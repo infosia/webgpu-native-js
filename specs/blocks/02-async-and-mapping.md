@@ -449,6 +449,56 @@ A18 holds. But it is the second time this project has had to learn that value
 ownership is the boundary's hardest edge, and the first was three days of review
 ago.
 
+**A27 — `core/` holds engine values now, so block 01's R7 is no longer vacuous —
+and it was not implemented.** *(Both of Phase 2's teardown aborts trace here.)*
+
+R7 says: *"If the wrapper also holds a JS-level reference … the engine must trace
+it: QuickJS via `JSClassDef::gc_mark`, JSC by protecting it."* Phase 1's review
+marked R7 **"satisfied (vacuous)"** because no wrapper held a JS value. Phase 2
+made `core/` hold one — `duplicate_value(cx, range.value)` keeps each mapped
+range's `ArrayBuffer` alive in the buffer's payload — and left
+`gc_mark: None`.
+
+The value is kept alive by refcount and is **invisible to the collector**. Cycles
+through it cannot be collected, and `JS_FreeRuntime` finds live objects and
+**aborts**. That is why a second mapped range, or any range surviving to
+teardown, kills the process.
+
+A rule can be written, correctly discharged as vacuous, and then silently come
+back into force. **When a phase adds a capability, re-ask which "not applicable"
+rules just became applicable.**
+
+`JsEngine` gains a tracing hook — additive:
+
+```rust
+/// Visits every engine value the payload holds, so the engine can trace them.
+fn trace_payload(cx: Self::Context<'_>, payload: &dyn Any, visit: &mut dyn FnMut(Self::Value));
+```
+
+QuickJS wires it to `JSClassDef::gc_mark`; JSC protects on store and unprotects on
+drop; the mock asserts every traced value is one it knows about.
+
+**A28 — a pending async request must not survive into engine teardown.** The
+second abort. A `Deferred` owns two resolving functions; the request `Box` is
+owned by the WebGPU callback via `into_raw` (A6). If the callback never fires —
+the host drops the runtime with a `mapAsync` outstanding — those `JSValue`s are
+never freed and `JS_FreeRuntime` aborts.
+
+Freeing them *after* `JS_FreeRuntime` is worse: they point into a dead runtime.
+
+So `State` keeps a registry of outstanding requests. On teardown, **before**
+`JS_FreeContext`:
+
+1. take each request's `Deferred` out and free its values;
+2. leave the `Box` for the callback to reclaim, so a later firing is not a
+   use-after-free — it finds no `Deferred` and drops silently.
+
+`AllowProcessEvents` (A3) is what makes this safe: callbacks fire only from
+`tick()`, which cannot run concurrently with `Drop`.
+
+**A test that finds a bug is not deleted; the bug is fixed.** Both aborts were
+discovered by writing the tests A15 and §4 demand, and both tests must land.
+
 **A20 — the mock is at least as strict as the strictest engine** (R23). It models
 value ownership, and now also: promise settlement (settled exactly once), detach
 verification, and the `CopyInCopyOut` arm. Where QuickJS and JSC disagree, the

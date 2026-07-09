@@ -83,7 +83,9 @@ impl Runtime {
     ///
     /// # Safety
     ///
-    /// `device` must be a valid live `WGPUDevice` handle for this backend.
+    /// `device` must be non-null, must come from this adapter's backend, and
+    /// the caller must own or have borrowed a live native reference for the
+    /// duration of this call. The core wrapper takes its own native reference.
     pub unsafe fn wrap_device(&self, device: ffi_wgpu::WGPUDevice) -> Result<qjs::JSValue> {
         let scope = Scope::new(self.raw_context());
         let value = unsafe {
@@ -169,10 +171,14 @@ impl Runtime {
 
     /// Pumps WebGPU callbacks, QuickJS microtasks, then queued releases.
     ///
+    /// Returns the number of release requests drained.
+    ///
     /// # Safety
     ///
-    /// `instance` must be a valid live `WGPUInstance` handle for this backend.
-    pub unsafe fn tick(&self, instance: ffi_wgpu::WGPUInstance) -> Result<()> {
+    /// `instance` must be non-null, must come from this adapter's backend, and
+    /// must remain live for the whole pump. Callers must not pass an instance
+    /// that is concurrently being released.
+    pub unsafe fn tick(&self, instance: ffi_wgpu::WGPUInstance) -> Result<usize> {
         unsafe { ffi_wgpu::wgpuInstanceProcessEvents(instance) };
         loop {
             let mut job_ctx = ptr::null_mut();
@@ -197,15 +203,15 @@ impl Runtime {
             return Err(Error::Exception(message));
         }
         self.drain_releases()
-            .map_err(|_| Error::Exception("release queue is poisoned".to_owned()))?;
-        Ok(())
+            .map_err(|_| Error::Exception("release queue is poisoned".to_owned()))
     }
 
     /// Pumps only WebGPU callbacks, for event-loop regression tests.
     ///
     /// # Safety
     ///
-    /// `instance` must be a valid live `WGPUInstance` handle for this backend.
+    /// `instance` must be non-null, must come from this adapter's backend, and
+    /// must remain live for this event-processing call.
     pub unsafe fn process_events_only(&self, instance: ffi_wgpu::WGPUInstance) {
         unsafe { ffi_wgpu::wgpuInstanceProcessEvents(instance) };
     }
@@ -1705,7 +1711,7 @@ mod tests {
         eval_drop(
             &runtime,
             r#"
-                var mapped = device.createBuffer({ size: 8, usage: 2, mappedAtCreation: true });
+                var mapped = device.createBuffer({ size: 8, usage: 1, mappedAtCreation: true });
                 var createdRange = mapped.getMappedRange(0, 4);
                 var createdView = new Uint8Array(createdRange);
                 createdView[0] = 7;
@@ -1717,10 +1723,44 @@ mod tests {
                 "#,
             "mapping.js",
         );
+        let _ = runtime.drain_releases().expect("drain detached ranges");
         eval_drop(
             &runtime,
             "mapped = null; createdRange = null; createdView = null;",
             "cleanup.js",
+        );
+        runtime.clear_global("device").expect("clear device");
+        runtime.run_gc();
+        runtime.run_gc();
+        let _ = runtime.drain_releases().expect("drain");
+    }
+
+    #[test]
+    fn destroy_on_mapped_buffer_detaches_ranges() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let wrapped = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("device", wrapped)
+            .expect("set device");
+        eval_drop(
+            &runtime,
+            r#"
+                var destroyMapped = device.createBuffer({ size: 8, usage: 2, mappedAtCreation: true });
+                var destroyRange = destroyMapped.getMappedRange(0, 4);
+                var destroyView = new Uint8Array(destroyRange);
+                destroyView[0] = 5;
+                destroyMapped.destroy();
+                if (destroyRange.byteLength !== 0 || destroyView.byteLength !== 0) {
+                    throw new Error('destroy did not detach mapped range');
+                }
+            "#,
+            "destroy-mapped.js",
+        );
+        eval_drop(
+            &runtime,
+            "destroyMapped = null; destroyRange = null; destroyView = null;",
+            "destroy-mapped-cleanup.js",
         );
         runtime.clear_global("device").expect("clear device");
         runtime.run_gc();
@@ -1803,6 +1843,33 @@ mod tests {
             "check.js",
         );
         eval_drop(&runtime, "gotDevice = undefined;", "cleanup.js");
+        runtime.clear_global("gpu").expect("clear gpu");
+        runtime.run_gc();
+        let _ = runtime.drain_releases().expect("drain");
+    }
+
+    #[test]
+    fn two_concurrent_request_adapter_promises_settle_independently() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let gpu = runtime.wrap_gpu(setup.instance).expect("wrap gpu");
+        runtime.set_global_value("gpu", gpu).expect("set gpu");
+        eval_drop(
+            &runtime,
+            r#"
+                var adapters = [];
+                gpu.requestAdapter().then(function (adapter) { adapters.push(adapter ? 'first' : 'missing-first'); });
+                gpu.requestAdapter().then(function (adapter) { adapters.push(adapter ? 'second' : 'missing-second'); });
+            "#,
+            "concurrent-adapters.js",
+        );
+        unsafe { runtime.tick(setup.instance) }.expect("adapter tick");
+        eval_drop(
+            &runtime,
+            "if (adapters.join(',') !== 'first,second') throw new Error('concurrent adapters settled incorrectly: ' + adapters.join(','));",
+            "concurrent-adapters-check.js",
+        );
+        eval_drop(&runtime, "adapters = undefined;", "cleanup.js");
         runtime.clear_global("gpu").expect("clear gpu");
         runtime.run_gc();
         let _ = runtime.drain_releases().expect("drain");

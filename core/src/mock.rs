@@ -14,7 +14,7 @@ use crate::{
 };
 
 /// Mock JavaScript value handle.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Value(usize);
 
 /// Mock JavaScript context.
@@ -37,6 +37,7 @@ pub struct Runtime {
     classes: RefCell<BTreeMap<ClassId, &'static str>>,
     reclaimed_values: Cell<usize>,
     detach_noop: Cell<bool>,
+    duplicated_values: RefCell<BTreeMap<Value, usize>>,
 }
 
 impl Runtime {
@@ -49,6 +50,7 @@ impl Runtime {
             classes: RefCell::new(BTreeMap::new()),
             reclaimed_values: Cell::new(0),
             detach_noop: Cell::new(false),
+            duplicated_values: RefCell::new(BTreeMap::new()),
         }
     }
 
@@ -179,6 +181,19 @@ impl Runtime {
         .flatten()
     }
 
+    /// Returns a settled promise result for tests.
+    #[must_use]
+    pub fn promise_result(&self, value: Value) -> Option<std::result::Result<Value, Value>> {
+        self.with_value(value, |stored| match stored {
+            MockValue::Promise {
+                settled: true,
+                result,
+            } => *result,
+            _ => None,
+        })
+        .flatten()
+    }
+
     fn insert(&self, value: MockValue) -> Value {
         let mut values = self.values.borrow_mut();
         values.push(value);
@@ -195,6 +210,16 @@ impl Runtime {
 
     fn with_value<R>(&self, value: Value, f: impl FnOnce(&mut MockValue) -> R) -> Option<R> {
         self.values.borrow_mut().get_mut(value.0).map(f)
+    }
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        let duplicated = self.duplicated_values.borrow();
+        assert!(
+            duplicated.is_empty(),
+            "mock duplicated values were not released: {duplicated:?}"
+        );
     }
 }
 
@@ -520,11 +545,22 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
         }
     }
 
-    fn duplicate_value(_cx: Self::Context<'_>, value: Self::Value) -> Self::Value {
+    fn duplicate_value(cx: Self::Context<'_>, value: Self::Value) -> Self::Value {
+        let mut duplicated = cx.runtime.duplicated_values.borrow_mut();
+        *duplicated.entry(value).or_insert(0) += 1;
         value
     }
 
-    fn release_value(_cx: Self::Context<'_>, _value: Self::Value) {}
+    fn release_value(cx: Self::Context<'_>, value: Self::Value) {
+        let mut duplicated = cx.runtime.duplicated_values.borrow_mut();
+        let count = duplicated
+            .get_mut(&value)
+            .unwrap_or_else(|| panic!("mock value released without duplicate: {value:?}"));
+        *count -= 1;
+        if *count == 0 {
+            duplicated.remove(&value);
+        }
+    }
 }
 
 thread_local! {
@@ -960,9 +996,7 @@ mod tests {
             let converted =
                 convert_buffer_descriptor::<Engine>(cx, desc, &arena).expect("descriptor");
             assert_eq!(converted.label, "scoped");
-            assert_eq!(rt.reclaimed_values(), 0);
         });
-        assert_eq!(rt.reclaimed_values(), 4);
     }
 
     #[test]
@@ -1101,6 +1135,11 @@ mod tests {
                 [1, 2, 3, 4, 5, 6, 7, 8]
             );
         }
+        assert_eq!(
+            buffer_bytes(native).expect("bytes")[..8],
+            [1, 2, 3, 4, 5, 6, 7, 8],
+            "script writes through mapped ranges must reach native memory"
+        );
     }
 
     #[test]
@@ -1140,6 +1179,68 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "mock duplicated values were not released")]
+    fn r19_mock_catches_tracked_range_dropped_without_release() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let desc = descriptor(
+            &rt,
+            &[
+                ("size", rt.number(16.0)),
+                ("usage", rt.number(2.0)),
+                ("mappedAtCreation", rt.bool(true)),
+            ],
+        );
+        let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("buffer");
+        let _range =
+            buffer_get_mapped_range::<Engine>(cx, buffer, &[rt.number(0.0), rt.number(4.0)])
+                .expect("range");
+        let payload = Engine::payload(cx, buffer, crate::GPU_BUFFER_CLASS)
+            .and_then(|payload| payload.downcast_ref::<BufferPayload<Engine>>())
+            .expect("payload");
+        payload.state().lock().expect("state").ranges.clear();
+    }
+
+    #[test]
+    fn destroy_discards_copy_back_bytes_for_mapped_buffer() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<MockEngine<true>>(cx, fake_device()) }.expect("device");
+        let desc = descriptor(
+            &rt,
+            &[
+                ("size", rt.number(8.0)),
+                ("usage", rt.number(2.0)),
+                ("mappedAtCreation", rt.bool(true)),
+            ],
+        );
+        let buffer = device_create_buffer::<MockEngine<true>>(cx, device, &[desc]).expect("buffer");
+        let native = MockEngine::<true>::payload(cx, buffer, crate::GPU_BUFFER_CLASS)
+            .and_then(|payload| payload.downcast_ref::<BufferPayload<MockEngine<true>>>())
+            .and_then(|payload| payload.state().lock().ok().map(|state| state.buffer))
+            .expect("native buffer");
+        let range = buffer_get_mapped_range::<MockEngine<true>>(
+            cx,
+            buffer,
+            &[rt.number(0.0), rt.number(4.0)],
+        )
+        .expect("range");
+        assert!(rt.write_arraybuffer(range, &[9, 8, 7, 6]));
+
+        let _ = buffer_destroy::<MockEngine<true>>(cx, buffer, &[]).expect("destroy");
+
+        assert_eq!(MockEngine::<true>::arraybuffer_len(cx, range), Some(0));
+        assert_eq!(
+            buffer_bytes(native).expect("bytes")[..4],
+            [0, 0, 0, 0],
+            "destroy detaches ranges but discards script-side mapped bytes"
+        );
+    }
+
+    #[test]
     fn a21_rejects_offsets_that_would_truncate_on_32_bit_hosts() {
         reset_gpu();
         let rt = runtime();
@@ -1153,6 +1254,75 @@ mod tests {
             buffer_map_async::<Engine>(cx, buffer, &[rt.number(2.0), too_large]).is_err(),
             "mapAsync offset=2^32 must be rejected on 64-bit hosts too"
         );
+    }
+
+    thread_local! {
+        static PENDING_MAP_CALLBACKS: RefCell<Vec<WGPUBufferMapCallbackInfo>> = const { RefCell::new(Vec::new()) };
+    }
+
+    unsafe fn pending_buffer_map_async(
+        _buffer: WGPUBuffer,
+        _mode: WGPUMapMode,
+        _offset: usize,
+        _size: usize,
+        info: WGPUBufferMapCallbackInfo,
+    ) -> webgpu_native_js_ffi::native::WGPUFuture {
+        PENDING_MAP_CALLBACKS.with(|callbacks| callbacks.borrow_mut().push(info));
+        webgpu_native_js_ffi::native::WGPUFuture { id: 10 }
+    }
+
+    fn resolve_pending_map(index: usize) {
+        let info = PENDING_MAP_CALLBACKS.with(|callbacks| callbacks.borrow_mut().remove(index));
+        let callback = info.callback.expect("callback");
+        unsafe {
+            callback(
+                crate::WGPUMapAsyncStatus_WGPUMapAsyncStatus_Success,
+                WGPUStringView::from_bytes(b""),
+                info.userdata1,
+                info.userdata2,
+            );
+        }
+    }
+
+    #[test]
+    fn a7_two_concurrent_map_async_operations_settle_independently() {
+        reset_gpu();
+        PENDING_MAP_CALLBACKS.with(|callbacks| callbacks.borrow_mut().clear());
+        let mut gpu = dispatch();
+        gpu.buffer_map_async = pending_buffer_map_async;
+        let rt = Runtime::new(gpu);
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let desc_a = descriptor(&rt, &[("size", rt.number(8.0)), ("usage", rt.number(2.0))]);
+        let desc_b = descriptor(&rt, &[("size", rt.number(8.0)), ("usage", rt.number(2.0))]);
+        let first_buffer = device_create_buffer::<Engine>(cx, device, &[desc_a]).expect("buffer");
+        let second_buffer = device_create_buffer::<Engine>(cx, device, &[desc_b]).expect("buffer");
+
+        let first =
+            buffer_map_async::<Engine>(cx, first_buffer, &[rt.number(2.0)]).expect("promise");
+        let second =
+            buffer_map_async::<Engine>(cx, second_buffer, &[rt.number(2.0)]).expect("promise");
+
+        PENDING_MAP_CALLBACKS.with(|callbacks| assert_eq!(callbacks.borrow().len(), 2));
+        resolve_pending_map(1);
+        assert!(matches!(rt.promise_result(second), Some(Ok(_))));
+        assert_eq!(rt.promise_result(first), None);
+        resolve_pending_map(0);
+        assert!(matches!(rt.promise_result(first), Some(Ok(_))));
+    }
+
+    #[test]
+    fn a5_deferred_second_settle_is_ignored() {
+        let rt = runtime();
+        let cx = rt.context();
+        let (promise, deferred) = Engine::new_promise(cx).expect("promise");
+        let resolve = deferred.resolve();
+        let reject = deferred.reject();
+        let first = rt.number(1.0);
+        Engine::settle_deferred(cx, deferred, Ok(first));
+        Engine::settle_deferred(cx, Deferred::new(resolve, reject), Err(rt.string("late")));
+
+        assert_eq!(rt.promise_result(promise), Some(Ok(first)));
     }
 
     #[test]

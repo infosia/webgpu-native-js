@@ -263,9 +263,11 @@ pub trait JsEngine: Sized {
     ///
     /// # Safety
     ///
-    /// `ptr` must be valid for reads and, for zero-copy engines, for any
-    /// engine-managed access to `len` bytes for the lifetime required by the
-    /// created ArrayBuffer.
+    /// `ptr..ptr + len` must name the live mapped range returned by
+    /// `wgpuBufferGetMappedRange(owner, ..)`. The caller must keep the
+    /// `owner` reference passed here alive until the ArrayBuffer's engine
+    /// finalizer releases it, and must track the returned value so it is
+    /// detached before calling `wgpuBufferUnmap` or `wgpuBufferDestroy`.
     unsafe fn new_external_arraybuffer(
         cx: Self::Context<'_>,
         ptr: *mut u8,
@@ -643,7 +645,10 @@ pub fn wrap_gpu<E: JsEngine + 'static>(
 ///
 /// # Safety
 ///
-/// `device` must be a valid live `WGPUDevice` handle for the active backend.
+/// `device` must be non-null, must belong to the dispatch table in
+/// `E::environment(cx)`, and the caller must own or have borrowed a live native
+/// reference for the duration of this call. This function takes its own native
+/// reference before returning.
 pub unsafe fn wrap_device<E: JsEngine + 'static>(
     cx: E::Context<'_>,
     device: WGPUDevice,
@@ -730,7 +735,7 @@ pub fn buffer_destroy<E: JsEngine + 'static>(
 ) -> Result<E::Value, E::Error> {
     with_buffer_state::<E, _, _>(cx, this, |state| {
         if !state.destroyed {
-            detach_all_ranges::<E>(cx, state)?;
+            detach_all_ranges::<E>(cx, state, false)?;
             unsafe {
                 (E::environment(cx).gpu().buffer_destroy)(state.buffer);
             }
@@ -815,9 +820,6 @@ pub fn buffer_map_async<E: JsEngine + 'static>(
         .copied()
         .ok_or_else(|| E::type_error(cx, "GPUMapModeFlags is required"))?;
     let mode = u64::from(enforce_u32::<E>(cx, mode_value, "mode")?);
-    if mode > WEBIDL_U32_MAX {
-        return Err(E::type_error(cx, "mode"));
-    }
     let offset = optional_gpu_size_to_usize::<E>(cx, args.get(1).copied(), "offset", 0)?;
     let size = match args.get(2).copied() {
         Some(value) if !E::is_undefined(cx, value) => {
@@ -929,7 +931,7 @@ pub fn buffer_unmap<E: JsEngine + 'static>(
             return Ok(E::undefined(cx));
         }
         if state.mapped {
-            detach_all_ranges::<E>(cx, state)?;
+            detach_all_ranges::<E>(cx, state, true)?;
             unsafe {
                 (E::environment(cx).gpu().buffer_unmap)(state.buffer);
             }
@@ -1282,11 +1284,12 @@ where
 fn detach_all_ranges<E: JsEngine>(
     cx: E::Context<'_>,
     state: &mut BufferState<E>,
+    flush: bool,
 ) -> Result<(), E::Error> {
     let ranges = std::mem::take(&mut state.ranges);
     for range in ranges {
         let mut copy_back = Vec::new();
-        let out = if range.strategy == MappedRangeStrategy::CopyInCopyOut {
+        let out = if flush && range.strategy == MappedRangeStrategy::CopyInCopyOut {
             copy_back.resize(range.size, 0);
             Some(copy_back.as_mut_slice())
         } else {
@@ -1301,7 +1304,7 @@ fn detach_all_ranges<E: JsEngine>(
             E::release_value(cx, range.value);
             return Err(E::operation_error(cx, "mapped range detach failed"));
         }
-        if range.strategy == MappedRangeStrategy::CopyInCopyOut {
+        if flush && range.strategy == MappedRangeStrategy::CopyInCopyOut {
             let ptr = unsafe {
                 (E::environment(cx).gpu().buffer_get_mapped_range)(
                     state.buffer,
@@ -1310,6 +1313,7 @@ fn detach_all_ranges<E: JsEngine>(
                 )
             };
             if ptr.is_null() {
+                E::release_value(cx, range.value);
                 return Err(E::operation_error(cx, "mapped range is unavailable"));
             }
             let dst = unsafe { std::slice::from_raw_parts_mut(ptr.cast::<u8>(), range.size) };
