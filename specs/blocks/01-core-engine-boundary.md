@@ -170,7 +170,7 @@ plus `GPUObjectDescriptorBase { USVString label = ""; }`.
 
 | Member | WebIDL | C ABI | Rule |
 |---|---|---|---|
-| `size` | `required GPUSize64` (`[EnforceRange] unsigned long long`) | `uint64_t` | Missing → `TypeError`. Non-finite, non-integral, or outside `[0, 2^64-1]` → `TypeError`. |
+| `size` | `required GPUSize64` (`[EnforceRange] unsigned long long`) | `uint64_t` | Missing → `TypeError`. Non-finite, non-integral, or outside `[0, 2^64-1]` → `TypeError`. **Do not write the bound as `n > u64::MAX as f64`.** `u64::MAX as f64` rounds **up** to `2^64`, so `n == 2^64` — exactly representable, and valid JS — slips through and `n as u64` saturates silently to `2^64-1`. Compare `n >= 18446744073709551616.0` (i.e. `2^64`). `u32::MAX` *is* f64-exact, so the `usage` guard is correct by luck, not by construction; write both the same way. Test the `2^64` boundary explicitly. |
 | `usage` | `required GPUBufferUsageFlags` (`[EnforceRange] unsigned long`) | `WGPUBufferUsage` = `WGPUFlags` = **`uint64_t`** | Missing → `TypeError`. Outside `[0, 2^32-1]` → `TypeError`, *then* widen to 64-bit. The C type is 64-bit but the IDL type is 32-bit; do not let the C type widen the accepted range. |
 | `mappedAtCreation` | `boolean = false` | `WGPUBool` | `ToBoolean`, infallible. Absent → `false`. Note `"false"` is `true` — that is IDL-correct, do not "fix" it. |
 | `label` | `USVString = ""` | `WGPUStringView` | Absent → the empty string. |
@@ -228,6 +228,63 @@ scopes. No `unwrap`/`expect`/`panic!` in `core/`. Every `extern "C"` callback
 catches unwinds.
 
 ---
+
+### Value ownership — added after the Phase 1 review
+
+**R22 — every engine value obtained by `core/` has an owner, and `E::Context<'a>`
+is it.** QuickJS's `JS_GetPropertyStr` returns a **new reference** (+1 refcount).
+JSC's `JSObjectGetProperty` returns a GC-traced value needing no release. The mock
+returns an index into a `Vec`. Three different ownership models, and Phase 1's
+`core/` was written to the mock's.
+
+Consequence, found by the Phase 1 review: `createBuffer({ size, usage, label:
+"x" })` **leaks the label string on every call** under QuickJS, because
+`convert_buffer_descriptor` never frees the four values `get_property` handed it.
+Integer-tagged values hide it; a heap value does not.
+
+**The fix does not touch `core/`'s logic, and this is the point.** `E::Context<'a>`
+is engine-defined and already threaded through every conversion. Make it a
+**per-call handle scope**: QuickJS's `Context<'a>` carries a list of owned
+`JSValue`s that `get_property` registers and the scope frees on drop; JSC's and
+the mock's carry nothing. No `core/` signature changes, no `free_value` on the
+trait, and `E::Value: Copy` survives.
+
+This retroactively answers §6's first open question. **The GAT is not ceremony.**
+`type Context<'a>` is exactly where an engine's per-call obligations live, and
+Phase 1's tracking doc was wrong to call the lifetime unnecessary. Do not remove
+it.
+
+**R23 — the mock must be at least as strict as the strictest engine.** A mock
+more forgiving than production is not a test, it is a mirror. Phase 1's mock is
+garbage-collected, so it was structurally incapable of revealing R22. It must
+model **value ownership**: every value handed to `core/` is registered in the
+scope, and the mock asserts at scope drop that none outlived it. Then a `core/`
+that forgets its obligation fails a `core/` unit test, on the default gate, with
+no sanitizer.
+
+Generalise: when engines disagree about an obligation, the mock takes the
+**union** of the obligations, not the intersection.
+
+**R24 — the adapter may not know the name of any class or member.** Phase 1's
+adapter dispatches on hardcoded string pairs:
+
+```rust
+match (spec.name, method.name) {
+    ("GPUDevice", "createBuffer") => …,
+    ("GPUBuffer", "destroy") => …,
+    _ => /* generic path, never reached */
+}
+```
+
+`ClassSpec` exists precisely so this cannot happen. With ~40 IDL interfaces in
+Phase 4, every generated interface would demand new match arms in every adapter —
+the cost `ClassSpec` was invented to abolish. The generic dispatch path must be
+the **only** path, and it must therefore be exercised by every shipped member.
+
+If a generic path cannot be made to work, that is a boundary finding and must be
+reported, not routed around. Phase 1's hardcoding grew from an **unverified**
+claim that QuickJS delivered `magic == 0`; the claim was never root-caused, and
+the workaround silently disabled the mechanism it was meant to protect.
 
 ## 4. Tests
 

@@ -515,31 +515,53 @@ external buffer, STOP and report — the ZeroCopyDetach arm depends on it.
 
 ## Q4 — Did the boundary hold in Phase 1?
 
-**Status: YES, on the first slice.** `wrap_device` → `createBuffer` → `label`
-round-trip → `destroy()` runs headless under QuickJS against yawgpu's Noop
-backend. `core/` contains zero QuickJS or JSC references, and
-`cargo test -p webgpu-native-js-core` passes with **no engine, no backend
-feature, and `WEBGPU_NATIVE_JS_BACKEND_LIB_DIR` unset** — 16 tests, one per rule
-R8–R15 plus R8's whole rejection table.
+**Status: PARTLY — and the first version of this entry overclaimed. Corrected
+after the Phase 1 review (`phase-reviews.md` → Phase 1).**
 
-The coding agent reports it never wanted engine-specific logic inside `core/`.
-That is the answer Phase 3 will re-ask under JavaScriptCore, where it counts.
+What is genuinely established: `core/` contains zero QuickJS or JSC references;
+`cargo test -p webgpu-native-js-core` passes with no engine, no backend feature,
+and the backend env var unset; the descriptor **conversion arithmetic** is
+written once and generic over `E`; `wrap_device` → `createBuffer` → `label`
+round-trip → `destroy()` runs headless under QuickJS against yawgpu.
 
-Three secondary answers, from the block spec's §6:
+What was **not** established, and what this entry previously implied:
 
-- **`E::Context<'a>` did not need the GAT.** A plain `Copy` handle sufficed;
-  `to_str`'s borrow ties to the arena, not to the context. Revisit under JSC,
-  which needs a `JSContextRef` per operation — if it still fits, drop the
-  lifetime parameter.
-- **`Box<dyn Any + Send>` was the right payload.** No `dyn` reached the
+- **The boundary already broke, for the Tier-1 engine, and the mock hid it.**
+  QuickJS's `JS_GetPropertyStr` returns an **owned** value; `core/` frees none of
+  the four it reads per descriptor. The mock is garbage-collected, so it cannot
+  see the obligation. `createBuffer({size, usage, label: "x"})` leaks a JSString
+  every call. See block 01 → **R22**, and R23 for why the mock must henceforth be
+  the strictest engine, not the most forgiving.
+- **`ClassSpec`'s data-driven half is unexercised.** The adapter dispatches on
+  hardcoded `("GPUDevice", "createBuffer")` string pairs, with the generic path
+  unreachable. Block 01 → **R24**.
+- **The conversion is written once; the *dispatch* is not.** Those are different
+  claims, and only the first was earned.
+
+### The GAT is not ceremony — retracted
+
+This entry previously said: *"`E::Context<'a>` did not need the GAT. A plain
+`Copy` handle sufficed."* **Withdrawn.**
+
+R22's fix is a **per-call handle scope**, and `Context<'a>` is exactly where it
+lives: QuickJS's context carries the owned values `get_property` produced and
+frees them when the scope drops; JSC's and the mock's carry nothing. That fix
+requires **no change to `core/`'s logic and no `free_value` on the trait**, and
+`E::Value: Copy` survives.
+
+So the lifetime parameter is what lets an engine attach per-call obligations
+without leaking them into `core/`. It is the mechanism that keeps the bet
+alive. The reviewer who found R22 concluded the fix "is not additive to `core/`";
+that conclusion is wrong for this reason, and the finding is right anyway.
+
+### Secondary answers that stand
+
+- **`Box<dyn Any + Send>` was the right payload.** No `dyn` reaches the
   conversion path; the downcast happens once per finalizer.
-- **Method dispatch is one `extern "C"` callback per method**, not a magic-indexed
-  table. That is also what Phase 4's codegen will emit, so nothing is lost. The
-  agent reported that QuickJS's `magic` value "arrived as 0"; **that claim is not
-  recorded as fact.** `JS_NewCFunctionMagic` is a `static inline` forwarding to
-  `JS_NewCFunction2(..., JS_CFUNC_generic_magic, magic)`, and the likeliest
-  explanation is a call through a non-magic cproto. Nobody verified it, so it
-  stays an open question rather than an assertion about an upstream artifact.
+- The unverified claim that QuickJS delivers `magic == 0` is still **not recorded
+  as fact.** It was never root-caused — and it is now known to have produced the
+  R24 hardcoding. Refusing to write it down was right; failing to demand a
+  root-cause was not.
 
 ### R13 — recorded deviation: `createBuffer` on failure
 

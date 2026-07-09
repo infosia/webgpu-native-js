@@ -5,6 +5,102 @@ Fix)". Findings, triage decisions, fixes, and gate results live here.
 
 ---
 
+## Phase 1 Review — 2026-07-09
+
+Three fresh no-context reviewers again, lenses tuned to the phase: correctness /
+FFI soundness; block-spec compliance rule-by-rule (R1–R21); and **"is the mock a
+real test, or a mirror?"**
+
+The third lens was pointed at the one question Phase 1 exists to answer, and it
+earned its place: it found the CRITICAL, and neither of the others came near it.
+
+### Findings and triage
+
+| ID | Sev | Where | Finding | Disposition |
+|---|---|---|---|---|
+| **P1-C1** | CRITICAL | `core/src/lib.rs` conversion path; `adapters/quickjs/src/lib.rs:198` | QuickJS's `JS_GetPropertyStr` returns an **owned** value. `convert_buffer_descriptor` reads four properties per call and frees none. The trait has no value-release primitive. `createBuffer({size, usage, label: "x"})` leaks a JSString **every call**. The mock is GC-backed and structurally cannot see it; `buffer_slice.js` sets `label` through the setter, so the one real-engine test never reads a heap-valued property. | **Confirmed at source** (`quickjs.c: JS_GetPropertyStr → JS_GetProperty`, which dups). Block 01 → **R22**, **R23**. Handed to the coding agent. |
+| **P1-M1** | MAJOR | `adapters/quickjs/src/lib.rs:363, 411` | The adapter dispatches on hardcoded `("GPUDevice","createBuffer")` string pairs; the generic magic-indexed path is unreachable. `ClassSpec`'s data-driven half is therefore **unexercised**, and Phase 4's ~40 interfaces would each demand new match arms in every adapter. | **Confirmed.** Block 01 → **R24**. Traced to the unverified `magic == 0` claim. Handed over. |
+| **P1-M2** | MAJOR | `core/src/lib.rs:641` | `enforce_u64`'s guard is `n > u64::MAX as f64`, but `u64::MAX as f64` rounds **up** to `2^64`. `size: 2**64` — valid JS, exactly f64-representable — passes the check and `n as u64` saturates silently to `2^64-1`. R8 requires `TypeError`. | **Confirmed by direct measurement** (see adjudication below). Handed over. |
+| **P1-M3** | MAJOR | `core/src/mock.rs` | The `AddRef` **acquire** side of R4/R5 is never asserted. The mock counts `device_add_refs`, but no test compares it. Drop `createBuffer`'s second `wgpuDeviceAddRef` and every existing test still passes — while a real backend under-refcounts the host's device. | **Confirmed.** Two lenses found it independently. Handed over. |
+| **P1-M4** | MAJOR | `core/src/mock.rs:632` | The R5 guard does `let _ = ptr::read_volatile(...)` and discards the value, so on the default gate a reversed release order **passes**. It only bites under ASan. R19 says a guard never seen red is a test of nothing. | **Confirmed, with a correction to the proposed fix** — see below. Handed over. |
+| **P1-M5** | MAJOR | `adapters/quickjs/src/lib.rs` | The `catch_unwind` seam — safety-critical, principle 8 — is exercised by **no test**. R19 applies to it too. | **Confirmed.** Handed over. |
+| P1-m1 | MINOR | `core/src/lib.rs:678–720` | `Box::leak`s a fresh `ClassSpec` on **every** `wrap_device`, before the adapter's idempotency check discards it. Unbounded across device re-adoption (device loss / recreation). | Handed over. Use a `OnceLock`. |
+| P1-m2 | MINOR | `core/src/mock.rs` | `NaN` / `Infinity` rejection is implemented but untested. | Handed over. |
+| P1-m3 | MINOR | `adapters/quickjs/tests/scripts/buffer_slice.js` | The one real-engine test would pass with a no-op `destroy()`, and asserts nothing about `mappedAtCreation`, default `label`, `usage` widening, or any rejection case. | Handed over. |
+| P1-m4 | MINOR | `engine-boundary.md` Q4 | "16 tests, one per rule R8–R15" overstates: `r15_..._getters_are_synchronous` tests neither `TypeError` propagation nor the unwind catch, which is R15's content. `wrap_device`'s null guard is untested. | Fixed (Claude): Q4 rewritten. |
+
+### Where the reviewers disagreed, and who was right
+
+**P1-M2, the `2^64` boundary.** The correctness lens called it MAJOR. The
+compliance lens called it MINOR, reasoning that it sits "inside R11's documented
+`Number` precision limit." **The compliance lens is wrong**, and the disagreement
+is settled by one measurement:
+
+```
+u64::MAX as f64          = 18446744073709551616.0   // == 2^64, rounded UP
+(2^64 > u64::MAX as f64) = false                    // guard slips
+2^64 as u64              = 18446744073709551615     // silent saturation
+u32::MAX as f64 exact?   = true                     // usage guard is correct by luck
+```
+
+`2^64` is **exactly** f64-representable, so this is not a precision limit — it is
+a plain off-by-one in a range check, on a value WebIDL requires be rejected. R11
+covers values that lose exactness *before* the binding sees them; this one does
+not. The block spec now forbids the `> u64::MAX as f64` idiom by name.
+
+### P1-M4: the reviewer's fix would not have worked
+
+The correctness lens proposed asserting on the `marker` value. That is not
+enough: freed memory usually still holds its old bytes, so a reversed order can
+read `0xfeed_face` and pass anyway. **Make the guard deterministic instead:** have
+`parent_release` overwrite the marker with a poison value *before* freeing. Then
+child-after-parent reads poison and the assertion fails on the ordinary
+`cargo test` gate, with no sanitizer. A guard that needs ASan to bite is a guard
+that does not run in CI.
+
+Note the guard's *subject* is sound — it enqueues a real
+`ReleaseRequest::BufferWithDeviceRef` and drains it, so `core/`'s ordering logic
+is genuinely under test. Only the detection was weak. And the Phase 1
+implementation agent **did** demonstrate it red under ASan before trusting it, as
+R19 demands; what is missing is that the ordinary gate cannot.
+
+### The finding that matters
+
+P1-C1 is the most important result of Phase 1, and it inverts the phase's
+headline.
+
+The design bet is "one `core/`, many engines." Phase 1 tested `core/` against a
+mock whose values are garbage-collected — the **same model JavaScriptCore uses**,
+and **not** the model of QuickJS, the Tier-1 engine we actually ship. So `core/`
+was written to a value model only one of the two engines has, and the test that
+was supposed to prove engine-agnosticism was the very thing that concealed the
+engine-specific obligation.
+
+The exit gate we designed for Phase 3 — "wiring JSC must require zero `core/`
+logic changes" — would **not** have caught this, because JSC is the engine the
+mock resembles. The gate was pointed at the wrong engine.
+
+**The bet survives, and the mechanism that saves it is the GAT this project had
+just dismissed as ceremony.** `E::Context<'a>` is engine-defined and already
+threaded through every conversion, so QuickJS can carry a per-call handle scope
+there: `get_property` registers each owned value; the scope frees them on drop.
+`core/` does not change. `E::Value: Copy` survives. No `free_value` on the trait.
+
+The reviewer concluded the fix "is not additive to `core/`" and was wrong about
+that — but was right about everything that mattered, and would not have found it
+at all had the lens been "check the rules" rather than "is the mock a mirror."
+
+**R23 is the durable lesson: a mock more forgiving than production is not a test.
+When engines disagree about an obligation, the mock takes the union.**
+
+### Gate
+
+Phase 1 cannot be COMPLETE while P1-C1 and P1-M1 through P1-M5 are open. All are
+handed to the coding agent. P1-m4 and the Q4 overclaim are fixed by Claude in the
+same commit as this entry.
+
+---
+
 ## Phase 0 Review — 2026-07-09
 
 Three **fresh, no-context** reviewers were run in parallel over the cumulative
