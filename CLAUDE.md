@@ -99,7 +99,7 @@ The plan's §7 has the full evidence. These are the conclusions that are now
 
 | Tier | Engines | Meaning |
 |---|---|---|
-| **Tier 1 — Supported** | QuickJS (fork TBD — plan §6.3) | Primary/first-class. Builds and passes the full test suite on all four platforms. |
+| **Tier 1 — Supported** | [quickjs-ng](https://github.com/quickjs-ng/quickjs) (MIT), pinned submodule, raw `bindgen` | Primary/first-class. Builds and passes the full test suite on all four platforms. Chosen over Bellard's original for MSVC/CMake support and sanitizer CI; rationale in `specs/tracking/engine-boundary.md` → Q2. |
 | **Tier 2 — Experimental (best-effort)** | JavaScriptCore | Behind opt-in `jsc` cargo feature; never in `default`. **iOS + macOS only** (system framework, dynamic link). Android and Windows are explicitly unsupported (plan §3.2). Exists to validate the `JsEngine` boundary. |
 
 **Operational rule (engine-independent core).** `core/` must contain **zero**
@@ -249,7 +249,8 @@ Genuinely undecided. Answer with evidence; do not let the draft plan's guesses
 harden into assumptions.
 
 - **Who owns the GPU-release thread** — the host engine or this project?
-- **Which QuickJS fork, and `rquickjs` or raw `bindgen`?** (Plan §6.3.)
+- **Which quickjs-ng revision is pinned?** The fork question is closed
+  (`engine-boundary.md` → Q2); the pin is not.
 - **Full WebIDL coverage vs. a trimmed engine-oriented subset.** Revisit after
   the first codegen pass shows the real effort delta.
 - **Where does `webgpu.idl` come from**, and how is it pinned against the

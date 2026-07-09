@@ -369,10 +369,17 @@ the core/adapter boundary (§2.1).
 
 **Rev 2 additions:**
 
-- **"QuickJS" is a fork choice, not a dependency.** Bellard's original vs.
-  **quickjs-ng** — the latter is materially more actively maintained, has better
-  mobile/CI platform coverage, and is what `rquickjs` targets. Undecided (§6).
-  Also undecided: raw `bindgen` vs. the `rquickjs` crate.
+- **"QuickJS" is a fork choice, not a dependency.** ✅ **DECIDED 2026-07-09:
+  [quickjs-ng](https://github.com/quickjs-ng/quickjs)** (MIT), pinned as a git
+  submodule, bindings via raw `bindgen` in our own `build.rs`; we depend on
+  neither `rquickjs` nor `rquickjs-sys`. Decisive criterion: Bellard's original
+  has no official MSVC support, and Windows is a dev target whose results must
+  predict production. quickjs-ng additionally ships CMake, sanitizer CI across
+  50+ configurations, and calls out Android/iOS. `rquickjs` is the wrong layer
+  (a safe wrapper beneath our own `JsEngine` abstraction), and `rquickjs-sys`
+  ships no pre-generated bindings for Android or iOS — our two ship targets — so
+  it buys nothing we would not run ourselves. Full rationale and the named
+  fallback: `specs/tracking/engine-boundary.md` → Q2.
 - **JSC on Windows is a licensing and build problem, not just a build problem.**
   JavaScriptCore is LGPL-2.1. On iOS/macOS this is fine: dynamically link the
   system `JavaScriptCore.framework`. On Windows there is no system JSC, so
@@ -637,8 +644,10 @@ assumptions by being restated confidently in a later document.
 2. **Does the host game engine own the GPU-release thread, or does this project
    spin up its own?** (Affects §2.5, §5.2.) Now the highest-priority open
    question, since Q1 is closed.
-3. **Which QuickJS fork** — Bellard vs. quickjs-ng — and **`rquickjs` vs. raw
-   `bindgen`**? (§3.2.)
+3. ~~**Which QuickJS fork, and `rquickjs` vs. raw `bindgen`?**~~ **CLOSED
+   2026-07-09: quickjs-ng, pinned submodule, raw `bindgen`.** (§3.2;
+   `specs/tracking/engine-boundary.md` → Q2.) Residual: **which revision is
+   pinned**, recorded at submodule-add time alongside the `webgpu-headers` pin.
 4. **Where does `webgpu.idl` come from, and how is it pinned against the
    `webgpu.h` version?** (§2.3.) They are versioned independently upstream.
 5. **Full WebIDL coverage vs. a deliberately trimmed engine-oriented subset**
