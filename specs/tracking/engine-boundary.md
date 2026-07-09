@@ -268,12 +268,81 @@ ranges (try >= 1 MiB) rather than the 4-16 byte toys used so far.
 
 ## Q1a — Does QuickJS `JS_DetachArrayBuffer` work on an external buffer?
 
-**Status: OPEN.** Assumed yes (it is the documented purpose of the API), but
-unverified: there is no QuickJS checkout in this environment yet, and the answer
-gates the `ZeroCopyDetach` arm above.
+**Status: ANSWERED AT SOURCE LEVEL (2026-07-09), runtime proof handed off.**
 
-Folded into the handoff below rather than spiked separately — the two arms of
-`MappedRangeStrategy` should be proven by the same harness.
+quickjs-ng is now pinned (Q3), so the implementation is readable directly.
+Reading it changed the design *and* corrected acceptance criteria this document
+had previously stated wrongly.
+
+### E7 — detach works on external buffers, and calls `free_func` **at detach**
+
+`JS_DetachArrayBuffer` (quickjs-ng `quickjs.c`):
+
+```c
+void JS_DetachArrayBuffer(JSContext *ctx, JSValueConst obj) {
+    JSArrayBuffer *abuf = JS_GetOpaque(obj, JS_CLASS_ARRAY_BUFFER);
+    if (!abuf || abuf->detached) return;          /* silent no-op */
+    if (abuf->free_func)
+        abuf->free_func(ctx->rt, abuf->opaque, abuf->data);
+    abuf->data = NULL; abuf->byte_length = 0; abuf->detached = true;
+    /* ...and every typed-array view over it gets count = 0, ptr = NULL */
+}
+```
+
+So the `ZeroCopyDetach` arm is real: `JS_NewArrayBuffer(ctx, ptr, len, free_func,
+opaque, /*is_shared=*/false)` over foreign memory, detached at `unmap()`. The
+buffer's views are neutered in the same call.
+
+**But `free_func` fires at `unmap()` time, synchronously, on the JS thread** —
+not at GC. For a zero-copy view over a GPU mapping this is the wrong place to
+free anything: the mapping is owned by the backend and released by
+`wgpuBufferUnmap`. **Pass a null `free_func`**, or a no-op. This is a design
+input, not a detail.
+
+### E8 — `free_func` is called a **second time**, with `ptr == NULL`
+
+`js_array_buffer_finalizer` calls `abuf->free_func(rt, abuf->opaque, abuf->data)`
+**unconditionally — it does not check `abuf->detached`.** After a detach,
+`abuf->data` is `NULL`, so the sequence over a buffer's life is:
+
+| Event | `free_func` called with |
+|---|---|
+| `JS_DetachArrayBuffer` | the real pointer |
+| later GC / finalize | **`NULL`** |
+
+**Any `free_func` that does `Box::from_raw(ptr)`, `wgpuBufferUnmap`, or a plain
+`free(ptr)` without a null guard is a double-free or a null deref.** This is the
+QuickJS-side twin of the JSC pinning hazard (Q1b): an unguarded path with no
+diagnostic.
+
+**This corrects an acceptance criterion this document previously stated.** The
+earlier handoff demanded "`free_func` fires exactly once". That is false and,
+taken literally, would have produced a broken implementation. The correct
+requirement is: **`free_func` fires exactly once with a non-null pointer, and
+must tolerate a subsequent call with `NULL`.**
+
+### E9 — `JS_DetachArrayBuffer` returns `void` and silently no-ops
+
+It returns nothing, and does nothing at all if the value is not an `ArrayBuffer`
+or is already detached. Like JSC's `transfer()` (Q1b/E5), **it cannot fail
+loudly.** The adapter must *verify* detachment after the call — e.g.
+`JS_GetArrayBuffer` yielding a null pointer / zero length — rather than trusting
+that the call did anything.
+
+### Consequence for the boundary
+
+Both engines can detach, and **both can silently fail to.** Verification after
+detach is therefore not engine-specific defensive coding; it belongs in `core/`,
+once, as part of the `unmap()` contract. This is a *good* outcome for
+`CLAUDE.md` invariant 1 — the shared logic grew, the engine-specific surface did
+not.
+
+Note also that quickjs-ng ships resizable `ArrayBuffer` (`max_len`) and
+`JS_IsImmutableArrayBuffer`, neither of which exists in Bellard's. Neither is
+exercised by our path, but a resizable buffer reaching `JS_DetachArrayBuffer` is
+worth one negative test.
+
+### Handoff → coding agent (runtime proof)
 
 ### Handoff → coding agent
 
@@ -298,28 +367,40 @@ Produce:
   expose it to script as an ArrayBuffer per that engine's strategy, run a
   script that stashes a reference to it, "unmap", then prove from script that
   the stashed reference is detached (byteLength === 0 / throws on access).
-- QuickJS arm: JS_NewArrayBuffer(ctx, buf, len, free_func, opaque, is_shared)
-  over *external* memory + JS_DetachArrayBuffer. Confirm detach succeeds and
-  that free_func fires exactly once, at the expected time. quickjs-ng ships
-  Resizable ArrayBuffer, so this is a real test, not a formality.
-- JSC arm: engine-owned ArrayBuffer + copy-in/copy-out + detach via
-  ArrayBuffer.prototype.transfer() through JSObjectCallAsFunction.
-  Confirm detach and that no pointer to foreign memory ever reaches script.
-- Record the minimum macOS/iOS version at which transfer() is available.
+- Spike crate spikes/quickjs-detach/ (standalone, NOT a workspace member,
+  NOT core/). Build quickjs-ng from the pinned submodule via build.rs (cc),
+  bindings via bindgen. No rquickjs, no rquickjs-sys.
+- Prove ZeroCopyDetach: JS_NewArrayBuffer(ctx, ptr, len, free_func, opaque,
+  /*is_shared=*/false) over Rust-owned "foreign" memory; script stashes the
+  buffer; JS_DetachArrayBuffer at "unmap"; prove from script that the stash
+  is detached (byteLength === 0, typed-array views neutered).
 
-Out of scope: real GPU, webgpu.h calls, core/ changes, commits.
+Read E7/E8/E9 above BEFORE writing free_func. Specifically:
+- free_func is invoked BY JS_DetachArrayBuffer with the real pointer, and
+  AGAIN by the finalizer with ptr == NULL. It must be null-tolerant. Test
+  both calls explicitly; a free_func that frees unconditionally is a
+  double-free and ASan will say so.
+- JS_DetachArrayBuffer returns void and no-ops silently. Do not trust it:
+  verify detachment afterwards and surface a hard error if it did not happen.
+
+Out of scope: real GPU, webgpu.h calls, core/ changes, commits, specs/ edits,
+the JSC arm (already landed in spikes/jsc-detach).
 
 Acceptance criteria:
-- [ ] both arms: post-unmap access from script fails, observably
-- [ ] QuickJS: free_func fires exactly once; no leak, no double free
-- [ ] run under ASan; no use-after-free
+- [ ] post-unmap access from script fails observably (byteLength === 0)
+- [ ] free_func called exactly once with a non-null ptr, and tolerates the
+      later NULL call; assert on the observed call sequence
+- [ ] detach is verified, not assumed; a failed detach raises a hard error
+- [ ] negative test: a resizable ArrayBuffer (maxByteLength) through the same
+      path — document what happens, do not paper over it
+- [ ] ASan clean: no double free, no use-after-free, no leak
 - [ ] headless: no GPU, no window
 - [ ] no local or sibling filesystem paths in any committed file
 - [ ] clippy clean with -D warnings
 
-Report back: the two arms' results, the transfer() minimum OS version, and
-whether QuickJS detach on an external buffer behaves as assumed. If it does
-not, STOP and report — the Decision above depends on it.
+Report back: files changed, the observed free_func call sequence, what the
+resizable-buffer case did, and gate output. If detach does NOT work on an
+external buffer, STOP and report — the ZeroCopyDetach arm depends on it.
 ```
 
 ---
@@ -414,7 +495,16 @@ one — it must not be allowed to become one.
 
 ## Q3 — Which QuickJS revision is pinned?
 
-**Status: OPEN.** Pin a specific quickjs-ng tag (v0.15.1 is current as of
-2026-07-09) when the submodule is added, and record the tag here alongside the
-`webgpu-headers` pin (Phase 0.6). Two independently-versioned upstreams; both
-pins live in tracking docs, not in prose.
+**Status: PINNED (2026-07-09).**
+
+| | |
+|---|---|
+| Submodule path | `third_party/quickjs` |
+| Upstream | https://github.com/quickjs-ng/quickjs |
+| Tag | `v0.15.1` |
+| Commit | `fd0a0210b7be00957751871e7e01b8291268fc29` |
+| License | MIT |
+
+The `webgpu-headers` pin (Phase 0.6) is still open and is tracked in
+`backend-deltas.md` → D1's caveat. Two independently-versioned upstreams; both
+pins live in tracking docs, never in prose.
