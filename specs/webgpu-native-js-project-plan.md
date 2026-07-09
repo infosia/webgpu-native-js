@@ -424,21 +424,32 @@ Answer the unknowns the rest of the plan depends on, cheaply. **Reordered by
 risk:** the JSC capability spike now comes first, because it is the one that can
 invalidate §2.4.
 
-1. **JSC ArrayBuffer detach capability.** `getMappedRange()` must return an
-   `ArrayBuffer` that `unmap()` **detaches**. QuickJS has `JS_DetachArrayBuffer`.
-   JSC has `JSObjectMakeArrayBufferWithBytesNoCopy` but no obvious public detach
-   in its C API. Determine whether one exists. If not, decide now whether
-   `JsEngine` carries a capability flag with a documented JSC deviation, or
-   whether JSC is downgraded further. **This is the single most likely place the
-   "one core, two engines" bet breaks.**
+1. **JSC ArrayBuffer detach capability.** ✅ **ANSWERED 2026-07-09** —
+   `specs/tracking/engine-boundary.md` → Q1. JSC's public C API exposes **no**
+   detach; the JS-level `ArrayBuffer.prototype.transfer()` is dependable on
+   engine-owned buffers but not on external (`…WithBytesNoCopy`) ones, and the
+   `bytesDeallocator` never fires. Handing script a zero-copy view over GPU
+   memory would therefore leave a dangling pointer after `unmap()` — memory
+   unsafety, not a conformance footnote. **Decision:** `JsEngine` carries a
+   `MappedRangeStrategy` capability (`ZeroCopyDetach` for QuickJS,
+   `CopyInCopyOut` for JSC); `core/` implements both once, generic over `E`.
+   Copying at `unmap()` is spec-conformant, so this is a perf cost on the Tier 2
+   engine, not a behavioural deviation. **The boundary survived** — the fix was
+   additive (a capability + a trait method), which is exactly the outcome §2.4
+   predicted a correct boundary would produce. Residual: **Q1a** — confirm
+   QuickJS `JS_DetachArrayBuffer` works on an *external* buffer. Handoff issued.
 2. Set up the `bindgen`-generated Rust FFI crate from `webgpu.h`; verify a
    trivial program (`wgpuCreateInstance` → `wgpuInstanceRelease`) links and runs
    against yawgpu and wgpu-native, reusing `webgpu-native-cts`'s
    backend-selection approach as Cargo features. (Dawn's build is heavy; defer
    linking it to Phase 7 CI unless it is cheap.)
 3. Confirm yawgpu's `webgpu.h` surface matches (or document deltas from) the
-   canonical `webgpu-headers` version. Divergence undermines
-   backend-swappability and should be fixed upstream in yawgpu first.
+   canonical `webgpu-headers` version. ✅ **ANSWERED 2026-07-09** —
+   `specs/tracking/backend-deltas.md` → D1. Function surface (202 fns) and type
+   surface are **identical**; yawgpu's vendored copy lacks exactly one
+   enumerator (`WGPUFeatureName_SubgroupSizeControl`). ABI-compatible; report
+   upstream. Does not block, because this project generates from the canonical
+   headers, not from a backend's vendored copy.
 4. **Prototype the event-loop pump (§2.7)** end-to-end with no GPU: issue a
    `AllowProcessEvents` callback, drive `wgpuInstanceProcessEvents`, resolve a
    QuickJS Promise, drain `JS_ExecutePendingJob`, observe the `.then()` run.
@@ -619,10 +630,13 @@ Until Phase 8, the test layers are:
 Genuinely undecided. Answer with evidence. Do not let them harden into
 assumptions by being restated confidently in a later document.
 
-1. **Does JSC's public C API expose ArrayBuffer detach?** (Phase 0.1.) Blocks the
-   `getMappedRange`/`unmap` contract and stress-tests §2.4. Highest priority.
+1. ~~**Does JSC's public C API expose ArrayBuffer detach?**~~ **CLOSED
+   2026-07-09: no.** Resolved into the `MappedRangeStrategy` capability; see
+   `specs/tracking/engine-boundary.md` → Q1 and Phase 0.1 above. Residual **Q1a**
+   (QuickJS detach on an external buffer) is open and handed off.
 2. **Does the host game engine own the GPU-release thread, or does this project
-   spin up its own?** (Affects §2.5, §5.2.)
+   spin up its own?** (Affects §2.5, §5.2.) Now the highest-priority open
+   question, since Q1 is closed.
 3. **Which QuickJS fork** — Bellard vs. quickjs-ng — and **`rquickjs` vs. raw
    `bindgen`**? (§3.2.)
 4. **Where does `webgpu.idl` come from, and how is it pinned against the

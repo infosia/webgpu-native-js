@@ -85,6 +85,15 @@ The plan's §7 has the full evidence. These are the conclusions that are now
 8. **Scripts are trusted.** First-party game logic, not a browser sandbox.
    Spend no effort hardening against adversarial JS; spend it on catching
    honest mistakes with clear, early errors.
+9. **`getMappedRange()` never hands an engine a pointer it cannot revoke.**
+   JSC's public C API has no ArrayBuffer detach (evidence:
+   `specs/tracking/engine-boundary.md` → Q1), so a zero-copy view over GPU
+   memory would leave script holding a dangling pointer after `unmap()`. The
+   `JsEngine` capability `MappedRangeStrategy` selects `ZeroCopyDetach`
+   (QuickJS) or `CopyInCopyOut` (JSC). `core/` implements both once, generic
+   over `E`. Copying at `unmap()` is spec-conformant — WebGPU defines mapped
+   contents as becoming visible to the GPU at `unmap()` — so this is a
+   performance difference on the Tier 2 engine, not a behavioural one.
 
 ## Engine support tiers
 
@@ -239,13 +248,6 @@ up codegen, do not absorb the churn.
 Genuinely undecided. Answer with evidence; do not let the draft plan's guesses
 harden into assumptions.
 
-- **Does JSC's public C API expose ArrayBuffer detach?** `getMappedRange()` must
-  return an `ArrayBuffer` that is **detached** by `unmap()`. QuickJS has
-  `JS_DetachArrayBuffer`. JSC has `JSObjectMakeArrayBufferWithBytesNoCopy` but
-  no obvious public detach. If none exists, the `JsEngine` trait needs a
-  capability flag and the JSC adapter needs a documented deviation — this is the
-  single most likely place the "one core, two engines" bet breaks, and it should
-  be the **first Phase 0 spike**, ahead of the release queue.
 - **Who owns the GPU-release thread** — the host engine or this project?
 - **Which QuickJS fork, and `rquickjs` or raw `bindgen`?** (Plan §6.3.)
 - **Full WebIDL coverage vs. a trimmed engine-oriented subset.** Revisit after
