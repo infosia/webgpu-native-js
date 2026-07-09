@@ -102,7 +102,14 @@ The plan's §7 has the full evidence. These are the conclusions that are now
     after `unmap()` with no error raised anywhere. Copy through a private
     staging buffer and detach via `transfer()` *before* touching any pointer —
     protocol in `engine-boundary.md` → Q1b. Treat any C pointer taken from a
-    script-reachable buffer as a CRITICAL finding.
+    script-reachable buffer as a CRITICAL finding. (Only the two bytes-pointer
+    accessors pin; `JSObjectGetArrayBufferByteLength` is safe — E12.)
+11. **Neither engine reports a failed detach.** JSC's `transfer()` silently
+    no-ops on a pinned buffer; QuickJS's `JS_DetachArrayBuffer` returns `void`
+    and no-ops on a non-buffer or an already-detached one. `unmap()` must
+    therefore **verify** detachment and raise a hard error when it did not
+    happen. This check lives in `core/` once, not in each adapter — it is shared
+    behaviour, not engine-specific defensive coding.
 
 ## Engine support tiers
 

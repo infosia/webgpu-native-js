@@ -192,7 +192,59 @@ both O(n) bytes. **Not** O(n) engine calls. Acceptable for a Tier 2 engine.
 This protocol also removes the ordering trap: detach happens *before* we ever
 touch a pointer, so a pinned buffer can never reach script.
 
-### Review of the spike — VERDICT: accepted as evidence, revision required
+### E12 — only the *bytes-pointer* accessors pin; `byteLength` does not
+
+Checked directly, because invariant 10 would be actively harmful if read too
+broadly. `JSObjectGetArrayBufferByteLength` does **not** pin: taking it and then
+calling `transfer()` still yields `detached === true`.
+
+So the hazard is confined to `JSObjectGetArrayBufferBytesPtr` and
+`JSObjectGetTypedArrayBytesPtr`. Length and other metadata accessors are safe,
+and post-detach verification may use them. This is what makes the verification in
+`detach_and_take_private_copy()` sound.
+
+### Revision landed (2026-07-09) — Q1b CLOSED
+
+`spikes/jsc-detach/` now implements the E6 protocol. Gates re-run directly:
+`cargo test --offline` → **8 passed**; `clippy --all-targets -- -D warnings` →
+EXIT=0; ASan → EXIT=0. Same for `spikes/quickjs-detach/` (5 passed).
+
+What changed, and why each matters:
+
+- **Copies are `copy_nonoverlapping`.** The per-byte `JSObjectSetPropertyAtIndex`
+  walk is gone. A **1 MiB** range now round-trips in both directions
+  (`e6_protocol_holds_for_one_mib_ranges`), so E6 is confirmed at a realistic
+  size rather than on 8-byte toys.
+- **`bytes_ptr()` is deleted.** Removing it forced no other API change — it had
+  existed solely to let one test assert a pointer inequality.
+- **`unmap()` verifies.** `detach_and_take_private_copy()` calls `transfer()`,
+  then checks the source buffer's length is `0`, and returns
+  `DetachVerificationFailed` otherwise. Detach now happens **before** any pointer
+  is taken, so a pinned buffer cannot reach script by construction.
+- **E5 is now an executable invariant.** `pinned_script_visible_buffer_fails_loudly_on_unmap`
+  deliberately pins a script-visible buffer, then asserts `unmap()` returns
+  `DetachVerificationFailed` *and* that `buf.byteLength` is still `8` — pinning
+  E5's silent-no-op behaviour in place. Independently reconfirmed by the agent:
+  `transfer()` on a pinned buffer **does not throw**.
+- **The suite now enforces the rule it documents.** If `make_visible_buffer` ever
+  pinned the buffer it hands to script, every `unmap()` test would fail. The
+  invariant no longer depends on anyone remembering it.
+- The two engines' zero-copy tests are now deliberate mirror images: QuickJS
+  asserts script **does** observe a foreign mutation while mapped; JSC asserts it
+  **does not**. That divergence is the visible reason `MappedRangeStrategy` exists.
+
+Remaining MINORs from the original review are resolved: `Error::Exception` now
+carries the JS exception message, the observable `__mapped_range_buffer` global
+is gone, and the silent `NaN → 0` path was removed with the per-byte copy. The
+`quickjs-detach` aliasing finding is fixed.
+
+**ASan caveat, stated once and for all:** Apple platforms ship no
+LeakSanitizer. A clean ASan run on macOS demonstrates no double-free and no
+use-after-free. It does **not** demonstrate the absence of leaks. In
+`quickjs-detach`, leak coverage comes from the asserted `free_func` call
+sequence, not from ASan.
+
+### Original review of the spike — VERDICT: accepted as evidence, revision required
 
 Gates re-run directly (not via the agent): `cargo test` → 6 passed, EXIT=0;
 `cargo clippy --all-targets -- -D warnings` → EXIT=0; zero external crates

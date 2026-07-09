@@ -76,13 +76,13 @@ unsafe extern "C" fn free_array_buffer(
             return;
         }
 
-        let state = unsafe { &mut *(opaque.cast::<ForeignAllocation>()) };
         if ptr.is_null() {
             record_free_event(true, false);
             drop(unsafe { Box::from_raw(opaque.cast::<ForeignAllocation>()) });
             return;
         }
 
+        let state = unsafe { &mut *(opaque.cast::<ForeignAllocation>()) };
         let freed_allocation = state.bytes.take().is_some();
         record_free_event(false, freed_allocation);
     }));
