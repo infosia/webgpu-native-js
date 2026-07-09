@@ -1,0 +1,12 @@
+[package]
+name = "webgpu-native-js-core"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[features]
+default = []
+mock = []
+
+[dependencies]
+webgpu-native-js-ffi = { path = "../ffi", default-features = false }

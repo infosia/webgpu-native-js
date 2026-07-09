@@ -6,12 +6,12 @@ build = "build.rs"
 
 [features]
 default = []
-backend-yawgpu = ["ffi/backend-yawgpu"]
-backend-wgpu-native = ["ffi/backend-wgpu-native"]
-backend-dawn = ["ffi/backend-dawn"]
+backend-yawgpu = ["webgpu-native-js-ffi/backend-yawgpu"]
+backend-wgpu-native = ["webgpu-native-js-ffi/backend-wgpu-native"]
+backend-dawn = ["webgpu-native-js-ffi/backend-dawn"]
 
 [dependencies]
-ffi = { path = "../../ffi" }
+webgpu-native-js-ffi = { path = "../../ffi" }
 
 [build-dependencies]
 bindgen = "0.72.1"

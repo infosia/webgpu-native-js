@@ -68,17 +68,24 @@ A slice is the smallest unit of dispatchable work. Depending on the phase:
 
 | Gate | Command | Who |
 |---|---|---|
-| Build | `cargo build --workspace --features backend-yawgpu` | both |
-| Test | `cargo test --workspace --features backend-yawgpu` | Claude (backstop); agent runs targeted subsets |
-| Lint | `cargo clippy --workspace --all-targets --features backend-yawgpu -- -D warnings` | both |
+| Build | `cargo build --workspace --features webgpu-native-js-ffi/backend-yawgpu` | both |
+| Test | `cargo test --workspace --features webgpu-native-js-ffi/backend-yawgpu` | Claude (backstop); agent runs targeted subsets |
+| Lint | `cargo clippy --workspace --all-targets --features webgpu-native-js-ffi/backend-yawgpu -- -D warnings` | both |
+| Engine-agnostic | `cargo test -p webgpu-native-js-core` with **no** backend feature and `WEBGPU_NATIVE_JS_BACKEND_LIB_DIR` **unset** | both |
 | Dual-engine | the slice's `.js` conformance script under **both** engines, identical expected output | Claude |
 
-**A backend feature is mandatory.** `ffi` refuses to build with zero or more than
-one `backend-*` feature (`compile_error!`), so a bare `cargo test --workspace`
-fails by design. `WEBGPU_NATIVE_JS_BACKEND_LIB_DIR` must also be set, to a
-directory containing the backend's dynamic library — see
-`specs/reference/dependencies.md`. Wire it up in a **gitignored**
-`.cargo/config.toml`, never in a committed file.
+**The engine-agnostic gate is not optional.** `core/` depends on
+`webgpu-native-js-ffi` for its `bindgen` types (block 01 → R1a) but must compile
+and pass its unit tests with no engine, no backend library, and no GPU. If that
+gate ever needs a backend, the boundary has leaked.
+
+**Everything else needs a backend.** `webgpu-native-js-ffi` builds with zero
+backend features as a **types-only** crate — it emits no link directives — and
+`compile_error!`s only on *more than one*. Any crate that actually **calls**
+`webgpu.h` needs one backend feature and needs
+`WEBGPU_NATIVE_JS_BACKEND_LIB_DIR` set to a directory containing the backend's
+dynamic library (see `specs/reference/dependencies.md`). Wire it up in a
+**gitignored** `.cargo/config.toml`, never in a committed file.
 
 For yawgpu, point it at `target/release` of a yawgpu checkout. That directory is
 self-contained since D6 was fixed upstream: it colocates `libtint_shim.dylib`,

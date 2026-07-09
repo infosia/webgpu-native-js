@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::ThreadId;
 
-use ffi::native as wgpu;
+use webgpu_native_js_ffi::native as wgpu;
 
 static QUICKJS_CLASS_ID: AtomicUsize = AtomicUsize::new(0);
 

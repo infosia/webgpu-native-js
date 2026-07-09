@@ -88,6 +88,45 @@ JS-visible: `GPUDevice.createBuffer(descriptor) -> GPUBuffer`;
 `E: JsEngine`. Enforced by inspection and by the fact that `core/` must compile
 with **only** the mock engine, no engine crate in its dependency graph.
 
+**R1a — engine-agnostic is not backend-unlinked.** *(Added 2026-07-09 after the
+first Phase 1 slice. The original R1/R16 conflated the two and produced a real
+ABI hazard — see R20.)* `core/` must not know about **engines**. It **must**
+depend on `ffi` for the **`webgpu.h` types**, because those are
+`bindgen`-generated from the canonical headers and there may be exactly one
+definition of them in the tree (principle 2).
+
+This requires `ffi` to build with **zero** `backend-*` features: `build.rs`
+always generates bindings, and emits link directives only when a backend feature
+is on. `compile_error!` fires only for **more than one** backend, never for zero.
+Unused `extern "C"` declarations produce no undefined symbols, so `cargo test -p
+core` still links with no backend, no engine, and no GPU.
+
+**R20 — `core/` must not hand-declare any `webgpu.h` type.** No
+`pub type WGPUDevice = *mut c_void`, no `#[repr(C)] struct WGPUBufferDescriptor`,
+no `WGPU_STRLEN` constant. Every one of them comes from `ffi::native`.
+
+A hand-written copy that happens to match today is worse than one that does not,
+because nothing fails until upstream reorders a field. The concrete failure the
+first slice created: the adapter bridged the two definitions with
+`descriptor.cast()` — a pointer reinterpretation between two independently
+declared structs, with no static assertion. Add a field upstream, `bindgen`
+follows, the hand-copy does not, and the driver reads a `usage` that used to be a
+`size`. Silent memory corruption, and exactly what principles 2 and 9 exist to
+prevent.
+
+**The function-pointer seam stays.** Injecting the `webgpu.h` entry points as
+`unsafe extern "C" fn` pointers is legitimate and valuable: it is what lets the
+mock exercise R13 (`wgpuDeviceCreateBuffer` returning `NULL`), which no real
+backend will do on demand. Every call still crosses the C ABI. Only the **types**
+must come from `bindgen`; the **dispatch** may be indirect.
+
+**R21 — crate names must not shadow the standard library.** The first slice named
+the crate `core`, which shadows the sysroot `core` crate for every dependent:
+inside `adapters/quickjs`, `core::mem` no longer resolves to `::core::mem`. Rename
+to a project-prefixed name. Do the deferred `ffi` rename
+(`phase-reviews.md` → deferred MINORs) in the same change, now that `core` depends
+on it.
+
 **R2.** No `dyn` on the descriptor-conversion path. `E::Value` is `Copy` and
 conversion functions are generic and monomorphized. `Box<dyn Any>` is permitted
 for the *payload* an object carries, because it is touched once per finalizer,
@@ -193,9 +232,14 @@ catches unwinds.
 ## 4. Tests
 
 **R16 — `core/` is tested against a mock engine, with no GPU and no engine.**
-The mock implements `JsEngine` over a plain Rust value tree. Every rule R8–R15
-gets at least one direct unit test there. This is what proves `core/` is
-engine-agnostic: if it needs QuickJS to be tested, it is not.
+The mock implements `JsEngine` over a plain Rust value tree, and supplies the
+`webgpu.h` entry points as fn pointers. Every rule R8–R15 gets at least one
+direct unit test there. This is what proves `core/` is engine-agnostic: if it
+needs QuickJS to be tested, it is not.
+
+**`cargo test -p <core>` must need no engine, no backend library, and no GPU** —
+but it *does* depend on the `ffi` crate, for types only (R1a). "No backend in the
+dependency graph" was the wrong criterion and is withdrawn.
 
 **R17 — the QuickJS adapter is tested against the real slice.** One `.js` script
 runs `wrap_device` → `createBuffer` → `label` round-trip → `destroy`, headless,

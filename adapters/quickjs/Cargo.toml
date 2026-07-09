@@ -1,5 +1,5 @@
 [package]
-name = "release-queue"
+name = "quickjs-adapter"
 version = "0.1.0"
 edition = "2021"
 build = "build.rs"
@@ -11,6 +11,7 @@ backend-wgpu-native = ["webgpu-native-js-ffi/backend-wgpu-native"]
 backend-dawn = ["webgpu-native-js-ffi/backend-dawn"]
 
 [dependencies]
+webgpu-native-js-core = { path = "../../core" }
 webgpu-native-js-ffi = { path = "../../ffi" }
 
 [build-dependencies]

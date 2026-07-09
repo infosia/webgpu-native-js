@@ -513,6 +513,62 @@ external buffer, STOP and report — the ZeroCopyDetach arm depends on it.
 
 ---
 
+## Q4 — Did the boundary hold in Phase 1?
+
+**Status: YES, on the first slice.** `wrap_device` → `createBuffer` → `label`
+round-trip → `destroy()` runs headless under QuickJS against yawgpu's Noop
+backend. `core/` contains zero QuickJS or JSC references, and
+`cargo test -p webgpu-native-js-core` passes with **no engine, no backend
+feature, and `WEBGPU_NATIVE_JS_BACKEND_LIB_DIR` unset** — 16 tests, one per rule
+R8–R15 plus R8's whole rejection table.
+
+The coding agent reports it never wanted engine-specific logic inside `core/`.
+That is the answer Phase 3 will re-ask under JavaScriptCore, where it counts.
+
+Three secondary answers, from the block spec's §6:
+
+- **`E::Context<'a>` did not need the GAT.** A plain `Copy` handle sufficed;
+  `to_str`'s borrow ties to the arena, not to the context. Revisit under JSC,
+  which needs a `JSContextRef` per operation — if it still fits, drop the
+  lifetime parameter.
+- **`Box<dyn Any + Send>` was the right payload.** No `dyn` reached the
+  conversion path; the downcast happens once per finalizer.
+- **Method dispatch is one `extern "C"` callback per method**, not a magic-indexed
+  table. That is also what Phase 4's codegen will emit, so nothing is lost. The
+  agent reported that QuickJS's `magic` value "arrived as 0"; **that claim is not
+  recorded as fact.** `JS_NewCFunctionMagic` is a `static inline` forwarding to
+  `JS_NewCFunction2(..., JS_CFUNC_generic_magic, magic)`, and the likeliest
+  explanation is a call through a non-magic cproto. Nobody verified it, so it
+  stays an open question rather than an assertion about an upstream artifact.
+
+### R13 — recorded deviation: `createBuffer` on failure
+
+`wgpuDeviceCreateBuffer` is declared `WGPU_NULLABLE`. WebGPU's IDL says
+`createBuffer` **always returns a `GPUBuffer`** — an *invalid* one on failure —
+and routes the error to the current error scope.
+
+Phase 1 raises a synchronous engine exception on a null handle instead, because
+error scopes do not exist until Phase 6. This is a **deliberate, temporary
+divergence from the IDL**, written down here rather than quietly shipped. When
+error scopes land, `createBuffer` must stop throwing and start returning an
+invalid buffer.
+
+### R11 — recorded limit: `GPUSize64` through a JS `Number`
+
+`size` is `[EnforceRange] unsigned long long` in WebIDL and `uint64_t` in the C
+ABI, but a JS `Number` represents integers exactly only up to `2^53 - 1`. Values
+above that which are not exactly representable have **already lost information
+before the binding sees them**. The conversion follows the IDL — it accepts the
+integral value that arrives, rejecting non-finite, non-integral, negative, and
+out-of-range inputs — and does not invent a stricter rule.
+
+This is an inherent property of `Number`-typed `GPUSize64`, shared with every
+browser. It is recorded so nobody later "fixes" it into a `2^53` cap, and so that
+a future `BigInt` accepting path, if the IDL ever grows one, has somewhere to
+attach.
+
+---
+
 ## Q2 — Which QuickJS fork, and `rquickjs` vs raw `bindgen`?
 
 **Status: DECIDED (2026-07-09).**

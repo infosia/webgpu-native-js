@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread::ThreadId;
 
-use ffi::native as wgpu;
+use webgpu_native_js_ffi::native as wgpu;
 
 #[allow(
     dead_code,

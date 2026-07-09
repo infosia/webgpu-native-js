@@ -85,14 +85,7 @@ version = "0.1.0"
 dependencies = [
  "bindgen",
  "cc",
- "ffi",
-]
-
-[[package]]
-name = "ffi"
-version = "0.1.0"
-dependencies = [
- "bindgen",
+ "webgpu-native-js-ffi",
 ]
 
 [[package]]
@@ -180,6 +173,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "quickjs-adapter"
+version = "0.1.0"
+dependencies = [
+ "bindgen",
+ "cc",
+ "webgpu-native-js-core",
+ "webgpu-native-js-ffi",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -223,7 +226,7 @@ version = "0.1.0"
 dependencies = [
  "bindgen",
  "cc",
- "ffi",
+ "webgpu-native-js-ffi",
 ]
 
 [[package]]
@@ -260,6 +263,20 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "webgpu-native-js-core"
+version = "0.1.0"
+dependencies = [
+ "webgpu-native-js-ffi",
+]
+
+[[package]]
+name = "webgpu-native-js-ffi"
+version = "0.1.0"
+dependencies = [
+ "bindgen",
+]
 
 [[package]]
 name = "windows-link"

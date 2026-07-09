@@ -50,10 +50,11 @@ Per the workflow gate, MINOR may be deferred only with a written reason.
   downstream code will match on. These enums never leave their spike crate, and
   every spike is scheduled for deletion once `core/` subsumes it. Applying it here
   buys nothing and adds noise. Revisit when `core/` defines its first public enum.
-- **Renaming the bare `ffi` crate.** Real hazard, wrong moment: the rename touches
-  the workspace root, two path dependencies, and every gate command in
-  `workflow.md`. Do it as the first change of Phase 1, when `core/` lands beside
-  it and the naming scheme is decided once.
+- ~~**Renaming the bare `ffi` crate.**~~ **CLOSED in Phase 1**, as planned, and
+  for a sharper reason than anticipated: the first slice named its crate `core`,
+  which shadows the **sysroot `core` crate** for every dependent. Both are now
+  `webgpu-native-js-{core,ffi}` (block 01 → R21). The gate commands in
+  `workflow.md` moved with them.
 - **Edition drift (2021 vs 2024 across spikes).** Harmless for standalone crates;
   unifying now would churn four manifests for no behavioural change. Fold into the
   Phase 1 workspace cleanup.

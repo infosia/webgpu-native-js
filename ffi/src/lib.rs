@@ -2,21 +2,12 @@
 
 //! Raw WebGPU C ABI bindings generated from the pinned canonical `webgpu.h`.
 
-#[cfg(not(any(
-    feature = "backend-yawgpu",
-    feature = "backend-wgpu-native",
-    feature = "backend-dawn"
-)))]
-compile_error!(
-    "enable exactly one backend feature: backend-yawgpu, backend-wgpu-native, or backend-dawn"
-);
-
 #[cfg(any(
     all(feature = "backend-yawgpu", feature = "backend-wgpu-native"),
     all(feature = "backend-yawgpu", feature = "backend-dawn"),
     all(feature = "backend-wgpu-native", feature = "backend-dawn")
 ))]
-compile_error!("enable exactly one backend feature");
+compile_error!("enable at most one backend feature");
 
 #[cfg(feature = "backend-dawn")]
 compile_error!("not yet supported");
@@ -32,7 +23,7 @@ pub mod native {
     include!(concat!(env!("OUT_DIR"), "/webgpu_bindings.rs"));
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(feature = "backend-yawgpu", feature = "backend-wgpu-native")))]
 mod tests {
     #[test]
     fn create_instance_and_release_roundtrip() {
