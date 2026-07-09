@@ -10,7 +10,7 @@ use std::any::Any;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::ptr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 pub use webgpu_native_js_ffi::native::{
     WGPUBool, WGPUBuffer, WGPUBufferDescriptor, WGPUBufferUsage, WGPUDevice, WGPUStringView,
@@ -638,7 +638,11 @@ fn enforce_u64<E: JsEngine>(
     name: &'static str,
 ) -> Result<u64, E::Error> {
     let number = E::to_f64(cx, value)?;
-    if !number.is_finite() || number < 0.0 || number.fract() != 0.0 || number > u64::MAX as f64 {
+    if !number.is_finite()
+        || number < 0.0
+        || number.fract() != 0.0
+        || number >= 18_446_744_073_709_551_616.0
+    {
         return Err(E::type_error(cx, name));
     }
     Ok(number as u64)
@@ -650,7 +654,7 @@ fn enforce_u32<E: JsEngine>(
     name: &'static str,
 ) -> Result<u32, E::Error> {
     let number = E::to_f64(cx, value)?;
-    if !number.is_finite() || number < 0.0 || number.fract() != 0.0 || number > u32::MAX as f64 {
+    if !number.is_finite() || number < 0.0 || number.fract() != 0.0 || number >= 4_294_967_296.0 {
         return Err(E::type_error(cx, name));
     }
     Ok(number as u32)
@@ -676,7 +680,7 @@ where
 }
 
 fn device_class<E: JsEngine>() -> &'static ClassSpec<E> {
-    Box::leak(Box::new(ClassSpec {
+    class_spec_once::<E, _>(GPU_DEVICE_CLASS, || ClassSpec {
         name: "GPUDevice",
         id: GPU_DEVICE_CLASS,
         properties: &[],
@@ -686,11 +690,11 @@ fn device_class<E: JsEngine>() -> &'static ClassSpec<E> {
             call: device_create_buffer::<E>,
         }])),
         finalizer: finalize_device,
-    }))
+    })
 }
 
 fn buffer_class<E: JsEngine>() -> &'static ClassSpec<E> {
-    Box::leak(Box::new(ClassSpec {
+    class_spec_once::<E, _>(GPU_BUFFER_CLASS, || ClassSpec {
         name: "GPUBuffer",
         id: GPU_BUFFER_CLASS,
         properties: Box::leak(Box::new([
@@ -716,7 +720,29 @@ fn buffer_class<E: JsEngine>() -> &'static ClassSpec<E> {
             call: buffer_destroy::<E>,
         }])),
         finalizer: finalize_buffer,
-    }))
+    })
+}
+
+fn class_spec_once<E, F>(id: ClassId, init: F) -> &'static ClassSpec<E>
+where
+    E: JsEngine + 'static,
+    F: FnOnce() -> ClassSpec<E>,
+{
+    static SPECS: OnceLock<Mutex<Vec<(std::any::TypeId, ClassId, usize)>>> = OnceLock::new();
+    let type_id = std::any::TypeId::of::<E>();
+    let specs = SPECS.get_or_init(|| Mutex::new(Vec::new()));
+    let Ok(mut specs) = specs.lock() else {
+        return Box::leak(Box::new(init()));
+    };
+    if let Some((_, _, ptr)) = specs
+        .iter()
+        .find(|(existing_type, existing_id, _)| *existing_type == type_id && *existing_id == id)
+    {
+        return unsafe { &*(*ptr as *const ClassSpec<E>) };
+    }
+    let spec = Box::leak(Box::new(init()));
+    specs.push((type_id, id, spec as *const ClassSpec<E> as usize));
+    spec
 }
 
 #[cfg(any(test, feature = "mock"))]

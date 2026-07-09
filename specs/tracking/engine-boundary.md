@@ -558,10 +558,21 @@ that conclusion is wrong for this reason, and the finding is right anyway.
 
 - **`Box<dyn Any + Send>` was the right payload.** No `dyn` reaches the
   conversion path; the downcast happens once per finalizer.
-- The unverified claim that QuickJS delivers `magic == 0` is still **not recorded
-  as fact.** It was never root-caused — and it is now known to have produced the
-  R24 hardcoding. Refusing to write it down was right; failing to demand a
-  root-cause was not.
+- The claim that QuickJS delivers `magic == 0` was **false**, and is now
+  root-caused: QuickJS stores a C function's magic as an **`int16_t`**
+  (`quickjs.c:1101`). Phase 1's encoding packed a class id into the high bits;
+  a 16-bit field truncated them. Refusing to record the claim as fact was right.
+  **Failing to demand the root-cause was the mistake** — it cost a hardcoded
+  dispatch table that would have metastasised across forty interfaces in Phase 4.
+
+### Resolved: the boundary is re-entrant
+
+`core/` calls back into the adapter (`E::payload`, `E::get_property`,
+`E::type_error`) while servicing a method. Phase 1's first generic-dispatch build
+deadlocked, holding the class-registry mutex across a call into `core/` that
+re-entered `payload`. Block 01 → **R25**: take what you need from a lock, drop it,
+then call `core/`. This is a property of the boundary, and JavaScriptCore will hit
+it identically.
 
 ### R13 — recorded deviation: `createBuffer` on failure
 

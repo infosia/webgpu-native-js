@@ -286,6 +286,22 @@ reported, not routed around. Phase 1's hardcoding grew from an **unverified**
 claim that QuickJS delivered `magic == 0`; the claim was never root-caused, and
 the workaround silently disabled the mechanism it was meant to protect.
 
+**Root cause, once someone opened the file:** QuickJS stores a C function's magic
+as an **`int16_t`** (`quickjs.c`, `JSObject::u.cfunc.magic`). Phase 1's encoding
+packed a class id into the high bits — `(class << 16) | …` — which a 16-bit field
+silently truncates. Nothing was wrong with `magic`; the encoding did not fit. Use
+a table index that fits in 16 bits, or a per-member callback table.
+
+**R25 — an adapter must hold no lock across a call into `core/`.** `core/` calls
+back into the adapter (`E::payload`, `E::get_property`, `E::type_error`) while
+servicing a method, so the call graph is **re-entrant through the boundary**.
+Phase 1's first generic-dispatch build deadlocked: the method callback held the
+class-registry mutex while `core/` re-entered `payload`, which wanted the same
+lock.
+
+Take what you need from a lock, drop it, then call `core/`. This is a property of
+the boundary, not of QuickJS, and it will bite JSC identically.
+
 ## 4. Tests
 
 **R16 — `core/` is tested against a mock engine, with no GPU and no engine.**

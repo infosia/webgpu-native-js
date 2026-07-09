@@ -1,7 +1,7 @@
 //! Mock JavaScript engine used by core unit tests.
 
 use std::any::Any;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::ptr;
 use std::sync::Arc;
@@ -19,6 +19,13 @@ pub struct Value(usize);
 #[derive(Clone, Copy)]
 pub struct Context<'a> {
     runtime: &'a Runtime,
+    scope: Option<&'a Scope<'a>>,
+}
+
+/// Mock per-call value ownership scope.
+pub struct Scope<'a> {
+    runtime: &'a Runtime,
+    owned: RefCell<Vec<Value>>,
 }
 
 /// Mock JavaScript runtime.
@@ -26,6 +33,7 @@ pub struct Runtime {
     env: Environment,
     values: RefCell<Vec<MockValue>>,
     classes: RefCell<BTreeMap<ClassId, &'static str>>,
+    reclaimed_values: Cell<usize>,
 }
 
 impl Runtime {
@@ -36,13 +44,37 @@ impl Runtime {
             env: Environment::new(gpu, Arc::new(ReleaseQueue::new())),
             values: RefCell::new(vec![MockValue::Undefined]),
             classes: RefCell::new(BTreeMap::new()),
+            reclaimed_values: Cell::new(0),
         }
     }
 
     /// Returns a context handle.
     #[must_use]
     pub fn context(&self) -> Context<'_> {
-        Context { runtime: self }
+        Context {
+            runtime: self,
+            scope: None,
+        }
+    }
+
+    /// Calls a closure with a per-call ownership scope.
+    pub fn with_scope<R>(&self, f: impl FnOnce(Context<'_>) -> R) -> R {
+        let scope = Scope {
+            runtime: self,
+            owned: RefCell::new(Vec::new()),
+        };
+        let result = f(Context {
+            runtime: self,
+            scope: Some(&scope),
+        });
+        drop(scope);
+        result
+    }
+
+    /// Returns how many scoped values have been reclaimed.
+    #[must_use]
+    pub fn reclaimed_values(&self) -> usize {
+        self.reclaimed_values.get()
     }
 
     /// Returns the release queue.
@@ -100,6 +132,16 @@ impl Runtime {
     }
 }
 
+impl Drop for Scope<'_> {
+    fn drop(&mut self) {
+        let count = self.owned.borrow().len();
+        self.runtime
+            .reclaimed_values
+            .set(self.runtime.reclaimed_values.get() + count);
+        self.owned.borrow_mut().clear();
+    }
+}
+
 #[derive(Clone)]
 enum MockValue {
     Undefined,
@@ -131,10 +173,16 @@ impl JsEngine for Engine {
         key: &str,
     ) -> Result<Self::Value, Self::Error> {
         match cx.runtime.get(obj) {
-            MockValue::Object(map) => Ok(map
-                .get(key)
-                .copied()
-                .unwrap_or_else(|| cx.runtime.undefined())),
+            MockValue::Object(map) => {
+                let value = map
+                    .get(key)
+                    .copied()
+                    .unwrap_or_else(|| cx.runtime.undefined());
+                if let Some(scope) = cx.scope {
+                    scope.owned.borrow_mut().push(value);
+                }
+                Ok(value)
+            }
             _ => Ok(cx.runtime.undefined()),
         }
     }
@@ -430,6 +478,40 @@ mod tests {
     }
 
     #[test]
+    fn r8_rejects_size_at_two_to_the_64_boundary() {
+        let rt = runtime();
+        let cx = rt.context();
+        let desc = descriptor(
+            &rt,
+            &[
+                ("size", rt.number(18_446_744_073_709_551_616.0)),
+                ("usage", rt.number(8.0)),
+            ],
+        );
+        let arena = Arena::new();
+        assert!(convert_buffer_descriptor::<Engine>(cx, desc, &arena).is_err());
+    }
+
+    #[test]
+    fn r8_rejects_non_finite_size_and_usage() {
+        for (size, usage) in [
+            (f64::NAN, 8.0),
+            (f64::INFINITY, 8.0),
+            (256.0, f64::NAN),
+            (256.0, f64::INFINITY),
+        ] {
+            let rt = runtime();
+            let cx = rt.context();
+            let desc = descriptor(
+                &rt,
+                &[("size", rt.number(size)), ("usage", rt.number(usage))],
+            );
+            let arena = Arena::new();
+            assert!(convert_buffer_descriptor::<Engine>(cx, desc, &arena).is_err());
+        }
+    }
+
+    #[test]
     fn r8_rejects_negative_size() {
         let rt = runtime();
         let cx = rt.context();
@@ -500,6 +582,27 @@ mod tests {
         GPU_STATE.with(|state| {
             assert_eq!(state.borrow().descriptors[0].label, b"abc");
         });
+    }
+
+    #[test]
+    fn r23_heap_property_values_are_reclaimed_by_scope() {
+        let rt = runtime();
+        let desc = descriptor(
+            &rt,
+            &[
+                ("size", rt.number(16.0)),
+                ("usage", rt.number(8.0)),
+                ("label", rt.string("scoped")),
+            ],
+        );
+        rt.with_scope(|cx| {
+            let arena = Arena::new();
+            let converted =
+                convert_buffer_descriptor::<Engine>(cx, desc, &arena).expect("descriptor");
+            assert_eq!(converted.label, "scoped");
+            assert_eq!(rt.reclaimed_values(), 0);
+        });
+        assert_eq!(rt.reclaimed_values(), 4);
     }
 
     #[test]
@@ -616,12 +719,16 @@ mod tests {
         assert_eq!(rt.queue().len().expect("len"), 2);
         GPU_STATE.with(|state| {
             let state = state.borrow();
+            assert_eq!(state.device_add_refs, 2);
             assert_eq!(state.buffer_releases, 0);
             assert_eq!(state.device_releases, 0);
         });
         assert_eq!(rt.queue().drain().expect("drain"), 2);
         GPU_STATE.with(|state| {
-            let order = &state.borrow().native_order;
+            let state = state.borrow();
+            assert_eq!(state.device_releases, 2);
+            assert_eq!(state.buffer_releases, 1);
+            let order = &state.native_order;
             assert!(order
                 .windows(2)
                 .any(|window| window == ["buffer_release", "device_release"]));
@@ -643,6 +750,7 @@ mod tests {
         unsafe fn parent_release(device: WGPUDevice) {
             let parent = device.cast::<Parent>();
             unsafe {
+                (*parent).marker = 0xdead_beef;
                 drop(Box::from_raw(parent));
             }
         }
@@ -651,7 +759,8 @@ mod tests {
             let child = buffer.cast::<Child>();
             unsafe {
                 let child = Box::from_raw(child);
-                let _ = ptr::read_volatile(ptr::addr_of!((*child.parent).marker));
+                let marker = ptr::read_volatile(ptr::addr_of!((*child.parent).marker));
+                assert_eq!(marker, 0xfeed_face);
             }
         }
 

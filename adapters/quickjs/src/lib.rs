@@ -3,6 +3,7 @@
 //! QuickJS adapter for `webgpu-native-js`.
 
 use std::any::Any;
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -76,13 +77,16 @@ impl Runtime {
 
     /// Wraps an adopted WebGPU device.
     pub fn wrap_device(&self, device: ffi_wgpu::WGPUDevice) -> Result<qjs::JSValue> {
+        let scope = Scope::new(self.raw_context());
         let value = core::wrap_device::<Engine>(
             Context {
                 ctx: self.raw_context(),
+                scope: Some(&scope),
             },
             device,
         )
         .map_err(|value| Error::Exception(exception_or_value(self.raw_context(), value)))?;
+        scope.escape(value);
         Ok(value)
     }
 
@@ -109,6 +113,7 @@ impl Runtime {
             name,
             Engine::undefined(Context {
                 ctx: self.raw_context(),
+                scope: None,
             }),
         )
     }
@@ -159,6 +164,7 @@ struct State {
     env: core::Environment,
     classes: Mutex<BTreeMap<core::ClassId, ClassEntry>>,
     quickjs_to_core: Mutex<BTreeMap<qjs::JSClassID, core::ClassId>>,
+    callbacks: Mutex<Vec<CallbackTarget>>,
 }
 
 impl State {
@@ -167,6 +173,7 @@ impl State {
             env: core::Environment::new(gpu_dispatch(), Arc::new(core::ReleaseQueue::new())),
             classes: Mutex::new(BTreeMap::new()),
             quickjs_to_core: Mutex::new(BTreeMap::new()),
+            callbacks: Mutex::new(Vec::new()),
         }
     }
 }
@@ -176,18 +183,62 @@ struct ClassEntry {
     spec: &'static core::ClassSpec<Engine>,
 }
 
+#[derive(Clone, Copy)]
+struct CallbackTarget {
+    class: core::ClassId,
+    kind: CallbackKind,
+    index: usize,
+}
+
 /// QuickJS engine marker type.
 pub struct Engine;
 
 /// QuickJS context handle.
 #[derive(Clone, Copy)]
-pub struct Context {
+pub struct Context<'a> {
     ctx: *mut qjs::JSContext,
+    scope: Option<&'a Scope>,
+}
+
+struct Scope {
+    ctx: *mut qjs::JSContext,
+    values: RefCell<Vec<qjs::JSValue>>,
+}
+
+impl Scope {
+    fn new(ctx: *mut qjs::JSContext) -> Self {
+        Self {
+            ctx,
+            values: RefCell::new(Vec::new()),
+        }
+    }
+
+    fn track(&self, value: qjs::JSValue) {
+        self.values.borrow_mut().push(value);
+    }
+
+    fn escape(&self, value: qjs::JSValue) {
+        let mut values = self.values.borrow_mut();
+        if let Some(index) = values
+            .iter()
+            .position(|candidate| same_js_value(*candidate, value))
+        {
+            values.swap_remove(index);
+        }
+    }
+}
+
+impl Drop for Scope {
+    fn drop(&mut self) {
+        for value in self.values.borrow_mut().drain(..) {
+            unsafe { qjs::JS_FreeValue(self.ctx, value) };
+        }
+    }
 }
 
 impl core::JsEngine for Engine {
     type Value = qjs::JSValue;
-    type Context<'a> = Context;
+    type Context<'a> = Context<'a>;
     type Error = qjs::JSValue;
 
     fn environment<'a>(cx: Self::Context<'a>) -> &'a core::Environment {
@@ -205,6 +256,9 @@ impl core::JsEngine for Engine {
         if unsafe { qjs::JS_IsException(value) } {
             Err(value)
         } else {
+            if let Some(scope) = cx.scope {
+                scope.track(value);
+            }
             Ok(value)
         }
     }
@@ -276,8 +330,8 @@ impl core::JsEngine for Engine {
         if unsafe { qjs::JS_IsException(proto) } {
             return Err(proto);
         }
-        install_methods(cx.ctx, proto, spec)?;
-        install_properties(cx.ctx, proto, spec)?;
+        install_methods(cx.ctx, state, proto, spec)?;
+        install_properties(cx.ctx, state, proto, spec)?;
         unsafe {
             qjs::JS_SetClassProto(cx.ctx, quickjs_id, proto);
         }
@@ -315,6 +369,9 @@ impl core::JsEngine for Engine {
         unsafe {
             qjs::JS_SetOpaque(object, Box::into_raw(holder).cast());
         }
+        if let Some(scope) = cx.scope {
+            scope.track(object);
+        }
         Ok(object)
     }
 
@@ -335,11 +392,19 @@ impl core::JsEngine for Engine {
     }
 
     fn number(cx: Self::Context<'_>, value: f64) -> core::Result<Self::Value, Self::Error> {
-        Ok(unsafe { qjs::JS_NewFloat64(cx.ctx, value) })
+        let value = unsafe { qjs::JS_NewFloat64(cx.ctx, value) };
+        if let Some(scope) = cx.scope {
+            scope.track(value);
+        }
+        Ok(value)
     }
 
     fn string(cx: Self::Context<'_>, value: &str) -> core::Result<Self::Value, Self::Error> {
-        Ok(unsafe { qjs::JS_NewStringLen(cx.ctx, value.as_ptr().cast(), value.len()) })
+        let value = unsafe { qjs::JS_NewStringLen(cx.ctx, value.as_ptr().cast(), value.len()) };
+        if let Some(scope) = cx.scope {
+            scope.track(value);
+        }
+        Ok(value)
     }
 
     fn type_error(cx: Self::Context<'_>, message: &str) -> Self::Error {
@@ -353,30 +418,26 @@ impl core::JsEngine for Engine {
 
 fn install_methods(
     ctx: *mut qjs::JSContext,
+    state: &State,
     proto: qjs::JSValue,
     spec: &'static core::ClassSpec<Engine>,
 ) -> core::Result<(), qjs::JSValue> {
     for (index, method) in spec.methods.iter().enumerate() {
         let Ok(name) = CString::new(method.name) else {
-            return Err(Engine::type_error(Context { ctx }, "invalid method name"));
+            return Err(Engine::type_error(
+                Context { ctx, scope: None },
+                "invalid method name",
+            ));
         };
-        let func = match (spec.name, method.name) {
-            ("GPUDevice", "createBuffer") => unsafe {
-                qjs::JS_NewCFunction(ctx, Some(qjs_device_create_buffer), name.as_ptr(), 1)
-            },
-            ("GPUBuffer", "destroy") => unsafe {
-                qjs::JS_NewCFunction(ctx, Some(qjs_buffer_destroy), name.as_ptr(), 0)
-            },
-            _ => unsafe {
-                qjs::JS_NewCFunctionMagic(
-                    ctx,
-                    Some(qjs_method),
-                    name.as_ptr(),
-                    i32::from(method.length),
-                    qjs::JSCFunctionEnum_JS_CFUNC_generic_magic,
-                    magic(spec.id, CallbackKind::Method, index),
-                )
-            },
+        let func = unsafe {
+            qjs::JS_NewCFunctionMagic(
+                ctx,
+                Some(qjs_method),
+                name.as_ptr(),
+                i32::from(method.length),
+                qjs::JSCFunctionEnum_JS_CFUNC_generic_magic,
+                allocate_magic(ctx, state, spec.id, CallbackKind::Method, index)?,
+            )
         };
         if unsafe { qjs::JS_IsException(func) } {
             return Err(func);
@@ -399,43 +460,39 @@ fn install_methods(
 
 fn install_properties(
     ctx: *mut qjs::JSContext,
+    state: &State,
     proto: qjs::JSValue,
     spec: &'static core::ClassSpec<Engine>,
 ) -> core::Result<(), qjs::JSValue> {
     for (index, property) in spec.properties.iter().enumerate() {
         let Ok(name) = CString::new(property.name) else {
-            return Err(Engine::type_error(Context { ctx }, "invalid property name"));
+            return Err(Engine::type_error(
+                Context { ctx, scope: None },
+                "invalid property name",
+            ));
         };
         let atom = unsafe { qjs::JS_NewAtom(ctx, name.as_ptr()) };
         let getter = if property.get.is_some() {
-            match (spec.name, property.name) {
-                ("GPUBuffer", "label") => new_getter(ctx, name.as_ptr(), qjs_buffer_label_get, 0),
-                ("GPUBuffer", "size") => new_getter(ctx, name.as_ptr(), qjs_buffer_size_get, 0),
-                ("GPUBuffer", "usage") => new_getter(ctx, name.as_ptr(), qjs_buffer_usage_get, 0),
-                _ => new_getter(
-                    ctx,
-                    name.as_ptr(),
-                    qjs_getter,
-                    magic(spec.id, CallbackKind::Getter, index),
-                ),
-            }
+            new_getter(
+                ctx,
+                name.as_ptr(),
+                qjs_getter,
+                allocate_magic(ctx, state, spec.id, CallbackKind::Getter, index)?,
+            )
         } else {
-            Engine::undefined(Context { ctx })
+            Engine::undefined(Context { ctx, scope: None })
         };
         let setter = if property.set.is_some() {
-            match (spec.name, property.name) {
-                ("GPUBuffer", "label") => new_setter(ctx, name.as_ptr(), qjs_buffer_label_set, 0),
-                _ => new_setter(
-                    ctx,
-                    name.as_ptr(),
-                    qjs_setter,
-                    magic(spec.id, CallbackKind::Setter, index),
-                ),
-            }
+            new_setter(
+                ctx,
+                name.as_ptr(),
+                qjs_setter,
+                allocate_magic(ctx, state, spec.id, CallbackKind::Setter, index)?,
+            )
         } else {
-            Engine::undefined(Context { ctx })
+            Engine::undefined(Context { ctx, scope: None })
         };
-        if unsafe {
+        let rc = unsafe {
             qjs::JS_DefinePropertyGetSet(
                 ctx,
                 proto,
@@ -444,8 +501,9 @@ fn install_properties(
                 setter,
                 qjs::JS_PROP_CONFIGURABLE as c_int,
             )
-        } < 0
-        {
+        };
+        unsafe { qjs::JS_FreeAtom(ctx, atom) };
+        if rc < 0 {
             return Err(take_exception_value(ctx));
         }
     }
@@ -499,25 +557,65 @@ fn new_setter(
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 enum CallbackKind {
     Method = 1,
     Getter = 2,
     Setter = 3,
 }
 
-fn magic(class: core::ClassId, kind: CallbackKind, index: usize) -> c_int {
-    ((class.0 as c_int) << 16) | ((kind as c_int) << 12) | (index as c_int)
+fn allocate_magic(
+    ctx: *mut qjs::JSContext,
+    state: &State,
+    class: core::ClassId,
+    kind: CallbackKind,
+    index: usize,
+) -> core::Result<c_int, qjs::JSValue> {
+    let mut callbacks = state.callbacks.lock().map_err(|_| {
+        Engine::operation_error(
+            Context { ctx, scope: None },
+            "callback registry is poisoned",
+        )
+    })?;
+    if callbacks.len() >= i16::MAX as usize {
+        return Err(Engine::operation_error(
+            Context { ctx, scope: None },
+            "too many registered callbacks",
+        ));
+    }
+    callbacks.push(CallbackTarget { class, kind, index });
+    Ok(callbacks.len() as c_int)
 }
 
-fn decode_magic(value: c_int) -> (core::ClassId, CallbackKind, usize) {
-    let class = core::ClassId(((value >> 16) & 0xffff) as u32);
-    let kind = match (value >> 12) & 0xf {
-        2 => CallbackKind::Getter,
-        3 => CallbackKind::Setter,
-        _ => CallbackKind::Method,
+fn callback_target(
+    ctx: *mut qjs::JSContext,
+    magic_value: c_int,
+    expected: CallbackKind,
+) -> core::Result<CallbackTarget, qjs::JSValue> {
+    let state = state_from_context(ctx);
+    let callbacks = state.callbacks.lock().map_err(|_| {
+        Engine::operation_error(
+            Context { ctx, scope: None },
+            "callback registry is poisoned",
+        )
+    })?;
+    let Some(target) = magic_value
+        .checked_sub(1)
+        .and_then(|index| callbacks.get(index as usize))
+        .copied()
+    else {
+        return Err(Engine::operation_error(
+            Context { ctx, scope: None },
+            "callback is not registered",
+        ));
     };
-    (class, kind, (value & 0xfff) as usize)
+    if target.kind as c_int != expected as c_int {
+        return Err(Engine::operation_error(
+            Context { ctx, scope: None },
+            "callback kind mismatch",
+        ));
+    }
+    Ok(target)
 }
 
 unsafe extern "C" fn qjs_method(
@@ -527,97 +625,34 @@ unsafe extern "C" fn qjs_method(
     argv: *mut qjs::JSValue,
     magic_value: c_int,
 ) -> qjs::JSValue {
-    catch_callback(ctx, || {
-        let (class, _, index) = decode_magic(magic_value);
+    catch_callback(ctx, |cx| {
+        let target = callback_target(ctx, magic_value, CallbackKind::Method)?;
         let state = state_from_context(ctx);
-        let classes = state
-            .classes
-            .lock()
-            .map_err(|_| Engine::operation_error(Context { ctx }, "class registry is poisoned"))?;
-        let Some(method) = classes
-            .get(&class)
-            .and_then(|entry| entry.spec.methods.get(index))
-        else {
-            return Err(Engine::operation_error(
-                Context { ctx },
-                &format!("method is not registered: class={} index={index}", class.0),
-            ));
+        let method = {
+            let classes = state
+                .classes
+                .lock()
+                .map_err(|_| Engine::operation_error(cx, "class registry is poisoned"))?;
+            let Some(method) = classes
+                .get(&target.class)
+                .and_then(|entry| entry.spec.methods.get(target.index))
+            else {
+                return Err(Engine::operation_error(
+                    cx,
+                    &format!(
+                        "method is not registered: class={} index={}",
+                        target.class.0, target.index
+                    ),
+                ));
+            };
+            method.call
         };
         let args = if argc <= 0 || argv.is_null() {
             &[]
         } else {
             unsafe { std::slice::from_raw_parts(argv, argc as usize) }
         };
-        (method.call)(Context { ctx }, this_val, args)
-    })
-}
-
-unsafe extern "C" fn qjs_device_create_buffer(
-    ctx: *mut qjs::JSContext,
-    this_val: qjs::JSValue,
-    argc: c_int,
-    argv: *mut qjs::JSValue,
-) -> qjs::JSValue {
-    catch_callback(ctx, || {
-        let args = if argc <= 0 || argv.is_null() {
-            &[]
-        } else {
-            unsafe { std::slice::from_raw_parts(argv, argc as usize) }
-        };
-        core::device_create_buffer::<Engine>(Context { ctx }, this_val, args)
-    })
-}
-
-unsafe extern "C" fn qjs_buffer_destroy(
-    ctx: *mut qjs::JSContext,
-    this_val: qjs::JSValue,
-    _argc: c_int,
-    _argv: *mut qjs::JSValue,
-) -> qjs::JSValue {
-    catch_callback(ctx, || {
-        core::buffer_destroy::<Engine>(Context { ctx }, this_val, &[])
-    })
-}
-
-unsafe extern "C" fn qjs_buffer_label_get(
-    ctx: *mut qjs::JSContext,
-    this_val: qjs::JSValue,
-    _magic_value: c_int,
-) -> qjs::JSValue {
-    catch_callback(ctx, || {
-        core::buffer_label_get::<Engine>(Context { ctx }, this_val)
-    })
-}
-
-unsafe extern "C" fn qjs_buffer_size_get(
-    ctx: *mut qjs::JSContext,
-    this_val: qjs::JSValue,
-    _magic_value: c_int,
-) -> qjs::JSValue {
-    catch_callback(ctx, || {
-        core::buffer_size_get::<Engine>(Context { ctx }, this_val)
-    })
-}
-
-unsafe extern "C" fn qjs_buffer_usage_get(
-    ctx: *mut qjs::JSContext,
-    this_val: qjs::JSValue,
-    _magic_value: c_int,
-) -> qjs::JSValue {
-    catch_callback(ctx, || {
-        core::buffer_usage_get::<Engine>(Context { ctx }, this_val)
-    })
-}
-
-unsafe extern "C" fn qjs_buffer_label_set(
-    ctx: *mut qjs::JSContext,
-    this_val: qjs::JSValue,
-    value: qjs::JSValue,
-    _magic_value: c_int,
-) -> qjs::JSValue {
-    catch_callback(ctx, || {
-        core::buffer_label_set::<Engine>(Context { ctx }, this_val, value)?;
-        Ok(Engine::undefined(Context { ctx }))
+        method(cx, this_val, args)
     })
 }
 
@@ -626,24 +661,24 @@ unsafe extern "C" fn qjs_getter(
     this_val: qjs::JSValue,
     magic_value: c_int,
 ) -> qjs::JSValue {
-    catch_callback(ctx, || {
-        let (class, _, index) = decode_magic(magic_value);
+    catch_callback(ctx, |cx| {
+        let target = callback_target(ctx, magic_value, CallbackKind::Getter)?;
         let state = state_from_context(ctx);
-        let classes = state
-            .classes
-            .lock()
-            .map_err(|_| Engine::operation_error(Context { ctx }, "class registry is poisoned"))?;
-        let Some(getter) = classes
-            .get(&class)
-            .and_then(|entry| entry.spec.properties.get(index))
-            .and_then(|property| property.get)
-        else {
-            return Err(Engine::operation_error(
-                Context { ctx },
-                "getter is not registered",
-            ));
+        let getter = {
+            let classes = state
+                .classes
+                .lock()
+                .map_err(|_| Engine::operation_error(cx, "class registry is poisoned"))?;
+            let Some(getter) = classes
+                .get(&target.class)
+                .and_then(|entry| entry.spec.properties.get(target.index))
+                .and_then(|property| property.get)
+            else {
+                return Err(Engine::operation_error(cx, "getter is not registered"));
+            };
+            getter
         };
-        getter(Context { ctx }, this_val)
+        getter(cx, this_val)
     })
 }
 
@@ -653,34 +688,42 @@ unsafe extern "C" fn qjs_setter(
     value: qjs::JSValue,
     magic_value: c_int,
 ) -> qjs::JSValue {
-    catch_callback(ctx, || {
-        let (class, _, index) = decode_magic(magic_value);
+    catch_callback(ctx, |cx| {
+        let target = callback_target(ctx, magic_value, CallbackKind::Setter)?;
         let state = state_from_context(ctx);
-        let classes = state
-            .classes
-            .lock()
-            .map_err(|_| Engine::operation_error(Context { ctx }, "class registry is poisoned"))?;
-        let Some(setter) = classes
-            .get(&class)
-            .and_then(|entry| entry.spec.properties.get(index))
-            .and_then(|property| property.set)
-        else {
-            return Err(Engine::operation_error(
-                Context { ctx },
-                "setter is not registered",
-            ));
+        let setter = {
+            let classes = state
+                .classes
+                .lock()
+                .map_err(|_| Engine::operation_error(cx, "class registry is poisoned"))?;
+            let Some(setter) = classes
+                .get(&target.class)
+                .and_then(|entry| entry.spec.properties.get(target.index))
+                .and_then(|property| property.set)
+            else {
+                return Err(Engine::operation_error(cx, "setter is not registered"));
+            };
+            setter
         };
-        setter(Context { ctx }, this_val, value)?;
-        Ok(Engine::undefined(Context { ctx }))
+        setter(cx, this_val, value)?;
+        Ok(Engine::undefined(cx))
     })
 }
 
 fn catch_callback<F>(ctx: *mut qjs::JSContext, f: F) -> qjs::JSValue
 where
-    F: FnOnce() -> core::Result<qjs::JSValue, qjs::JSValue>,
+    F: FnOnce(Context<'_>) -> core::Result<qjs::JSValue, qjs::JSValue>,
 {
-    match catch_unwind(AssertUnwindSafe(f)) {
-        Ok(Ok(value)) => value,
+    let scope = Scope::new(ctx);
+    let cx = Context {
+        ctx,
+        scope: Some(&scope),
+    };
+    match catch_unwind(AssertUnwindSafe(|| f(cx))) {
+        Ok(Ok(value)) => {
+            scope.escape(value);
+            value
+        }
         Ok(Err(error)) => error,
         Err(_) => throw_message(ctx, "Rust callback panicked", false),
     }
@@ -732,6 +775,10 @@ fn qjs_value_with_tag(tag: i64) -> qjs::JSValue {
         u: qjs::JSValueUnion { int32: 0 },
         tag,
     }
+}
+
+fn same_js_value(left: qjs::JSValue, right: qjs::JSValue) -> bool {
+    left.tag == right.tag && unsafe { left.u.ptr == right.u.ptr }
 }
 
 fn throw_message(ctx: *mut qjs::JSContext, message: &str, type_error: bool) -> qjs::JSValue {
@@ -817,7 +864,8 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
-    use super::{ffi_wgpu as wgpu, Runtime};
+    use super::{c_int, core, ffi_wgpu as wgpu, qjs, CallbackKind, Context, Engine, Runtime};
+    use webgpu_native_js_core::JsEngine;
 
     struct RequestState {
         status: AtomicUsize,
@@ -865,6 +913,133 @@ mod tests {
             state.status.store(status as usize, Ordering::SeqCst);
             state.handle.store(device as usize, Ordering::SeqCst);
         }));
+    }
+
+    const PANIC_CLASS: core::ClassId = core::ClassId(10_000);
+
+    fn panicking_method(
+        _cx: Context<'_>,
+        _this: qjs::JSValue,
+        _args: &[qjs::JSValue],
+    ) -> core::Result<qjs::JSValue, qjs::JSValue> {
+        panic!("method panic");
+    }
+
+    fn panicking_getter(
+        _cx: Context<'_>,
+        _this: qjs::JSValue,
+    ) -> core::Result<qjs::JSValue, qjs::JSValue> {
+        panic!("getter panic");
+    }
+
+    fn panicking_setter(
+        _cx: Context<'_>,
+        _this: qjs::JSValue,
+        _value: qjs::JSValue,
+    ) -> core::Result<(), qjs::JSValue> {
+        panic!("setter panic");
+    }
+
+    fn panicking_finalizer(_payload: Box<dyn std::any::Any + Send>, _env: &core::Environment) {
+        panic!("finalizer panic");
+    }
+
+    fn panicking_spec() -> &'static core::ClassSpec<Engine> {
+        Box::leak(Box::new(core::ClassSpec::<Engine> {
+            name: "PanicClass",
+            id: PANIC_CLASS,
+            properties: Box::leak(Box::new([core::PropertySpec::<Engine> {
+                name: "panicProp",
+                get: Some(panicking_getter),
+                set: Some(panicking_setter),
+            }])),
+            methods: Box::leak(Box::new([core::MethodSpec::<Engine> {
+                name: "panicMethod",
+                length: 0,
+                call: panicking_method,
+            }])),
+            finalizer: panicking_finalizer,
+        }))
+    }
+
+    fn callback_magic(runtime: &Runtime, kind: CallbackKind, index: usize) -> c_int {
+        let state = super::state_from_context(runtime.raw_context());
+        let callbacks = state.callbacks.lock().expect("callbacks");
+        callbacks
+            .iter()
+            .position(|target| {
+                target.class == PANIC_CLASS && target.kind == kind && target.index == index
+            })
+            .map(|index| (index + 1) as c_int)
+            .expect("callback magic")
+    }
+
+    fn panic_test_instance(runtime: &Runtime) -> qjs::JSValue {
+        let cx = Context {
+            ctx: runtime.raw_context(),
+            scope: None,
+        };
+        assert!(Engine::register_class(cx, panicking_spec()).is_ok());
+        Engine::new_instance(cx, PANIC_CLASS, Box::new(())).unwrap_or_else(|_| {
+            panic!("instance");
+        })
+    }
+
+    fn assert_exception(runtime: &Runtime, value: qjs::JSValue) {
+        assert!(unsafe { qjs::JS_IsException(value) });
+        let message = super::take_exception(runtime.raw_context(), "exception");
+        assert!(message.contains("Rust callback panicked"));
+    }
+
+    #[test]
+    fn extern_callbacks_contain_panicking_method_getter_and_setter() {
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let instance = panic_test_instance(&runtime);
+        let method_magic = callback_magic(&runtime, CallbackKind::Method, 0);
+        let getter_magic = callback_magic(&runtime, CallbackKind::Getter, 0);
+        let setter_magic = callback_magic(&runtime, CallbackKind::Setter, 0);
+
+        let method = unsafe {
+            super::qjs_method(
+                runtime.raw_context(),
+                instance,
+                0,
+                ptr::null_mut(),
+                method_magic,
+            )
+        };
+        assert_exception(&runtime, method);
+
+        let getter = unsafe { super::qjs_getter(runtime.raw_context(), instance, getter_magic) };
+        assert_exception(&runtime, getter);
+
+        let setter = unsafe {
+            super::qjs_setter(
+                runtime.raw_context(),
+                instance,
+                Engine::undefined(Context {
+                    ctx: runtime.raw_context(),
+                    scope: None,
+                }),
+                setter_magic,
+            )
+        };
+        assert_exception(&runtime, setter);
+
+        unsafe { qjs::JS_SetOpaque(instance, ptr::null_mut()) };
+        unsafe { qjs::JS_FreeValue(runtime.raw_context(), instance) };
+    }
+
+    #[test]
+    fn extern_finalizer_contains_panic() {
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let instance = panic_test_instance(&runtime);
+        let result = catch_unwind(AssertUnwindSafe(|| unsafe {
+            super::qjs_finalizer(qjs::JS_GetRuntime(runtime.raw_context()), instance);
+        }));
+        assert!(result.is_ok());
+        unsafe { qjs::JS_SetOpaque(instance, ptr::null_mut()) };
+        unsafe { qjs::JS_FreeValue(runtime.raw_context(), instance) };
     }
 
     #[test]

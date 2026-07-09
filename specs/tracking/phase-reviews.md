@@ -93,11 +93,57 @@ at all had the lens been "check the rules" rather than "is the mock a mirror."
 **R23 is the durable lesson: a mock more forgiving than production is not a test.
 When engines disagree about an obligation, the mock takes the union.**
 
-### Gate
+### Gate — PASSED. Phase 1 is COMPLETE.
 
-Phase 1 cannot be COMPLETE while P1-C1 and P1-M1 through P1-M5 are open. All are
-handed to the coding agent. P1-m4 and the Q4 overclaim are fixed by Claude in the
-same commit as this entry.
+Gates re-run directly by Claude, not taken on the agent's word:
+
+```
+core, backend env var UNSET, no backend feature   EXIT=0   19 tests
+cargo test  --workspace                            EXIT=0   10 suites
+cargo clippy --workspace --all-targets -D warnings EXIT=0
+spikes/jsc-detach, spikes/quickjs-detach           EXIT=0
+R5 ASan guard                                      EXIT=0
+```
+
+**P1-C1 is fixed the way the boundary demanded.** QuickJS's `Context<'a>` now
+carries a per-call `Scope`; `get_property`, `new_instance`, `number` and `string`
+register their owned values there, the callback's return value is `escape`d, and
+`Drop` frees the rest. **`core/`'s signatures and logic did not change.**
+`type Value: Copy` and `type Context<'a>: Copy` are intact and the trait has no
+`free_value` — verified. The GAT earned its keep.
+
+**P1-M1's root cause was found by opening the file.** QuickJS stores a C
+function's magic as an **`int16_t`** (`quickjs.c:1101`). Phase 1's encoding packed
+a class id into the high bits, which a 16-bit field silently truncates. `magic`
+was never broken; the encoding did not fit. Refusing to record "QuickJS delivers
+`magic == 0`" as fact was right — it was false. **Failing to demand the
+root-cause was the actual mistake**, and it cost a hardcoded dispatch table that
+would have metastasised across forty interfaces in Phase 4.
+
+**A deadlock surfaced the moment the generic path went live**, and it is a
+property of the boundary rather than of QuickJS: the method callback held the
+class-registry mutex while `core/` re-entered the adapter through `payload`. The
+call graph is re-entrant *through* the boundary. Now block 01 → **R25**. It will
+bite JavaScriptCore identically.
+
+**The negative demonstrations were run, and reported.** Reversing the R5 release
+order fails on the plain `cargo test` gate now (`marker` reads the `0xdead_beef`
+poison written before the free — assertion, not sanitizer). Making the mock's
+scope leaky fails `r23_heap_property_values_are_reclaimed_by_scope` with
+`left: 0, right: 4` — the four descriptor properties. Both guards have been seen
+red.
+
+Verified fixed: P1-C1, P1-M1 through P1-M5, P1-m1 through P1-m4.
+
+### One accepted deviation, recorded
+
+`mappedAtCreation: "false"` — the case that proves `ToBoolean` — is exercised in
+`core/` against the mock, but **not** in the real-engine script. `ToBoolean("false")`
+is `true`, which creates a mapped buffer, and this slice has no `unmap()` to
+release it. `buffer_slice.js` uses `mappedAtCreation: ""` instead, which still
+drives QuickJS's real property read and `ToBoolean` while producing an unmapped
+buffer. Consequence: **no real-engine test creates a mapped buffer.** That gap
+closes when `mapAsync`/`unmap` land in Phase 2.
 
 ---
 
