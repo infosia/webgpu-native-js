@@ -264,6 +264,12 @@ script executed under **both** engines with identical expected output.
   `E`.
 - bindgen output is `include!`d into a `pub mod native { ... }`; never edit
   generated code.
+- **`#[allow]` on a correctness or soundness lint is a silenced review.** It
+  needs a `// SAFETY`-style comment saying why the lint is wrong *here*, and it
+  is a Phase Review finding without one. Phase 1 shipped
+  `#[allow(clippy::not_unsafe_ptr_arg_deref)]` on a `pub fn` taking a raw
+  pointer; the gate was green, and three independent reviewers walked past it.
+  Blanket `#[allow]` on a generated-bindings module is the one exemption.
 - Colocate each object's binding with its own module, not one giant `spec.rs`
   (mgpu/yawgpu convention).
 

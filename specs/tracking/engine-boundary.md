@@ -602,6 +602,68 @@ attach.
 
 ---
 
+## Q5 — Did the boundary survive Phase 2?
+
+**Status: YES, and this is the first result worth much.** Phase 1 only needed
+property reads and object creation, where the two engines agree. Phase 2 added
+Promises, the microtask pump, external `ArrayBuffer`s, and detach — where they do
+not.
+
+**Every capability was an *addition* to `JsEngine`**: `type Deferred`,
+`type AsyncContext`, `const MAPPED_RANGE_STRATEGY`, `with_async_scope`,
+`new_promise`/`settle`, `drain_microtasks`, `new_external_arraybuffer`,
+`detach_arraybuffer`, `arraybuffer_len`. `core/`'s conversion and object-model
+logic changed only to *grow features* (`mapAsync`, range tracking), never to
+accommodate an engine.
+
+Asked precisely — *is there any line in `core/` that exists because QuickJS is
+refcounted, or that would differ if JSC were the only engine?* — the answer is
+**no**. Refcounting is contained in the adapter's trait impl.
+
+`core/` now implements **both** `MappedRangeStrategy` arms and unit-tests both
+against a const-generic mock, so the JSC arm is exercised before JSC exists. That
+is R23 doing its job.
+
+### The hole that opened, and why it matters more than the result
+
+The first Phase 2 attempt gave the trait
+`fn context_from_async(cx) -> Context<'static>`, and QuickJS implemented it as
+`Context { ctx, scope: None }`. The WebGPU callback fires outside any JS call, so
+it has no per-call scope to inherit — and the design handed it a context with
+**no owner for the values it created**. That is P1-C1 verbatim, one layer down,
+and it is why the real-engine `mapAsync` test leaked a promise graph at runtime
+teardown (`JS_FreeRuntime`'s leak report was the diagnostic).
+
+Two rules came out of it (block 02 → A23): `Context`'s scope is **not** an
+`Option` — an engine that can silently decline the obligation will — and the
+callback opens its own scope via `with_async_scope`, which drops on the way out.
+`Context<'static>` must not exist.
+
+**Value ownership has now been the boundary's hardest edge twice.** It is the one
+place where QuickJS's model and JSC's genuinely differ, and both times the escape
+was a type that made the obligation optional.
+
+`AsyncContext` survives, and legitimately: a WebGPU callback outlives the JS call
+that started it, so it cannot hold a `Context<'_>`. It is a raw engine token, and
+reviving it is `unsafe` — which the type now says.
+
+### `#[allow]` on a soundness lint hid a real defect for a whole phase
+
+`cargo clippy -D warnings` was green through Phase 1 because `pub fn wrap_device`
+carried `#[allow(clippy::not_unsafe_ptr_arg_deref)]`: a **safe** public function
+taking a raw pointer and dereferencing it. Three independent reviewers and every
+gate walked past it. Phase 2's clippy run — with the allow removed — also found
+`arc_with_non_send_sync`, an `Arc` whose payload is `!Send + !Sync`.
+
+That `Arc` is **my error**, from a Phase 0 handoff: *"an `Arc` of a non-`Send`
+type is fine as long as it never crosses a thread."* Clippy is right. The type
+lied about what it permitted; `Rc` is both sound here — `AllowProcessEvents`
+guarantees the callback fires on the pumping thread (`event-loop.md` → E3) — and
+honest. `CLAUDE.md` now treats an unjustified `#[allow]` on a correctness lint as
+a review finding.
+
+---
+
 ## Q2 — Which QuickJS fork, and `rquickjs` vs raw `bindgen`?
 
 **Status: DECIDED (2026-07-09).**

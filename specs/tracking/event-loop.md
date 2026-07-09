@@ -144,6 +144,44 @@ machine-verified.
 
 ---
 
+## E8 — a throwing `.then()` does **not** surface via `JS_ExecutePendingJob`
+
+**Found in Phase 2, by the implementing agent, and verified at source.** It
+corrects the reasoning behind block 02's original A2.
+
+`quickjs.c`'s `promise_reaction_job`:
+
+```c
+res = JS_Call(ctx, handler, JS_UNDEFINED, 1, &arg);
+is_reject = JS_IsException(res);
+if (is_reject) {
+    if (unlikely(JS_IsUncatchableError(ctx->rt->current_exception)))
+        return JS_EXCEPTION;          /* interrupts, stack overflow */
+    res = JS_GetException(ctx);
+}
+func = argv[is_reject];               /* reject the derived promise */
+```
+
+A throw inside `.then()` is **captured and converted into a rejection of the
+derived promise**. `JS_ExecutePendingJob` returns `<0` only for an **uncatchable**
+error. So the `<0` case must still be surfaced — the runtime is unwinding — but
+it is not what catches a throwing continuation.
+
+**The real vanishing hazard is an unhandled rejection**, and the only way to see
+it is `JS_SetHostPromiseRejectionTracker` (block 02 → A22). Its `is_handled`
+argument fires again when a `.catch()` attaches late, so report only what remains
+unhandled once the microtask queue has drained.
+
+E1–E4 are unaffected: they concern *whether the continuation runs at all*, which
+the two-queue pump still governs. E8 concerns what happens when it runs and
+throws.
+
+That is the second time a claim about `webgpu.h` or `quickjs.h` written from
+reasoning rather than from the file turned out to be wrong. The agent was invited
+to say when the spec is mistaken, and did.
+
+---
+
 ## Original review of the spike — VERDICT: result accepted, revision required
 
 Gates re-run directly: `cargo test --offline -p event-loop-pump --features

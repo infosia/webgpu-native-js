@@ -21,7 +21,7 @@ pub struct Value(usize);
 #[derive(Clone, Copy)]
 pub struct Context<'a> {
     runtime: &'a Runtime,
-    scope: Option<&'a Scope<'a>>,
+    scope: &'a Scope<'a>,
 }
 
 /// Mock per-call value ownership scope.
@@ -50,12 +50,16 @@ impl Runtime {
         }
     }
 
-    /// Returns a context handle.
+    /// Returns a context handle with a long-lived ownership scope.
     #[must_use]
     pub fn context(&self) -> Context<'_> {
+        let scope = Box::leak(Box::new(Scope {
+            runtime: self,
+            owned: RefCell::new(Vec::new()),
+        }));
         Context {
             runtime: self,
-            scope: None,
+            scope,
         }
     }
 
@@ -67,7 +71,7 @@ impl Runtime {
         };
         let result = f(Context {
             runtime: self,
-            scope: Some(&scope),
+            scope: &scope,
         });
         drop(scope);
         result
@@ -119,6 +123,26 @@ impl Runtime {
         Value(0)
     }
 
+    /// Replaces an ArrayBuffer's bytes for tests.
+    pub fn write_arraybuffer(&self, value: Value, bytes: &[u8]) -> bool {
+        self.with_value(value, |stored| {
+            let MockValue::ArrayBuffer {
+                bytes: stored,
+                detached: false,
+                ..
+            } = stored
+            else {
+                return false;
+            };
+            if stored.len() != bytes.len() {
+                return false;
+            }
+            stored.copy_from_slice(bytes);
+            true
+        })
+        .unwrap_or(false)
+    }
+
     fn insert(&self, value: MockValue) -> Value {
         let mut values = self.values.borrow_mut();
         values.push(value);
@@ -166,6 +190,7 @@ enum MockValue {
     ArrayBuffer {
         bytes: Vec<u8>,
         detached: bool,
+        copy_out: bool,
     },
     Instance {
         class: ClassId,
@@ -173,16 +198,23 @@ enum MockValue {
     },
 }
 
-/// Mock engine marker type.
-pub struct Engine;
+/// Mock engine marker type parameterized by mapped-range behavior.
+pub struct MockEngine<const COPY_IN_COPY_OUT: bool>;
 
-impl JsEngine for Engine {
+/// Default mock engine using zero-copy mapped ranges.
+pub type Engine = MockEngine<false>;
+
+impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
     type Value = Value;
     type Context<'a> = Context<'a>;
     type Error = String;
     type AsyncContext = *const Runtime;
 
-    const MAPPED_RANGE_STRATEGY: MappedRangeStrategy = MappedRangeStrategy::ZeroCopyDetach;
+    const MAPPED_RANGE_STRATEGY: MappedRangeStrategy = if COPY_IN_COPY_OUT {
+        MappedRangeStrategy::CopyInCopyOut
+    } else {
+        MappedRangeStrategy::ZeroCopyDetach
+    };
 
     fn environment<'a>(cx: Self::Context<'a>) -> &'a Environment {
         &cx.runtime.env
@@ -199,9 +231,7 @@ impl JsEngine for Engine {
                     .get(key)
                     .copied()
                     .unwrap_or_else(|| cx.runtime.undefined());
-                if let Some(scope) = cx.scope {
-                    scope.owned.borrow_mut().push(value);
-                }
+                cx.scope.owned.borrow_mut().push(value);
                 Ok(value)
             }
             _ => Ok(cx.runtime.undefined()),
@@ -313,23 +343,19 @@ impl JsEngine for Engine {
         cx.runtime
     }
 
-    fn context_from_async(cx: Self::AsyncContext) -> Self::Context<'static> {
-        Context {
-            runtime: unsafe { &*cx },
-            scope: None,
-        }
+    unsafe fn with_async_scope<R>(
+        cx: Self::AsyncContext,
+        f: impl FnOnce(Self::Context<'_>) -> R,
+    ) -> R {
+        unsafe { &*cx }.with_scope(f)
     }
 
-    fn async_undefined(cx: Self::AsyncContext) -> Self::Value {
-        unsafe { &*cx }.undefined()
+    fn async_error_value(cx: Self::Context<'_>, message: &str) -> Self::Value {
+        cx.runtime.string(message)
     }
 
-    fn async_error_value(cx: Self::AsyncContext, message: &str) -> Self::Value {
-        unsafe { &*cx }.string(message)
-    }
-
-    fn error_value_from_error(cx: Self::AsyncContext, error: Self::Error) -> Self::Value {
-        unsafe { &*cx }.string(&error)
+    fn error_value_from_error(cx: Self::Context<'_>, error: Self::Error) -> Self::Value {
+        cx.runtime.string(&error)
     }
 
     fn new_promise(cx: Self::Context<'_>) -> Result<(Self::Value, Deferred<Self>), Self::Error> {
@@ -349,11 +375,11 @@ impl JsEngine for Engine {
     }
 
     fn settle_deferred(
-        cx: Self::AsyncContext,
+        cx: Self::Context<'_>,
         deferred: Deferred<Self>,
         result: std::result::Result<Self::Value, Self::Value>,
     ) {
-        let runtime = unsafe { &*cx };
+        let runtime = cx.runtime;
         let resolver = match result {
             Ok(_) => deferred.resolve(),
             Err(_) => deferred.reject(),
@@ -379,7 +405,7 @@ impl JsEngine for Engine {
         });
     }
 
-    fn new_external_arraybuffer(
+    unsafe fn new_external_arraybuffer(
         cx: Self::Context<'_>,
         ptr: *mut u8,
         len: usize,
@@ -392,6 +418,7 @@ impl JsEngine for Engine {
         Ok(cx.runtime.insert(MockValue::ArrayBuffer {
             bytes,
             detached: false,
+            copy_out: false,
         }))
     }
 
@@ -402,13 +429,21 @@ impl JsEngine for Engine {
         Ok(cx.runtime.insert(MockValue::ArrayBuffer {
             bytes: bytes.to_vec(),
             detached: false,
+            copy_out: true,
         }))
     }
 
     fn detach_arraybuffer(cx: Self::Context<'_>, value: Self::Value) {
         let _ = cx.runtime.with_value(value, |stored| {
-            if let MockValue::ArrayBuffer { bytes, detached } = stored {
-                bytes.clear();
+            if let MockValue::ArrayBuffer {
+                bytes,
+                detached,
+                copy_out,
+            } = stored
+            {
+                if !*copy_out {
+                    bytes.clear();
+                }
                 *detached = true;
             }
         });
@@ -416,16 +451,20 @@ impl JsEngine for Engine {
 
     fn arraybuffer_len(cx: Self::Context<'_>, value: Self::Value) -> Option<usize> {
         match cx.runtime.get(value) {
-            MockValue::ArrayBuffer { bytes, detached } => {
-                Some(if detached { 0 } else { bytes.len() })
-            }
+            MockValue::ArrayBuffer {
+                bytes, detached, ..
+            } => Some(if detached { 0 } else { bytes.len() }),
             _ => None,
         }
     }
 
     fn arraybuffer_copy_to(cx: Self::Context<'_>, value: Self::Value, dst: &mut [u8]) -> bool {
         match cx.runtime.get(value) {
-            MockValue::ArrayBuffer { bytes, detached } if !detached && bytes.len() == dst.len() => {
+            MockValue::ArrayBuffer {
+                bytes,
+                detached,
+                copy_out,
+            } if (!detached || copy_out) && bytes.len() == dst.len() => {
                 dst.copy_from_slice(&bytes);
                 true
             }
@@ -455,6 +494,7 @@ struct MockGpuState {
     descriptors: Vec<RecordedDescriptor>,
     null_create_buffer: bool,
     native_order: Vec<&'static str>,
+    buffers: BTreeMap<usize, Vec<u8>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -506,6 +546,12 @@ pub fn dispatch() -> GpuDispatch {
 #[must_use]
 pub fn fake_device() -> WGPUDevice {
     ptr::NonNull::<u8>::dangling().as_ptr().cast()
+}
+
+/// Returns a copy of mock native buffer bytes.
+#[must_use]
+pub fn buffer_bytes(buffer: WGPUBuffer) -> Option<Vec<u8>> {
+    GPU_STATE.with(|state| state.borrow().buffers.get(&(buffer as usize)).cloned())
 }
 
 fn fake_buffer(id: usize) -> WGPUBuffer {
@@ -585,7 +631,9 @@ unsafe fn device_create_buffer(
             label: read_view(descriptor.label),
         });
         state.next += 1;
-        fake_buffer(state.next)
+        let id = state.next;
+        state.buffers.insert(id, vec![0; descriptor.size as usize]);
+        fake_buffer(id)
     })
 }
 
@@ -606,19 +654,28 @@ unsafe fn buffer_destroy(_buffer: WGPUBuffer) {
 }
 
 unsafe fn buffer_get_mapped_range(
-    _buffer: WGPUBuffer,
+    buffer: WGPUBuffer,
     offset: usize,
     size: usize,
 ) -> *mut std::ffi::c_void {
-    let len = if size == crate::WGPU_WHOLE_MAP_SIZE as usize {
-        64
-    } else {
-        size
-    };
-    let mut bytes = vec![0u8; offset.saturating_add(len)];
-    let ptr = bytes.as_mut_ptr();
-    std::mem::forget(bytes);
-    unsafe { ptr.add(offset).cast() }
+    GPU_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let Some(bytes) = state.buffers.get_mut(&(buffer as usize)) else {
+            return ptr::null_mut();
+        };
+        let len = if size == crate::WGPU_WHOLE_MAP_SIZE as usize {
+            bytes.len().saturating_sub(offset)
+        } else {
+            size
+        };
+        let Some(end) = offset.checked_add(len) else {
+            return ptr::null_mut();
+        };
+        if end > bytes.len() {
+            return ptr::null_mut();
+        }
+        unsafe { bytes.as_mut_ptr().add(offset).cast() }
+    })
 }
 
 unsafe fn buffer_map_async(
@@ -814,7 +871,7 @@ mod tests {
         reset_gpu();
         let rt = runtime();
         let cx = rt.context();
-        let device = wrap_device::<Engine>(cx, fake_device()).expect("device");
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
         let desc = descriptor(
             &rt,
             &[
@@ -871,7 +928,7 @@ mod tests {
         reset_gpu();
         let rt = runtime();
         let cx = rt.context();
-        let device = wrap_device::<Engine>(cx, fake_device()).expect("device");
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
         let desc = descriptor(&rt, &[("size", rt.number(16.0)), ("usage", rt.number(8.0))]);
         let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("buffer");
         buffer_label_set::<Engine>(cx, buffer, rt.string("new")).expect("set label");
@@ -891,7 +948,7 @@ mod tests {
         set_null_create_buffer(true);
         let rt = runtime();
         let cx = rt.context();
-        let device = wrap_device::<Engine>(cx, fake_device()).expect("device");
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
         let desc = descriptor(&rt, &[("size", rt.number(16.0)), ("usage", rt.number(8.0))]);
         assert!(device_create_buffer::<Engine>(cx, device, &[desc]).is_err());
     }
@@ -901,7 +958,7 @@ mod tests {
         reset_gpu();
         let rt = runtime();
         let cx = rt.context();
-        let device = wrap_device::<Engine>(cx, fake_device()).expect("device");
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
         let desc = descriptor(&rt, &[("size", rt.number(16.0)), ("usage", rt.number(8.0))]);
         let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("buffer");
         let _ = buffer_destroy::<Engine>(cx, buffer, &[]).expect("destroy");
@@ -918,7 +975,7 @@ mod tests {
         reset_gpu();
         let rt = runtime();
         let cx = rt.context();
-        let device = wrap_device::<Engine>(cx, fake_device()).expect("device");
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
         let desc = descriptor(&rt, &[("size", rt.number(16.0)), ("usage", rt.number(8.0))]);
         let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("buffer");
         assert_eq!(
@@ -932,12 +989,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a15_unmap_detaches_all_mapped_ranges() {
+    fn assert_unmap_detaches_all_mapped_ranges<const COPY: bool>() {
         reset_gpu();
         let rt = runtime();
         let cx = rt.context();
-        let device = wrap_device::<Engine>(cx, fake_device()).expect("device");
+        let device = unsafe { wrap_device::<MockEngine<COPY>>(cx, fake_device()) }.expect("device");
         let desc = descriptor(
             &rt,
             &[
@@ -946,20 +1002,48 @@ mod tests {
                 ("mappedAtCreation", rt.bool(true)),
             ],
         );
-        let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("buffer");
-        let first =
-            buffer_get_mapped_range::<Engine>(cx, buffer, &[rt.number(0.0), rt.number(4.0)])
-                .expect("range");
-        let second =
-            buffer_get_mapped_range::<Engine>(cx, buffer, &[rt.number(4.0), rt.number(4.0)])
-                .expect("range");
-        assert_eq!(Engine::arraybuffer_len(cx, first), Some(4));
-        assert_eq!(Engine::arraybuffer_len(cx, second), Some(4));
+        let buffer = device_create_buffer::<MockEngine<COPY>>(cx, device, &[desc]).expect("buffer");
+        let native = MockEngine::<COPY>::payload(cx, buffer, crate::GPU_BUFFER_CLASS)
+            .and_then(|payload| payload.downcast_ref::<BufferPayload<MockEngine<COPY>>>())
+            .and_then(|payload| payload.state().lock().ok().map(|state| state.buffer))
+            .expect("native buffer");
+        let first = buffer_get_mapped_range::<MockEngine<COPY>>(
+            cx,
+            buffer,
+            &[rt.number(0.0), rt.number(4.0)],
+        )
+        .expect("range");
+        let second = buffer_get_mapped_range::<MockEngine<COPY>>(
+            cx,
+            buffer,
+            &[rt.number(4.0), rt.number(4.0)],
+        )
+        .expect("range");
+        assert_eq!(MockEngine::<COPY>::arraybuffer_len(cx, first), Some(4));
+        assert_eq!(MockEngine::<COPY>::arraybuffer_len(cx, second), Some(4));
+        assert!(rt.write_arraybuffer(first, &[1, 2, 3, 4]));
+        assert!(rt.write_arraybuffer(second, &[5, 6, 7, 8]));
 
-        let _ = buffer_unmap::<Engine>(cx, buffer, &[]).expect("unmap");
+        let _ = buffer_unmap::<MockEngine<COPY>>(cx, buffer, &[]).expect("unmap");
 
-        assert_eq!(Engine::arraybuffer_len(cx, first), Some(0));
-        assert_eq!(Engine::arraybuffer_len(cx, second), Some(0));
+        assert_eq!(MockEngine::<COPY>::arraybuffer_len(cx, first), Some(0));
+        assert_eq!(MockEngine::<COPY>::arraybuffer_len(cx, second), Some(0));
+        if MockEngine::<COPY>::MAPPED_RANGE_STRATEGY == MappedRangeStrategy::CopyInCopyOut {
+            assert_eq!(
+                buffer_bytes(native).expect("bytes")[..8],
+                [1, 2, 3, 4, 5, 6, 7, 8]
+            );
+        }
+    }
+
+    #[test]
+    fn a15_unmap_detaches_all_mapped_ranges_zero_copy() {
+        assert_unmap_detaches_all_mapped_ranges::<false>();
+    }
+
+    #[test]
+    fn a10_a20_copy_in_copy_out_detaches_and_copies_back() {
+        assert_unmap_detaches_all_mapped_ranges::<true>();
     }
 
     #[test]
@@ -967,7 +1051,7 @@ mod tests {
         reset_gpu();
         let rt = runtime();
         let cx = rt.context();
-        let device = wrap_device::<Engine>(cx, fake_device()).expect("device");
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
         let desc = descriptor(&rt, &[("size", rt.number(16.0)), ("usage", rt.number(2.0))]);
         let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("buffer");
         let too_large = rt.number(4_294_967_296.0);
@@ -983,7 +1067,7 @@ mod tests {
         reset_gpu();
         let rt = runtime();
         let cx = rt.context();
-        let device = wrap_device::<Engine>(cx, fake_device()).expect("device");
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
         let desc = descriptor(&rt, &[("size", rt.number(16.0)), ("usage", rt.number(8.0))]);
         let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("buffer");
 

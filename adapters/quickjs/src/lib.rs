@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr::{self, NonNull};
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use webgpu_native_js_core as core;
@@ -49,7 +50,7 @@ impl From<std::ffi::NulError> for Error {
 pub struct Runtime {
     rt: NonNull<qjs::JSRuntime>,
     ctx: NonNull<qjs::JSContext>,
-    state: Arc<State>,
+    state: Rc<State>,
 }
 
 impl Runtime {
@@ -59,12 +60,15 @@ impl Runtime {
         let rt = NonNull::new(rt).ok_or(Error::Null("JS_NewRuntime"))?;
         let ctx = unsafe { qjs::JS_NewContext(rt.as_ptr()) };
         let ctx = NonNull::new(ctx).ok_or(Error::Null("JS_NewContext"))?;
-        let state = Arc::new(State::new());
-        let raw_state = Arc::into_raw(Arc::clone(&state))
-            .cast::<c_void>()
-            .cast_mut();
+        let state = Rc::new(State::new());
+        let raw_state = Rc::into_raw(Rc::clone(&state)).cast::<c_void>().cast_mut();
         unsafe {
             qjs::JS_SetRuntimeOpaque(rt.as_ptr(), raw_state);
+            qjs::JS_SetHostPromiseRejectionTracker(
+                rt.as_ptr(),
+                Some(promise_rejection_tracker),
+                raw_state,
+            );
         }
         Ok(Self { rt, ctx, state })
     }
@@ -76,15 +80,21 @@ impl Runtime {
     }
 
     /// Wraps an adopted WebGPU device.
-    pub fn wrap_device(&self, device: ffi_wgpu::WGPUDevice) -> Result<qjs::JSValue> {
+    ///
+    /// # Safety
+    ///
+    /// `device` must be a valid live `WGPUDevice` handle for this backend.
+    pub unsafe fn wrap_device(&self, device: ffi_wgpu::WGPUDevice) -> Result<qjs::JSValue> {
         let scope = Scope::new(self.raw_context());
-        let value = core::wrap_device::<Engine>(
-            Context {
-                ctx: self.raw_context(),
-                scope: Some(&scope),
-            },
-            device,
-        )
+        let value = unsafe {
+            core::wrap_device::<Engine>(
+                Context {
+                    ctx: self.raw_context(),
+                    scope: &scope,
+                },
+                device,
+            )
+        }
         .map_err(|value| Error::Exception(exception_or_value(self.raw_context(), value)))?;
         scope.escape(value);
         Ok(value)
@@ -96,7 +106,7 @@ impl Runtime {
         let value = core::wrap_gpu::<Engine>(
             Context {
                 ctx: self.raw_context(),
-                scope: Some(&scope),
+                scope: &scope,
             },
             instance,
         )
@@ -124,13 +134,9 @@ impl Runtime {
 
     /// Clears a global property by assigning `undefined`.
     pub fn clear_global(&self, name: &str) -> Result<()> {
-        self.set_global_value(
-            name,
-            Engine::undefined(Context {
-                ctx: self.raw_context(),
-                scope: None,
-            }),
-        )
+        with_scope(self.raw_context(), |cx| {
+            self.set_global_value(name, Engine::undefined(cx))
+        })
     }
 
     /// Evaluates a script and returns its completion value.
@@ -162,7 +168,11 @@ impl Runtime {
     }
 
     /// Pumps WebGPU callbacks, QuickJS microtasks, then queued releases.
-    pub fn tick(&self, instance: ffi_wgpu::WGPUInstance) -> Result<()> {
+    ///
+    /// # Safety
+    ///
+    /// `instance` must be a valid live `WGPUInstance` handle for this backend.
+    pub unsafe fn tick(&self, instance: ffi_wgpu::WGPUInstance) -> Result<()> {
         unsafe { ffi_wgpu::wgpuInstanceProcessEvents(instance) };
         loop {
             let mut job_ctx = ptr::null_mut();
@@ -183,13 +193,20 @@ impl Runtime {
                 "JS_ExecutePendingJob",
             )));
         }
+        if let Some(message) = self.state.take_unhandled_rejection(self.raw_context()) {
+            return Err(Error::Exception(message));
+        }
         self.drain_releases()
             .map_err(|_| Error::Exception("release queue is poisoned".to_owned()))?;
         Ok(())
     }
 
     /// Pumps only WebGPU callbacks, for event-loop regression tests.
-    pub fn process_events_only(&self, instance: ffi_wgpu::WGPUInstance) {
+    ///
+    /// # Safety
+    ///
+    /// `instance` must be a valid live `WGPUInstance` handle for this backend.
+    pub unsafe fn process_events_only(&self, instance: ffi_wgpu::WGPUInstance) {
         unsafe { ffi_wgpu::wgpuInstanceProcessEvents(instance) };
     }
 
@@ -202,11 +219,13 @@ impl Runtime {
 impl Drop for Runtime {
     fn drop(&mut self) {
         unsafe {
+            qjs::JS_SetHostPromiseRejectionTracker(self.rt.as_ptr(), None, ptr::null_mut());
+            let raw = qjs::JS_GetRuntimeOpaque(self.rt.as_ptr()).cast::<State>();
+            qjs::JS_SetRuntimeOpaque(self.rt.as_ptr(), ptr::null_mut());
             qjs::JS_FreeContext(self.ctx.as_ptr());
             qjs::JS_FreeRuntime(self.rt.as_ptr());
-            let raw = qjs::JS_GetRuntimeOpaque(self.rt.as_ptr()).cast::<State>();
             if !raw.is_null() {
-                drop(Arc::from_raw(raw));
+                drop(Rc::from_raw(raw));
             }
         }
     }
@@ -217,6 +236,7 @@ struct State {
     classes: Mutex<BTreeMap<core::ClassId, ClassEntry>>,
     quickjs_to_core: Mutex<BTreeMap<qjs::JSClassID, core::ClassId>>,
     callbacks: Mutex<Vec<CallbackTarget>>,
+    unhandled_rejections: Mutex<Vec<UnhandledRejection>>,
 }
 
 impl State {
@@ -226,13 +246,72 @@ impl State {
             classes: Mutex::new(BTreeMap::new()),
             quickjs_to_core: Mutex::new(BTreeMap::new()),
             callbacks: Mutex::new(Vec::new()),
+            unhandled_rejections: Mutex::new(Vec::new()),
         }
+    }
+
+    fn track_unhandled(
+        &self,
+        ctx: *mut qjs::JSContext,
+        promise: qjs::JSValue,
+        reason: qjs::JSValue,
+    ) {
+        let Ok(mut rejections) = self.unhandled_rejections.lock() else {
+            return;
+        };
+        if rejections
+            .iter()
+            .any(|entry| same_js_value(entry.promise, promise))
+        {
+            return;
+        }
+        rejections.push(UnhandledRejection {
+            promise: unsafe { qjs::JS_DupValue(ctx, promise) },
+            reason: unsafe { qjs::JS_DupValue(ctx, reason) },
+        });
+    }
+
+    fn mark_handled(&self, ctx: *mut qjs::JSContext, promise: qjs::JSValue) {
+        let Ok(mut rejections) = self.unhandled_rejections.lock() else {
+            return;
+        };
+        if let Some(index) = rejections
+            .iter()
+            .position(|entry| same_js_value(entry.promise, promise))
+        {
+            let entry = rejections.swap_remove(index);
+            unsafe {
+                qjs::JS_FreeValue(ctx, entry.promise);
+                qjs::JS_FreeValue(ctx, entry.reason);
+            }
+        }
+    }
+
+    fn take_unhandled_rejection(&self, ctx: *mut qjs::JSContext) -> Option<String> {
+        let Ok(mut rejections) = self.unhandled_rejections.lock() else {
+            return Some("promise rejection tracker is poisoned".to_owned());
+        };
+        let entry = rejections.pop()?;
+        let message = exception_or_value(ctx, entry.reason);
+        unsafe { qjs::JS_FreeValue(ctx, entry.promise) };
+        for entry in rejections.drain(..) {
+            unsafe {
+                qjs::JS_FreeValue(ctx, entry.promise);
+                qjs::JS_FreeValue(ctx, entry.reason);
+            }
+        }
+        Some(format!("Unhandled promise rejection: {message}"))
     }
 }
 
 struct ClassEntry {
     quickjs_id: qjs::JSClassID,
     spec: &'static core::ClassSpec<Engine>,
+}
+
+struct UnhandledRejection {
+    promise: qjs::JSValue,
+    reason: qjs::JSValue,
 }
 
 #[derive(Clone, Copy)]
@@ -249,7 +328,7 @@ pub struct Engine;
 #[derive(Clone, Copy)]
 pub struct Context<'a> {
     ctx: *mut qjs::JSContext,
-    scope: Option<&'a Scope>,
+    scope: &'a Scope,
 }
 
 struct Scope {
@@ -288,6 +367,11 @@ impl Drop for Scope {
     }
 }
 
+fn with_scope<R>(ctx: *mut qjs::JSContext, f: impl FnOnce(Context<'_>) -> R) -> R {
+    let scope = Scope::new(ctx);
+    f(Context { ctx, scope: &scope })
+}
+
 impl core::JsEngine for Engine {
     type Value = qjs::JSValue;
     type Context<'a> = Context<'a>;
@@ -312,9 +396,7 @@ impl core::JsEngine for Engine {
         if unsafe { qjs::JS_IsException(value) } {
             Err(value)
         } else {
-            if let Some(scope) = cx.scope {
-                scope.track(value);
-            }
+            cx.scope.track(value);
             Ok(value)
         }
     }
@@ -386,8 +468,8 @@ impl core::JsEngine for Engine {
         if unsafe { qjs::JS_IsException(proto) } {
             return Err(proto);
         }
-        install_methods(cx.ctx, state, proto, spec)?;
-        install_properties(cx.ctx, state, proto, spec)?;
+        install_methods(cx, state, proto, spec)?;
+        install_properties(cx, state, proto, spec)?;
         unsafe {
             qjs::JS_SetClassProto(cx.ctx, quickjs_id, proto);
         }
@@ -425,9 +507,7 @@ impl core::JsEngine for Engine {
         unsafe {
             qjs::JS_SetOpaque(object, Box::into_raw(holder).cast());
         }
-        if let Some(scope) = cx.scope {
-            scope.track(object);
-        }
+        cx.scope.track(object);
         Ok(object)
     }
 
@@ -449,17 +529,13 @@ impl core::JsEngine for Engine {
 
     fn number(cx: Self::Context<'_>, value: f64) -> core::Result<Self::Value, Self::Error> {
         let value = unsafe { qjs::JS_NewFloat64(cx.ctx, value) };
-        if let Some(scope) = cx.scope {
-            scope.track(value);
-        }
+        cx.scope.track(value);
         Ok(value)
     }
 
     fn string(cx: Self::Context<'_>, value: &str) -> core::Result<Self::Value, Self::Error> {
         let value = unsafe { qjs::JS_NewStringLen(cx.ctx, value.as_ptr().cast(), value.len()) };
-        if let Some(scope) = cx.scope {
-            scope.track(value);
-        }
+        cx.scope.track(value);
         Ok(value)
     }
 
@@ -475,31 +551,25 @@ impl core::JsEngine for Engine {
         cx.ctx
     }
 
-    fn context_from_async(cx: Self::AsyncContext) -> Self::Context<'static> {
-        Context {
-            ctx: cx,
-            scope: None,
-        }
+    unsafe fn with_async_scope<R>(
+        cx: Self::AsyncContext,
+        f: impl FnOnce(Self::Context<'_>) -> R,
+    ) -> R {
+        with_scope(cx, f)
     }
 
-    fn async_undefined(cx: Self::AsyncContext) -> Self::Value {
-        Self::undefined(Context {
-            ctx: cx,
-            scope: None,
-        })
-    }
-
-    fn async_error_value(cx: Self::AsyncContext, message: &str) -> Self::Value {
+    fn async_error_value(cx: Self::Context<'_>, message: &str) -> Self::Value {
         match CString::new(message) {
-            Ok(message) => unsafe { qjs::JS_NewString(cx, message.as_ptr()) },
-            Err(_) => Self::undefined(Context {
-                ctx: cx,
-                scope: None,
-            }),
+            Ok(message) => {
+                let value = unsafe { qjs::JS_NewString(cx.ctx, message.as_ptr()) };
+                cx.scope.track(value);
+                value
+            }
+            Err(_) => Self::undefined(cx),
         }
     }
 
-    fn error_value_from_error(_cx: Self::AsyncContext, error: Self::Error) -> Self::Value {
+    fn error_value_from_error(_cx: Self::Context<'_>, error: Self::Error) -> Self::Value {
         error
     }
 
@@ -511,14 +581,12 @@ impl core::JsEngine for Engine {
         if unsafe { qjs::JS_IsException(promise) } {
             return Err(promise);
         }
-        if let Some(scope) = cx.scope {
-            scope.track(promise);
-        }
+        cx.scope.track(promise);
         Ok((promise, core::Deferred::new(resolving[0], resolving[1])))
     }
 
     fn settle_deferred(
-        cx: Self::AsyncContext,
+        cx: Self::Context<'_>,
         deferred: core::Deferred<Self>,
         result: std::result::Result<Self::Value, Self::Value>,
     ) {
@@ -526,21 +594,19 @@ impl core::JsEngine for Engine {
             Ok(value) => (deferred.resolve(), value),
             Err(value) => (deferred.reject(), value),
         };
-        let this = Self::undefined(Context {
-            ctx: cx,
-            scope: None,
-        });
+        let this = qjs_value_with_tag(qjs::JS_TAG_UNDEFINED as i64);
         let mut argv = [arg];
-        let call = unsafe { qjs::JS_Call(cx, func, this, 1, argv.as_mut_ptr()) };
+        cx.scope.escape(arg);
+        let call = unsafe { qjs::JS_Call(cx.ctx, func, this, 1, argv.as_mut_ptr()) };
         unsafe {
-            qjs::JS_FreeValue(cx, call);
-            qjs::JS_FreeValue(cx, arg);
-            qjs::JS_FreeValue(cx, deferred.resolve());
-            qjs::JS_FreeValue(cx, deferred.reject());
+            qjs::JS_FreeValue(cx.ctx, call);
+            qjs::JS_FreeValue(cx.ctx, arg);
+            qjs::JS_FreeValue(cx.ctx, deferred.resolve());
+            qjs::JS_FreeValue(cx.ctx, deferred.reject());
         }
     }
 
-    fn new_external_arraybuffer(
+    unsafe fn new_external_arraybuffer(
         cx: Self::Context<'_>,
         ptr: *mut u8,
         len: usize,
@@ -550,9 +616,7 @@ impl core::JsEngine for Engine {
         if unsafe { qjs::JS_IsException(value) } {
             Err(value)
         } else {
-            if let Some(scope) = cx.scope {
-                scope.track(value);
-            }
+            cx.scope.track(value);
             Ok(value)
         }
     }
@@ -565,9 +629,7 @@ impl core::JsEngine for Engine {
         if unsafe { qjs::JS_IsException(value) } {
             Err(value)
         } else {
-            if let Some(scope) = cx.scope {
-                scope.track(value);
-            }
+            cx.scope.track(value);
             Ok(value)
         }
     }
@@ -605,26 +667,23 @@ impl core::JsEngine for Engine {
 }
 
 fn install_methods(
-    ctx: *mut qjs::JSContext,
+    cx: Context<'_>,
     state: &State,
     proto: qjs::JSValue,
     spec: &'static core::ClassSpec<Engine>,
 ) -> core::Result<(), qjs::JSValue> {
     for (index, method) in spec.methods.iter().enumerate() {
         let Ok(name) = CString::new(method.name) else {
-            return Err(Engine::type_error(
-                Context { ctx, scope: None },
-                "invalid method name",
-            ));
+            return Err(Engine::type_error(cx, "invalid method name"));
         };
         let func = unsafe {
             qjs::JS_NewCFunctionMagic(
-                ctx,
+                cx.ctx,
                 Some(qjs_method),
                 name.as_ptr(),
                 i32::from(method.length),
                 qjs::JSCFunctionEnum_JS_CFUNC_generic_magic,
-                allocate_magic(ctx, state, spec.id, CallbackKind::Method, index)?,
+                allocate_magic(cx, state, spec.id, CallbackKind::Method, index)?,
             )
         };
         if unsafe { qjs::JS_IsException(func) } {
@@ -632,7 +691,7 @@ fn install_methods(
         }
         if unsafe {
             qjs::JS_DefinePropertyValueStr(
-                ctx,
+                cx.ctx,
                 proto,
                 name.as_ptr(),
                 func,
@@ -640,49 +699,46 @@ fn install_methods(
             )
         } < 0
         {
-            return Err(take_exception_value(ctx));
+            return Err(take_exception_value(cx.ctx));
         }
     }
     Ok(())
 }
 
 fn install_properties(
-    ctx: *mut qjs::JSContext,
+    cx: Context<'_>,
     state: &State,
     proto: qjs::JSValue,
     spec: &'static core::ClassSpec<Engine>,
 ) -> core::Result<(), qjs::JSValue> {
     for (index, property) in spec.properties.iter().enumerate() {
         let Ok(name) = CString::new(property.name) else {
-            return Err(Engine::type_error(
-                Context { ctx, scope: None },
-                "invalid property name",
-            ));
+            return Err(Engine::type_error(cx, "invalid property name"));
         };
-        let atom = unsafe { qjs::JS_NewAtom(ctx, name.as_ptr()) };
+        let atom = unsafe { qjs::JS_NewAtom(cx.ctx, name.as_ptr()) };
         let getter = if property.get.is_some() {
             new_getter(
-                ctx,
+                cx.ctx,
                 name.as_ptr(),
                 qjs_getter,
-                allocate_magic(ctx, state, spec.id, CallbackKind::Getter, index)?,
+                allocate_magic(cx, state, spec.id, CallbackKind::Getter, index)?,
             )
         } else {
-            Engine::undefined(Context { ctx, scope: None })
+            Engine::undefined(cx)
         };
         let setter = if property.set.is_some() {
             new_setter(
-                ctx,
+                cx.ctx,
                 name.as_ptr(),
                 qjs_setter,
-                allocate_magic(ctx, state, spec.id, CallbackKind::Setter, index)?,
+                allocate_magic(cx, state, spec.id, CallbackKind::Setter, index)?,
             )
         } else {
-            Engine::undefined(Context { ctx, scope: None })
+            Engine::undefined(cx)
         };
         let rc = unsafe {
             qjs::JS_DefinePropertyGetSet(
-                ctx,
+                cx.ctx,
                 proto,
                 atom,
                 getter,
@@ -690,9 +746,9 @@ fn install_properties(
                 qjs::JS_PROP_CONFIGURABLE as c_int,
             )
         };
-        unsafe { qjs::JS_FreeAtom(ctx, atom) };
+        unsafe { qjs::JS_FreeAtom(cx.ctx, atom) };
         if rc < 0 {
-            return Err(take_exception_value(ctx));
+            return Err(take_exception_value(cx.ctx));
         }
     }
     Ok(())
@@ -753,55 +809,42 @@ enum CallbackKind {
 }
 
 fn allocate_magic(
-    ctx: *mut qjs::JSContext,
+    cx: Context<'_>,
     state: &State,
     class: core::ClassId,
     kind: CallbackKind,
     index: usize,
 ) -> core::Result<c_int, qjs::JSValue> {
-    let mut callbacks = state.callbacks.lock().map_err(|_| {
-        Engine::operation_error(
-            Context { ctx, scope: None },
-            "callback registry is poisoned",
-        )
-    })?;
+    let mut callbacks = state
+        .callbacks
+        .lock()
+        .map_err(|_| Engine::operation_error(cx, "callback registry is poisoned"))?;
     if callbacks.len() >= i16::MAX as usize {
-        return Err(Engine::operation_error(
-            Context { ctx, scope: None },
-            "too many registered callbacks",
-        ));
+        return Err(Engine::operation_error(cx, "too many registered callbacks"));
     }
     callbacks.push(CallbackTarget { class, kind, index });
     Ok(callbacks.len() as c_int)
 }
 
 fn callback_target(
-    ctx: *mut qjs::JSContext,
+    cx: Context<'_>,
     magic_value: c_int,
     expected: CallbackKind,
 ) -> core::Result<CallbackTarget, qjs::JSValue> {
-    let state = state_from_context(ctx);
-    let callbacks = state.callbacks.lock().map_err(|_| {
-        Engine::operation_error(
-            Context { ctx, scope: None },
-            "callback registry is poisoned",
-        )
-    })?;
+    let state = state_from_context(cx.ctx);
+    let callbacks = state
+        .callbacks
+        .lock()
+        .map_err(|_| Engine::operation_error(cx, "callback registry is poisoned"))?;
     let Some(target) = magic_value
         .checked_sub(1)
         .and_then(|index| callbacks.get(index as usize))
         .copied()
     else {
-        return Err(Engine::operation_error(
-            Context { ctx, scope: None },
-            "callback is not registered",
-        ));
+        return Err(Engine::operation_error(cx, "callback is not registered"));
     };
     if target.kind as c_int != expected as c_int {
-        return Err(Engine::operation_error(
-            Context { ctx, scope: None },
-            "callback kind mismatch",
-        ));
+        return Err(Engine::operation_error(cx, "callback kind mismatch"));
     }
     Ok(target)
 }
@@ -814,7 +857,7 @@ unsafe extern "C" fn qjs_method(
     magic_value: c_int,
 ) -> qjs::JSValue {
     catch_callback(ctx, |cx| {
-        let target = callback_target(ctx, magic_value, CallbackKind::Method)?;
+        let target = callback_target(cx, magic_value, CallbackKind::Method)?;
         let state = state_from_context(ctx);
         let method = {
             let classes = state
@@ -850,7 +893,7 @@ unsafe extern "C" fn qjs_getter(
     magic_value: c_int,
 ) -> qjs::JSValue {
     catch_callback(ctx, |cx| {
-        let target = callback_target(ctx, magic_value, CallbackKind::Getter)?;
+        let target = callback_target(cx, magic_value, CallbackKind::Getter)?;
         let state = state_from_context(ctx);
         let getter = {
             let classes = state
@@ -877,7 +920,7 @@ unsafe extern "C" fn qjs_setter(
     magic_value: c_int,
 ) -> qjs::JSValue {
     catch_callback(ctx, |cx| {
-        let target = callback_target(ctx, magic_value, CallbackKind::Setter)?;
+        let target = callback_target(cx, magic_value, CallbackKind::Setter)?;
         let state = state_from_context(ctx);
         let setter = {
             let classes = state
@@ -903,10 +946,7 @@ where
     F: FnOnce(Context<'_>) -> core::Result<qjs::JSValue, qjs::JSValue>,
 {
     let scope = Scope::new(ctx);
-    let cx = Context {
-        ctx,
-        scope: Some(&scope),
-    };
+    let cx = Context { ctx, scope: &scope };
     match catch_unwind(AssertUnwindSafe(|| f(cx))) {
         Ok(Ok(value)) => {
             scope.escape(value);
@@ -945,6 +985,26 @@ extern "C" fn qjs_finalizer(rt: *mut qjs::JSRuntime, value: qjs::JSValue) {
         };
         let payload = unsafe { Box::from_raw(raw.as_ptr()) };
         (spec.finalizer)(*payload, &state.env);
+    }));
+}
+
+extern "C" fn promise_rejection_tracker(
+    ctx: *mut qjs::JSContext,
+    promise: qjs::JSValue,
+    reason: qjs::JSValue,
+    is_handled: bool,
+    opaque: *mut c_void,
+) {
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        let Some(state) = NonNull::new(opaque.cast::<State>()) else {
+            return;
+        };
+        let state = unsafe { state.as_ref() };
+        if is_handled {
+            state.mark_handled(ctx, promise);
+        } else {
+            state.track_unhandled(ctx, promise, reason);
+        }
     }));
 }
 
@@ -1097,8 +1157,8 @@ unsafe fn buffer_release(buffer: core::WGPUBuffer) {
 mod tests {
     use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::ptr;
+    use std::rc::Rc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
 
     use super::{c_int, core, ffi_wgpu as wgpu, qjs, CallbackKind, Context, Engine, Runtime};
     use webgpu_native_js_core::JsEngine;
@@ -1128,8 +1188,10 @@ mod tests {
         let instance = unsafe { wgpu::wgpuCreateInstance(ptr::null()) };
         assert!(!instance.is_null());
 
-        let adapter_state = Arc::new(RequestState::new());
-        let adapter_callback_state = Arc::into_raw(Arc::clone(&adapter_state)).cast_mut().cast();
+        // AllowProcessEvents runs callbacks on the thread that calls
+        // wgpuInstanceProcessEvents, so the userdata clone is single-threaded.
+        let adapter_state = Rc::new(RequestState::new());
+        let adapter_callback_state = Rc::into_raw(Rc::clone(&adapter_state)).cast_mut().cast();
         let adapter_info = wgpu::WGPURequestAdapterCallbackInfo {
             nextInChain: ptr::null_mut(),
             mode: wgpu::WGPUCallbackMode_WGPUCallbackMode_AllowProcessEvents,
@@ -1148,8 +1210,10 @@ mod tests {
         let adapter = adapter_state.handle.load(Ordering::SeqCst) as wgpu::WGPUAdapter;
         assert!(!adapter.is_null());
 
-        let device_state = Arc::new(RequestState::new());
-        let device_callback_state = Arc::into_raw(Arc::clone(&device_state)).cast_mut().cast();
+        // AllowProcessEvents runs callbacks on the thread that calls
+        // wgpuInstanceProcessEvents, so the userdata clone is single-threaded.
+        let device_state = Rc::new(RequestState::new());
+        let device_callback_state = Rc::into_raw(Rc::clone(&device_state)).cast_mut().cast();
         let device_info = wgpu::WGPURequestDeviceCallbackInfo {
             nextInChain: ptr::null_mut(),
             mode: wgpu::WGPUCallbackMode_WGPUCallbackMode_AllowProcessEvents,
@@ -1200,7 +1264,7 @@ mod tests {
             if userdata1.is_null() {
                 return;
             }
-            let state = unsafe { Arc::from_raw(userdata1.cast::<RequestState>()) };
+            let state = unsafe { Rc::from_raw(userdata1.cast::<RequestState>()) };
             state.status.store(status as usize, Ordering::SeqCst);
             state.handle.store(adapter as usize, Ordering::SeqCst);
         }));
@@ -1217,7 +1281,7 @@ mod tests {
             if userdata1.is_null() {
                 return;
             }
-            let state = unsafe { Arc::from_raw(userdata1.cast::<RequestState>()) };
+            let state = unsafe { Rc::from_raw(userdata1.cast::<RequestState>()) };
             state.status.store(status as usize, Ordering::SeqCst);
             state.handle.store(device as usize, Ordering::SeqCst);
         }));
@@ -1283,13 +1347,14 @@ mod tests {
     }
 
     fn panic_test_instance(runtime: &Runtime) -> qjs::JSValue {
-        let cx = Context {
-            ctx: runtime.raw_context(),
-            scope: None,
-        };
-        assert!(Engine::register_class(cx, panicking_spec()).is_ok());
-        Engine::new_instance(cx, PANIC_CLASS, Box::new(())).unwrap_or_else(|_| {
-            panic!("instance");
+        super::with_scope(runtime.raw_context(), |cx| {
+            assert!(Engine::register_class(cx, panicking_spec()).is_ok());
+            let instance =
+                Engine::new_instance(cx, PANIC_CLASS, Box::new(())).unwrap_or_else(|_| {
+                    panic!("instance");
+                });
+            cx.scope.escape(instance);
+            instance
         })
     }
 
@@ -1322,15 +1387,8 @@ mod tests {
         assert_exception(&runtime, getter);
 
         let setter = unsafe {
-            super::qjs_setter(
-                runtime.raw_context(),
-                instance,
-                Engine::undefined(Context {
-                    ctx: runtime.raw_context(),
-                    scope: None,
-                }),
-                setter_magic,
-            )
+            let value = super::with_scope(runtime.raw_context(), |cx| Engine::undefined(cx));
+            super::qjs_setter(runtime.raw_context(), instance, value, setter_magic)
         };
         assert_exception(&runtime, setter);
 
@@ -1355,7 +1413,7 @@ mod tests {
         let setup = native_setup();
         let runtime = Runtime::new().expect("quickjs runtime");
         eval_drop(&runtime, "var smoke = 1;", "smoke.js");
-        let wrapped = runtime.wrap_device(setup.device).expect("wrap device");
+        let wrapped = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
         runtime
             .set_global_value("device", wrapped)
             .expect("set device");
@@ -1378,7 +1436,7 @@ mod tests {
             "queueMicrotask(function () { throw new Error('boom'); });",
             "throwing_then.js",
         );
-        let error = runtime.tick(setup.instance).expect_err("tick error");
+        let error = unsafe { runtime.tick(setup.instance) }.expect_err("tick error");
         assert!(format!("{error:?}").contains("boom"));
     }
 
@@ -1391,13 +1449,13 @@ mod tests {
             "var ran = false; async function f() { await 0; ran = true; } f();",
             "await.js",
         );
-        runtime.process_events_only(setup.instance);
+        unsafe { runtime.process_events_only(setup.instance) };
         eval_drop(
             &runtime,
             "if (ran) throw new Error('await resumed too early');",
             "check1.js",
         );
-        runtime.tick(setup.instance).expect("tick");
+        unsafe { runtime.tick(setup.instance) }.expect("tick");
         eval_drop(
             &runtime,
             "if (!ran) throw new Error('await did not resume');",
@@ -1406,10 +1464,84 @@ mod tests {
     }
 
     #[test]
+    fn tick_reports_unhandled_rejection_after_microtasks_drain() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("quickjs runtime");
+        eval_drop(
+            &runtime,
+            "Promise.resolve().then(function () { throw new Error('unhandled boom'); });",
+            "unhandled.js",
+        );
+        let error = unsafe { runtime.tick(setup.instance) }.expect_err("tick error");
+        assert!(format!("{error:?}").contains("unhandled boom"));
+    }
+
+    #[test]
+    fn tick_ignores_rejection_handled_before_drain_finishes() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("quickjs runtime");
+        eval_drop(
+            &runtime,
+            "var handled = false; Promise.resolve().then(function () { throw new Error('handled boom'); }).catch(function () { handled = true; });",
+            "handled.js",
+        );
+        unsafe { runtime.tick(setup.instance) }.expect("tick");
+        eval_drop(
+            &runtime,
+            "if (!handled) throw new Error('catch did not run');",
+            "handled-check.js",
+        );
+    }
+
+    #[test]
+    fn map_async_get_mapped_range_write_unmap_is_leak_free() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let wrapped = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("device", wrapped)
+            .expect("set device");
+        eval_drop(
+            &runtime,
+            r#"
+                var asyncMapped = device.createBuffer({ size: 16, usage: 2 });
+                var asyncDone = false;
+                asyncMapped.mapAsync(2, 0, 8).then(function () {
+                    var range = asyncMapped.getMappedRange(0, 8);
+                    var view = new Uint8Array(range);
+                    view[0] = 11;
+                    view[7] = 22;
+                    asyncMapped.unmap();
+                    if (range.byteLength !== 0 || view.byteLength !== 0) {
+                        throw new Error('mapAsync range was not detached');
+                    }
+                    asyncDone = true;
+                });
+            "#,
+            "map-async.js",
+        );
+        unsafe { runtime.tick(setup.instance) }.expect("tick");
+        eval_drop(
+            &runtime,
+            "if (!asyncDone) throw new Error('mapAsync continuation did not run');",
+            "map-async-check.js",
+        );
+        eval_drop(
+            &runtime,
+            "asyncMapped = null; asyncDone = undefined;",
+            "map-async-cleanup.js",
+        );
+        runtime.clear_global("device").expect("clear device");
+        runtime.run_gc();
+        runtime.run_gc();
+        assert!(runtime.drain_releases().expect("drain") >= 2);
+    }
+
+    #[test]
     fn mapped_at_creation_detaches_on_unmap() {
         let setup = native_setup();
         let runtime = Runtime::new().expect("quickjs runtime");
-        let wrapped = runtime.wrap_device(setup.device).expect("wrap device");
+        let wrapped = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
         runtime
             .set_global_value("device", wrapped)
             .expect("set device");
@@ -1450,8 +1582,8 @@ mod tests {
             "var gotDevice = false; gpu.requestAdapter().then(function (a) { return a.requestDevice(); }).then(function (d) { gotDevice = !!d; });",
             "request_path.js",
         );
-        runtime.tick(setup.instance).expect("adapter tick");
-        runtime.tick(setup.instance).expect("device tick");
+        unsafe { runtime.tick(setup.instance) }.expect("adapter tick");
+        unsafe { runtime.tick(setup.instance) }.expect("device tick");
         eval_drop(
             &runtime,
             "if (!gotDevice) throw new Error('device promise did not resolve');",
