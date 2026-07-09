@@ -5,6 +5,10 @@ target/
 # Generated bindings are build artifacts ($OUT_DIR), never committed
 # (see CLAUDE.md, principle 9)
 
+# Local machine wiring: where a developer's backend libraries happen to live.
+# Never committed — see CLAUDE.md, "No local or sibling paths in committed files".
+/.cargo/
+
 # Agent / editor local state
 /.claude/
 .vscode/

@@ -13,8 +13,15 @@ Two rules govern everything below, both from `CLAUDE.md`:
 | Path | Upstream | Pin | License |
 |---|---|---|---|
 | `third_party/quickjs` | [quickjs-ng](https://github.com/quickjs-ng/quickjs) | `v0.15.1` (`fd0a021`) | MIT |
-| `third_party/webgpu-headers` | [webgpu-headers](https://github.com/webgpu-native/webgpu-headers) | *to add* — Phase 0.2 | BSD-3 |
+| `third_party/webgpu-headers` | [webgpu-headers](https://github.com/webgpu-native/webgpu-headers) | `a11ef44` | BSD-3 |
 | `third_party/gpuweb` | [gpuweb](https://github.com/gpuweb/gpuweb) (for `webgpu.idl`) | *to add* — Phase 4 | W3C |
+
+The `webgpu-headers` checkout supplies **both** codegen inputs named by plan
+§2.3's C-ABI half: `webgpu.h` (for `bindgen`) and `webgpu.yml` (plus
+`webgpu.json` and `schema.json`). Its `webgpu.h` is byte-identical to the copy
+Dawn pins, so "canonical" is unambiguous. The pinned commit is, fittingly,
+*"Add `subgroup-size-control` feature"* — the very enumerator yawgpu's vendored
+header lacks (`backend-deltas.md` → D1); yawgpu is pinned one commit behind it.
 
 **Alignment policy.** Dawn is the conformance oracle for the backend layer, so
 we pin the same revisions Dawn pins unless we have a reason not to. As of
