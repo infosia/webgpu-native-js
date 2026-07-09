@@ -296,18 +296,15 @@ impl Arena {
 
     fn alloc_wgsl_source(&self, code: WGPUStringView) -> &WGPUShaderSourceWGSL {
         let mut values = self.shader_sources.borrow_mut();
-        values.push(Box::new([WGPUShaderSourceWGSL {
+        let source = Box::new([WGPUShaderSourceWGSL {
             chain: WGPUChainedStruct {
                 next: ptr::null_mut(),
                 sType: WGPUSType_WGPUSType_ShaderSourceWGSL,
             },
             code,
-        }]));
-        let source = values
-            .last()
-            .and_then(|sources| sources.first())
-            .expect("just-pushed WGSL source");
-        let ptr = ptr::from_ref(source);
+        }]);
+        let ptr = source.as_ptr();
+        values.push(source);
         // SAFETY: arena-owned shader sources live in boxed slices. Moving the
         // owning Box inside `shader_sources` does not move the allocation, so
         // descriptor pointers handed to the backend remain address-stable for
@@ -869,10 +866,12 @@ impl<E: JsEngine> TracedValues<E> {
 // access from WebGPU callbacks.
 // SAFETY: Contains JS mapped-range values only; no WGPU handles are dereferenced off-thread.
 unsafe impl<E: JsEngine> Send for TracedValues<E> {}
-// SAFETY: `TracedValues` uses interior mutability for GC tracing, but the engine
-// does not run JS entry points concurrently with tracing. Shared references are
-// used only on the engine/finalizer path to visit or clear values, not to
-// dereference native handles.
+// SAFETY: `TracedValues` uses interior mutability for GC tracing. This is sound
+// for QuickJS because tracing and finalizers run on the engine thread and cannot
+// race JS entry points. A future engine with any-thread tracing/finalizers must
+// replace this storage or add synchronization before enabling mapped ranges.
+// Shared references are used only to visit or clear JS values, not to dereference
+// native handles.
 // SAFETY: Shared access is engine GC/finalizer bookkeeping and does not use WGPU handles.
 unsafe impl<E: JsEngine> Sync for TracedValues<E> {}
 
@@ -1024,7 +1023,7 @@ unsafe impl Send for CommandEncoderPayload {}
 
 /// Payload stored by a `GPUCommandBuffer` wrapper.
 pub struct CommandBufferPayload {
-    command_buffer: WGPUCommandBuffer,
+    state: Arc<Mutex<CommandBufferState>>,
 }
 
 // SAFETY: `CommandBufferPayload` stores a `WGPUCommandBuffer`. Queue submission
@@ -1033,6 +1032,19 @@ pub struct CommandBufferPayload {
 // creating `tick()` thread.
 // SAFETY: The `WGPUCommandBuffer` is submitted on the engine thread or released in `tick()`.
 unsafe impl Send for CommandBufferPayload {}
+
+struct CommandBufferState {
+    command_buffer: WGPUCommandBuffer,
+    consumed: bool,
+}
+
+// SAFETY: `CommandBufferState` contains a `WGPUCommandBuffer` and a consumed
+// flag protected by a `Mutex`. JS queue methods dereference the command buffer
+// only on the engine thread; finalizers may lock the state off-thread only to
+// copy the handle into `ReleaseRequest::CommandBuffer`, drained on the creating
+// `tick()` thread.
+// SAFETY: The `WGPUCommandBuffer` is copied by finalizers and submitted in engine/`tick()`.
+unsafe impl Send for CommandBufferState {}
 
 /// Payload stored by a `GPUComputePassEncoder` wrapper.
 pub struct ComputePassEncoderPayload {
@@ -1080,6 +1092,7 @@ struct MappedRange<E: JsEngine> {
     offset: usize,
     size: usize,
     strategy: MappedRangeStrategy,
+    map_mode: WGPUMapMode,
 }
 
 /// Registers the GPUDevice class.
@@ -1184,6 +1197,8 @@ pub fn device_create_buffer<E: JsEngine + 'static>(
     };
     let buffer =
         unsafe { (gpu.device_create_buffer)(device_payload.device, ptr::from_ref(&native)) };
+    // Only wgpuDeviceCreateBuffer is contractually nullable; the other createXxx
+    // null checks in this file are defensive against backend failures.
     if buffer.is_null() {
         return Err(E::operation_error(
             cx,
@@ -1208,14 +1223,23 @@ pub fn device_create_buffer<E: JsEngine + 'static>(
         },
         ranges: Vec::new(),
     };
-    E::new_instance(
+    match E::new_instance(
         cx,
         GPU_BUFFER_CLASS,
         Box::new(BufferPayload::<E> {
             state: Arc::new(Mutex::new(state)),
             traced_values: Arc::new(TracedValues::new()),
         }),
-    )
+    ) {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            unsafe {
+                (gpu.buffer_release)(buffer);
+                (gpu.device_release)(device_payload.device);
+            }
+            Err(error)
+        }
+    }
 }
 
 /// Implements `GPUBuffer.destroy`.
@@ -1408,6 +1432,7 @@ pub fn buffer_get_mapped_range<E: JsEngine + 'static>(
             offset,
             size,
             strategy: E::MAPPED_RANGE_STRATEGY,
+            map_mode: state.map_mode,
         });
         payload.traced_values.push(tracked);
         Ok(value)
@@ -1496,11 +1521,17 @@ pub fn device_queue_get<E: JsEngine + 'static>(
     if queue.is_null() {
         return Err(E::operation_error(cx, "wgpuDeviceGetQueue returned null"));
     }
-    unsafe {
-        (env.gpu().queue_add_ref)(queue);
+    if let Err(error) = E::register_class(cx, queue_class::<E>()) {
+        unsafe { (env.gpu().queue_release)(queue) };
+        return Err(error);
     }
-    let _ = E::register_class(cx, queue_class::<E>())?;
-    E::new_instance(cx, GPU_QUEUE_CLASS, Box::new(QueuePayload { queue }))
+    match E::new_instance(cx, GPU_QUEUE_CLASS, Box::new(QueuePayload { queue })) {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            unsafe { (env.gpu().queue_release)(queue) };
+            Err(error)
+        }
+    }
 }
 
 /// Implements `GPUQueue.writeBuffer`.
@@ -1582,7 +1613,24 @@ pub fn queue_submit<E: JsEngine + 'static>(
         .copied()
         .ok_or_else(|| E::type_error(cx, "commands"))?;
     let arena = Arena::new();
-    let commands = convert_command_buffer_sequence::<E>(cx, commands_value, &arena)?;
+    let command_states = convert_command_buffer_sequence::<E>(cx, commands_value)?;
+    let mut command_handles = Vec::with_capacity(command_states.len());
+    for state in &command_states {
+        let state = state
+            .lock()
+            .map_err(|_| E::operation_error(cx, "GPUCommandBuffer state is poisoned"))?;
+        if state.consumed {
+            return Err(E::operation_error(cx, "GPUCommandBuffer is consumed"));
+        }
+        command_handles.push(state.command_buffer);
+    }
+    for state in &command_states {
+        state
+            .lock()
+            .map_err(|_| E::operation_error(cx, "GPUCommandBuffer state is poisoned"))?
+            .consumed = true;
+    }
+    let commands = arena.alloc_command_buffers(command_handles);
     unsafe {
         (E::environment(cx).gpu().queue_submit)(
             queue_payload.queue,
@@ -1652,12 +1700,21 @@ pub fn device_create_shader_module<E: JsEngine + 'static>(
             "wgpuDeviceCreateShaderModule returned null",
         ));
     }
-    let _ = E::register_class(cx, shader_module_class::<E>())?;
-    E::new_instance(
+    if let Err(error) = E::register_class(cx, shader_module_class::<E>()) {
+        unsafe { (E::environment(cx).gpu().shader_module_release)(module) };
+        return Err(error);
+    }
+    match E::new_instance(
         cx,
         GPU_SHADER_MODULE_CLASS,
         Box::new(ShaderModulePayload { module }),
-    )
+    ) {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            unsafe { (E::environment(cx).gpu().shader_module_release)(module) };
+            Err(error)
+        }
+    }
 }
 
 /// Implements `GPUDevice.createBindGroupLayout`.
@@ -1682,12 +1739,21 @@ pub fn device_create_bind_group_layout<E: JsEngine + 'static>(
             "wgpuDeviceCreateBindGroupLayout returned null",
         ));
     }
-    let _ = E::register_class(cx, bind_group_layout_class::<E>())?;
-    E::new_instance(
+    if let Err(error) = E::register_class(cx, bind_group_layout_class::<E>()) {
+        unsafe { (E::environment(cx).gpu().bind_group_layout_release)(layout) };
+        return Err(error);
+    }
+    match E::new_instance(
         cx,
         GPU_BIND_GROUP_LAYOUT_CLASS,
         Box::new(BindGroupLayoutPayload { layout }),
-    )
+    ) {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            unsafe { (E::environment(cx).gpu().bind_group_layout_release)(layout) };
+            Err(error)
+        }
+    }
 }
 
 /// Implements `GPUDevice.createPipelineLayout`.
@@ -1712,12 +1778,21 @@ pub fn device_create_pipeline_layout<E: JsEngine + 'static>(
             "wgpuDeviceCreatePipelineLayout returned null",
         ));
     }
-    let _ = E::register_class(cx, pipeline_layout_class::<E>())?;
-    E::new_instance(
+    if let Err(error) = E::register_class(cx, pipeline_layout_class::<E>()) {
+        unsafe { (E::environment(cx).gpu().pipeline_layout_release)(layout) };
+        return Err(error);
+    }
+    match E::new_instance(
         cx,
         GPU_PIPELINE_LAYOUT_CLASS,
         Box::new(PipelineLayoutPayload { layout }),
-    )
+    ) {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            unsafe { (E::environment(cx).gpu().pipeline_layout_release)(layout) };
+            Err(error)
+        }
+    }
 }
 
 /// Implements `GPUDevice.createBindGroup`.
@@ -1749,15 +1824,35 @@ pub fn device_create_bind_group<E: JsEngine + 'static>(
     for buffer in &converted.buffers {
         unsafe { (gpu.buffer_add_ref)(*buffer) };
     }
-    let _ = E::register_class(cx, bind_group_class::<E>())?;
-    E::new_instance(
+    if let Err(error) = E::register_class(cx, bind_group_class::<E>()) {
+        unsafe {
+            (gpu.bind_group_release)(bind_group);
+            for buffer in &converted.buffers {
+                (gpu.buffer_release)(*buffer);
+            }
+        }
+        return Err(error);
+    }
+    let retained_buffers = converted.buffers.clone();
+    match E::new_instance(
         cx,
         GPU_BIND_GROUP_CLASS,
         Box::new(BindGroupPayload {
             bind_group,
             buffers: converted.buffers,
         }),
-    )
+    ) {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            unsafe {
+                (gpu.bind_group_release)(bind_group);
+                for buffer in &retained_buffers {
+                    (gpu.buffer_release)(*buffer);
+                }
+            }
+            Err(error)
+        }
+    }
 }
 
 /// Implements `GPUDevice.createComputePipeline`.
@@ -1782,12 +1877,21 @@ pub fn device_create_compute_pipeline<E: JsEngine + 'static>(
             "wgpuDeviceCreateComputePipeline returned null",
         ));
     }
-    let _ = E::register_class(cx, compute_pipeline_class::<E>())?;
-    E::new_instance(
+    if let Err(error) = E::register_class(cx, compute_pipeline_class::<E>()) {
+        unsafe { (E::environment(cx).gpu().compute_pipeline_release)(pipeline) };
+        return Err(error);
+    }
+    match E::new_instance(
         cx,
         GPU_COMPUTE_PIPELINE_CLASS,
         Box::new(ComputePipelinePayload { pipeline }),
-    )
+    ) {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            unsafe { (E::environment(cx).gpu().compute_pipeline_release)(pipeline) };
+            Err(error)
+        }
+    }
 }
 
 /// Implements `GPUDevice.createCommandEncoder`.
@@ -1816,8 +1920,11 @@ pub fn device_create_command_encoder<E: JsEngine + 'static>(
             "wgpuDeviceCreateCommandEncoder returned null",
         ));
     }
-    let _ = E::register_class(cx, command_encoder_class::<E>())?;
-    E::new_instance(
+    if let Err(error) = E::register_class(cx, command_encoder_class::<E>()) {
+        unsafe { (E::environment(cx).gpu().command_encoder_release)(encoder) };
+        return Err(error);
+    }
+    match E::new_instance(
         cx,
         GPU_COMMAND_ENCODER_CLASS,
         Box::new(CommandEncoderPayload {
@@ -1826,7 +1933,13 @@ pub fn device_create_command_encoder<E: JsEngine + 'static>(
                 ended: false,
             })),
         }),
-    )
+    ) {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            unsafe { (E::environment(cx).gpu().command_encoder_release)(encoder) };
+            Err(error)
+        }
+    }
 }
 
 /// Implements `GPUCommandEncoder.copyBufferToBuffer`.
@@ -1914,8 +2027,11 @@ pub fn command_encoder_begin_compute_pass<E: JsEngine + 'static>(
             "wgpuCommandEncoderBeginComputePass returned null",
         ));
     }
-    let _ = E::register_class(cx, compute_pass_encoder_class::<E>())?;
-    E::new_instance(
+    if let Err(error) = E::register_class(cx, compute_pass_encoder_class::<E>()) {
+        unsafe { (E::environment(cx).gpu().compute_pass_encoder_release)(pass) };
+        return Err(error);
+    }
+    match E::new_instance(
         cx,
         GPU_COMPUTE_PASS_ENCODER_CLASS,
         Box::new(ComputePassEncoderPayload {
@@ -1925,7 +2041,13 @@ pub fn command_encoder_begin_compute_pass<E: JsEngine + 'static>(
                 parent,
             })),
         }),
-    )
+    ) {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            unsafe { (E::environment(cx).gpu().compute_pass_encoder_release)(pass) };
+            Err(error)
+        }
+    }
 }
 
 /// Implements `GPUCommandEncoder.finish`.
@@ -1964,12 +2086,26 @@ pub fn command_encoder_finish<E: JsEngine + 'static>(
             "wgpuCommandEncoderFinish returned null",
         ));
     }
-    let _ = E::register_class(cx, command_buffer_class::<E>())?;
-    E::new_instance(
+    if let Err(error) = E::register_class(cx, command_buffer_class::<E>()) {
+        unsafe { (E::environment(cx).gpu().command_buffer_release)(command_buffer) };
+        return Err(error);
+    }
+    match E::new_instance(
         cx,
         GPU_COMMAND_BUFFER_CLASS,
-        Box::new(CommandBufferPayload { command_buffer }),
-    )
+        Box::new(CommandBufferPayload {
+            state: Arc::new(Mutex::new(CommandBufferState {
+                command_buffer,
+                consumed: false,
+            })),
+        }),
+    ) {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            unsafe { (E::environment(cx).gpu().command_buffer_release)(command_buffer) };
+            Err(error)
+        }
+    }
 }
 
 /// Implements `GPUComputePassEncoder.setPipeline`.
@@ -2157,8 +2293,11 @@ pub fn finalize_command_buffer(payload: Box<dyn Any + Send>, env: &Environment) 
     let Ok(payload) = payload.downcast::<CommandBufferPayload>() else {
         return;
     };
+    let Ok(state) = payload.state.lock() else {
+        return;
+    };
     let _ = env.queue().enqueue(ReleaseRequest::CommandBuffer {
-        command_buffer: payload.command_buffer,
+        command_buffer: state.command_buffer,
         gpu: env.gpu(),
     });
 }
@@ -2682,7 +2821,12 @@ fn convert_bind_group_layout_entry<E: JsEngine>(
     cx: E::Context<'_>,
     value: E::Value,
 ) -> Result<WGPUBindGroupLayoutEntry, E::Error> {
-    let binding = optional_u32::<E>(cx, E::get_property(cx, value, "binding").ok(), "binding", 0)?;
+    let binding = optional_u32::<E>(
+        cx,
+        Some(E::get_property(cx, value, "binding")?),
+        "binding",
+        0,
+    )?;
     let visibility = optional_u32::<E>(
         cx,
         E::get_property(cx, value, "visibility").ok(),
@@ -2769,7 +2913,12 @@ fn convert_bind_group_entry<E: JsEngine + 'static>(
     cx: E::Context<'_>,
     value: E::Value,
 ) -> Result<WGPUBindGroupEntry, E::Error> {
-    let binding = optional_u32::<E>(cx, E::get_property(cx, value, "binding").ok(), "binding", 0)?;
+    let binding = optional_u32::<E>(
+        cx,
+        Some(E::get_property(cx, value, "binding")?),
+        "binding",
+        0,
+    )?;
     let resource = required_member::<E>(cx, value, "resource")?;
     let buffer_value = E::get_property(cx, resource, "buffer")?;
     let buffer = if E::is_undefined(cx, buffer_value) {
@@ -2811,20 +2960,19 @@ fn convert_bind_group_layout_sequence<'a, E: JsEngine + 'static>(
     Ok(arena.alloc_bind_group_layouts(layouts))
 }
 
-fn convert_command_buffer_sequence<'a, E: JsEngine + 'static>(
+fn convert_command_buffer_sequence<E: JsEngine + 'static>(
     cx: E::Context<'_>,
     value: E::Value,
-    arena: &'a Arena,
-) -> Result<&'a [WGPUCommandBuffer], E::Error> {
+) -> Result<Vec<Arc<Mutex<CommandBufferState>>>, E::Error> {
     let len = sequence_len::<E>(cx, value, "commands.length")?;
     let mut commands = Vec::with_capacity(len);
     for index in 0..len {
-        commands.push(command_buffer_handle::<E>(
+        commands.push(command_buffer_state::<E>(
             cx,
             sequence_item::<E>(cx, value, index)?,
         )?);
     }
-    Ok(arena.alloc_command_buffers(commands))
+    Ok(commands)
 }
 
 fn required_member<E: JsEngine>(
@@ -2959,13 +3107,13 @@ fn compute_pipeline_handle<E: JsEngine + 'static>(
         .ok_or_else(|| E::type_error(cx, "GPUComputePipeline is required"))
 }
 
-fn command_buffer_handle<E: JsEngine + 'static>(
+fn command_buffer_state<E: JsEngine + 'static>(
     cx: E::Context<'_>,
     value: E::Value,
-) -> Result<WGPUCommandBuffer, E::Error> {
+) -> Result<Arc<Mutex<CommandBufferState>>, E::Error> {
     E::payload(cx, value, GPU_COMMAND_BUFFER_CLASS)
         .and_then(|payload| payload.downcast_ref::<CommandBufferPayload>())
-        .map(|payload| payload.command_buffer)
+        .map(|payload| Arc::clone(&payload.state))
         .ok_or_else(|| E::type_error(cx, "GPUCommandBuffer is required"))
 }
 
@@ -3086,7 +3234,10 @@ fn detach_all_ranges<E: JsEngine>(
     let ranges = std::mem::take(&mut state.ranges);
     for range in ranges {
         let mut copy_back = Vec::new();
-        let out = if flush && range.strategy == MappedRangeStrategy::CopyInCopyOut {
+        let should_copy_back = flush
+            && range.strategy == MappedRangeStrategy::CopyInCopyOut
+            && range.map_mode == WGPUMapMode_Write;
+        let out = if should_copy_back {
             copy_back.resize(range.size, 0);
             Some(copy_back.as_mut_slice())
         } else {
@@ -3101,7 +3252,7 @@ fn detach_all_ranges<E: JsEngine>(
             E::release_value(cx, range.value);
             return Err(E::operation_error(cx, "mapped range detach failed"));
         }
-        if flush && range.strategy == MappedRangeStrategy::CopyInCopyOut {
+        if should_copy_back {
             let ptr = mapped_range_ptr::<E>(cx, state, range.offset, range.size);
             if ptr.is_null() {
                 E::release_value(cx, range.value);

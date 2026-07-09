@@ -78,6 +78,39 @@ does not support.
 That is the third phase running in which the most valuable finding came from
 asking *"what does green not mean?"* rather than *"is the code correct?"*
 
+### Gate — PASSED. Block 03 is COMPLETE.
+
+Gates re-run directly by Claude: `core` with the backend env var **unset** EXIT=0
+(36 tests); `cargo test --workspace` EXIT=0 (`quickjs-adapter` 26); `cargo clippy
+--workspace --all-targets -- -D warnings` EXIT=0; both detach spikes EXIT=0. No
+`#[ignore]` anywhere.
+
+**Both red demonstrations were re-run, one of them by me.** Removing the
+`WEBIDL_U32_MAX` guard now makes `b7` **fail** — it passed before the rewrite, and
+that is the difference between a test and a decoration. The mapped-range leak test
+showed `left: 1, right: 2` before the fix.
+
+**The `ReturnedWithOwnership` audit found exactly one wrong site.** `device.queue`
+double-counted; `requestAdapter`, `requestDevice`, and all eight `createXxx`
+returns were already correct. The mock now **counts** queue references and asserts
+the balance, so the class of bug that hid behind counter-less no-op stubs cannot
+hide again.
+
+The `arraybuffer_free` fix carries explicit state rather than guessing from the
+pointer: a flag set around our own `JS_DetachArrayBuffer`, plus a `released` flag
+on the owner. The detach path releases on the first call and frees the box on the
+`NULL` one; the GC-only path releases and frees on its single call. Both of
+QuickJS's sequences are covered without inferring intent from `ptr`.
+
+B19 (command-buffer single-use) is implemented and tested on a real engine. B20 is
+**tests only, deliberately**: an array-like is accepted, a `Set` is rejected, both
+documented as known deviations from WebIDL. Fixing them means adding an iteration
+primitive to `JsEngine`, and choosing its shape with one engine in the tree is the
+error that produced P2-C3. **Phase 4 decides, when codegen emits sequence
+conversions and JavaScriptCore has a vote.**
+
+Verified fixed: B3-M1 … B3-M6, B3-m1 … B3-m5.
+
 ---
 
 ## Phase 2 Review — 2026-07-09

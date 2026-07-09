@@ -3,7 +3,7 @@
 //! QuickJS adapter for `webgpu-native-js`.
 
 use std::any::Any;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -24,6 +24,10 @@ use webgpu_native_js_ffi::native as ffi_wgpu;
 )]
 mod qjs {
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+}
+
+thread_local! {
+    static DETACHING_ARRAYBUFFER: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Adapter result type.
@@ -56,11 +60,20 @@ pub struct Runtime {
 impl Runtime {
     /// Creates a QuickJS runtime configured with the WebGPU binding environment.
     pub fn new() -> Result<Self> {
+        Self::new_with_state(State::new())
+    }
+
+    #[cfg(test)]
+    fn new_with_dispatch(gpu: core::GpuDispatch) -> Result<Self> {
+        Self::new_with_state(State::new_with_dispatch(gpu))
+    }
+
+    fn new_with_state(state: State) -> Result<Self> {
         let rt = unsafe { qjs::JS_NewRuntime() };
         let rt = NonNull::new(rt).ok_or(Error::Null("JS_NewRuntime"))?;
         let ctx = unsafe { qjs::JS_NewContext(rt.as_ptr()) };
         let ctx = NonNull::new(ctx).ok_or(Error::Null("JS_NewContext"))?;
-        let state = Rc::new(State::new());
+        let state = Rc::new(state);
         let raw_state = Rc::into_raw(Rc::clone(&state)).cast::<c_void>().cast_mut();
         unsafe {
             qjs::JS_SetRuntimeOpaque(rt.as_ptr(), raw_state);
@@ -257,8 +270,12 @@ struct State {
 
 impl State {
     fn new() -> Self {
+        Self::new_with_dispatch(gpu_dispatch())
+    }
+
+    fn new_with_dispatch(gpu: core::GpuDispatch) -> Self {
         Self {
-            env: core::Environment::new(gpu_dispatch(), Arc::new(core::ReleaseQueue::new())),
+            env: core::Environment::new(gpu, Arc::new(core::ReleaseQueue::new())),
             classes: Mutex::new(BTreeMap::new()),
             quickjs_to_core: Mutex::new(BTreeMap::new()),
             callbacks: Mutex::new(Vec::new()),
@@ -373,6 +390,7 @@ struct ArrayBufferOwner {
     buffer: core::WGPUBuffer,
     gpu: core::GpuDispatch,
     queue: Arc<core::ReleaseQueue>,
+    released: bool,
 }
 
 struct ObjectPayload {
@@ -702,6 +720,7 @@ impl core::JsEngine for Engine {
             buffer: owner_buffer,
             gpu: env.gpu(),
             queue: Arc::clone(env.queue()),
+            released: false,
         });
         let opaque = Box::into_raw(owner).cast();
         let value = unsafe {
@@ -747,7 +766,11 @@ impl core::JsEngine for Engine {
             let src = unsafe { std::slice::from_raw_parts(ptr, len) };
             out.copy_from_slice(src);
         }
-        unsafe { qjs::JS_DetachArrayBuffer(cx.ctx, value) };
+        crate::DETACHING_ARRAYBUFFER.with(|detaching| {
+            let previous = detaching.replace(true);
+            unsafe { qjs::JS_DetachArrayBuffer(cx.ctx, value) };
+            detaching.set(previous);
+        });
         Ok(())
     }
 
@@ -1561,18 +1584,29 @@ unsafe extern "C" fn arraybuffer_free(
     ptr: *mut c_void,
 ) {
     let _ = catch_unwind(AssertUnwindSafe(|| {
-        if !ptr.is_null() {
-            return;
-        }
         let Some(owner) = NonNull::new(opaque.cast::<ArrayBufferOwner>()) else {
             return;
         };
-        let owner = unsafe { Box::from_raw(owner.as_ptr()) };
-        let _ = owner.queue.enqueue(core::ReleaseRequest::Buffer {
-            buffer: owner.buffer,
-            gpu: owner.gpu,
-        });
+        let detaching = DETACHING_ARRAYBUFFER.with(Cell::get);
+        if !ptr.is_null() && detaching {
+            let owner = unsafe { &mut *owner.as_ptr() };
+            release_arraybuffer_owner(owner);
+            return;
+        }
+        let mut owner = unsafe { Box::from_raw(owner.as_ptr()) };
+        release_arraybuffer_owner(&mut owner);
     }));
+}
+
+fn release_arraybuffer_owner(owner: &mut ArrayBufferOwner) {
+    if owner.released {
+        return;
+    }
+    owner.released = true;
+    let _ = owner.queue.enqueue(core::ReleaseRequest::Buffer {
+        buffer: owner.buffer,
+        gpu: owner.gpu,
+    });
 }
 
 #[cfg(test)]
@@ -1585,6 +1619,8 @@ mod tests {
 
     use super::{c_int, core, ffi_wgpu as wgpu, qjs, CallbackKind, Context, Engine, Runtime};
     use webgpu_native_js_core::JsEngine;
+
+    static COUNTED_BUFFER_RELEASES: AtomicUsize = AtomicUsize::new(0);
 
     struct AdapterRequestState {
         status: Cell<wgpu::WGPURequestAdapterStatus>,
@@ -1811,6 +1847,17 @@ mod tests {
 
     unsafe fn teardown_buffer_release(_buffer: core::WGPUBuffer) {
         TEARDOWN_BUFFER_RELEASES.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn counted_release_dispatch() -> core::GpuDispatch {
+        let mut gpu = super::gpu_dispatch();
+        gpu.buffer_release = counted_buffer_release;
+        gpu
+    }
+
+    unsafe fn counted_buffer_release(buffer: core::WGPUBuffer) {
+        COUNTED_BUFFER_RELEASES.fetch_add(1, Ordering::SeqCst);
+        unsafe { wgpu::wgpuBufferRelease(buffer) };
     }
 
     fn callback_magic(runtime: &Runtime, kind: CallbackKind, index: usize) -> c_int {
@@ -2211,7 +2258,11 @@ mod tests {
             "red-one-range.js",
         );
         let first = global_value(&runtime, "redFirst");
-        unsafe { qjs::JS_DetachArrayBuffer(runtime.raw_context(), first) };
+        crate::DETACHING_ARRAYBUFFER.with(|detaching| {
+            let previous = detaching.replace(true);
+            unsafe { qjs::JS_DetachArrayBuffer(runtime.raw_context(), first) };
+            detaching.set(previous);
+        });
         unsafe { qjs::JS_FreeValue(runtime.raw_context(), first) };
         eval_drop(
             &runtime,
@@ -2298,6 +2349,39 @@ mod tests {
             "keptView = null; keptRange = null;",
             "range-keepalive-cleanup.js",
         );
+        runtime.clear_global("device").expect("clear device");
+        runtime.run_gc();
+        runtime.run_gc();
+        let _ = runtime.drain_releases().expect("drain");
+    }
+
+    #[test]
+    fn mapped_range_dropped_without_unmap_releases_buffer_ref_on_gc() {
+        let setup = native_setup();
+        COUNTED_BUFFER_RELEASES.store(0, Ordering::SeqCst);
+        let runtime =
+            Runtime::new_with_dispatch(counted_release_dispatch()).expect("quickjs runtime");
+        let wrapped = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("device", wrapped)
+            .expect("set device");
+        eval_drop(
+            &runtime,
+            r#"
+                var gcRangeBuffer = device.createBuffer({ size: 8, usage: 2, mappedAtCreation: true });
+                var gcOnlyRange = gcRangeBuffer.getMappedRange(0, 4);
+                var gcOnlyView = new Uint8Array(gcOnlyRange);
+                gcOnlyView[0] = 61;
+                gcOnlyRange = null;
+                gcOnlyView = null;
+                gcRangeBuffer = null;
+            "#,
+            "mapped-range-gc-only.js",
+        );
+        runtime.run_gc();
+        runtime.run_gc();
+        unsafe { runtime.tick(setup.instance) }.expect("tick");
+        assert_eq!(COUNTED_BUFFER_RELEASES.load(Ordering::SeqCst), 2);
         runtime.clear_global("device").expect("clear device");
         runtime.run_gc();
         runtime.run_gc();
@@ -2400,6 +2484,122 @@ mod tests {
             &runtime,
             "twiceEncoder = afterFinishEncoder = tmpA = tmpB = passEncoder = pass = null;",
             "invalid-states-cleanup.js",
+        );
+        runtime.clear_global("device").expect("clear device");
+        runtime.run_gc();
+        runtime.run_gc();
+        let _ = runtime.drain_releases().expect("drain");
+    }
+
+    #[test]
+    fn command_buffer_submit_is_single_use() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let wrapped = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("device", wrapped)
+            .expect("set device");
+        eval_drop(
+            &runtime,
+            r#"
+                function mustThrow(fn, needle) {
+                    var threw = false;
+                    try {
+                        fn();
+                    } catch (e) {
+                        threw = String(e).indexOf(needle) >= 0;
+                    }
+                    if (!threw) {
+                        throw new Error('expected throw containing: ' + needle);
+                    }
+                }
+
+                var singleUseEncoder = device.createCommandEncoder();
+                var singleUseCommand = singleUseEncoder.finish();
+                device.queue.submit([singleUseCommand]);
+                mustThrow(function () {
+                    device.queue.submit([singleUseCommand]);
+                }, 'GPUCommandBuffer is consumed');
+            "#,
+            "command-buffer-single-use.js",
+        );
+        eval_drop(
+            &runtime,
+            "singleUseEncoder = singleUseCommand = null;",
+            "command-buffer-single-use-cleanup.js",
+        );
+        runtime.clear_global("device").expect("clear device");
+        runtime.run_gc();
+        runtime.run_gc();
+        let _ = runtime.drain_releases().expect("drain");
+    }
+
+    #[test]
+    /// Documents a known deviation from WebIDL: plain array-like objects are
+    /// accepted by today's temporary length/index sequence conversion.
+    fn sequence_conversion_array_like_is_known_webidl_deviation() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let wrapped = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("device", wrapped)
+            .expect("set device");
+        eval_drop(
+            &runtime,
+            r#"
+                // Known deviation: WebIDL sequence<T> is iterator-based and
+                // rejects plain array-like objects. Phase 4 codegen will replace
+                // today's temporary length/index conversion.
+                var deviationBgl = device.createBindGroupLayout({ entries: [] });
+                var arrayLikeLayouts = { length: 1, 0: deviationBgl };
+                var deviationLayout = device.createPipelineLayout({ bindGroupLayouts: arrayLikeLayouts });
+            "#,
+            "sequence-array-like-deviation.js",
+        );
+        eval_drop(
+            &runtime,
+            "deviationBgl = deviationLayout = null;",
+            "sequence-array-like-deviation-cleanup.js",
+        );
+        runtime.clear_global("device").expect("clear device");
+        runtime.run_gc();
+        runtime.run_gc();
+        let _ = runtime.drain_releases().expect("drain");
+    }
+
+    #[test]
+    /// Documents a known deviation from WebIDL: iterable sequence values such
+    /// as `Set` are rejected until Phase 4 codegen defines iterator conversion.
+    fn sequence_conversion_set_rejection_is_known_webidl_deviation() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let wrapped = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("device", wrapped)
+            .expect("set device");
+        eval_drop(
+            &runtime,
+            r#"
+                // Known deviation: WebIDL sequence<T> accepts iterable objects
+                // such as Set. Phase 4 codegen will replace today's temporary
+                // length/index conversion.
+                var setBgl = device.createBindGroupLayout({ entries: [] });
+                var threw = false;
+                try {
+                    device.createPipelineLayout({ bindGroupLayouts: new Set([setBgl]) });
+                } catch (e) {
+                    threw = true;
+                }
+                if (!threw) {
+                    throw new Error('Set sequence should be rejected by current deviation');
+                }
+            "#,
+            "sequence-set-deviation.js",
+        );
+        eval_drop(
+            &runtime,
+            "setBgl = null;",
+            "sequence-set-deviation-cleanup.js",
         );
         runtime.clear_global("device").expect("clear device");
         runtime.run_gc();

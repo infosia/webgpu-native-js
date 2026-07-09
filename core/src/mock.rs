@@ -635,8 +635,10 @@ struct MockGpuState {
     next: usize,
     device_add_refs: usize,
     buffer_add_refs: usize,
+    queue_add_refs: usize,
     device_releases: usize,
     buffer_releases: usize,
+    queue_releases: usize,
     buffer_destroys: usize,
     mapped_range_calls: usize,
     const_mapped_range_calls: usize,
@@ -1004,8 +1006,21 @@ unsafe fn buffer_release(_buffer: WGPUBuffer) {
     });
 }
 
-unsafe fn queue_add_ref(_queue: WGPUQueue) {}
-unsafe fn queue_release(_queue: WGPUQueue) {}
+unsafe fn queue_add_ref(_queue: WGPUQueue) {
+    GPU_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        state.queue_add_refs += 1;
+        state.native_order.push("queue_add_ref");
+    });
+}
+
+unsafe fn queue_release(_queue: WGPUQueue) {
+    GPU_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        state.queue_releases += 1;
+        state.native_order.push("queue_release");
+    });
+}
 
 unsafe fn queue_write_buffer(
     _queue: WGPUQueue,
@@ -1154,8 +1169,9 @@ mod tests {
         convert_buffer_binding_layout, convert_buffer_descriptor,
         convert_compute_pipeline_descriptor, convert_shader_module_descriptor,
         device_create_bind_group, device_create_buffer, device_queue_get, finalize_buffer,
-        finalize_device, queue_write_buffer, wrap_device, BindGroupLayoutPayload, BufferPayload,
-        DevicePayload, JsEngine, ShaderModulePayload,
+        finalize_device, finalize_queue, optional_gpu_size_to_usize, wrap_device,
+        BindGroupLayoutPayload, BufferPayload, DevicePayload, JsEngine, QueuePayload,
+        ShaderModulePayload,
     };
 
     fn descriptor(rt: &Runtime, fields: &[(&str, Value)]) -> Value {
@@ -1413,29 +1429,41 @@ mod tests {
 
     #[test]
     fn b7_write_buffer_rejects_size_that_would_truncate_on_32_bit_hosts() {
+        let rt = runtime();
+        let cx = rt.context();
+
+        let error =
+            optional_gpu_size_to_usize::<Engine>(cx, Some(rt.number(4_294_967_296.0)), "size", 0)
+                .expect_err("oversized size must fail before narrowing");
+
+        assert_eq!(error, "TypeError: size");
+    }
+
+    #[test]
+    fn device_queue_get_balances_returned_owned_queue_reference() {
         reset_gpu();
         let rt = runtime();
         let cx = rt.context();
         let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
-        let queue = device_queue_get::<Engine>(cx, device).expect("queue");
-        let desc = descriptor(&rt, &[("size", rt.number(16.0)), ("usage", rt.number(8.0))]);
-        let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("buffer");
-        let data = Engine::new_arraybuffer_copy(cx, &[1, 2, 3, 4]).expect("arraybuffer");
+        let _queue = device_queue_get::<Engine>(cx, device).expect("queue");
 
-        let error = queue_write_buffer::<Engine>(
-            cx,
-            queue,
-            &[
-                buffer,
-                rt.number(0.0),
-                data,
-                rt.number(0.0),
-                rt.number(4_294_967_296.0),
-            ],
-        )
-        .expect_err("oversized size must fail");
-
-        assert_eq!(error, "TypeError: size");
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.queue_add_refs, 0);
+            assert_eq!(state.queue_releases, 0);
+        });
+        finalize_queue(
+            Box::new(QueuePayload {
+                queue: fake_handle(1001),
+            }),
+            &rt.env,
+        );
+        assert_eq!(rt.queue().drain().expect("drain queue release"), 1);
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.queue_add_refs, 0);
+            assert_eq!(state.queue_releases, 1);
+        });
     }
 
     #[test]
