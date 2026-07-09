@@ -69,14 +69,13 @@ whole point of going through the C ABI.
 
 | Backend | Prebuilt locally | Notes |
 |---|---|---|
-| yawgpu | `.a` + `.dylib` (release) | Tier 1. Exports 199 of the canonical 202; the three absent are deliberate non-goals (D2, closed). **Its directory must also contain `libtint_shim.dylib`** — yawgpu does not colocate it (D6, open). |
-| wgpu-native | `.a` + `.dylib` (release) | Tier 2. Exports 227 — a superset; no canonical symbol missing, no non-system dylib dependency. |
+| yawgpu | `.a` + `.dylib` (release) | Tier 1. Exports 199 of the canonical 202; the three absent are deliberate non-goals (D2, closed). `target/release` is self-contained and **relocatable**: `@rpath` install name, `libtint_shim.dylib` colocated via `@loader_path` (D5, D6, closed). |
+| wgpu-native | `.a` + `.dylib` (release) | Tier 2. Exports 227 — a superset; no canonical symbol missing, no non-system dylib dependency. Still has an absolute `install_name` (D5, open, low priority). |
 | Dawn | none | Tier 2. Heavy build (GN + depot_tools). Deferred to Phase 7 CI per plan §4. |
 
-Both backends' dylibs currently carry an absolute `install_name` into their build
-tree (D5, open), so a linked binary embeds that path and ignores our `LC_RPATH`.
-The build works; the artifact is not relocatable. This blocks iOS packaging, not
-development.
+Point `WEBGPU_NATIVE_JS_BACKEND_LIB_DIR` at the backend's `target/release`. For
+yawgpu that now works from any location the two dylibs are copied to, which is
+what makes iOS packaging tractable.
 
 Dawn exists locally as two checkouts, an upstream one and a fork. They pin
 **identical** `webgpu-headers`, so either serves as a header reference. Prefer

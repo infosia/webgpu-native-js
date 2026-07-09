@@ -193,8 +193,23 @@ where development effort goes, not which implementation is most finished today.
 
 ## D5 — both backends' dylibs carry an absolute `install_name` (macOS/iOS)
 
-**Status: OPEN. Found 2026-07-09 during Phase 0.2. Affects shipping, not
-correctness.**
+**Status: CLOSED for yawgpu (2026-07-09). OPEN for wgpu-native, low priority.**
+
+yawgpu now sets `install_name` to `@rpath/libyawgpu.dylib`. Verified: the Phase
+0.2 test binary's load command changed from an absolute path to
+`@rpath/libyawgpu.dylib`, and **our `LC_RPATH` is now the thing that resolves
+it.** The rpath emission that D5 called "dead code, do not delete" became
+load-bearing exactly as predicted.
+
+wgpu-native still exports an absolute `install_name` into its build tree. It is
+Tier 2, upstream is not ours, and iOS ships yawgpu — so this stays open at low
+priority rather than being worked around. Do not add an `install_name_tool`
+rewrite to `ffi/build.rs` for it without a concrete need.
+
+The original analysis follows.
+
+**Status when opened: OPEN. Found 2026-07-09 during Phase 0.2. Affects shipping,
+not correctness.**
 
 Cargo's default for a `cdylib` on macOS leaves the `install_name` as an absolute
 path into the build tree:
@@ -246,20 +261,25 @@ exactly what becomes load-bearing the moment (1) lands. Do not delete it as
 
 ## D6 — yawgpu's dylib has a transitive `@rpath/libtint_shim.dylib` not colocated
 
-**Status: OPEN (upstream). Found 2026-07-09 during Phase 0.2. Still reproduces
-after the D2 fix — D5 and D6 were not part of that change.**
+**Status: CLOSED 2026-07-09. Fixed upstream in yawgpu.**
 
-Reproduced directly against the rebuilt library. Pointing
-`WEBGPU_NATIVE_JS_BACKEND_LIB_DIR` at yawgpu's own `target/release`:
+yawgpu now colocates `libtint_shim.dylib` beside `libyawgpu.dylib` and references
+it as `@loader_path/libtint_shim.dylib`, so it resolves relative to the library
+that needs it rather than relative to the consumer's binary — fix (2) below.
 
-```
-dyld: Library not loaded: @rpath/libtint_shim.dylib
-```
+Verified three ways, because "it builds" proves nothing here:
 
-Copying `libtint_shim.dylib` next to `libyawgpu.dylib` in a curated directory
-makes the Phase 0.2 tests pass (2 passed). That curated directory is how yawgpu
-is exercised until this is fixed, and it is the reason `specs/reference/workflow.md`
-tells contributors to build one.
+1. `WEBGPU_NATIVE_JS_BACKEND_LIB_DIR` pointed at yawgpu's own `target/release`
+   now passes (previously: `dyld: Library not loaded: @rpath/libtint_shim.dylib`).
+2. The test binary's load command is `@rpath/libyawgpu.dylib`, resolved through
+   the `LC_RPATH` we emit — so D5's fix is actually in force, not merely present.
+3. **Relocation test.** Both dylibs copied into a scratch directory unrelated to
+   yawgpu's build tree; tests pass from there. That is the property that
+   matters, and it is the one a compile check never exercises.
+
+The original analysis follows.
+
+**Status when opened: OPEN (upstream). Found 2026-07-09 during Phase 0.2.**
 
 ```
 libyawgpu.dylib
