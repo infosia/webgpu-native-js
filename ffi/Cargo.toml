@@ -1,0 +1,14 @@
+[package]
+name = "ffi"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[features]
+default = []
+backend-yawgpu = []
+backend-wgpu-native = []
+backend-dawn = []
+
+[build-dependencies]
+bindgen = "0.72.1"

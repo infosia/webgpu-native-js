@@ -68,10 +68,23 @@ A slice is the smallest unit of dispatchable work. Depending on the phase:
 
 | Gate | Command | Who |
 |---|---|---|
-| Build | `cargo build --workspace` | both |
-| Test | `cargo test --workspace` | Claude (backstop); agent runs targeted subsets |
-| Lint | `cargo clippy --workspace --all-targets -- -D warnings` | both |
+| Build | `cargo build --workspace --features backend-yawgpu` | both |
+| Test | `cargo test --workspace --features backend-yawgpu` | Claude (backstop); agent runs targeted subsets |
+| Lint | `cargo clippy --workspace --all-targets --features backend-yawgpu -- -D warnings` | both |
 | Dual-engine | the slice's `.js` conformance script under **both** engines, identical expected output | Claude |
+
+**A backend feature is mandatory.** `ffi` refuses to build with zero or more than
+one `backend-*` feature (`compile_error!`), so a bare `cargo test --workspace`
+fails by design. `WEBGPU_NATIVE_JS_BACKEND_LIB_DIR` must also be set, to a
+directory containing the backend's dynamic library — see
+`specs/reference/dependencies.md`. Wire it up in a **gitignored**
+`.cargo/config.toml`, never in a committed file.
+
+For yawgpu specifically that directory must also contain `libtint_shim.dylib`,
+which yawgpu does not colocate (`specs/tracking/backend-deltas.md` → D6).
+
+**The spike crates are outside the workspace** and are gated individually:
+`cargo test --offline --manifest-path spikes/<name>/Cargo.toml`.
 
 **Headless-first** (`CLAUDE.md` principle 7): every gate above must pass with no
 GPU and no window. Real-GPU and native-surface tests are separately gated and

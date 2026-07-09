@@ -158,6 +158,95 @@ where development effort goes, not which implementation is most finished today.
 
 ---
 
+## D5 — both backends' dylibs carry an absolute `install_name` (macOS/iOS)
+
+**Status: OPEN. Found 2026-07-09 during Phase 0.2. Affects shipping, not
+correctness.**
+
+Cargo's default for a `cdylib` on macOS leaves the `install_name` as an absolute
+path into the build tree:
+
+```
+libyawgpu.dylib      -> <build-tree>/target/release/deps/libyawgpu.dylib
+libwgpu_native.dylib -> <build-tree>/target/release/deps/libwgpu_native.dylib
+```
+
+Consequence, verified by inspecting the Phase 0.2 test binary's load commands:
+the binary records that **absolute path** as the library to load. Our `build.rs`
+emits an `LC_RPATH` entry, and dyld **never consults it**, because the load
+command is absolute rather than `@rpath/…`.
+
+Two things follow, and the second is the one that matters.
+
+1. **Our rpath is currently dead code.** The Phase 0.2 tests pass only because
+   the absolute path happens to exist on the machine that built the backend.
+   Move or rename that directory and the binary breaks, with no fallback.
+2. **The artifact violates the no-local-paths rule even though the source does
+   not.** `build.rs` is clean — a hygiene grep over the tree finds nothing — yet
+   the linked binary embeds a developer's home directory. The rule is about what
+   we *ship*, and a check that only greps source misses this.
+
+**This is not a yawgpu bug.** wgpu-native does the same; it is what Rust emits
+for a `cdylib` unless told otherwise. It is nonetheless ours to solve, because
+iOS requires `@rpath`-relative install names for embedded frameworks.
+
+Fixes, in preference order:
+
+1. **Upstream, cheap:** each backend sets
+   `cargo:rustc-cdylib-link-arg=-Wl,-install_name,@rpath/libX.dylib` in its own
+   `build.rs`. One line. Then our existing `LC_RPATH` starts doing its job.
+2. **Ours, defensive:** `ffi/build.rs` copies the dylib into `$OUT_DIR` and runs
+   `install_name_tool -id @rpath/...`. Works for backends we do not control, but
+   it is a build-time rewrite of someone else's artifact and should be a last
+   resort.
+3. Link the staticlib. **Rejected**: a Rust `staticlib` bundles its own `std`;
+   linking it into another Rust target duplicates those symbols.
+
+Until fixed, `ffi/build.rs` keeps emitting the rpath. It is harmless, and it is
+exactly what becomes load-bearing the moment (1) lands. Do not delete it as
+"unused".
+
+**Android is unaffected** — Rust sets a plain `SONAME` for `.so` targets.
+**iOS is affected** and will fail at packaging time, not build time.
+
+---
+
+## D6 — yawgpu's dylib has a transitive `@rpath/libtint_shim.dylib` not colocated
+
+**Status: OPEN (upstream). Found 2026-07-09 during Phase 0.2.**
+
+```
+libyawgpu.dylib
+  └── @rpath/libtint_shim.dylib
+```
+
+`libtint_shim.dylib` is yawgpu's C++ shim over Tint. It is **not** placed next to
+`libyawgpu.dylib`; it is built into
+`target/release/build/yawgpu-tint-<hash>/out/build/`, under a directory whose
+name embeds a Cargo build hash.
+
+So a consumer that points `WEBGPU_NATIVE_JS_BACKEND_LIB_DIR` at yawgpu's release
+directory gets a **dyld failure at test run time**, not a link error. Pointing it
+at a hand-curated directory containing both dylibs works, which is how Phase 0.2
+was verified against yawgpu.
+
+The hash in the path makes this unfixable from the consumer side: there is no
+stable location to add to the rpath.
+
+**Fix upstream in yawgpu**, one of:
+
+1. Static-link the Tint shim into `libyawgpu.dylib`, so there is one artifact.
+2. Copy `libtint_shim.dylib` next to `libyawgpu.dylib` in `build.rs`, and set its
+   install name to `@loader_path/libtint_shim.dylib` so it resolves relative to
+   the library that needs it.
+
+(1) is simpler for consumers and is what a distributable backend should do.
+Contrast wgpu-native, which has no non-system dylib dependency at all.
+
+Recorded in yawgpu's `HANDOFF.md` alongside D2.
+
+---
+
 ## D4 — Dawn
 
 **Status: DEFERRED.** No build artifacts exist locally, and a Dawn build needs

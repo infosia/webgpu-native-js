@@ -1,0 +1,4 @@
+[workspace]
+members = ["ffi"]
+exclude = ["spikes/jsc-detach", "spikes/quickjs-detach", "third_party/*"]
+resolver = "2"
