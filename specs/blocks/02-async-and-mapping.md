@@ -46,8 +46,25 @@ entry point); `GPUBuffer.mapAsync` / `getMappedRange` / `unmap`;
 promoted to drain from `tick()`.
 
 **Out.** Error scopes, `uncapturederror`, device-lost, `GPUQueue`, textures,
-pipelines, codegen, and the JSC adapter. Platform bring-up (Android/iOS/Windows)
-is **block 03** — this block ships on macOS only, headless.
+pipelines, codegen, and the JSC adapter.
+
+**Mobile bring-up is deferred, by decision (2026-07-09).** The project owner has
+ruled out iOS/Android **simulators and emulators** entirely, and deferred real
+devices. The near-term goal is to **fill out the API surface on Windows and
+macOS** and find out whether the design is feasible before paying for
+cross-compilation.
+
+This is the right order. Four-platform parity is a *verification* of a design; it
+teaches nothing while the design is still moving, and Phase 2 has already shown
+the design still moves (A23). What it costs is that **A21's 32-bit truncation
+hazard is unexercised until an armv7 build exists** — which is precisely why A21
+demands the guard be tested with `offset = 2^32` on a 64-bit host, where it must
+fire anyway.
+
+Windows is still a first-class target of this block: it is where a second
+word-size and a second linker are exercised. What is deferred is **iOS and
+Android only**, and the old "block 03 = four-platform bring-up" is now
+**block 05**, after the API surface is filled.
 
 ---
 
@@ -69,9 +86,49 @@ passes every test that avoids `await` and hangs forever on the first one that
 uses it. Step 3 is last because QuickJS finalizers run *during* step 2, when the
 last reference to a wrapper is dropped.
 
-**A2 — `JS_ExecutePendingJob`'s `<0` return must surface the exception.** A loop
-that only checks `JS_IsJobPending` makes a throwing `.then()` vanish silently.
-`tick()` returns a `Result`; the exception message travels with it.
+**A2 — `JS_ExecutePendingJob`'s `<0` return must surface the exception**, and
+`tick()` returns a `Result` carrying the message.
+
+**Corrected 2026-07-09, and the original premise was wrong.** A2 first claimed
+that "a loop which only checks `JS_IsJobPending` makes a throwing `.then()`
+vanish". It does not. `quickjs.c`'s `promise_reaction_job` calls the handler,
+and:
+
+```c
+is_reject = JS_IsException(res);
+if (is_reject) {
+    if (unlikely(JS_IsUncatchableError(ctx->rt->current_exception)))
+        return JS_EXCEPTION;          /* only interrupts / stack overflow */
+    res = JS_GetException(ctx);
+}
+func = argv[is_reject];               /* reject the derived promise */
+```
+
+A throw inside `.then()` is **captured and turned into a rejection of the derived
+promise**. `JS_ExecutePendingJob` returns `<0` only for an **uncatchable** error.
+So `<0` must still be surfaced — it means the runtime is unwinding — but it is
+not the mechanism that catches a throwing continuation.
+
+*(Found by the implementing agent, who was invited to say when the spec is wrong.
+It was. Verified at source before being written down.)*
+
+**A22 — the real vanishing hazard is an unhandled rejection, and it needs
+`JS_SetHostPromiseRejectionTracker`.** A `.then()` that throws with no `.catch()`
+rejects a promise nobody observes, and nothing in `tick()`'s three queues reports
+it. Install the tracker; surface unhandled rejections through `tick()`'s result
+or a host callback. Do not let a script's async failure disappear.
+
+`quickjs.h` exposes:
+
+```c
+typedef void JSHostPromiseRejectionTracker(JSContext *ctx, JSValueConst promise,
+                                           JSValueConst reason, bool is_handled, void *opaque);
+void JS_SetHostPromiseRejectionTracker(JSRuntime *rt, JSHostPromiseRejectionTracker *cb, void *opaque);
+```
+
+Note `is_handled`: a rejection can be handled *later*, so the tracker fires twice
+for a promise that gets a `.catch()` after the fact. Report only what remains
+unhandled once the microtask queue is drained.
 
 **A3 — every JS-facing async op uses `WGPUCallbackMode_AllowProcessEvents`.**
 `requestAdapter`, `requestDevice`, `mapAsync`. `WGPUBufferMapCallbackInfo` has a
@@ -225,6 +282,33 @@ early, and it is a better time to learn it.
 **A19 — the adapter names no class and no member** (block 01 → R24), and **holds
 no lock across a call into `core/`** (R25). The boundary is re-entrant: `core/`
 calls back through `E::payload` while servicing a method.
+
+**A23 — the WebGPU callback runs inside a handle scope, and there is no way to
+opt out.** *(Added after the first Phase 2 attempt, which reintroduced Phase 1's
+CRITICAL through a hole in the trait.)*
+
+The callback fires from `wgpuInstanceProcessEvents`, outside any JS call, so it
+has no per-call scope to inherit. The first attempt solved this with
+`type AsyncContext` plus `fn context_from_async(cx) -> Context<'static>`, and
+QuickJS implemented the latter as `Context { ctx, scope: None }`. **Every owned
+value the callback then created — the settled promise's plumbing included — was
+owned by nobody.** P1-C1 verbatim, one layer down. It is why the real-engine
+`mapAsync` test leaked a promise graph at runtime teardown.
+
+Two rules follow:
+
+- **`Context`'s scope is not `Option`.** An engine that can silently decline the
+  scope will, under pressure, decline it. The type must make the obligation
+  unavoidable.
+- **The callback opens its own scope.** Give the trait
+  `fn with_async_scope<R>(cx: Self::AsyncContext, f: impl FnOnce(Self::Context<'_>) -> R) -> R`
+  (or equivalent), so the callback body runs with a real `Context<'_>` whose
+  scope drops on the way out. `Context<'static>` must not exist.
+
+This is still an **addition** to `JsEngine`, not a change to `core/`'s logic — so
+A18 holds. But it is the second time this project has had to learn that value
+ownership is the boundary's hardest edge, and the first was three days of review
+ago.
 
 **A20 — the mock is at least as strict as the strictest engine** (R23). It models
 value ownership, and now also: promise settlement (settled exactly once), detach

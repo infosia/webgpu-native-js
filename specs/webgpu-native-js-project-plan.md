@@ -572,13 +572,29 @@ resolved by reading the header (§2.6). Removed.
 1. `impl JsEngine for QuickJs` — value ops, `ClassSpec` → `JSClassDef`.
 2. Promise via `JS_NewPromiseCapability`; microtask pump via `JS_ExecutePendingJob`.
 3. Expose `tick()` (§2.7) as public API; wire the async vertical slice through it.
-4. Build integration: NDK (Android), clang cross-compile (iOS, interpreter-only),
-   Windows/macOS for dev/test.
-5. Validate on Android emulator + physical device, iOS simulator + physical
-   device, Windows, macOS. Confirm behavioral parity across all four — this is
-   the point of choosing QuickJS; verify it actually holds.
+4. Build integration. **Rescoped 2026-07-09 by the project owner:** iOS/Android
+   **simulators and emulators are ruled out entirely**, and real devices are
+   deferred. Windows and macOS only, until the API surface is filled out and the
+   design is shown feasible.
+5. ~~Validate on Android emulator + physical device, iOS simulator + physical
+   device, Windows, macOS.~~ Deferred to the new **block 05**, after the API
+   surface exists.
 
-**Exit criteria:** sync + async slices pass on all four platforms, consistently.
+**Rationale, and the cost.** Four-platform parity *verifies* a design; it teaches
+nothing while the design is still moving, and Phase 2's own review showed it still
+moves. Filling the API surface first is cheaper and more informative. The cost is
+that block 02's **A21** — `wgpuBufferMapAsync` takes `size_t` offsets, which
+truncate silently on armv7 and i686 — goes unexercised on a 32-bit target until
+block 05. A21 therefore requires the range guard be **tested with `offset = 2^32`
+on a 64-bit host**, where it must fire anyway. Parity is not assumed; it is
+deferred with a stand-in test and a written debt.
+
+Windows remains in scope throughout: it is where a second word size and a second
+linker get exercised without a device.
+
+**Exit criteria (revised):** the sync and async slices pass headless on macOS and
+Windows, and every capability Phase 2 adds is an *addition* to `JsEngine` rather
+than a change to `core/`'s logic.
 
 ### Phase 3 — JavaScriptCore adapter (boundary validation)
 

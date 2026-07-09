@@ -90,6 +90,21 @@ impl Runtime {
         Ok(value)
     }
 
+    /// Wraps a WebGPU instance as a JavaScript `GPU`.
+    pub fn wrap_gpu(&self, instance: ffi_wgpu::WGPUInstance) -> Result<qjs::JSValue> {
+        let scope = Scope::new(self.raw_context());
+        let value = core::wrap_gpu::<Engine>(
+            Context {
+                ctx: self.raw_context(),
+                scope: Some(&scope),
+            },
+            instance,
+        )
+        .map_err(|value| Error::Exception(exception_or_value(self.raw_context(), value)))?;
+        scope.escape(value);
+        Ok(value)
+    }
+
     /// Sets a global property to a JavaScript value. The runtime adopts the value.
     pub fn set_global_value(&self, name: &str, value: qjs::JSValue) -> Result<()> {
         let name = CString::new(name)?;
@@ -144,6 +159,43 @@ impl Runtime {
     /// Drains the core release queue.
     pub fn drain_releases(&self) -> std::result::Result<usize, core::QueueError> {
         self.state.env.queue().drain()
+    }
+
+    /// Pumps WebGPU callbacks, QuickJS microtasks, then queued releases.
+    pub fn tick(&self, instance: ffi_wgpu::WGPUInstance) -> Result<()> {
+        unsafe { ffi_wgpu::wgpuInstanceProcessEvents(instance) };
+        loop {
+            let mut job_ctx = ptr::null_mut();
+            let rc = unsafe { qjs::JS_ExecutePendingJob(self.rt.as_ptr(), &mut job_ctx) };
+            if rc > 0 {
+                continue;
+            }
+            if rc == 0 {
+                break;
+            }
+            let ctx = if job_ctx.is_null() {
+                self.raw_context()
+            } else {
+                job_ctx
+            };
+            return Err(Error::Exception(take_exception(
+                ctx,
+                "JS_ExecutePendingJob",
+            )));
+        }
+        self.drain_releases()
+            .map_err(|_| Error::Exception("release queue is poisoned".to_owned()))?;
+        Ok(())
+    }
+
+    /// Pumps only WebGPU callbacks, for event-loop regression tests.
+    pub fn process_events_only(&self, instance: ffi_wgpu::WGPUInstance) {
+        unsafe { ffi_wgpu::wgpuInstanceProcessEvents(instance) };
+    }
+
+    /// Runs the engine garbage collector.
+    pub fn run_gc(&self) {
+        unsafe { qjs::JS_RunGC(self.rt.as_ptr()) };
     }
 }
 
@@ -240,6 +292,10 @@ impl core::JsEngine for Engine {
     type Value = qjs::JSValue;
     type Context<'a> = Context<'a>;
     type Error = qjs::JSValue;
+    type AsyncContext = *mut qjs::JSContext;
+
+    const MAPPED_RANGE_STRATEGY: core::MappedRangeStrategy =
+        core::MappedRangeStrategy::ZeroCopyDetach;
 
     fn environment<'a>(cx: Self::Context<'a>) -> &'a core::Environment {
         let state = state_from_context(cx.ctx);
@@ -413,6 +469,138 @@ impl core::JsEngine for Engine {
 
     fn operation_error(cx: Self::Context<'_>, message: &str) -> Self::Error {
         throw_message(cx.ctx, message, false)
+    }
+
+    fn async_context(cx: Self::Context<'_>) -> Self::AsyncContext {
+        cx.ctx
+    }
+
+    fn context_from_async(cx: Self::AsyncContext) -> Self::Context<'static> {
+        Context {
+            ctx: cx,
+            scope: None,
+        }
+    }
+
+    fn async_undefined(cx: Self::AsyncContext) -> Self::Value {
+        Self::undefined(Context {
+            ctx: cx,
+            scope: None,
+        })
+    }
+
+    fn async_error_value(cx: Self::AsyncContext, message: &str) -> Self::Value {
+        match CString::new(message) {
+            Ok(message) => unsafe { qjs::JS_NewString(cx, message.as_ptr()) },
+            Err(_) => Self::undefined(Context {
+                ctx: cx,
+                scope: None,
+            }),
+        }
+    }
+
+    fn error_value_from_error(_cx: Self::AsyncContext, error: Self::Error) -> Self::Value {
+        error
+    }
+
+    fn new_promise(
+        cx: Self::Context<'_>,
+    ) -> core::Result<(Self::Value, core::Deferred<Self>), Self::Error> {
+        let mut resolving = [Self::undefined(cx), Self::undefined(cx)];
+        let promise = unsafe { qjs::JS_NewPromiseCapability(cx.ctx, resolving.as_mut_ptr()) };
+        if unsafe { qjs::JS_IsException(promise) } {
+            return Err(promise);
+        }
+        if let Some(scope) = cx.scope {
+            scope.track(promise);
+        }
+        Ok((promise, core::Deferred::new(resolving[0], resolving[1])))
+    }
+
+    fn settle_deferred(
+        cx: Self::AsyncContext,
+        deferred: core::Deferred<Self>,
+        result: std::result::Result<Self::Value, Self::Value>,
+    ) {
+        let (func, arg) = match result {
+            Ok(value) => (deferred.resolve(), value),
+            Err(value) => (deferred.reject(), value),
+        };
+        let this = Self::undefined(Context {
+            ctx: cx,
+            scope: None,
+        });
+        let mut argv = [arg];
+        let call = unsafe { qjs::JS_Call(cx, func, this, 1, argv.as_mut_ptr()) };
+        unsafe {
+            qjs::JS_FreeValue(cx, call);
+            qjs::JS_FreeValue(cx, arg);
+            qjs::JS_FreeValue(cx, deferred.resolve());
+            qjs::JS_FreeValue(cx, deferred.reject());
+        }
+    }
+
+    fn new_external_arraybuffer(
+        cx: Self::Context<'_>,
+        ptr: *mut u8,
+        len: usize,
+    ) -> core::Result<Self::Value, Self::Error> {
+        let value =
+            unsafe { qjs::JS_NewArrayBuffer(cx.ctx, ptr, len, None, ptr::null_mut(), false) };
+        if unsafe { qjs::JS_IsException(value) } {
+            Err(value)
+        } else {
+            if let Some(scope) = cx.scope {
+                scope.track(value);
+            }
+            Ok(value)
+        }
+    }
+
+    fn new_arraybuffer_copy(
+        cx: Self::Context<'_>,
+        bytes: &[u8],
+    ) -> core::Result<Self::Value, Self::Error> {
+        let value = unsafe { qjs::JS_NewArrayBufferCopy(cx.ctx, bytes.as_ptr(), bytes.len()) };
+        if unsafe { qjs::JS_IsException(value) } {
+            Err(value)
+        } else {
+            if let Some(scope) = cx.scope {
+                scope.track(value);
+            }
+            Ok(value)
+        }
+    }
+
+    fn detach_arraybuffer(cx: Self::Context<'_>, value: Self::Value) {
+        unsafe { qjs::JS_DetachArrayBuffer(cx.ctx, value) };
+    }
+
+    fn arraybuffer_len(cx: Self::Context<'_>, value: Self::Value) -> Option<usize> {
+        let mut len = 0usize;
+        unsafe {
+            let _ = qjs::JS_GetArrayBuffer(cx.ctx, &mut len, value);
+        }
+        Some(len)
+    }
+
+    fn arraybuffer_copy_to(cx: Self::Context<'_>, value: Self::Value, dst: &mut [u8]) -> bool {
+        let mut len = 0usize;
+        let ptr = unsafe { qjs::JS_GetArrayBuffer(cx.ctx, &mut len, value) };
+        if ptr.is_null() || len != dst.len() {
+            return false;
+        }
+        let src = unsafe { std::slice::from_raw_parts(ptr, len) };
+        dst.copy_from_slice(src);
+        true
+    }
+
+    fn duplicate_value(cx: Self::Context<'_>, value: Self::Value) -> Self::Value {
+        unsafe { qjs::JS_DupValue(cx.ctx, value) }
+    }
+
+    fn release_value(cx: Self::Context<'_>, value: Self::Value) {
+        unsafe { qjs::JS_FreeValue(cx.ctx, value) };
     }
 }
 
@@ -821,13 +1009,39 @@ fn exception_or_value(ctx: *mut qjs::JSContext, value: qjs::JSValue) -> String {
 
 fn gpu_dispatch() -> core::GpuDispatch {
     core::GpuDispatch {
+        instance_request_adapter,
+        adapter_request_device,
+        adapter_release,
         device_add_ref,
         device_release,
         device_create_buffer,
         buffer_set_label,
         buffer_destroy,
+        buffer_get_mapped_range,
+        buffer_map_async,
+        buffer_unmap,
         buffer_release,
     }
+}
+
+unsafe fn instance_request_adapter(
+    instance: ffi_wgpu::WGPUInstance,
+    options: *const ffi_wgpu::WGPURequestAdapterOptions,
+    callback_info: ffi_wgpu::WGPURequestAdapterCallbackInfo,
+) -> ffi_wgpu::WGPUFuture {
+    unsafe { ffi_wgpu::wgpuInstanceRequestAdapter(instance, options, callback_info) }
+}
+
+unsafe fn adapter_request_device(
+    adapter: ffi_wgpu::WGPUAdapter,
+    descriptor: *const ffi_wgpu::WGPUDeviceDescriptor,
+    callback_info: ffi_wgpu::WGPURequestDeviceCallbackInfo,
+) -> ffi_wgpu::WGPUFuture {
+    unsafe { ffi_wgpu::wgpuAdapterRequestDevice(adapter, descriptor, callback_info) }
+}
+
+unsafe fn adapter_release(adapter: ffi_wgpu::WGPUAdapter) {
+    unsafe { ffi_wgpu::wgpuAdapterRelease(adapter) };
 }
 
 unsafe fn device_add_ref(device: core::WGPUDevice) {
@@ -853,6 +1067,28 @@ unsafe fn buffer_destroy(buffer: core::WGPUBuffer) {
     unsafe { ffi_wgpu::wgpuBufferDestroy(buffer) };
 }
 
+unsafe fn buffer_get_mapped_range(
+    buffer: core::WGPUBuffer,
+    offset: usize,
+    size: usize,
+) -> *mut c_void {
+    unsafe { ffi_wgpu::wgpuBufferGetMappedRange(buffer, offset, size) }
+}
+
+unsafe fn buffer_map_async(
+    buffer: core::WGPUBuffer,
+    mode: core::WGPUMapMode,
+    offset: usize,
+    size: usize,
+    callback_info: ffi_wgpu::WGPUBufferMapCallbackInfo,
+) -> ffi_wgpu::WGPUFuture {
+    unsafe { ffi_wgpu::wgpuBufferMapAsync(buffer, mode, offset, size, callback_info) }
+}
+
+unsafe fn buffer_unmap(buffer: core::WGPUBuffer) {
+    unsafe { ffi_wgpu::wgpuBufferUnmap(buffer) };
+}
+
 unsafe fn buffer_release(buffer: core::WGPUBuffer) {
     unsafe { ffi_wgpu::wgpuBufferRelease(buffer) };
 }
@@ -870,6 +1106,78 @@ mod tests {
     struct RequestState {
         status: AtomicUsize,
         handle: AtomicUsize,
+    }
+
+    struct NativeSetup {
+        instance: wgpu::WGPUInstance,
+        adapter: wgpu::WGPUAdapter,
+        device: wgpu::WGPUDevice,
+    }
+
+    impl Drop for NativeSetup {
+        fn drop(&mut self) {
+            unsafe {
+                wgpu::wgpuDeviceRelease(self.device);
+                wgpu::wgpuAdapterRelease(self.adapter);
+                wgpu::wgpuInstanceRelease(self.instance);
+            }
+        }
+    }
+
+    fn native_setup() -> NativeSetup {
+        let instance = unsafe { wgpu::wgpuCreateInstance(ptr::null()) };
+        assert!(!instance.is_null());
+
+        let adapter_state = Arc::new(RequestState::new());
+        let adapter_callback_state = Arc::into_raw(Arc::clone(&adapter_state)).cast_mut().cast();
+        let adapter_info = wgpu::WGPURequestAdapterCallbackInfo {
+            nextInChain: ptr::null_mut(),
+            mode: wgpu::WGPUCallbackMode_WGPUCallbackMode_AllowProcessEvents,
+            callback: Some(adapter_callback),
+            userdata1: adapter_callback_state,
+            userdata2: ptr::null_mut(),
+        };
+        unsafe {
+            wgpu::wgpuInstanceRequestAdapter(instance, ptr::null(), adapter_info);
+            wgpu::wgpuInstanceProcessEvents(instance);
+        }
+        assert_eq!(
+            adapter_state.status.load(Ordering::SeqCst) as wgpu::WGPURequestAdapterStatus,
+            wgpu::WGPURequestAdapterStatus_WGPURequestAdapterStatus_Success
+        );
+        let adapter = adapter_state.handle.load(Ordering::SeqCst) as wgpu::WGPUAdapter;
+        assert!(!adapter.is_null());
+
+        let device_state = Arc::new(RequestState::new());
+        let device_callback_state = Arc::into_raw(Arc::clone(&device_state)).cast_mut().cast();
+        let device_info = wgpu::WGPURequestDeviceCallbackInfo {
+            nextInChain: ptr::null_mut(),
+            mode: wgpu::WGPUCallbackMode_WGPUCallbackMode_AllowProcessEvents,
+            callback: Some(device_callback),
+            userdata1: device_callback_state,
+            userdata2: ptr::null_mut(),
+        };
+        unsafe {
+            wgpu::wgpuAdapterRequestDevice(adapter, ptr::null(), device_info);
+            wgpu::wgpuInstanceProcessEvents(instance);
+        }
+        assert_eq!(
+            device_state.status.load(Ordering::SeqCst) as wgpu::WGPURequestDeviceStatus,
+            wgpu::WGPURequestDeviceStatus_WGPURequestDeviceStatus_Success
+        );
+        let device = device_state.handle.load(Ordering::SeqCst) as wgpu::WGPUDevice;
+        assert!(!device.is_null());
+
+        NativeSetup {
+            instance,
+            adapter,
+            device,
+        }
+    }
+
+    fn eval_drop(runtime: &Runtime, source: &str, name: &str) {
+        let value = runtime.eval(source, name).expect(name);
+        unsafe { qjs::JS_FreeValue(runtime.raw_context(), value) };
     }
 
     impl RequestState {
@@ -1044,68 +1352,114 @@ mod tests {
 
     #[test]
     fn script_runs_buffer_vertical_slice() {
-        let instance = unsafe { wgpu::wgpuCreateInstance(ptr::null()) };
-        assert!(!instance.is_null());
-
-        let adapter_state = Arc::new(RequestState::new());
-        let adapter_callback_state = Arc::into_raw(Arc::clone(&adapter_state)).cast_mut().cast();
-        let adapter_info = wgpu::WGPURequestAdapterCallbackInfo {
-            nextInChain: ptr::null_mut(),
-            mode: wgpu::WGPUCallbackMode_WGPUCallbackMode_AllowProcessEvents,
-            callback: Some(adapter_callback),
-            userdata1: adapter_callback_state,
-            userdata2: ptr::null_mut(),
-        };
-        unsafe {
-            wgpu::wgpuInstanceRequestAdapter(instance, ptr::null(), adapter_info);
-            wgpu::wgpuInstanceProcessEvents(instance);
-        }
-        assert_eq!(
-            adapter_state.status.load(Ordering::SeqCst) as wgpu::WGPURequestAdapterStatus,
-            wgpu::WGPURequestAdapterStatus_WGPURequestAdapterStatus_Success
-        );
-        let adapter = adapter_state.handle.load(Ordering::SeqCst) as wgpu::WGPUAdapter;
-        assert!(!adapter.is_null());
-
-        let device_state = Arc::new(RequestState::new());
-        let device_callback_state = Arc::into_raw(Arc::clone(&device_state)).cast_mut().cast();
-        let device_info = wgpu::WGPURequestDeviceCallbackInfo {
-            nextInChain: ptr::null_mut(),
-            mode: wgpu::WGPUCallbackMode_WGPUCallbackMode_AllowProcessEvents,
-            callback: Some(device_callback),
-            userdata1: device_callback_state,
-            userdata2: ptr::null_mut(),
-        };
-        unsafe {
-            wgpu::wgpuAdapterRequestDevice(adapter, ptr::null(), device_info);
-            wgpu::wgpuInstanceProcessEvents(instance);
-        }
-        assert_eq!(
-            device_state.status.load(Ordering::SeqCst) as wgpu::WGPURequestDeviceStatus,
-            wgpu::WGPURequestDeviceStatus_WGPURequestDeviceStatus_Success
-        );
-        let device = device_state.handle.load(Ordering::SeqCst) as wgpu::WGPUDevice;
-        assert!(!device.is_null());
-
+        let setup = native_setup();
         let runtime = Runtime::new().expect("quickjs runtime");
-        runtime.eval("var smoke = 1;", "smoke.js").expect("smoke");
-        let wrapped = runtime.wrap_device(device).expect("wrap device");
+        eval_drop(&runtime, "var smoke = 1;", "smoke.js");
+        let wrapped = runtime.wrap_device(setup.device).expect("wrap device");
         runtime
             .set_global_value("device", wrapped)
             .expect("set device");
-        runtime
-            .eval(
-                include_str!("../tests/scripts/buffer_slice.js"),
-                "buffer_slice.js",
-            )
-            .expect("script");
+        eval_drop(
+            &runtime,
+            include_str!("../tests/scripts/buffer_slice.js"),
+            "buffer_slice.js",
+        );
         runtime.clear_global("device").expect("clear device");
+        runtime.run_gc();
         assert!(runtime.drain_releases().expect("drain") >= 2);
+    }
 
-        unsafe {
-            wgpu::wgpuDeviceRelease(device);
-            wgpu::wgpuAdapterRelease(adapter);
-            wgpu::wgpuInstanceRelease(instance);
-        }
+    #[test]
+    fn tick_surfaces_throwing_microtask_message() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("quickjs runtime");
+        eval_drop(
+            &runtime,
+            "queueMicrotask(function () { throw new Error('boom'); });",
+            "throwing_then.js",
+        );
+        let error = runtime.tick(setup.instance).expect_err("tick error");
+        assert!(format!("{error:?}").contains("boom"));
+    }
+
+    #[test]
+    fn process_events_without_microtasks_does_not_resume_await() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("quickjs runtime");
+        eval_drop(
+            &runtime,
+            "var ran = false; async function f() { await 0; ran = true; } f();",
+            "await.js",
+        );
+        runtime.process_events_only(setup.instance);
+        eval_drop(
+            &runtime,
+            "if (ran) throw new Error('await resumed too early');",
+            "check1.js",
+        );
+        runtime.tick(setup.instance).expect("tick");
+        eval_drop(
+            &runtime,
+            "if (!ran) throw new Error('await did not resume');",
+            "check2.js",
+        );
+    }
+
+    #[test]
+    fn mapped_at_creation_detaches_on_unmap() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let wrapped = runtime.wrap_device(setup.device).expect("wrap device");
+        runtime
+            .set_global_value("device", wrapped)
+            .expect("set device");
+        eval_drop(
+            &runtime,
+            r#"
+                var mapped = device.createBuffer({ size: 8, usage: 2, mappedAtCreation: true });
+                var createdRange = mapped.getMappedRange(0, 4);
+                var createdView = new Uint8Array(createdRange);
+                createdView[0] = 7;
+                mapped.unmap();
+                if (createdRange.byteLength !== 0 || createdView.byteLength !== 0) {
+                    throw new Error('mappedAtCreation range was not detached');
+                }
+
+                "#,
+            "mapping.js",
+        );
+        eval_drop(
+            &runtime,
+            "mapped = null; createdRange = null; createdView = null;",
+            "cleanup.js",
+        );
+        runtime.clear_global("device").expect("clear device");
+        runtime.run_gc();
+        runtime.run_gc();
+        assert!(runtime.drain_releases().expect("drain") >= 2);
+    }
+
+    #[test]
+    fn request_adapter_request_device_promises_are_end_to_end() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let gpu = runtime.wrap_gpu(setup.instance).expect("wrap gpu");
+        runtime.set_global_value("gpu", gpu).expect("set gpu");
+        eval_drop(
+            &runtime,
+            "var gotDevice = false; gpu.requestAdapter().then(function (a) { return a.requestDevice(); }).then(function (d) { gotDevice = !!d; });",
+            "request_path.js",
+        );
+        runtime.tick(setup.instance).expect("adapter tick");
+        runtime.tick(setup.instance).expect("device tick");
+        eval_drop(
+            &runtime,
+            "if (!gotDevice) throw new Error('device promise did not resolve');",
+            "check.js",
+        );
+        eval_drop(&runtime, "gotDevice = undefined;", "cleanup.js");
+        runtime.clear_global("gpu").expect("clear gpu");
+        runtime.run_gc();
+        let _ = runtime.drain_releases().expect("drain");
     }
 }

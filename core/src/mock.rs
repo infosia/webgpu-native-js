@@ -7,8 +7,10 @@ use std::ptr;
 use std::sync::Arc;
 
 use crate::{
-    Arena, ClassId, ClassSpec, Environment, GpuDispatch, JsEngine, ReleaseQueue, Result,
-    WGPUBuffer, WGPUBufferDescriptor, WGPUDevice, WGPUStringView, WGPUStringViewExt,
+    Arena, ClassId, ClassSpec, Deferred, Environment, GpuDispatch, JsEngine, MappedRangeStrategy,
+    ReleaseQueue, Result, WGPUAdapter, WGPUBuffer, WGPUBufferDescriptor, WGPUBufferMapCallbackInfo,
+    WGPUDevice, WGPUMapMode, WGPURequestAdapterCallbackInfo, WGPURequestDeviceCallbackInfo,
+    WGPUStringView, WGPUStringViewExt,
 };
 
 /// Mock JavaScript value handle.
@@ -130,6 +132,10 @@ impl Runtime {
             .cloned()
             .unwrap_or(MockValue::Undefined)
     }
+
+    fn with_value<R>(&self, value: Value, f: impl FnOnce(&mut MockValue) -> R) -> Option<R> {
+        self.values.borrow_mut().get_mut(value.0).map(f)
+    }
 }
 
 impl Drop for Scope<'_> {
@@ -149,6 +155,18 @@ enum MockValue {
     Bool(bool),
     String(String),
     Object(BTreeMap<String, Value>),
+    Promise {
+        settled: bool,
+        result: Option<std::result::Result<Value, Value>>,
+    },
+    Resolver {
+        promise: Value,
+        resolve: bool,
+    },
+    ArrayBuffer {
+        bytes: Vec<u8>,
+        detached: bool,
+    },
     Instance {
         class: ClassId,
         payload: &'static (dyn Any + Send),
@@ -162,6 +180,9 @@ impl JsEngine for Engine {
     type Value = Value;
     type Context<'a> = Context<'a>;
     type Error = String;
+    type AsyncContext = *const Runtime;
+
+    const MAPPED_RANGE_STRATEGY: MappedRangeStrategy = MappedRangeStrategy::ZeroCopyDetach;
 
     fn environment<'a>(cx: Self::Context<'a>) -> &'a Environment {
         &cx.runtime.env
@@ -196,9 +217,12 @@ impl JsEngine for Engine {
             MockValue::Number(value) => Ok(value),
             MockValue::Bool(value) => Ok(if value { 1.0 } else { 0.0 }),
             MockValue::String(value) => value.parse::<f64>().map_err(|_| "number".to_owned()),
-            MockValue::Undefined | MockValue::Object(_) | MockValue::Instance { .. } => {
-                Err("number".to_owned())
-            }
+            MockValue::Undefined
+            | MockValue::Object(_)
+            | MockValue::Promise { .. }
+            | MockValue::Resolver { .. }
+            | MockValue::ArrayBuffer { .. }
+            | MockValue::Instance { .. } => Err("number".to_owned()),
         }
     }
 
@@ -208,7 +232,11 @@ impl JsEngine for Engine {
             MockValue::Bool(value) => value,
             MockValue::Number(value) => value != 0.0 && !value.is_nan(),
             MockValue::String(value) => !value.is_empty(),
-            MockValue::Object(_) | MockValue::Instance { .. } => true,
+            MockValue::Object(_)
+            | MockValue::Promise { .. }
+            | MockValue::Resolver { .. }
+            | MockValue::ArrayBuffer { .. }
+            | MockValue::Instance { .. } => true,
         }
     }
 
@@ -222,9 +250,11 @@ impl JsEngine for Engine {
             MockValue::Number(value) => Ok(arena.alloc_str(&value.to_string())),
             MockValue::Bool(value) => Ok(arena.alloc_str(if value { "true" } else { "false" })),
             MockValue::String(value) => Ok(arena.alloc_str(&value)),
-            MockValue::Object(_) | MockValue::Instance { .. } => {
-                Ok(arena.alloc_str("[object Object]"))
-            }
+            MockValue::Object(_)
+            | MockValue::Promise { .. }
+            | MockValue::Resolver { .. }
+            | MockValue::ArrayBuffer { .. }
+            | MockValue::Instance { .. } => Ok(arena.alloc_str("[object Object]")),
         }
     }
 
@@ -278,6 +308,136 @@ impl JsEngine for Engine {
     fn operation_error(_cx: Self::Context<'_>, message: &str) -> Self::Error {
         format!("OperationError: {message}")
     }
+
+    fn async_context(cx: Self::Context<'_>) -> Self::AsyncContext {
+        cx.runtime
+    }
+
+    fn context_from_async(cx: Self::AsyncContext) -> Self::Context<'static> {
+        Context {
+            runtime: unsafe { &*cx },
+            scope: None,
+        }
+    }
+
+    fn async_undefined(cx: Self::AsyncContext) -> Self::Value {
+        unsafe { &*cx }.undefined()
+    }
+
+    fn async_error_value(cx: Self::AsyncContext, message: &str) -> Self::Value {
+        unsafe { &*cx }.string(message)
+    }
+
+    fn error_value_from_error(cx: Self::AsyncContext, error: Self::Error) -> Self::Value {
+        unsafe { &*cx }.string(&error)
+    }
+
+    fn new_promise(cx: Self::Context<'_>) -> Result<(Self::Value, Deferred<Self>), Self::Error> {
+        let promise = cx.runtime.insert(MockValue::Promise {
+            settled: false,
+            result: None,
+        });
+        let resolve = cx.runtime.insert(MockValue::Resolver {
+            promise,
+            resolve: true,
+        });
+        let reject = cx.runtime.insert(MockValue::Resolver {
+            promise,
+            resolve: false,
+        });
+        Ok((promise, Deferred::new(resolve, reject)))
+    }
+
+    fn settle_deferred(
+        cx: Self::AsyncContext,
+        deferred: Deferred<Self>,
+        result: std::result::Result<Self::Value, Self::Value>,
+    ) {
+        let runtime = unsafe { &*cx };
+        let resolver = match result {
+            Ok(_) => deferred.resolve(),
+            Err(_) => deferred.reject(),
+        };
+        let MockValue::Resolver { promise, resolve } = runtime.get(resolver) else {
+            return;
+        };
+        let actual_is_ok = result.is_ok();
+        if resolve != actual_is_ok {
+            return;
+        }
+        let _ = runtime.with_value(promise, |value| {
+            if let MockValue::Promise {
+                settled,
+                result: stored,
+            } = value
+            {
+                if !*settled {
+                    *settled = true;
+                    *stored = Some(result);
+                }
+            }
+        });
+    }
+
+    fn new_external_arraybuffer(
+        cx: Self::Context<'_>,
+        ptr: *mut u8,
+        len: usize,
+    ) -> Result<Self::Value, Self::Error> {
+        let bytes = if ptr.is_null() {
+            Vec::new()
+        } else {
+            unsafe { std::slice::from_raw_parts(ptr, len).to_vec() }
+        };
+        Ok(cx.runtime.insert(MockValue::ArrayBuffer {
+            bytes,
+            detached: false,
+        }))
+    }
+
+    fn new_arraybuffer_copy(
+        cx: Self::Context<'_>,
+        bytes: &[u8],
+    ) -> Result<Self::Value, Self::Error> {
+        Ok(cx.runtime.insert(MockValue::ArrayBuffer {
+            bytes: bytes.to_vec(),
+            detached: false,
+        }))
+    }
+
+    fn detach_arraybuffer(cx: Self::Context<'_>, value: Self::Value) {
+        let _ = cx.runtime.with_value(value, |stored| {
+            if let MockValue::ArrayBuffer { bytes, detached } = stored {
+                bytes.clear();
+                *detached = true;
+            }
+        });
+    }
+
+    fn arraybuffer_len(cx: Self::Context<'_>, value: Self::Value) -> Option<usize> {
+        match cx.runtime.get(value) {
+            MockValue::ArrayBuffer { bytes, detached } => {
+                Some(if detached { 0 } else { bytes.len() })
+            }
+            _ => None,
+        }
+    }
+
+    fn arraybuffer_copy_to(cx: Self::Context<'_>, value: Self::Value, dst: &mut [u8]) -> bool {
+        match cx.runtime.get(value) {
+            MockValue::ArrayBuffer { bytes, detached } if !detached && bytes.len() == dst.len() => {
+                dst.copy_from_slice(&bytes);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn duplicate_value(_cx: Self::Context<'_>, value: Self::Value) -> Self::Value {
+        value
+    }
+
+    fn release_value(_cx: Self::Context<'_>, _value: Self::Value) {}
 }
 
 thread_local! {
@@ -327,11 +487,17 @@ pub fn runtime() -> Runtime {
 #[must_use]
 pub fn dispatch() -> GpuDispatch {
     GpuDispatch {
+        instance_request_adapter,
+        adapter_request_device,
+        adapter_release,
         device_add_ref,
         device_release,
         device_create_buffer,
         buffer_set_label,
         buffer_destroy,
+        buffer_get_mapped_range,
+        buffer_map_async,
+        buffer_unmap,
         buffer_release,
     }
 }
@@ -353,6 +519,46 @@ unsafe fn device_add_ref(_device: WGPUDevice) {
         state.native_order.push("device_add_ref");
     });
 }
+
+unsafe fn instance_request_adapter(
+    _instance: webgpu_native_js_ffi::native::WGPUInstance,
+    _options: *const webgpu_native_js_ffi::native::WGPURequestAdapterOptions,
+    info: WGPURequestAdapterCallbackInfo,
+) -> webgpu_native_js_ffi::native::WGPUFuture {
+    if let Some(callback) = info.callback {
+        unsafe {
+            callback(
+                webgpu_native_js_ffi::native::WGPURequestAdapterStatus_WGPURequestAdapterStatus_Success,
+                fake_device().cast::<webgpu_native_js_ffi::native::WGPUAdapterImpl>(),
+                WGPUStringView::from_bytes(b""),
+                info.userdata1,
+                info.userdata2,
+            );
+        }
+    }
+    webgpu_native_js_ffi::native::WGPUFuture { id: 1 }
+}
+
+unsafe fn adapter_request_device(
+    _adapter: WGPUAdapter,
+    _descriptor: *const webgpu_native_js_ffi::native::WGPUDeviceDescriptor,
+    info: WGPURequestDeviceCallbackInfo,
+) -> webgpu_native_js_ffi::native::WGPUFuture {
+    if let Some(callback) = info.callback {
+        unsafe {
+            callback(
+                webgpu_native_js_ffi::native::WGPURequestDeviceStatus_WGPURequestDeviceStatus_Success,
+                fake_device(),
+                WGPUStringView::from_bytes(b""),
+                info.userdata1,
+                info.userdata2,
+            );
+        }
+    }
+    webgpu_native_js_ffi::native::WGPUFuture { id: 2 }
+}
+
+unsafe fn adapter_release(_adapter: WGPUAdapter) {}
 
 unsafe fn device_release(_device: WGPUDevice) {
     GPU_STATE.with(|state| {
@@ -399,6 +605,44 @@ unsafe fn buffer_destroy(_buffer: WGPUBuffer) {
     });
 }
 
+unsafe fn buffer_get_mapped_range(
+    _buffer: WGPUBuffer,
+    offset: usize,
+    size: usize,
+) -> *mut std::ffi::c_void {
+    let len = if size == crate::WGPU_WHOLE_MAP_SIZE as usize {
+        64
+    } else {
+        size
+    };
+    let mut bytes = vec![0u8; offset.saturating_add(len)];
+    let ptr = bytes.as_mut_ptr();
+    std::mem::forget(bytes);
+    unsafe { ptr.add(offset).cast() }
+}
+
+unsafe fn buffer_map_async(
+    _buffer: WGPUBuffer,
+    _mode: WGPUMapMode,
+    _offset: usize,
+    _size: usize,
+    info: WGPUBufferMapCallbackInfo,
+) -> webgpu_native_js_ffi::native::WGPUFuture {
+    if let Some(callback) = info.callback {
+        unsafe {
+            callback(
+                crate::WGPUMapAsyncStatus_WGPUMapAsyncStatus_Success,
+                WGPUStringView::from_bytes(b""),
+                info.userdata1,
+                info.userdata2,
+            );
+        }
+    }
+    webgpu_native_js_ffi::native::WGPUFuture { id: 3 }
+}
+
+unsafe fn buffer_unmap(_buffer: WGPUBuffer) {}
+
 unsafe fn buffer_release(_buffer: WGPUBuffer) {
     GPU_STATE.with(|state| {
         let mut state = state.borrow_mut();
@@ -418,7 +662,8 @@ fn read_view(view: WGPUStringView) -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::{
-        buffer_destroy, buffer_label_get, buffer_label_set, buffer_size_get, buffer_usage_get,
+        buffer_destroy, buffer_get_mapped_range, buffer_label_get, buffer_label_set,
+        buffer_map_async, buffer_size_get, buffer_unmap, buffer_usage_get,
         convert_buffer_descriptor, device_create_buffer, finalize_buffer, finalize_device,
         wrap_device, BufferPayload, DevicePayload, JsEngine,
     };
@@ -688,6 +933,52 @@ mod tests {
     }
 
     #[test]
+    fn a15_unmap_detaches_all_mapped_ranges() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = wrap_device::<Engine>(cx, fake_device()).expect("device");
+        let desc = descriptor(
+            &rt,
+            &[
+                ("size", rt.number(16.0)),
+                ("usage", rt.number(2.0)),
+                ("mappedAtCreation", rt.bool(true)),
+            ],
+        );
+        let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("buffer");
+        let first =
+            buffer_get_mapped_range::<Engine>(cx, buffer, &[rt.number(0.0), rt.number(4.0)])
+                .expect("range");
+        let second =
+            buffer_get_mapped_range::<Engine>(cx, buffer, &[rt.number(4.0), rt.number(4.0)])
+                .expect("range");
+        assert_eq!(Engine::arraybuffer_len(cx, first), Some(4));
+        assert_eq!(Engine::arraybuffer_len(cx, second), Some(4));
+
+        let _ = buffer_unmap::<Engine>(cx, buffer, &[]).expect("unmap");
+
+        assert_eq!(Engine::arraybuffer_len(cx, first), Some(0));
+        assert_eq!(Engine::arraybuffer_len(cx, second), Some(0));
+    }
+
+    #[test]
+    fn a21_rejects_offsets_that_would_truncate_on_32_bit_hosts() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = wrap_device::<Engine>(cx, fake_device()).expect("device");
+        let desc = descriptor(&rt, &[("size", rt.number(16.0)), ("usage", rt.number(2.0))]);
+        let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("buffer");
+        let too_large = rt.number(4_294_967_296.0);
+
+        assert!(
+            buffer_map_async::<Engine>(cx, buffer, &[rt.number(2.0), too_large]).is_err(),
+            "mapAsync offset=2^32 must be rejected on 64-bit hosts too"
+        );
+    }
+
+    #[test]
     fn r5_r6_finalizers_enqueue_only_and_drain_releases_child_before_parent_ref() {
         reset_gpu();
         let rt = runtime();
@@ -697,10 +988,10 @@ mod tests {
         let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("buffer");
 
         let buffer_payload = Engine::payload(cx, buffer, crate::GPU_BUFFER_CLASS)
-            .and_then(|payload| payload.downcast_ref::<BufferPayload>())
+            .and_then(|payload| payload.downcast_ref::<BufferPayload<Engine>>())
             .expect("payload");
-        finalize_buffer(
-            Box::new(BufferPayload {
+        finalize_buffer::<Engine>(
+            Box::new(BufferPayload::<Engine> {
                 state: Arc::clone(buffer_payload.state()),
             }),
             Engine::environment(cx),
@@ -773,6 +1064,38 @@ mod tests {
         }
         unsafe fn noop_label(_buffer: WGPUBuffer, _label: WGPUStringView) {}
         unsafe fn noop_destroy(_buffer: WGPUBuffer) {}
+        unsafe fn noop_adapter_release(_adapter: WGPUAdapter) {}
+        unsafe fn noop_request_adapter(
+            _instance: webgpu_native_js_ffi::native::WGPUInstance,
+            _options: *const webgpu_native_js_ffi::native::WGPURequestAdapterOptions,
+            _info: WGPURequestAdapterCallbackInfo,
+        ) -> webgpu_native_js_ffi::native::WGPUFuture {
+            webgpu_native_js_ffi::native::WGPUFuture { id: 0 }
+        }
+        unsafe fn noop_request_device(
+            _adapter: WGPUAdapter,
+            _descriptor: *const webgpu_native_js_ffi::native::WGPUDeviceDescriptor,
+            _info: WGPURequestDeviceCallbackInfo,
+        ) -> webgpu_native_js_ffi::native::WGPUFuture {
+            webgpu_native_js_ffi::native::WGPUFuture { id: 0 }
+        }
+        unsafe fn noop_get_range(
+            _buffer: WGPUBuffer,
+            _offset: usize,
+            _size: usize,
+        ) -> *mut std::ffi::c_void {
+            ptr::null_mut()
+        }
+        unsafe fn noop_map_async(
+            _buffer: WGPUBuffer,
+            _mode: WGPUMapMode,
+            _offset: usize,
+            _size: usize,
+            _info: WGPUBufferMapCallbackInfo,
+        ) -> webgpu_native_js_ffi::native::WGPUFuture {
+            webgpu_native_js_ffi::native::WGPUFuture { id: 0 }
+        }
+        unsafe fn noop_unmap(_buffer: WGPUBuffer) {}
 
         let parent = Box::into_raw(Box::new(Parent {
             marker: 0xfeed_face,
@@ -784,11 +1107,17 @@ mod tests {
                 buffer: child.cast(),
                 device: parent.cast(),
                 gpu: GpuDispatch {
+                    instance_request_adapter: noop_request_adapter,
+                    adapter_request_device: noop_request_device,
+                    adapter_release: noop_adapter_release,
                     device_add_ref: noop_device,
                     device_release: parent_release,
                     device_create_buffer: noop_create,
                     buffer_set_label: noop_label,
                     buffer_destroy: noop_destroy,
+                    buffer_get_mapped_range: noop_get_range,
+                    buffer_map_async: noop_map_async,
+                    buffer_unmap: noop_unmap,
                     buffer_release: child_release,
                 },
             })
