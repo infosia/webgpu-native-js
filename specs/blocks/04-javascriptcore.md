@@ -1,7 +1,7 @@
 # Block 04 — the JavaScriptCore adapter
 
-Phase 3. Rules **J1–J18**. Blocks 01 (R1–R25), 02 (A1–A29) and 03 (B1–B20) all
-still bind.
+Phase 3. Rules **J1–J21** (J19–J21 added by the 2026-07-10 review). Blocks 01
+(R1–R27), 02 (A1–A31) and 03 (B1–B22) all still bind.
 
 Every JSC fact below was **measured on this machine, today**, against the system
 `JavaScriptCore.framework`, by a program linking the public C API. Where a claim
@@ -86,6 +86,13 @@ makes the two engines agree.**
 It is engine-neutral: QuickJS runs it harmlessly and still needs its explicit
 `JS_ExecutePendingJob` drain (step 3's second half). Under JSC that drain is a
 no-op, because the trampoline's return already drained.
+
+*(Amended 2026-07-10: the four-step ordering is now **owned by `core/`** as a
+generic tick skeleton — block 02 → A30 — with `drain_microtasks` as the engine
+hook. The JSC adapter delegates to it; it does not hand-write the sequence. A
+deletion experiment showed the batching step is unfalsifiable from QuickJS's
+side, so the only structural guarantee of the ordering is that it is written
+once.)*
 
 **J3 — `core/` changes, and that is the gate working.** J1 and J2 alter `core/`'s
 async settlement policy. Per the exit gate this must be reported, not absorbed —
@@ -195,6 +202,49 @@ is undefined and unattributable.
 one that QuickJS did not: `unsafe impl Sync for TracedValues` is sound only under
 QuickJS's on-thread GC. Recheck it, and every sibling, against an any-thread
 finalizer.
+
+### Added by the 2026-07-10 review — the traps block 04 was silent about
+
+**J19 — `arraybuffer_copy` is the pinning trap J8/J9 forgot, and its obvious JSC
+implementation is the project's named CRITICAL.** `writeBuffer` copies script
+bytes via `E::arraybuffer_copy`, and the QuickJS impl takes the raw bytes pointer
+of the **script's own** `ArrayBuffer` — harmless there. The mirror-image JSC
+implementation (`JSObjectGetArrayBufferBytesPtr` on the script's `data`) invokes
+`pinAndLock()` and **permanently, silently** disables `transfer()` on a
+script-visible buffer (F6, invariant 10). The safe JSC shape: call the buffer's
+own `slice()` (two property reads + `call`, no `eval` — the J11 primitives
+suffice), which yields a **private** product; pin *that*, `memcpy`, release. The
+script's buffer is never pinned. J9's grep — any C bytes pointer taken from a
+script-reachable buffer is CRITICAL — applies to this method with no exemption
+for "it's just a read".
+
+**J20 — unhandled rejections have no JSC hook, and the parity claim must be
+scoped honestly.** QuickJS surfaces them via
+`JS_SetHostPromiseRejectionTracker` (A22). The F1 header sweep found no JSC
+equivalent in the public C API — no tracker, no job hook. Consequences, stated
+before the adapter exists so nobody discovers them as a red diff:
+
+- A22's surfacing is a **Tier 1 diagnostic**, not a portable contract. Record it
+  as an engine delta in `specs/tracking/engine-boundary.md`.
+- **J17's conformance script must not depend on unhandled-rejection reporting**:
+  every rejection in it is explicitly `.catch()`ed and logged, so the
+  byte-identical-output claim stays achievable on both engines.
+- The JSC adapter's `tick()` returns no unhandled-rejection error, ever. If the
+  host wants that diagnostic under JSC, the answer is a script-level
+  `.catch()` discipline — trusted scripts, invariant 8 — not prototype patching.
+
+**J21 — a JSC finalizer may not call *any* function taking a `JSContextRef`, and
+that includes `JSValueUnprotect`.** The QuickJS adapter releases a payload's
+duplicated range values inside the class finalizer, synchronously — legal there.
+JSC's `finalize` callback documentation forbids it, and the finalizer receives
+only the `JSObjectRef`, no context. So the JSC adapter needs a **deferred-release
+path for engine values**, symmetric with the native release queue: the finalizer
+extracts the values from the payload and pushes them onto an adapter-owned
+unprotect queue; `tick()` step 4 drains it on the JS thread with a live context.
+The native `ReleaseQueue` stays native-only (it is `E`-free by design); this
+queue is the adapter's. The mock's teardown balance assertion (R23) must still
+hold: an extracted-but-undrained value at context teardown is drained by
+`Runtime::drop` **before** `JSGlobalContextRelease`, mirroring A28.
 
 ---
 

@@ -3,7 +3,8 @@
 Phase 2, part 2. `GPUQueue`, shader modules, bind groups, pipelines, command
 encoders, compute passes — enough of the IDL to answer one question.
 
-Rules are numbered **B1–B18**. Blocks 01 (R1–R25) and 02 (A1–A23) still bind.
+Rules are numbered **B1–B22** (B19–B22 added by reviews). Blocks 01 (R1–R27) and
+02 (A1–A31) still bind.
 
 Every claim below about `webgpu.h` was checked against the pinned file while
 writing. Reopen it; do not restate from memory.
@@ -113,6 +114,18 @@ is a *named* entry point that does not exist. Encode
 `{NULL, WGPU_STRLEN}` for absent, and a real view for present. **Getting these
 backwards changes behaviour silently**, which is why block 01 → R9 forbids
 branching on `data.is_null()` alone.
+
+*(Clarification, 2026-07-10, after a review found two behaviours in one tree.)*
+**B4 is a statement about the C side.** It says nothing about JavaScript `null`.
+On the JS side, WebIDL decides: `label` is a **non-nullable** `USVString`
+defaulting to `""`, so an **absent/undefined** member takes the default and a JS
+`null` converts by `ToString` to the four-character string `"null"`. A helper
+that maps JS `null` to `""` is applying B4 one layer up, where it does not hold.
+`entryPoint` is genuinely **nullable** in the IDL, so there JS `null` means
+absent — that is the one place JS `null` and the C null encoding coincide. The
+review found `createBuffer` converting labels WebIDL-correctly and every other
+descriptor routing through the null-swallowing helper; one behaviour must win,
+and it is WebIDL's.
 
 **B5 — `count + pointer` arrays.** `entryCount`/`entries`,
 `bindGroupLayoutCount`/`bindGroupLayouts`, `commandCount`/`commands`. All counts
@@ -278,6 +291,41 @@ raised by the binding, in the same way `finish()` twice and `end()` twice are
 (B10). Track it in the wrapper. The handle is still released by the finalizer
 through the queue — consumption and release are different, exactly as `destroy()`
 and release are (block 01 → R14).
+
+- **B8 was half-implemented, and the half that shipped had the test.** *(Found by
+  the 2026-07-10 design review; the same review class that produced B19.)* The
+  rule's own text names three cases: bind group → buffers, compute pipeline →
+  shader module + pipeline layout, command buffer → submit array. What shipped:
+  `BindGroupPayload` retains its entry **buffers** — and nothing else. The
+  compute pipeline retains neither its module nor its layout; the bind group does
+  not retain its **layout**. Same UAF class, same rule, no test — because the
+  only B8 test (`b8_bind_group_addrefs_each_stored_buffer`) checks the one arm
+  that was written. The fix retains **every** descriptor handle the created
+  object may depend on, with the same AddRef-count guards per arm, plus
+  wrapper-outlives tests for module and layout. A rule with an enumerated list
+  needs a test per list item, or the list decays to its first element.
+
+**B21 — `[SameObject]` attributes return the same wrapper.** *(Added 2026-07-10;
+found as an unrecorded WebIDL divergence.)* `GPUDevice.queue` is `[SameObject]`
+in the IDL; the shipped getter minted a fresh wrapper (and a fresh native queue
+reference) per property read, so `device.queue !== device.queue` — observably
+wrong for any script using identity, and a slow native-handle churn besides. The
+device wrapper caches the queue wrapper's JS value (a duplicated, traced value —
+the A27 machinery exists for exactly this) and returns it on every read. Phase 4
+must treat `[SameObject]` as a generatable attribute policy, so this one
+hand-written instance is its template.
+
+**B22 — `writeBuffer` takes a `BufferSource`, and today it takes only an
+`ArrayBuffer`.** *(Recorded 2026-07-10; implementation deferred to its own
+slice.)* WebIDL types `data` as `BufferSource` = `ArrayBuffer` or any
+`ArrayBufferView`, and a typed array is the *normal* way script holds bytes. The
+current conversion rejects views. Fixing it needs a view-introspection primitive
+(buffer + byteOffset + byteLength), which is additive per B12 — and under JSC it
+collides with the pinning hazard (`JSObjectGetTypedArrayBytesPtr` pins,
+block 04 → F6), so the primitive must be designed against both engines at once.
+Do it as one deliberate slice alongside the JSC adapter, not as a quick patch
+here. Until then the deviation stands recorded, and the error message for a view
+must say "pass buffer.buffer" rather than a bare type error.
 
 - **`getMappedRange()` is one JS method and two C functions** — see block 02 → A29.
 

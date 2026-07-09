@@ -3,8 +3,9 @@
 Phase 2, part 1. The public host contract, the Promise bridge, and
 `mapAsync`/`getMappedRange`/`unmap`.
 
-Rules in this block are numbered **A1–A20** to keep them distinct from block 01's
-R-rules, which all still apply.
+Rules in this block are numbered **A1–A31** to keep them distinct from block 01's
+R-rules, which all still apply. (A21–A31 were added by later reviews; the block
+originally ran A1–A20.)
 
 Every claim below about `webgpu.h` or `quickjs.h` was checked against the pinned
 files in `third_party/` while writing. Reopen them; do not restate from memory.
@@ -173,6 +174,14 @@ failing yields `WGPUMapAsyncStatus_Error` / `_Aborted` / `_CallbackCancelled`.
 Map each to a rejection; do not collapse them. `_CallbackCancelled` is not an
 error the script caused.
 
+*(Deferral, recorded 2026-07-10. The reason today is a message **string**, not a
+`GPUError`-shaped object. The error taxonomy — `GPUError` subclasses, `name`,
+error-scope routing — is Phase 6's subject, and a half-shaped object built now
+would be rebuilt then. Two parts are **not** deferred: the three statuses stay
+distinct, and the message must carry the backend's own diagnostic — the
+callback's `WGPUStringView message` — not a fixed placeholder. The 2026-07-10
+review found every callback discarding it.)*
+
 ### Mapping
 
 **A10 — `MappedRangeStrategy` is a `JsEngine` capability, and `core/` implements
@@ -202,12 +211,25 @@ does not check `abuf->detached`. A `free_func` that frees unconditionally is a
 double-free.
 
 That two-call sequence is not a hazard to route around. **It is the hook A25
-needs**: the `ptr == NULL` call is "the `ArrayBuffer` is gone", which is exactly
-when the range's native reference should be dropped. So:
+needs.** The rule as first written — "act only on the `NULL` call" — had a hole
+its own review found: a range that is **never detached** (script drops it without
+`unmap()`, GC-only path) would wait forever for a detach that never comes, and on
+one engine's teardown ordering the release was lost outright. The implemented
+protocol, which this text now records *(revised 2026-07-10 to match; the code was
+right and the sentence was stale)*:
 
-- `ptr != NULL` (detach): do nothing.
-- `ptr == NULL` (finalize): enqueue the release of whatever the `opaque` owns.
-- Never `free` the pointer. The mapping belongs to the backend.
+- The owner (`opaque`) carries a `released` flag; **the native release is
+  enqueued at the first call that can claim it**, whichever that is — the
+  explicit-detach call (real `ptr`, flagged by the adapter's own detach path) or
+  the finalize call (`ptr == NULL`). The flag makes the pair single-shot.
+- The owner `Box` is freed exactly once, on the call that is **not** the
+  adapter's flagged detach — i.e. at finalize, which QuickJS guarantees fires.
+- Never `free` the pointer itself. The mapping belongs to the backend.
+
+Seen red (2026-07-10 review, deletion experiment E16): removing the `released`
+guard makes the adapter suite crash with a native double-release. The red state
+is a crash, not a named assertion — a test that *names* the property is still
+owed (see the review log in `specs/tracking/phase-reviews.md`).
 
 **A25 — a mapped range keeps its buffer alive, natively.** The Phase 2 review
 found this, and it is reachable from an honest script:
@@ -445,13 +467,22 @@ associated types (`Deferred`), new methods (`new_promise`, `settle`,
 engine.** If it must, stop and report: that is the JSC exit gate firing one phase
 early, and it is a better time to learn it.
 
+*(Correction, 2026-07-10: `drain_microtasks` did not in fact become a trait
+method in Phase 2 — the whole pump landed in the adapter's `tick()` instead, so
+the parity-critical four-step ordering existed only as one engine's hand-written
+function. A30 fixes that; the method list above is accurate as of A30 landing.)*
+
 **A19 — the adapter names no class and no member** (block 01 → R24), and **holds
 no lock across a call into `core/`** (R25). The boundary is re-entrant: `core/`
 calls back through `E::payload` while servicing a method.
 
 **A23 — the WebGPU callback runs inside a handle scope, and there is no way to
 opt out.** *(Added after the first Phase 2 attempt, which reintroduced Phase 1's
-CRITICAL through a hole in the trait.)*
+CRITICAL through a hole in the trait. **Superseded in part by block 04 → J1**,
+which removed the callback-side engine work entirely — `with_async_scope` and
+`AsyncContext` no longer exist, because the callback no longer touches the
+engine. What survives of A23 is its first rule: `Context`'s scope is not
+`Option`, on any engine, ever.)*
 
 The callback fires from `wgpuInstanceProcessEvents`, outside any JS call, so it
 has no per-call scope to inherit. The first attempt solved this with
@@ -563,6 +594,60 @@ value ownership, and now also: promise settlement (settled exactly once), detach
 verification, and the `CopyInCopyOut` arm. Where QuickJS and JSC disagree, the
 mock takes the **union** of their obligations, so a `core/` bug fails a `core/`
 test on the default gate, with no sanitizer and no engine.
+
+*(The 2026-07-10 review found three places the union was not taken, each of which
+had already hidden a real defect: the mock's `get_property` cannot fail, so a
+swallowed conversion error in `core/` was invisible; its
+`new_external_arraybuffer` ignores `owner`, so a broken A25 native-ref pairing
+cannot fail a core test; and its coercions run no script, so R27's
+re-entrancy-under-lock deadlock was unreachable. The fix handoff adds a
+throwing-property knob, an owner model, and a coercion re-entry hook.)*
+
+**A30 — `tick()`'s four-step ordering is written once, in `core/`.** *(Added
+2026-07-10. Block 02 §6 asked "where does `tick()` live?" and Phase 2 answered
+it by default: in the adapter. That answer failed review the moment a second
+adapter appeared on the schedule.)*
+
+The ordering — ProcessEvents → settle all recorded results in one JS frame →
+drain microtasks → drain the release queue — is the parity contract itself
+(block 04 → J2). Hand-writing it per adapter means the JSC adapter can reorder
+it and no shared test can notice; the 2026-07-10 deletion experiments proved
+even the *batching* step is unfalsifiable from QuickJS's side (experiment E8:
+unbatching the settlement drain left every test green, because QuickJS defers
+continuations either way).
+
+So `core/` owns a generic tick skeleton:
+
+```rust
+pub fn tick<E: JsEngine>(/* instance/env access, engine context */) -> Result<(), TickError> {
+    // 1. wgpuInstanceProcessEvents — callbacks record settlements (J1)
+    // 2. settlement_queue.drain — ONE settle_deferreds call for the batch (J2)
+    // 3. E::drain_microtasks — engine hook; a no-op under JSC (F2)
+    // 4. release_queue.drain
+}
+```
+
+`drain_microtasks` finally becomes the trait method A18 promised. The adapter's
+public `tick()` delegates; it may add engine-specific diagnostics (A22's
+unhandled-rejection surfacing) but may not reorder. The mock counts
+`settle_deferreds` calls, so "one call per drain, N settlements in it" is a
+`core/` unit test — falsifiable with no engine at all, which E8 showed nothing
+else is.
+
+**A31 — `ArrayBuffer.prototype.transfer()` on a zero-copy mapped range is a
+recorded limitation, not a guarded path.** Found by the 2026-07-10 soundness
+review, verified against `quickjs.c`: `transfer()` neuters the original buffer
+**without invoking `free_func`** and moves the same backing pointer — the live
+GPU mapping — into a new `ArrayBuffer` with a null opaque. The new buffer is
+invisible to A25's keep-alive and survives `unmap()`'s detach-all, so script
+holds a dangling view after the mapping is reclaimed.
+
+No guard is practical: QuickJS offers no hook on `transfer`, and intercepting it
+at the JS level would mean patching prototypes, which invariant 8 (trusted
+scripts) spends no effort on. The decision: **document, do not guard.** The
+user-facing docs for `getMappedRange` must say "do not `transfer()` a mapped
+range". If a future engine offers a hook, revisit. This paragraph is the record
+invariant-8 decisions are required to leave.
 
 ---
 

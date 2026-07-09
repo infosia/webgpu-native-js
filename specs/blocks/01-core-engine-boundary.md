@@ -302,6 +302,48 @@ lock.
 Take what you need from a lock, drop it, then call `core/`. This is a property of
 the boundary, not of QuickJS, and it will bite JSC identically.
 
+**R26 — `Self::Error` is an owned error *value*, and no pending engine state
+escapes a `JsEngine` method.** *(Added by the 2026-07-10 design review, which
+found the Tier 1 adapter running two incompatible conventions at once.)*
+
+The contract, stated once so both engines can read it:
+
+- A failing `JsEngine` method returns `Err(e)` where `e` **is** (or wholly owns)
+  the error value. `error_value_from_error` yields a JS value usable as a
+  rejection reason — never an engine-internal sentinel.
+- At the moment `Err` is produced, the engine's pending-exception state (if the
+  engine has such state; JSC does not) has been **fully consumed** into `e`.
+  `core/` may hold, propagate, or drop an `Error` without any hidden context
+  state changing meaning behind it.
+- The adapter's callback glue is the **only** place an `Error` becomes an engine
+  throw, and it must actually throw — returning the error value as if it were
+  the method's result is a swallowed exception.
+- Dropping an `Error` must be safe: no leak, no dangling pending state. Under a
+  refcounted engine that means error values are scope-tracked like every other
+  owned value (R22), and escaped at the throw.
+
+What the review found: `get_property` returned the `JS_EXCEPTION` sentinel with
+the exception left pending, while `to_f64`/`to_str` returned the exception
+*object* with the pending state cleared. `catch_callback` only understood the
+first convention, so a coercion failure — `createBuffer({size: 10n})` — was
+returned to script as a normal value: **the method handed back a `TypeError`
+object instead of throwing it.** On the settlement path the sentinel, not the
+error, became a rejection reason. One contract, written down, replaces both
+guesses.
+
+**R27 — `core/` takes no engine call while holding a payload lock.** R25 stated
+this for adapters; the 2026-07-10 review found `core/` violating its own rule:
+`buffer_get_mapped_range` converted its `size` argument — `E::to_f64`, which is
+`ToNumber`, which runs a user `valueOf` — **inside** `with_buffer_payload_state`'s
+`Mutex`. Script that re-enters `unmap()`/`destroy()` from that `valueOf`
+re-locks the same non-reentrant mutex on the same thread: deadlock, reachable
+from a trusted script's honest mistake. Under JSC the class widens — property
+getters run script too, so *any* `get_property` under a held lock is the same
+hazard.
+
+Convert every argument **before** taking the state lock. The lock guards state
+transitions, never conversions.
+
 ## 4. Tests
 
 **R16 — `core/` is tested against a mock engine, with no GPU and no engine.**

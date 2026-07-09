@@ -574,3 +574,76 @@ memory. Every one was refutable in under a minute by reading the pinned file tha
 sits in this repository. The rule this phase should hand to Phase 1 is not "read
 the spec" — everyone believes they do — but: **a claim about an upstream artifact
 is not written down until the artifact has been opened in the same session.**
+
+---
+
+## Design Review — 2026-07-10 (whole-tree, between Phase 3 parts 1 and 2)
+
+Occasion: the project owner switched the orchestrating model and asked for a
+review of the overall design and codebase before dispatching the JavaScriptCore
+adapter. Not a Phase Review — Phase 3 is mid-flight — but run with the same
+discipline: four no-context lenses over the whole tree at `0fdfd98`, one of them
+(the deletion experimenter) in an isolated worktree per the workflow rule its own
+predecessor caused.
+
+Lenses: **soundness** (unsafe/FFI/refcounts), **architecture** (every `JsEngine`
+method walked against JSC's public C API), **deletion experiments** (16 run, 12
+red), **spec-vs-code** (77 rules audited, 58 fully covered).
+
+### Findings — accepted
+
+| ID | Sev | Finding | Where |
+|---|---|---|---|
+| DR-C1 | CRITICAL | B8 half-implemented: compute pipeline retains neither module nor layout; bind group does not retain its layout. The rule's own list has three items; one shipped, and only that one had a test. | core/src/lib.rs:1988, 2035 |
+| DR-M1 | MAJOR | Two incompatible error conventions in one adapter: `get_property` returns the `JS_EXCEPTION` sentinel (pending set); `to_f64`/`to_str` return the exception object (pending cleared). `catch_callback` understands only the first, so a coercion failure is **returned to script as a value** — `createBuffer({size: 10n})` hands back a `TypeError` object instead of throwing. On the settlement path the sentinel becomes a rejection reason. Now R26. | adapters/quickjs/src/lib.rs:563–590, 1211 |
+| DR-M2 | MAJOR | `core/` violates its own R25: `buffer_get_mapped_range` converts `size` (`to_f64` → user `valueOf` → arbitrary script) inside the payload mutex — self-deadlock reachable from an honest script. Now R27. | core/src/lib.rs:1541–1551 |
+| DR-M3 | MAJOR | `visibility` read failure swallowed by `.ok()` → default 0; `binding`/`visibility` are *required* IDL members and must TypeError when absent. The mock's infallible `get_property` made this invisible (R23 union unmet). | core/src/lib.rs:2923–2928 |
+| DR-M4 | MAJOR | `label: null` converts to `""` via `optional_non_null_string` but to `"null"` in `convert_buffer_descriptor` — two behaviours, one tree; the `""` arm misapplies the C-side B4 rule one layer up and a test pins the wrong behaviour. B4 clarified. | core/src/lib.rs:2830–2860 |
+| DR-M5 | MAJOR | The barred `usize`-smuggling pattern (CLAUDE.md, block 01 → R18) reappears: deferred-slot pointers stored as `usize` to make the container `Send`, no SAFETY comment. | adapters/quickjs/src/lib.rs:410–422 |
+| DR-M6 | MAJOR | `ReleaseQueue` FIFO order has no failing test (deletion experiment E7: LIFO inversion, 63 tests green). The spike tests its own private queue, not core's. | core/src/lib.rs:879 |
+| DR-M7 | MAJOR | The one-frame settlement batching is unfalsifiable under QuickJS (E8: unbatching left everything green, including the test named for it). The property must be assertable in core against the mock (call-count), and the ordering must be written once — now A30 (core-owned tick skeleton, `drain_microtasks` becomes the trait method A18 already promised). | core/src/lib.rs:589–594; adapters/quickjs/src/lib.rs:217–250 |
+| DR-M8 | MAJOR | Mock gaps that hid real defects (R23): `get_property` cannot fail (hid DR-M3); `new_external_arraybuffer` ignores `owner` (A25 pairing unverifiable in core); coercions run no script (R27 deadlock unreachable); `settle_deferreds` call count unrecorded (DR-M7 unassertable). | core/src/mock.rs:309–325, 511–522 |
+| DR-M9 | MAJOR | R23 scope-drop assertions are vacuous: `Scope::drop` counts but never asserts, and no test asserts the counters. | core/src/mock.rs:242–254 |
+| DR-M10 | MAJOR | Real-engine A17 assertion missing: the mappedAtCreation test asserts detachment, never that the bytes reached the buffer; A14's error cases (getMappedRange unmapped/destroyed) have zero tests anywhere. | adapters/quickjs/src/lib.rs:2219 |
+| DR-M11 | MAJOR | Block 04 was silent about three JSC traps found by walking the trait: `arraybuffer_copy` is an invariant-10 pinning trap on the `writeBuffer` path (now J19); unhandled rejections have no JSC hook, so J17 as written was unachievable (now J20); JSC finalizers may not call `JSValueUnprotect`, breaking the mapped-range value-release protocol (now J21). | specs/blocks/04-javascriptcore.md |
+| DR-m1 | MINOR | `settle_deferreds` cold fallback branches free settlement values without `escape` → double-free via scope drop (trampoline-`None` and OOM arms only). | adapters/quickjs/src/lib.rs:751–779 |
+| DR-m2 | MINOR | `SettlementQueue::release_pending` releases the deferred but leaks the native `WGPUAdapter`/`WGPUDevice` inside undrained settlements at teardown; ditto the `UnexpectedSettlementType` arm. | core/src/lib.rs:599–617 |
+| DR-m3 | MINOR | Every WebGPU callback discards the backend's `WGPUStringView message`, substituting a fixed string — driver diagnostics never reach script. Folded into A9's non-deferred half. | core/src/lib.rs:2533–2626 |
+| DR-m4 | MINOR | `Runtime::drop` never frees entries left in `unhandled_rejections` — currently unreachable (every tick drains) but one refactor from a teardown abort (found by E13's failure mode being a heap-leak SIGABRT, not the named test). | adapters/quickjs/src/lib.rs:268–292 |
+| DR-m5 | MINOR | `Arena` is per-type pools, one `alloc_*` per array type — Phase 4 would edit core per descriptor. Generic `alloc_slice<T: Copy>` instead. | core/src/lib.rs:238–246 |
+| DR-m6 | MINOR | `trace_payload`/finalizer both enumerate payload types by name in every adapter — multiplies engines × payloads under codegen. Core exports `trace_payload_values::<E>`/release twin; adapters call blind. | adapters/quickjs/src/lib.rs:685–693, 1225–1232 |
+| DR-m7 | MINOR | Coverage: `unmap()` idempotence untested (A16); `arraybuffer_len` `None` arm untested (A26); `writeBuffer` 2^32 tested against the helper, not the method (B17); `r15_…` test mislabelled (tests getters, not R15); consumed-guard and mapped-range AddRef only caught downstream of core (principle 1). | various |
+| DR-m8 | MINOR | `device.queue` mints a fresh wrapper + native ref per read — `[SameObject]` violated. Now B21. | core/src/lib.rs:1651 |
+| DR-m9 | MINOR | `writeBuffer` rejects `ArrayBufferView`s (IDL: `BufferSource`). Now B22, deliberately deferred to a slice designed against JSC pinning. | adapters/quickjs/src/lib.rs:892 |
+| DR-m10 | MINOR | Stale spec text: block 03 header cited A1–A23; block 02 preamble said A1–A20; A23 lacked its J1 supersession note; A18 listed `drain_microtasks` as landed when it never became a trait method; A11's protocol text predated the leak-forever fix. All corrected in this batch. | specs/blocks |
+
+### Findings — dropped or deferred, with reasons
+
+- **A9 `GPUError`-shaped reason** (spec-audit M2): deferred to Phase 6, where the
+  error taxonomy lives; building a half-shaped object now would be rebuilt then.
+  The non-deferred half (backend message passthrough, DR-m3) is fixed now.
+  Recorded in A9 itself.
+- **`transfer()` defeats ZeroCopyDetach keep-alive** (soundness): real, verified
+  against `quickjs.c`, and unguardable without prototype patching. Documented as
+  A31 under invariant 8 (trusted scripts), not fixed.
+- **`ReleaseRequest` copies the ~45-pointer `GpuDispatch` by value** (design
+  E-4): true; deferred until Phase 4 reshapes the release enum wholesale.
+- **A22 multiplicity** (spec m7): only the first unhandled rejection surfaces
+  per tick; the rest are freed. Acceptable diagnostic loss; noted here, not fixed.
+- **Mock `Error = String` lacks pending-state modelling** (design C-3): dissolved
+  by R26 — the contract is now "error is a value", which `String` models
+  exactly. The mock was accidentally right.
+- **E13/E14/E16 fail via SIGABRT/SIGTRAP rather than named assertions**
+  (deletion-lens observation): the guards are covered; converting crashes to
+  named assertions is folded into DR-m7's coverage work where cheap, otherwise
+  accepted — a crash in CI is still red.
+
+### Disposition
+
+Spec fixes (this commit): R26, R27, A9 note, A11 rewrite, A18 correction, A23
+supersession, A30, A31, B4 clarification, B8 record, B21, B22, J2 amendment,
+J19–J21, header renumberings.
+
+Production fixes: two handoffs to the coding agent — **DR-F1** (correctness:
+DR-C1, DR-M1..M5, DR-m1..m4) and **DR-F2** (structure + tests: DR-M6..M10,
+DR-m5..m8) — gates re-run and results appended below after each lands.

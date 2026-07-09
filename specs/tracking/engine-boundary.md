@@ -885,3 +885,33 @@ mistake.
 The `webgpu-headers` pin (Phase 0.6) is still open and is tracked in
 `backend-deltas.md` → D1's caveat. Two independently-versioned upstreams; both
 pins live in tracking docs, never in prose.
+
+---
+
+## Q8 — What the 2026-07-10 design review changed at the boundary
+
+**Status: RECORDED (2026-07-10).** Full findings and triage:
+`phase-reviews.md` → "Design Review — 2026-07-10".
+
+Three boundary-level corrections, each a contract that existed only as one
+engine's habit until it was written down:
+
+1. **`Self::Error` is an owned error value (block 01 → R26).** The Tier 1
+   adapter was running two conventions at once — sentinel-with-pending-state in
+   `get_property`, owned-object-with-cleared-state in `to_f64`/`to_str` — and the
+   callback glue understood only one, so a coercion failure was *returned* to
+   script instead of thrown. JSC has no pending-exception state at all, which is
+   what makes the owned-value contract the engine-neutral one.
+
+2. **`tick()`'s four-step ordering moves into `core/` (block 02 → A30).**
+   `drain_microtasks` becomes the trait method A18 had listed all along. The
+   deletion experiment E8 proved the settlement-batching step cannot go red under
+   QuickJS — the only structural guarantee available is writing the ordering
+   once, plus a mock call-count assertion in core.
+
+3. **Engine delta, recorded before the JSC adapter exists:** JSC's public C API
+   has no host promise-rejection-tracker (block 04 → F1 sweep), so A22's
+   unhandled-rejection surfacing is a Tier 1 diagnostic, not a portable
+   contract. J17's conformance script must catch every rejection explicitly
+   (block 04 → J20). This is the same class of silent divergence J1/J2 closed,
+   caught at the spec stage this time.
