@@ -470,10 +470,18 @@ invalidate §2.4.
    *does*: compare shipped libraries. Blocks nothing in Phase 0, but the
    `SetLabel` gap blocks Phase 4, because WebIDL gives every `GPUObjectBase` a
    writable `label`. Fix upstream in yawgpu, per `CLAUDE.md`.
-4. **Prototype the event-loop pump (§2.7)** end-to-end with no GPU: issue a
-   `AllowProcessEvents` callback, drive `wgpuInstanceProcessEvents`, resolve a
-   QuickJS Promise, drain `JS_ExecutePendingJob`, observe the `.then()` run.
-   This is small, and it is the thing most likely to be silently wrong.
+4. **Prototype the event-loop pump (§2.7)** end-to-end with no GPU. ✅ **DONE
+   2026-07-09** — `specs/tracking/event-loop.md`. The contract holds, and yawgpu
+   genuinely defers an `AllowProcessEvents` callback rather than firing it
+   inline, which was the load-bearing unknown. The sequence is now an executable
+   invariant: after `ProcessEvents` the Promise is resolved, a job is pending,
+   and `globalThis.ran` is **still false**; only draining
+   `JS_ExecutePendingJob` runs the continuation. A regression test ticks
+   `ProcessEvents` eight times without draining and shows an `await` continuation
+   never runs. The callback fires on the pumping thread, so `AllowProcessEvents`
+   removes cross-thread signalling entirely. Residual: two review findings
+   (the crux test asserts our own flag rather than `JS_PromiseState`; the
+   callback leaks its `WGPUAdapter`) — handoff issued.
 5. Prototype the release queue (§2.5) standalone: allocate one buffer handle,
    trigger release from a QuickJS finalizer and separately from a JSC finalizer,
    confirm the queue delivers exactly one `wgpuBufferRelease` from the designated

@@ -1,4 +1,4 @@
 [workspace]
-members = ["ffi"]
+members = ["ffi", "spikes/event-loop-pump"]
 exclude = ["spikes/jsc-detach", "spikes/quickjs-detach", "third_party/*"]
 resolver = "2"
