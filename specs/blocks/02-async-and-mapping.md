@@ -192,15 +192,73 @@ mock's strategy. This is exactly what R23 asks for: the mock takes the union of
 engine obligations, and it is the only place `CopyInCopyOut` can be exercised
 before JSC exists.
 
-**A11 — `free_func` must be null, or null-tolerant.** Measured
-(`engine-boundary.md` → E7/E8): `JS_DetachArrayBuffer` invokes `free_func`
-**synchronously at detach** with the real pointer, and
+**A11 — `free_func` is null-tolerant and acts only on the `NULL` call.**
+*(Revised after the Phase 2 review, which found the `null` form insufficient.)*
+
+Measured (`engine-boundary.md` → E7/E8): `JS_DetachArrayBuffer` invokes
+`free_func` **synchronously at detach** with the real pointer, and
 `js_array_buffer_finalizer` invokes it **again** with `ptr == NULL`, because it
 does not check `abuf->detached`. A `free_func` that frees unconditionally is a
 double-free.
 
-The mapping is owned by the backend and released by `wgpuBufferUnmap`. **Pass a
-null `free_func`.** If a hook is ever wanted, it must tolerate the null call.
+That two-call sequence is not a hazard to route around. **It is the hook A25
+needs**: the `ptr == NULL` call is "the `ArrayBuffer` is gone", which is exactly
+when the range's native reference should be dropped. So:
+
+- `ptr != NULL` (detach): do nothing.
+- `ptr == NULL` (finalize): enqueue the release of whatever the `opaque` owns.
+- Never `free` the pointer. The mapping belongs to the backend.
+
+**A25 — a mapped range keeps its buffer alive, natively.** The Phase 2 review
+found this, and it is reachable from an honest script:
+
+```js
+const r = buf.getMappedRange();
+buf = null;                 // GC releases the WGPUBuffer …
+r[0];                       // … while r still aliases the freed mapping
+```
+
+`finalize_buffer` enqueues `wgpuBufferRelease` without detaching outstanding
+`ZeroCopyDetach` ranges, and nothing roots the buffer from the range. The
+`ArrayBuffer` was built over backend memory with no owner. Use-after-free, from
+code a careless author writes on purpose.
+
+A finalizer **cannot** fix this by detaching: JSC finalizers may run on any
+thread and must not call into the engine, and `CLAUDE.md` invariant 4 forbids
+calling `webgpu.h` from one. The fix belongs at creation:
+
+> `getMappedRange` calls `wgpuBufferAddRef` and stores the handle as the
+> `ArrayBuffer`'s `opaque`. The `free_func`'s `NULL` call enqueues the matching
+> release.
+
+Then the buffer's native object outlives every range over it, whatever order the
+GC finalizes them in — the same argument as block 01 → R5 and block 03 → B8, and
+for the same reason: **finalizer order is unspecified, so only a native reference
+keeps an object alive.**
+
+`destroy()` and `unmap()` still detach eagerly. A25 is the backstop for the
+script that does neither.
+
+**A26 — `arraybuffer_len` must distinguish "detached" from "failed".** QuickJS's
+`JS_GetArrayBuffer` throws `TypeErrorDetachedArrayBuffer` on a detached buffer
+and writes `*psize = 0` on **every** failure path (`quickjs.c`). An adapter that
+does
+
+```rust
+let _ = JS_GetArrayBuffer(ctx, &mut len, value);   // swallows the throw
+Some(len)                                          // Some(0) on any failure
+```
+
+reports `Some(0)` for a detached buffer, for a non-buffer, and for an exception
+alike — so **A12's verification can never fire**, and a stale exception is left
+pending on the context after every successful `unmap()`.
+
+Deleting the A12 guard entirely left all 22 `core/` tests green; a reviewer
+proved it. The guard was dead code with a side effect.
+
+Return `Option`: `None` when the value is not an `ArrayBuffer` or the engine
+raised, `Some(len)` otherwise — and clear any pending exception the query
+provoked. A12's check then means what it says.
 
 **A12 — detach cannot fail loudly, so `unmap()` must verify.** `JS_DetachArrayBuffer`
 returns `void` and silently no-ops on a non-buffer or an already-detached buffer
@@ -211,13 +269,78 @@ back through the C API — and raise a hard error otherwise.
 This check is shared behaviour: it lives in `core/` **once**, not in each adapter
 (`CLAUDE.md` invariant 11).
 
-**A13 — under JSC, never take the C bytes pointer of a buffer script can see.**
-Not exercised in this block, but `core/`'s `CopyInCopyOut` arm must be written to
-the protocol now, because the mock will test it: copy in through a *private*
-pinned staging buffer and `transfer()` it to script; on `unmap()`, `transfer()`
-**first** (which detaches the script-visible buffer) and only then take the
-private product's pointer (`engine-boundary.md` → Q1b/E6). Detach before any
-pointer is taken; a pinned buffer can then never reach script.
+**A13 — under JSC, never take the C bytes pointer of a buffer script can see**,
+and **`core/` must never assume a detached buffer is still readable.**
+
+*(Rewritten after the Phase 2 review. The first version of this rule was obeyed
+in spirit and broken in the interface.)*
+
+The first implementation gave `core/` two primitives and called them in sequence
+on the **same value**:
+
+```rust
+E::detach_arraybuffer(cx, range.value);
+E::arraybuffer_copy_to(cx, range.value, dst);   // read a detached buffer
+```
+
+QuickJS tolerates that shape and the mock was built to fit it. **JavaScriptCore
+cannot implement it at all.** `transfer()` detaches the script-visible buffer and
+moves its bytes into a **new private product**; the original is unreadable
+afterwards. There is no JSC operation that reads a detached buffer.
+
+So `core/`'s copy arm, as written, forces a `core/` change the moment JSC arrives
+— which is precisely what A18 says must not happen. The bet was failing latently,
+and the mock hid it because the mock was shaped to `core/` rather than to the
+engine the arm exists for.
+
+**The primitive is one operation, not two:**
+
+```rust
+/// Detaches `value`. If `out` is `Some`, the buffer's contents are captured
+/// into it first. Fails if the engine could not detach.
+fn detach_arraybuffer(cx: Self::Context<'_>, value: Self::Value,
+                      out: Option<&mut [u8]>) -> Result<(), Self::Error>;
+```
+
+- **QuickJS** (`ZeroCopyDetach`, `out = None`): `JS_DetachArrayBuffer`.
+- **JavaScriptCore** (`CopyInCopyOut`, `out = Some`): `product = value.transfer()`
+  — which detaches `value` — then take **the product's** C pointer, `memcpy` into
+  `out`, release the product. Detach happens **before** any pointer is taken, so a
+  pinned buffer can never reach script (`engine-boundary.md` → Q1b/E5, E6).
+- **Copy-in** is the adapter's business too: JSC fills a *private, pinned* staging
+  buffer and `transfer()`s it to script. `core/` asks only for
+  "an `ArrayBuffer` containing these bytes".
+
+`arraybuffer_copy_to` is deleted from the trait. `core/` keeps the A12
+verification: after the call, `arraybuffer_len(value)` must be `Some(0)`.
+
+**The general rule this cost us:** a trait method pair that is only correct
+because one engine happens to allow an operation in a state another forbids is
+not an abstraction. Ask, for every primitive: *what does JSC do here?* — before
+the mock answers for it.
+
+**A24 — the mock must model what the engines actually do, not what `core/` needs.**
+Three specific obligations, each from a mirror the Phase 2 review found:
+
+1. **The external `ArrayBuffer` must alias, not copy.** The mock's
+   `new_external_arraybuffer` copied foreign bytes into a `Vec`, so
+   `ZeroCopyDetach` was not zero-copy and **no test anywhere asserted that a write
+   through a mapped range reaches backend memory**. A17 was unmet while reported
+   met.
+2. **`duplicate_value` / `release_value` must balance, and the mock must assert
+   it.** They were identity and no-op. A `core/` path that holds a range value and
+   never releases it leaks under QuickJS *and* under JSC — `JSValueProtect` needs
+   its `Unprotect` too, so this is not refcount-specific — and every mock test
+   passed. This is R22's failure class, one capability up.
+3. **`detach` and `arraybuffer_len` must be decoupleable.** The mock's detach set
+   a flag that its length getter read, so the hazard A12 defends against — *detach
+   silently no-ops while the length stays non-zero* (E9, E5) — could not be
+   expressed. Deleting the A12 guard left all 22 tests green; the reviewer proved
+   it. The mock needs a knob for "detach ran and did nothing."
+
+Where an engine's semantics cannot be modelled at all — JSC's **pinning** has no
+mock analogue — say so in the test, and do not let the tracking doc claim the arm
+is "exercised". Copy arithmetic is exercised. The safety protocol is not.
 
 **A14 — `getMappedRange` semantics.** WebIDL:
 `getMappedRange(optional GPUSize64 offset = 0, optional GPUSize64 size)`. Absent

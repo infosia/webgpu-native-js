@@ -5,6 +5,88 @@ Fix)". Findings, triage decisions, fixes, and gate results live here.
 
 ---
 
+## Phase 2 Review — 2026-07-09
+
+Three fresh no-context reviewers. The third lens was pointed at a single
+question — **"what does green not mean here?"** — and given this project's own
+history as evidence about its blind spots: two mocks that were mirrors, and an
+`#[allow]` that hid a soundness defect for a whole phase.
+
+It answered by **experiment**. It deleted the A12 detach-verification guard
+(`if !detached` → `if !detached && false`) and re-ran `cargo test -p
+webgpu-native-js-core`: **22 of 22 passed.** Not an argument. A measurement.
+
+Three CRITICALs. Every one of them reachable from code an honest author writes,
+and none of them visible to a green suite.
+
+### Findings and triage
+
+| ID | Sev | Where | Finding | Disposition |
+|---|---|---|---|---|
+| **P2-C1** | CRITICAL | `core/src/lib.rs:980` | `finalize_buffer` enqueues `wgpuBufferRelease` **without detaching outstanding zero-copy ranges**, and nothing roots the buffer from the range. `const r = buf.getMappedRange(); buf = null;` then a GC frees the mapping while `r` still aliases it. Use-after-free from an honest script. | **Confirmed.** Block 02 → **A25**: `getMappedRange` `AddRef`s the buffer and stores it as the `ArrayBuffer`'s `opaque`; the `free_func`'s `NULL` call enqueues the release. A finalizer cannot fix this — JSC's may run on any thread and must not call into the engine. |
+| **P2-C2** | CRITICAL | `adapters/quickjs/src/lib.rs:224` | `Runtime::drop` calls `JS_SetRuntimeOpaque(rt, null)` **before** `JS_FreeContext`/`JS_FreeRuntime`, whose sweep runs finalizers. `qjs_finalizer` → `state_from_runtime` → `&*null`. `catch_unwind` does not catch SIGSEGV. Tests pass only because each one manually clears globals, GCs, and drains before dropping. | **Confirmed by reading.** Move the null-out after `JS_FreeRuntime`. |
+| **P2-C3** | CRITICAL | `core/src/lib.rs:1266` | `core/`'s `CopyInCopyOut` arm **reads a detached buffer**: `detach_arraybuffer(v)` then `arraybuffer_copy_to(v, dst)`. **JavaScriptCore cannot implement this.** `transfer()` moves the bytes into a new private product; the original is unreadable. The arm exists *for* JSC and cannot be implemented by it. | **Confirmed.** This is the JSC exit gate firing one phase early, which is exactly what block 02 §1 said would be worth more than the slice. Block 02 → **A13** rewritten: one primitive, `detach_arraybuffer(cx, value, out: Option<&mut [u8]>)`, which each engine implements end-to-end. `arraybuffer_copy_to` is deleted from the trait. |
+| **P2-M1** | MAJOR | `adapters/quickjs/src/lib.rs:641` | The A12 guard **cannot fire**. `JS_GetArrayBuffer` throws `TypeErrorDetachedArrayBuffer` on a detached buffer and sets `*psize = 0` on *every* failure path, so `arraybuffer_len` returns `Some(0)` for detached, for non-buffers, and for exceptions alike. The throw is swallowed with `let _ =` and never cleared, leaving a stale exception on the context after every successful `unmap()`. | **Confirmed at source** (`quickjs.c`). Two reviewers converged: one proved the guard dead by deleting it, the other found the mechanism. Block 02 → **A26**. |
+| **P2-M2** | MAJOR | `adapters/quickjs/src/lib.rs:219` | Nothing drains the release queue after the final GC. Every buffer alive at teardown leaks its native handle and its parent-device reference. A host that cycles script VMs leaks per buffer. | **Confirmed.** Drain between `JS_FreeRuntime` and dropping `State`. |
+| **P2-M3** | MAJOR | `core/src/mock.rs` | **Three new mirrors, all in the capabilities Phase 2 added.** (a) `new_external_arraybuffer` *copies* into a `Vec`, so `ZeroCopyDetach` is not zero-copy and **nowhere is it asserted that a write through a mapped range reaches backend memory** — A17 was reported met and is not. (b) `duplicate_value`/`release_value` are identity and no-op with no balance check, so a held-value leak is invisible; this is R22's class, one capability up, and it bites JSC too (`JSValueProtect` needs its `Unprotect`). (c) `detach` and `arraybuffer_len` are coupled, so A12's hazard is inexpressible. | **Confirmed by reading.** Block 02 → **A24**. |
+| **P2-M4** | MAJOR | `core/src/mock.rs:890` | `r23_heap_property_values_are_reclaimed_by_scope` asserts `rt.reclaimed_values() == 4` — the **mock's own counter**, incremented by the mock's `Scope::drop`. To see it red you break the mock, not `core/`. **The third tautology**, and the same shape as the retracted P0-M3 and P1-M3. | **Confirmed.** The project has now caught itself doing this three times. |
+| **P2-M5** | MAJOR | tests | Claimed-or-required, absent: two concurrent async ops (**A7 says "Test it"**, and this is Phase 0's CRITICAL); two ranges detached by one `unmap` on a **real** engine; `Deferred` settled twice; runtime dropped with a pending `mapAsync`; and the R19 red demonstrations for A12, A15, A11 — which the implementing agent reported red-then-green but which **exist nowhere in the tree**. | **Confirmed.** A guard whose red state cannot be reproduced from the tree is on the honour system. |
+| **P2-M6** | MAJOR | several | `unsafe fn` `# Safety` docs restate the signature. Worst: `new_external_arraybuffer` says the memory must outlive the `ArrayBuffer`, while the code relies on the opposite (detach precedes `wgpuBufferUnmap`). A precondition nobody can check is decoration. | Handed over. |
+| P2-m1 | MINOR | `core/src/lib.rs` | Reviewers disagreed on whether `_Error` and `_Aborted` collapse. Adjudicate against the code; A9 forbids collapsing. The rejection value is a bare string, not a `GPUError` — in-spec until Phase 6, but record it. | Handed over. |
+| P2-m2 | MINOR | `core/src/lib.rs:708` | `destroy()` routes through `detach_all_ranges`, which for the copy arm **flushes possibly-stale script bytes back** into a buffer being destroyed. `destroy()` should discard. | Handed over. |
+| P2-m3 | MINOR | `core/src/lib.rs:1262` | `detach_all_ranges`' error paths drop duplicated range values without releasing them. | Handed over. |
+| P2-m4 | MINOR | `adapters/quickjs/src/lib.rs:1225` | Uncommented `#[allow(clippy::type_complexity)]`. Not a soundness lint, but `CLAUDE.md` asks for the *why*. | Handed over. |
+| P2-m5 | MINOR | `core/src/lib.rs:793` | Dead guard: `mode` is already bounded by `enforce_u32`, so `if mode > WEBIDL_U32_MAX` cannot fire. Misleading about where the widening guard lives. | Handed over. |
+
+### What Phase 2 actually earned
+
+Recorded because a review that only lists defects misrepresents the phase.
+Independently verified by two lenses:
+
+- **The boundary is additive.** Every Phase 2 capability is a trait addition;
+  `core/`'s Phase 1 logic is unchanged. `duplicate_value`/`release_value` map to
+  `Protect`/`Unprotect` on JSC, so they are not QuickJS-shaped. **P2-C3 is not a
+  counterexample to this** — it is a badly-chosen primitive pair, and the fix is
+  still an addition.
+- **`with_async_scope` is a real fix to a real leak**, and `Context`'s scope is no
+  longer `Option`.
+- **The `tick()` three-queue contract is strongly tested.**
+  `process_events_without_microtasks_does_not_resume_await`,
+  `tick_reports_unhandled_rejection_after_microtasks_drain` and
+  `tick_ignores_rejection_handled_before_drain_finishes` would each fail against a
+  no-op. A22's late-`.catch()` case is genuinely covered.
+- **The numeric guards are right.** `enforce_u64` uses `>= 2^64` after the Phase 1
+  correction; `optional_gpu_size_to_usize` rejects before narrowing; `offset = 2^32`
+  is tested on this 64-bit host.
+- **No `#[allow]` sits on a soundness lint in hand-written code** — the Phase 1
+  defect stayed fixed.
+
+### The pattern worth naming
+
+Every CRITICAL this phase came from the same place: **a primitive whose contract
+was set by what QuickJS happened to allow, and a mock built to match `core/`
+rather than to match the engines.**
+
+P2-C3 is the clearest. `core/` asked "detach, then read the detached buffer",
+QuickJS shrugged, and the mock — written by the same hand, in the same session —
+said yes. JSC would have said no, and would have said it in Phase 3, after forty
+generated interfaces were resting on the answer.
+
+The rule that follows, now A13's closing paragraph: **for every trait primitive,
+ask what JavaScriptCore does — before the mock answers for it.**
+
+And the rule that keeps catching us, now three times over: **a test that asserts
+the code's own bookkeeping is not a test.** P0-M3 asserted our release-call log.
+P1-M3 asserted our `add_ref` counter. P2-M4 asserts the mock's reclaim counter.
+Each was written by someone who had just read the retraction of the last one.
+
+### Gate
+
+Phase 2 cannot be COMPLETE while P2-C1 … P2-M6 are open. All are handed to the
+coding agent. Block 02 gains A13 (rewritten), A24, A25, A26; A11 is revised.
+
+---
+
 ## Phase 1 Review — 2026-07-09
 
 Three fresh no-context reviewers again, lenses tuned to the phase: correctness /
