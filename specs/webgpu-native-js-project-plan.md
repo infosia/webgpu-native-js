@@ -457,11 +457,15 @@ invalidate §2.4.
    linking it to Phase 7 CI unless it is cheap.)
 3. Confirm yawgpu's `webgpu.h` surface matches (or document deltas from) the
    canonical `webgpu-headers` version. ✅ **ANSWERED 2026-07-09** —
-   `specs/tracking/backend-deltas.md` → D1. Function surface (202 fns) and type
-   surface are **identical**; yawgpu's vendored copy lacks exactly one
-   enumerator (`WGPUFeatureName_SubgroupSizeControl`). ABI-compatible; report
-   upstream. Does not block, because this project generates from the canonical
-   headers, not from a backend's vendored copy.
+   `specs/tracking/backend-deltas.md` → D1–D3. The *header* surfaces match (202
+   functions), bar one enumerator. **The libraries do not.** yawgpu exports only
+   **178 of the 202** canonical functions — the whole `SetLabel` family,
+   `wgpuGetProcAddress`, `wgpuDeviceGetAdapterInfo` and others are unimplemented
+   in its source (D2). wgpu-native exports a complete superset (D3). Reading a
+   vendored header tells you what a backend *intends* to implement, not what it
+   *does*: compare shipped libraries. Blocks nothing in Phase 0, but the
+   `SetLabel` gap blocks Phase 4, because WebIDL gives every `GPUObjectBase` a
+   writable `label`. Fix upstream in yawgpu, per `CLAUDE.md`.
 4. **Prototype the event-loop pump (§2.7)** end-to-end with no GPU: issue a
    `AllowProcessEvents` callback, drive `wgpuInstanceProcessEvents`, resolve a
    QuickJS Promise, drain `JS_ExecutePendingJob`, observe the `.then()` run.
@@ -653,8 +657,14 @@ assumptions by being restated confidently in a later document.
    2026-07-09: quickjs-ng, pinned submodule, raw `bindgen`.** (§3.2;
    `specs/tracking/engine-boundary.md` → Q2.) Residual: **which revision is
    pinned**, recorded at submodule-add time alongside the `webgpu-headers` pin.
-4. **Where does `webgpu.idl` come from, and how is it pinned against the
-   `webgpu.h` version?** (§2.3.) They are versioned independently upstream.
+4. ~~**Where does `webgpu.idl` come from?**~~ **CLOSED 2026-07-09:** the W3C
+   [gpuweb](https://github.com/gpuweb/gpuweb) repository, not `webgpu-headers`.
+   Dawn's `src/dawn/node/BUILD.gn` feeds `third_party/gpuweb/webgpu.idl` to
+   `idlgen` alongside `interop/Browser.idl` and `interop/DawnExtensions.idl`.
+   See `specs/reference/dependencies.md`. **Residual, and still open: how the
+   `webgpu.idl` and `webgpu.h` pins are kept consistent**, since they version
+   independently upstream. Default policy adopted: pin what Dawn pins, and
+   record any divergence with its reason.
 5. **Full WebIDL coverage vs. a deliberately trimmed engine-oriented subset**
    (Web-source-compatibility vs. minimal-surface tradeoff). Revisit after Phase
    4's first codegen pass shows the real effort delta. Note that Phase 8 (running
