@@ -443,8 +443,13 @@ invalidate §2.4.
    Copying at `unmap()` is spec-conformant, so this is a perf cost on the Tier 2
    engine, not a behavioural deviation. **The boundary survived** — the fix was
    additive (a capability + a trait method), which is exactly the outcome §2.4
-   predicted a correct boundary would produce. Residual: **Q1a** — confirm
-   QuickJS `JS_DetachArrayBuffer` works on an *external* buffer. Handoff issued.
+   predicted a correct boundary would produce. **Q1a closed 2026-07-09**: both
+   arms now have running spikes. QuickJS `ZeroCopyDetach` is proven
+   (`spikes/quickjs-detach/`), and along the way the source showed that
+   `free_func` fires at *detach* and then again at finalize with a **null**
+   pointer (E7/E8), and that `JS_DetachArrayBuffer` cannot fail loudly (E9) —
+   just as JSC's `transfer()` cannot (Q1b/E5). **Both engines can silently fail
+   to detach**, so post-detach verification belongs in `core/` once.
 2. Set up the `bindgen`-generated Rust FFI crate from `webgpu.h`; verify a
    trivial program (`wgpuCreateInstance` → `wgpuInstanceRelease`) links and runs
    against yawgpu and wgpu-native, reusing `webgpu-native-cts`'s

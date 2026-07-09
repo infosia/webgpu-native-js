@@ -93,7 +93,7 @@ enum MappedRangeStrategy {
 ```
 
 - **QuickJS → `ZeroCopyDetach`** (`JS_DetachArrayBuffer` on an external buffer).
-  **Not yet verified locally** — see Q1a.
+  **Verified** in `spikes/quickjs-detach/` — see Q1a.
 - **JSC → `CopyInCopyOut`**, detaching the engine-owned buffer via E2's
   `transfer()` (the reliable path), invoked through `JSObjectCallAsFunction`.
 
@@ -342,7 +342,63 @@ Note also that quickjs-ng ships resizable `ArrayBuffer` (`max_len`) and
 exercised by our path, but a resizable buffer reaching `JS_DetachArrayBuffer` is
 worth one negative test.
 
-### Handoff → coding agent (runtime proof)
+### Runtime proof — `spikes/quickjs-detach/`, VERDICT: accepted, `ZeroCopyDetach` confirmed
+
+Gates re-run directly (not via the agent): `cargo test --offline` → 5 passed,
+EXIT=0; `cargo clippy --offline --all-targets -- -D warnings` → EXIT=0.
+
+| Claim | Result |
+|---|---|
+| Zero-copy is real | ✅ script observes a Rust-side mutation of foreign memory while mapped |
+| `unmap()` detaches | ✅ `stash.byteLength === 0`; the stashed `Uint8Array` view is neutered (`length === 0`, `view[0] === undefined`) |
+| **E7** `free_func` at detach, real pointer | ✅ confirmed |
+| **E8** `free_func` again at finalize, `ptr == NULL` | ✅ confirmed; foreign allocation freed exactly once |
+| **E9** silent no-op on non-buffer / already-detached | ✅ confirmed; the spike's verification layer turns it into a hard error |
+
+**`ZeroCopyDetach` is proven for QuickJS.** Both arms of `MappedRangeStrategy`
+now have running code behind them.
+
+### E11 — quickjs-ng bug: `maxByteLength` ignores detachment (upstream)
+
+The resizable-`ArrayBuffer` negative test reported `byteLength === 0` and
+`detached === true`, but **`maxByteLength` still returned `16`**. Confirmed at
+source: `js_array_buffer_get_maxByteLength` has **no detached guard** —
+
+```c
+if (array_buffer_is_resizable(abuf))
+    return js_uint32(abuf->max_byte_length);   /* never zeroed by detach */
+```
+
+whereas `byteLength` only appears correct because detach sets
+`abuf->byte_length = 0`. ECMA-262 `get ArrayBuffer.prototype.maxByteLength`
+requires "**If IsDetachedBuffer(O) is true, return +0**". This is an upstream
+conformance bug.
+
+**Impact on us: near zero** — we never hand script a resizable buffer. Recorded
+for two reasons. It should be reported upstream. And it means quickjs-ng's
+`ArrayBuffer` getters do **not** uniformly reflect the detached state, so
+post-detach verification (E9) must go through `JS_GetArrayBuffer` (null data
+pointer), never through a JS-visible length getter.
+
+### Review findings
+
+- **MINOR-1 — aliasing discipline in `free_array_buffer`.** The callback does
+  `let state = unsafe { &mut *opaque.cast::<ForeignAllocation>() }` *before* the
+  null-pointer branch, and that branch then does `Box::from_raw(opaque)`. A live
+  `&mut` derived from the same pointer is a Stacked Borrows violation; ASan does
+  not see it, Miri would. Move the `&mut` into the non-null branch. This shape
+  will be copied into the real adapter's finalizer, so fix it in the spike where
+  it is cheap.
+- **MINOR-2 — the ASan claim is narrower than it looks.** Apple platforms ship
+  no LeakSanitizer, so `ASAN EXIT=0` on macOS proves **no double-free and no
+  use-after-free**. It does **not** prove no leak. The report should say so; the
+  "freed exactly once" assertion, not ASan, is what covers the leak here.
+
+Neither is CRITICAL or MAJOR, so Q1a is closed. Both are folded into the
+outstanding `spikes/jsc-detach` revision handoff (Q1b) rather than dispatched
+separately.
+
+### Original handoff (superseded — kept for provenance)
 
 ### Handoff → coding agent
 
@@ -490,6 +546,31 @@ working `cc`-based vendored quickjs-ng compile. Read it; do not depend on it.
 a week of effort, adopt `rquickjs-sys` with the `bindgen` feature and revisit.
 Record the switch here. This is a build-plumbing decision, not an architectural
 one — it must not be allowed to become one.
+
+### E10 — `quickjs.h` puts 38 of its API behind `static inline` (build note)
+
+Found while bringing up the Q1a spike. `quickjs.h` v0.15.1 declares **260
+`JS_EXTERN` symbols and 38 `static inline` functions.** The inline set is not
+peripheral — it contains `JS_FreeValue`, `JS_DupValue`, `JS_IsException`,
+`JS_ToCString`, `JS_NewInt32`, and the `JSValue` tag predicates. **bindgen does
+not emit `static inline` functions**, so a naive `bindgen::Builder` produces
+bindings that fail to link exactly these.
+
+Two ways out:
+
+1. `bindgen::Builder::wrap_static_fns(true)` — bindgen emits a `.c` shim with
+   real symbols wrapping each inline; compile it alongside quickjs. Mechanical.
+2. Reimplement the 38 in Rust.
+
+**Use (1).** Option (2) looks cheap and is a trap: several inlines depend on the
+`JSValue` representation, which changes under `JS_NAN_BOXING`. Hand-maintaining
+that in Rust duplicates an ABI decision the C header already owns, and it would
+break silently on a build-flag change.
+
+This does **not** trip the Q2b fallback — it is one builder call plus one
+compiled shim, not a week. Recorded because a future reader hitting
+`cannot find function JS_FreeValue` will otherwise assume raw bindgen was a
+mistake.
 
 ---
 
