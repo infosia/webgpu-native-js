@@ -11,6 +11,7 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::ptr;
+use std::ptr::NonNull;
 use std::sync::{Arc, Mutex, OnceLock};
 
 pub use webgpu_native_js_ffi::native::{
@@ -225,6 +226,16 @@ pub trait JsEngine: Sized {
         obj: Self::Value,
         class: ClassId,
     ) -> Option<&'a (dyn Any + Send)>;
+    /// Visits every engine value the payload holds, so the engine can trace it.
+    ///
+    /// QuickJS uses this from `JSClassDef::gc_mark`; JavaScriptCore-style
+    /// adapters can satisfy the same boundary by protecting on store and
+    /// unprotecting on drop.
+    fn trace_payload(
+        cx: Self::Context<'_>,
+        payload: &(dyn Any + Send),
+        visit: &mut dyn FnMut(Self::Value),
+    );
     /// Creates a JavaScript `undefined` value.
     fn undefined(cx: Self::Context<'_>) -> Self::Value;
     /// Creates a JavaScript number value.
@@ -291,6 +302,12 @@ pub trait JsEngine: Sized {
     fn duplicate_value(cx: Self::Context<'_>, value: Self::Value) -> Self::Value;
     /// Releases a value previously duplicated for core.
     fn release_value(cx: Self::Context<'_>, value: Self::Value);
+    /// Registers a deferred slot owned by a raw async callback request.
+    fn register_deferred(cx: Self::Context<'_>, slot: NonNull<Option<Deferred<Self>>>);
+    /// Unregisters a deferred slot that is being settled by its callback.
+    fn unregister_deferred(cx: Self::Context<'_>, slot: NonNull<Option<Deferred<Self>>>);
+    /// Releases a deferred without settling it during engine teardown.
+    fn release_deferred(cx: Self::Context<'_>, deferred: Deferred<Self>);
 }
 
 /// Engine strategy for script-visible mapped ranges.
@@ -526,6 +543,7 @@ unsafe impl Send for DevicePayload {}
 /// Payload stored by a `GPUBuffer` wrapper.
 pub struct BufferPayload<E: JsEngine> {
     state: Arc<Mutex<BufferState<E>>>,
+    traced_values: Arc<TracedValues<E>>,
 }
 
 impl<E: JsEngine> BufferPayload<E> {
@@ -535,16 +553,57 @@ impl<E: JsEngine> BufferPayload<E> {
         &self.state
     }
 
+    /// Visits every mapped range value held by this payload.
+    pub fn trace_mapped_range_values(&self, mut visit: impl FnMut(E::Value)) {
+        self.traced_values.visit(&mut visit);
+    }
+
     /// Removes tracked mapped ranges and passes their held values to `release`.
     pub fn release_mapped_range_values(&self, mut release: impl FnMut(E::Value)) {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
+        self.traced_values.clear();
         for range in std::mem::take(&mut state.ranges) {
             release(range.value);
         }
     }
 }
+
+struct TracedValues<E: JsEngine> {
+    values: std::cell::UnsafeCell<Vec<E::Value>>,
+}
+
+impl<E: JsEngine> TracedValues<E> {
+    fn new() -> Self {
+        Self {
+            values: std::cell::UnsafeCell::new(Vec::new()),
+        }
+    }
+
+    fn push(&self, value: E::Value) {
+        // SAFETY: mapped range tracking is mutated only by JS entry points on
+        // the engine thread. `gc_mark` may read the same vector during QuickJS
+        // GC, which cannot run concurrently with those entry points.
+        unsafe { &mut *self.values.get() }.push(value);
+    }
+
+    fn clear(&self) {
+        // SAFETY: see `push`.
+        unsafe { &mut *self.values.get() }.clear();
+    }
+
+    fn visit(&self, visit: &mut dyn FnMut(E::Value)) {
+        // SAFETY: see `push`; this path must stay allocation- and lock-free for
+        // engine GC tracing.
+        for value in unsafe { &*self.values.get() }.iter().copied() {
+            visit(value);
+        }
+    }
+}
+
+unsafe impl<E: JsEngine> Send for TracedValues<E> {}
+unsafe impl<E: JsEngine> Sync for TracedValues<E> {}
 
 /// Mutable state of a `GPUBuffer` wrapper.
 pub struct BufferState<E: JsEngine> {
@@ -723,6 +782,7 @@ pub fn device_create_buffer<E: JsEngine + 'static>(
         GPU_BUFFER_CLASS,
         Box::new(BufferPayload::<E> {
             state: Arc::new(Mutex::new(state)),
+            traced_values: Arc::new(TracedValues::new()),
         }),
     )
 }
@@ -733,9 +793,9 @@ pub fn buffer_destroy<E: JsEngine + 'static>(
     this: E::Value,
     _args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
-    with_buffer_state::<E, _, _>(cx, this, |state| {
+    with_buffer_payload_state::<E, _, _>(cx, this, |payload, state| {
         if !state.destroyed {
-            detach_all_ranges::<E>(cx, state, false)?;
+            detach_all_ranges::<E>(cx, payload, state, false)?;
             unsafe {
                 (E::environment(cx).gpu().buffer_destroy)(state.buffer);
             }
@@ -760,10 +820,11 @@ pub fn gpu_request_adapter<E: JsEngine + 'static>(
         ));
     };
     let (promise, deferred) = E::new_promise(cx)?;
-    let request = Box::new(AdapterRequest::<E> {
+    let mut request = Box::new(AdapterRequest::<E> {
         async_cx: E::async_context(cx),
-        deferred,
+        deferred: Some(deferred),
     });
+    E::register_deferred(cx, NonNull::from(&mut request.deferred));
     let info = WGPURequestAdapterCallbackInfo {
         nextInChain: ptr::null_mut(),
         mode: WGPUCallbackMode_WGPUCallbackMode_AllowProcessEvents,
@@ -792,10 +853,11 @@ pub fn adapter_request_device<E: JsEngine + 'static>(
         ));
     };
     let (promise, deferred) = E::new_promise(cx)?;
-    let request = Box::new(DeviceRequest::<E> {
+    let mut request = Box::new(DeviceRequest::<E> {
         async_cx: E::async_context(cx),
-        deferred,
+        deferred: Some(deferred),
     });
+    E::register_deferred(cx, NonNull::from(&mut request.deferred));
     let info = WGPURequestDeviceCallbackInfo {
         nextInChain: ptr::null_mut(),
         mode: WGPUCallbackMode_WGPUCallbackMode_AllowProcessEvents,
@@ -846,11 +908,12 @@ pub fn buffer_map_async<E: JsEngine + 'static>(
         (state.buffer, Arc::clone(&payload.state))
     };
     let (promise, deferred) = E::new_promise(cx)?;
-    let request = Box::new(MapRequest::<E> {
+    let mut request = Box::new(MapRequest::<E> {
         async_cx: E::async_context(cx),
-        deferred,
+        deferred: Some(deferred),
         state,
     });
+    E::register_deferred(cx, NonNull::from(&mut request.deferred));
     let info = WGPUBufferMapCallbackInfo {
         nextInChain: ptr::null_mut(),
         mode: WGPUCallbackMode_WGPUCallbackMode_AllowProcessEvents,
@@ -871,7 +934,7 @@ pub fn buffer_get_mapped_range<E: JsEngine + 'static>(
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
     let offset = optional_gpu_size_to_usize::<E>(cx, args.first().copied(), "offset", 0)?;
-    with_buffer_state::<E, _, _>(cx, this, |state| {
+    with_buffer_payload_state::<E, _, _>(cx, this, |payload, state| {
         if state.destroyed || !state.mapped {
             return Err(E::operation_error(cx, "buffer is not mapped"));
         }
@@ -916,6 +979,7 @@ pub fn buffer_get_mapped_range<E: JsEngine + 'static>(
             size,
             strategy: E::MAPPED_RANGE_STRATEGY,
         });
+        payload.traced_values.push(tracked);
         Ok(value)
     })
 }
@@ -926,12 +990,12 @@ pub fn buffer_unmap<E: JsEngine + 'static>(
     this: E::Value,
     _args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
-    with_buffer_state::<E, _, _>(cx, this, |state| {
+    with_buffer_payload_state::<E, _, _>(cx, this, |payload, state| {
         if state.destroyed {
             return Ok(E::undefined(cx));
         }
         if state.mapped {
-            detach_all_ranges::<E>(cx, state, true)?;
+            detach_all_ranges::<E>(cx, payload, state, true)?;
             unsafe {
                 (E::environment(cx).gpu().buffer_unmap)(state.buffer);
             }
@@ -1023,17 +1087,17 @@ pub fn finalize_buffer<E: JsEngine + 'static>(payload: Box<dyn Any + Send>, env:
 
 struct AdapterRequest<E: JsEngine + 'static> {
     async_cx: E::AsyncContext,
-    deferred: Deferred<E>,
+    deferred: Option<Deferred<E>>,
 }
 
 struct DeviceRequest<E: JsEngine + 'static> {
     async_cx: E::AsyncContext,
-    deferred: Deferred<E>,
+    deferred: Option<Deferred<E>>,
 }
 
 struct MapRequest<E: JsEngine + 'static> {
     async_cx: E::AsyncContext,
-    deferred: Deferred<E>,
+    deferred: Option<Deferred<E>>,
     state: Arc<Mutex<BufferState<E>>>,
 }
 
@@ -1048,23 +1112,28 @@ unsafe extern "C" fn request_adapter_callback<E: JsEngine + 'static>(
         let Some(raw) = ptr::NonNull::new(userdata1.cast::<AdapterRequest<E>>()) else {
             return;
         };
-        let request = unsafe { Box::from_raw(raw.as_ptr()) };
+        let mut request = unsafe { Box::from_raw(raw.as_ptr()) };
+        let slot = NonNull::from(&mut request.deferred);
+        let Some(deferred) = request.deferred.take() else {
+            return;
+        };
         if status == WGPURequestAdapterStatus_WGPURequestAdapterStatus_Success && !adapter.is_null()
         {
             // SAFETY: callbacks use AllowProcessEvents, so they are processed
             // while the engine is alive on the event-processing thread.
             unsafe {
                 E::with_async_scope(request.async_cx, |cx| {
+                    E::unregister_deferred(cx, slot);
                     let value = E::new_instance(
                         cx,
                         GPU_ADAPTER_CLASS,
                         Box::new(AdapterPayload { adapter }),
                     );
                     match value {
-                        Ok(value) => E::settle_deferred(cx, request.deferred, Ok(value)),
+                        Ok(value) => E::settle_deferred(cx, deferred, Ok(value)),
                         Err(reason) => {
                             let reason = E::error_value_from_error(cx, reason);
-                            E::settle_deferred(cx, request.deferred, Err(reason));
+                            E::settle_deferred(cx, deferred, Err(reason));
                         }
                     }
                 })
@@ -1074,8 +1143,9 @@ unsafe extern "C" fn request_adapter_callback<E: JsEngine + 'static>(
             // while the engine is alive on the event-processing thread.
             unsafe {
                 E::with_async_scope(request.async_cx, |cx| {
+                    E::unregister_deferred(cx, slot);
                     let reason = E::async_error_value(cx, "requestAdapter failed");
-                    E::settle_deferred(cx, request.deferred, Err(reason));
+                    E::settle_deferred(cx, deferred, Err(reason));
                 })
             };
         }
@@ -1093,19 +1163,24 @@ unsafe extern "C" fn request_device_callback<E: JsEngine + 'static>(
         let Some(raw) = ptr::NonNull::new(userdata1.cast::<DeviceRequest<E>>()) else {
             return;
         };
-        let request = unsafe { Box::from_raw(raw.as_ptr()) };
+        let mut request = unsafe { Box::from_raw(raw.as_ptr()) };
+        let slot = NonNull::from(&mut request.deferred);
+        let Some(deferred) = request.deferred.take() else {
+            return;
+        };
         if status == WGPURequestDeviceStatus_WGPURequestDeviceStatus_Success && !device.is_null() {
             // SAFETY: callbacks use AllowProcessEvents, so they are processed
             // while the engine is alive on the event-processing thread.
             unsafe {
                 E::with_async_scope(request.async_cx, |cx| {
+                    E::unregister_deferred(cx, slot);
                     let value =
                         E::new_instance(cx, GPU_DEVICE_CLASS, Box::new(DevicePayload { device }));
                     match value {
-                        Ok(value) => E::settle_deferred(cx, request.deferred, Ok(value)),
+                        Ok(value) => E::settle_deferred(cx, deferred, Ok(value)),
                         Err(reason) => {
                             let reason = E::error_value_from_error(cx, reason);
-                            E::settle_deferred(cx, request.deferred, Err(reason));
+                            E::settle_deferred(cx, deferred, Err(reason));
                         }
                     }
                 })
@@ -1115,8 +1190,9 @@ unsafe extern "C" fn request_device_callback<E: JsEngine + 'static>(
             // while the engine is alive on the event-processing thread.
             unsafe {
                 E::with_async_scope(request.async_cx, |cx| {
+                    E::unregister_deferred(cx, slot);
                     let reason = E::async_error_value(cx, "requestDevice failed");
-                    E::settle_deferred(cx, request.deferred, Err(reason));
+                    E::settle_deferred(cx, deferred, Err(reason));
                 })
             };
         }
@@ -1133,7 +1209,11 @@ unsafe extern "C" fn buffer_map_callback<E: JsEngine + 'static>(
         let Some(raw) = ptr::NonNull::new(userdata1.cast::<MapRequest<E>>()) else {
             return;
         };
-        let request = unsafe { Box::from_raw(raw.as_ptr()) };
+        let mut request = unsafe { Box::from_raw(raw.as_ptr()) };
+        let slot = NonNull::from(&mut request.deferred);
+        let Some(deferred) = request.deferred.take() else {
+            return;
+        };
         if status == WGPUMapAsyncStatus_WGPUMapAsyncStatus_Success {
             if let Ok(mut state) = request.state.lock() {
                 state.mapped = true;
@@ -1142,8 +1222,9 @@ unsafe extern "C" fn buffer_map_callback<E: JsEngine + 'static>(
             // while the engine is alive on the event-processing thread.
             unsafe {
                 E::with_async_scope(request.async_cx, |cx| {
+                    E::unregister_deferred(cx, slot);
                     let value = E::undefined(cx);
-                    E::settle_deferred(cx, request.deferred, Ok(value));
+                    E::settle_deferred(cx, deferred, Ok(value));
                 })
             };
         } else {
@@ -1160,8 +1241,9 @@ unsafe extern "C" fn buffer_map_callback<E: JsEngine + 'static>(
             // while the engine is alive on the event-processing thread.
             unsafe {
                 E::with_async_scope(request.async_cx, |cx| {
+                    E::unregister_deferred(cx, slot);
                     let reason = E::async_error_value(cx, reason);
-                    E::settle_deferred(cx, request.deferred, Err(reason));
+                    E::settle_deferred(cx, deferred, Err(reason));
                 })
             };
         }
@@ -1267,6 +1349,18 @@ where
     E: JsEngine + 'static,
     F: FnOnce(&mut BufferState<E>) -> Result<R, E::Error>,
 {
+    with_buffer_payload_state(cx, this, |_payload, state| f(state))
+}
+
+fn with_buffer_payload_state<E, F, R>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    f: F,
+) -> Result<R, E::Error>
+where
+    E: JsEngine + 'static,
+    F: FnOnce(&BufferPayload<E>, &mut BufferState<E>) -> Result<R, E::Error>,
+{
     let Some(payload) = E::payload(cx, this, GPU_BUFFER_CLASS)
         .and_then(|payload| payload.downcast_ref::<BufferPayload<E>>())
     else {
@@ -1278,11 +1372,12 @@ where
     let Ok(mut state) = payload.state.lock() else {
         return Err(E::operation_error(cx, "GPUBuffer state is poisoned"));
     };
-    f(&mut state)
+    f(payload, &mut state)
 }
 
 fn detach_all_ranges<E: JsEngine>(
     cx: E::Context<'_>,
+    payload: &BufferPayload<E>,
     state: &mut BufferState<E>,
     flush: bool,
 ) -> Result<(), E::Error> {
@@ -1321,6 +1416,7 @@ fn detach_all_ranges<E: JsEngine>(
         }
         E::release_value(cx, range.value);
     }
+    payload.traced_values.clear();
     Ok(())
 }
 

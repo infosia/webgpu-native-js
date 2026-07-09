@@ -478,6 +478,38 @@ fn trace_payload(cx: Self::Context<'_>, payload: &dyn Any, visit: &mut dyn FnMut
 QuickJS wires it to `JSClassDef::gc_mark`; JSC protects on store and unprotects on
 drop; the mock asserts every traced value is one it knows about.
 
+**Red demonstration, observed:** neutering `qjs_gc_mark`'s body makes the adapter
+test binary abort with `SIGABRT`; restoring it makes all 18 tests pass.
+
+**A27 is a stopgap, and the debt is recorded here rather than discovered later.**
+Wiring it forced a change in `core/`'s *data layout*: the mapped-range values lived
+behind `BufferState`'s `Mutex`, and `gc_mark` runs inside the collector and cannot
+take a lock the mutator may hold. `core/` grew a lock-free side list to be traced.
+
+Two things follow.
+
+The `Mutex` is dead weight — the binding is single-threaded (A4), and only the
+release queue crosses threads. But swapping it for a `RefCell` would not save us:
+a GC can trigger inside any allocation, so *any* borrow held across an engine call
+is a hazard. The side list is a consequence of `trace_payload`, not of the `Mutex`.
+
+And `trace_payload` is itself a QuickJS concept. **The cleaner primitive is for
+`core/` never to hold an `E::Value` at all** — instead asking the engine to
+*associate* the range's `ArrayBuffer` with the buffer's wrapper:
+
+```rust
+fn associate_value(cx, owner: Self::Value, slot: SlotId, value: Self::Value);
+fn take_associated(cx, owner: Self::Value, slot: SlotId) -> Option<Self::Value>;
+```
+
+QuickJS stores it in a traced slot; JSC protects it. No tracing hook, no side list,
+and the leak class disappears because `core/` never owns an engine value.
+
+**Do not redesign this now.** With one engine in the tree, shaping the abstraction
+around it is precisely the error that produced P2-C3 and two mirrored mocks.
+`trace_payload` is implementable by both engines — on JSC it is a no-op, which is
+wasteful but correct. **Decide in Phase 3, when JavaScriptCore has a vote.**
+
 **A28 — a pending async request must not survive into engine teardown.** The
 second abort. A `Deferred` owns two resolving functions; the request `Box` is
 owned by the WebGPU callback via `into_raw` (A6). If the callback never fires —

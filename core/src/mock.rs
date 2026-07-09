@@ -36,6 +36,7 @@ pub struct Runtime {
     values: RefCell<Vec<MockValue>>,
     classes: RefCell<BTreeMap<ClassId, &'static str>>,
     reclaimed_values: Cell<usize>,
+    reclaimed_handles: RefCell<Vec<Value>>,
     detach_noop: Cell<bool>,
     duplicated_values: RefCell<BTreeMap<Value, usize>>,
 }
@@ -49,6 +50,7 @@ impl Runtime {
             values: RefCell::new(vec![MockValue::Undefined]),
             classes: RefCell::new(BTreeMap::new()),
             reclaimed_values: Cell::new(0),
+            reclaimed_handles: RefCell::new(Vec::new()),
             detach_noop: Cell::new(false),
             duplicated_values: RefCell::new(BTreeMap::new()),
         }
@@ -229,6 +231,10 @@ impl Drop for Scope<'_> {
         self.runtime
             .reclaimed_values
             .set(self.runtime.reclaimed_values.get() + count);
+        self.runtime
+            .reclaimed_handles
+            .borrow_mut()
+            .extend(self.owned.borrow().iter().copied());
         self.owned.borrow_mut().clear();
     }
 }
@@ -384,6 +390,26 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
                 payload,
             } if actual == class => Some(payload),
             _ => None,
+        }
+    }
+
+    fn trace_payload(
+        cx: Self::Context<'_>,
+        payload: &(dyn Any + Send),
+        visit: &mut dyn FnMut(Self::Value),
+    ) {
+        if let Some(buffer) = payload.downcast_ref::<crate::BufferPayload<Self>>() {
+            buffer.trace_mapped_range_values(|value| {
+                assert!(
+                    value.0 < cx.runtime.values.borrow().len(),
+                    "mock traced value was not issued: {value:?}"
+                );
+                assert!(
+                    !cx.runtime.reclaimed_handles.borrow().contains(&value),
+                    "mock payload traced a reclaimed value: {value:?}"
+                );
+                visit(value);
+            });
         }
     }
 
@@ -561,6 +587,17 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
             duplicated.remove(&value);
         }
     }
+
+    fn register_deferred(_cx: Self::Context<'_>, _slot: std::ptr::NonNull<Option<Deferred<Self>>>) {
+    }
+
+    fn unregister_deferred(
+        _cx: Self::Context<'_>,
+        _slot: std::ptr::NonNull<Option<Deferred<Self>>>,
+    ) {
+    }
+
+    fn release_deferred(_cx: Self::Context<'_>, _deferred: Deferred<Self>) {}
 }
 
 thread_local! {
@@ -1312,6 +1349,31 @@ mod tests {
     }
 
     #[test]
+    fn a7_red_demo_overwritten_userdata_loses_first_async_request() {
+        let rt = runtime();
+        let cx = rt.context();
+        let (first, first_deferred) = Engine::new_promise(cx).expect("first promise");
+        let (second, second_deferred) = Engine::new_promise(cx).expect("second promise");
+        let mut single_userdata_slot = Some(first_deferred);
+        single_userdata_slot = Some(second_deferred);
+
+        let overwritten = single_userdata_slot
+            .take()
+            .expect("second request overwrote first userdata");
+        Engine::settle_deferred(cx, overwritten, Ok(rt.undefined()));
+
+        assert_eq!(
+            rt.promise_result(first),
+            None,
+            "the first request is lost when a second async op overwrites userdata"
+        );
+        assert!(
+            matches!(rt.promise_result(second), Some(Ok(_))),
+            "the second request receives the first callback's completion"
+        );
+    }
+
+    #[test]
     fn a5_deferred_second_settle_is_ignored() {
         let rt = runtime();
         let cx = rt.context();
@@ -1340,6 +1402,7 @@ mod tests {
         finalize_buffer::<Engine>(
             Box::new(BufferPayload::<Engine> {
                 state: Arc::clone(buffer_payload.state()),
+                traced_values: Arc::new(crate::TracedValues::new()),
             }),
             Engine::environment(cx),
         );

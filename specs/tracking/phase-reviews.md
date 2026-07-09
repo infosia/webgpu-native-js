@@ -80,10 +80,80 @@ the code's own bookkeeping is not a test.** P0-M3 asserted our release-call log.
 P1-M3 asserted our `add_ref` counter. P2-M4 asserts the mock's reclaim counter.
 Each was written by someone who had just read the retraction of the last one.
 
-### Gate
+### Two more CRITICALs, found by writing the tests the rules demanded
 
-Phase 2 cannot be COMPLETE while P2-C1 … P2-M6 are open. All are handed to the
-coding agent. Block 02 gains A13 (rewritten), A24, A25, A26; A11 is revised.
+**P2-C4 — `core/` holds engine values; QuickJS traced none of them.**
+`duplicate_value(cx, range.value)` keeps each mapped range's `ArrayBuffer` alive in
+the buffer payload, while the class declared `gc_mark: None`. The value lives by
+refcount and is invisible to the collector, so `JS_FreeRuntime` finds live objects
+and **aborts**. A second mapped range surviving to teardown kills the process.
+
+Block 01's **R7** required exactly this tracing. Phase 1's review marked it
+**"satisfied (vacuous)"** — correctly, at the time, because no wrapper held a JS
+value. Phase 2 created one, and nobody re-asked.
+
+> **A rule can be written, correctly discharged as vacuous, and silently come back
+> into force.** When a phase adds a capability, re-ask which "not applicable" rules
+> just became applicable. Nothing in the process does this for you.
+
+**P2-C5 — a pending async request survives into teardown.** A `Deferred` owns two
+resolving functions inside a `Box` the WebGPU callback owns via `into_raw`. If the
+callback never fires, those values are never freed and `JS_FreeRuntime` aborts.
+Freeing them *after* is worse: they point into a dead runtime. Block 02 → **A28**.
+
+Both were found because the agent **wrote the tests the rules demanded instead of
+asserting they would pass** — and then reported the aborts instead of hiding them.
+It did, however, delete the tests. **A test that finds a bug is not deleted; the
+bug is fixed.** Both now land.
+
+**Red demonstrations.** I ran the ones the agent could not: reintroducing the
+premature `JS_SetRuntimeOpaque(null)` aborts the teardown test with `SIGABRT`
+(P2-C2); neutering `qjs_gc_mark`'s body aborts the adapter binary and restoring it
+returns 18 passing tests (P2-C4). The agent stated plainly that it had not observed
+the aborts before fixing them, rather than claiming a quote it did not capture.
+That is the right answer to give.
+
+### The one place `core/` bent toward an engine
+
+Wiring `trace_payload` forced a change in `core/`'s **data layout**, not its logic:
+the mapped-range values sat behind `BufferState`'s `Mutex`, and `gc_mark` runs
+inside the collector and cannot take a lock the mutator may hold, so `core/` grew a
+lock-free side list.
+
+`trace_payload` is a QuickJS concept — JSC needs no tracing callback, only
+`protect`/`unprotect`. The cleaner primitive is for `core/` never to hold an
+`E::Value`: ask the engine to *associate* the `ArrayBuffer` with the wrapper
+(`associate_value` / `take_associated`), which QuickJS puts in a traced slot and
+JSC protects. Then the hook, the side list, and the whole leak class disappear.
+
+**Deliberately not redesigned now.** With one engine in the tree, shaping the
+abstraction around it is exactly the error that produced P2-C3 and two mirrored
+mocks. `trace_payload` is implementable by both — a no-op on JSC, wasteful but
+correct. **Phase 3 decides, when JavaScriptCore has a vote.** The debt is recorded
+in block 02 → A27 rather than left to be rediscovered.
+
+### Gate — PASSED. Phase 2 is COMPLETE.
+
+Gates re-run directly: `core` with the backend env var **unset** EXIT=0 (28 tests);
+`cargo test --workspace` EXIT=0; `cargo clippy --workspace --all-targets -D
+warnings` EXIT=0; both detach spikes EXIT=0.
+
+Verified fixed: P2-C1 … P2-C5, P2-M1 … P2-M6, P2-m1 … P2-m5.
+Block 02 gained A13 (rewritten), A24, A25, A26, A27, A28; A11 and A26 were revised
+after the implementing agent showed each was wrong as first written.
+
+### What this phase taught, in one line each
+
+- **The mock must be shaped to the engines, not to `core/`.** P2-C3 shipped because
+  `core/` asked "detach, then read the detached buffer", QuickJS shrugged, and the
+  mock — written by the same hand in the same session — said yes.
+- **A predicate that returns the same value for "zero" and "no answer" cannot guard
+  anything.** `arraybuffer_len` returned `Some(0)` for detached, for non-buffers,
+  and for exceptions alike.
+- **Vacuous rules come back.** R7 was correctly not-applicable, then silently was.
+- **Write the test, then run it red.** Two CRITICALs existed only because someone
+  finally wrote a test that the rules had demanded for a phase and a half.
+- **A test that asserts your own bookkeeping is not a test.** Three times now.
 
 ---
 

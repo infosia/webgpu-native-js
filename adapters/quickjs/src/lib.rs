@@ -227,6 +227,13 @@ impl Drop for Runtime {
         unsafe {
             qjs::JS_SetHostPromiseRejectionTracker(self.rt.as_ptr(), None, ptr::null_mut());
             let raw = qjs::JS_GetRuntimeOpaque(self.rt.as_ptr()).cast::<State>();
+            if let Some(state) = raw.as_ref() {
+                // `AllowProcessEvents` callbacks only run from `tick()`, and
+                // `tick()` cannot run concurrently with `Drop` for this
+                // single-threaded runtime. Leave request boxes allocated for a
+                // later backend callback; it will observe `None` and return.
+                state.release_outstanding_deferreds(self.ctx.as_ptr());
+            }
             qjs::JS_FreeContext(self.ctx.as_ptr());
             qjs::JS_FreeRuntime(self.rt.as_ptr());
             if let Some(state) = raw.as_ref() {
@@ -244,6 +251,7 @@ struct State {
     classes: Mutex<BTreeMap<core::ClassId, ClassEntry>>,
     quickjs_to_core: Mutex<BTreeMap<qjs::JSClassID, core::ClassId>>,
     callbacks: Mutex<Vec<CallbackTarget>>,
+    outstanding_deferreds: Mutex<Vec<usize>>,
     unhandled_rejections: Mutex<Vec<UnhandledRejection>>,
 }
 
@@ -254,6 +262,7 @@ impl State {
             classes: Mutex::new(BTreeMap::new()),
             quickjs_to_core: Mutex::new(BTreeMap::new()),
             callbacks: Mutex::new(Vec::new()),
+            outstanding_deferreds: Mutex::new(Vec::new()),
             unhandled_rejections: Mutex::new(Vec::new()),
         }
     }
@@ -310,6 +319,44 @@ impl State {
         }
         Some(format!("Unhandled promise rejection: {message}"))
     }
+
+    fn register_deferred(&self, slot: NonNull<Option<core::Deferred<Engine>>>) {
+        if let Ok(mut slots) = self.outstanding_deferreds.lock() {
+            slots.push(slot.as_ptr() as usize);
+        }
+    }
+
+    fn unregister_deferred(&self, slot: NonNull<Option<core::Deferred<Engine>>>) {
+        if let Ok(mut slots) = self.outstanding_deferreds.lock() {
+            if let Some(index) = slots
+                .iter()
+                .position(|candidate| *candidate == slot.as_ptr() as usize)
+            {
+                slots.swap_remove(index);
+            }
+        }
+    }
+
+    fn release_outstanding_deferreds(&self, ctx: *mut qjs::JSContext) {
+        let slots = self
+            .outstanding_deferreds
+            .lock()
+            .map(|mut slots| std::mem::take(&mut *slots))
+            .unwrap_or_default();
+        for slot in slots {
+            let slot = slot as *mut Option<core::Deferred<Engine>>;
+            if slot.is_null() {
+                continue;
+            }
+            let Some(deferred) = (unsafe { &mut *slot }).take() else {
+                continue;
+            };
+            unsafe {
+                qjs::JS_FreeValue(ctx, deferred.resolve());
+                qjs::JS_FreeValue(ctx, deferred.reject());
+            }
+        }
+    }
 }
 
 struct ClassEntry {
@@ -326,6 +373,11 @@ struct ArrayBufferOwner {
     buffer: core::WGPUBuffer,
     gpu: core::GpuDispatch,
     queue: Arc<core::ReleaseQueue>,
+}
+
+struct ObjectPayload {
+    spec: &'static core::ClassSpec<Engine>,
+    payload: Box<dyn Any + Send>,
 }
 
 #[derive(Clone, Copy)]
@@ -471,7 +523,7 @@ impl core::JsEngine for Engine {
         let class_def = qjs::JSClassDef {
             class_name: class_name.as_ptr(),
             finalizer: Some(qjs_finalizer),
-            gc_mark: None,
+            gc_mark: Some(qjs_gc_mark),
             call: None,
             exotic: ptr::null_mut(),
         };
@@ -517,7 +569,10 @@ impl core::JsEngine for Engine {
         if unsafe { qjs::JS_IsException(object) } {
             return Err(object);
         }
-        let holder = Box::new(payload);
+        let holder = Box::new(ObjectPayload {
+            spec: entry.spec,
+            payload,
+        });
         unsafe {
             qjs::JS_SetOpaque(object, Box::into_raw(holder).cast());
         }
@@ -534,7 +589,18 @@ impl core::JsEngine for Engine {
         let classes = state.classes.lock().ok()?;
         let entry = classes.get(&class)?;
         let raw = unsafe { qjs::JS_GetOpaque(obj, entry.quickjs_id) };
-        NonNull::new(raw.cast::<Box<dyn Any + Send>>()).map(|ptr| unsafe { ptr.as_ref().as_ref() })
+        NonNull::new(raw.cast::<ObjectPayload>())
+            .map(|ptr| unsafe { ptr.as_ref().payload.as_ref() })
+    }
+
+    fn trace_payload(
+        _cx: Self::Context<'_>,
+        payload: &(dyn Any + Send),
+        visit: &mut dyn FnMut(Self::Value),
+    ) {
+        if let Some(buffer) = payload.downcast_ref::<core::BufferPayload<Self>>() {
+            buffer.trace_mapped_range_values(visit);
+        }
     }
 
     fn undefined(_cx: Self::Context<'_>) -> Self::Value {
@@ -706,6 +772,21 @@ impl core::JsEngine for Engine {
 
     fn release_value(cx: Self::Context<'_>, value: Self::Value) {
         unsafe { qjs::JS_FreeValue(cx.ctx, value) };
+    }
+
+    fn register_deferred(cx: Self::Context<'_>, slot: NonNull<Option<core::Deferred<Self>>>) {
+        state_from_context(cx.ctx).register_deferred(slot);
+    }
+
+    fn unregister_deferred(cx: Self::Context<'_>, slot: NonNull<Option<core::Deferred<Self>>>) {
+        state_from_context(cx.ctx).unregister_deferred(slot);
+    }
+
+    fn release_deferred(cx: Self::Context<'_>, deferred: core::Deferred<Self>) {
+        unsafe {
+            qjs::JS_FreeValue(cx.ctx, deferred.resolve());
+            qjs::JS_FreeValue(cx.ctx, deferred.reject());
+        }
     }
 }
 
@@ -1004,35 +1085,44 @@ extern "C" fn qjs_finalizer(rt: *mut qjs::JSRuntime, value: qjs::JSValue) {
     let _ = catch_unwind(AssertUnwindSafe(|| {
         let state = state_from_runtime(rt);
         let quickjs_id = unsafe { qjs::JS_GetClassID(value) };
-        let core_id = {
-            let Ok(map) = state.quickjs_to_core.lock() else {
-                return;
-            };
-            let Some(core_id) = map.get(&quickjs_id).copied() else {
-                return;
-            };
-            core_id
-        };
-        let spec = {
-            let Ok(classes) = state.classes.lock() else {
-                return;
-            };
-            let Some(entry) = classes.get(&core_id) else {
-                return;
-            };
-            entry.spec
-        };
         let raw = unsafe { qjs::JS_GetOpaque(value, quickjs_id) };
-        let Some(raw) = NonNull::new(raw.cast::<Box<dyn Any + Send>>()) else {
+        let Some(raw) = NonNull::new(raw.cast::<ObjectPayload>()) else {
             return;
         };
         let payload = unsafe { Box::from_raw(raw.as_ptr()) };
-        if let Some(buffer) = payload.downcast_ref::<core::BufferPayload<Engine>>() {
+        if let Some(buffer) = payload
+            .payload
+            .downcast_ref::<core::BufferPayload<Engine>>()
+        {
             buffer.release_mapped_range_values(|value| unsafe {
                 qjs::JS_FreeValueRT(rt, value);
             });
         }
-        (spec.finalizer)(*payload, &state.env);
+        (payload.spec.finalizer)(payload.payload, &state.env);
+    }));
+}
+
+unsafe extern "C" fn qjs_gc_mark(
+    rt: *mut qjs::JSRuntime,
+    value: qjs::JSValue,
+    mark_func: qjs::JS_MarkFunc,
+) {
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        let quickjs_id = unsafe { qjs::JS_GetClassID(value) };
+        let raw = unsafe { qjs::JS_GetOpaque(value, quickjs_id) };
+        let Some(raw) = NonNull::new(raw.cast::<ObjectPayload>()) else {
+            return;
+        };
+        let payload = unsafe { raw.as_ref() };
+        let scope = Scope::new(ptr::null_mut());
+        let cx = Context {
+            ctx: ptr::null_mut(),
+            scope: &scope,
+        };
+        let mut visit = |value| unsafe {
+            qjs::JS_MarkValue(rt, value, mark_func);
+        };
+        Engine::trace_payload(cx, payload.payload.as_ref(), &mut visit);
     }));
 }
 
@@ -1322,6 +1412,15 @@ mod tests {
     fn eval_drop(runtime: &Runtime, source: &str, name: &str) {
         let value = runtime.eval(source, name).expect(name);
         unsafe { qjs::JS_FreeValue(runtime.raw_context(), value) };
+    }
+
+    fn global_value(runtime: &Runtime, name: &str) -> qjs::JSValue {
+        let name = std::ffi::CString::new(name).expect("global name");
+        let global = unsafe { qjs::JS_GetGlobalObject(runtime.raw_context()) };
+        let value = unsafe { qjs::JS_GetPropertyStr(runtime.raw_context(), global, name.as_ptr()) };
+        unsafe { qjs::JS_FreeValue(runtime.raw_context(), global) };
+        assert!(!unsafe { qjs::JS_IsException(value) }, "global lookup");
+        value
     }
 
     impl RequestState {
@@ -1728,6 +1827,132 @@ mod tests {
             &runtime,
             "mapped = null; createdRange = null; createdView = null;",
             "cleanup.js",
+        );
+        runtime.clear_global("device").expect("clear device");
+        runtime.run_gc();
+        runtime.run_gc();
+        let _ = runtime.drain_releases().expect("drain");
+    }
+
+    #[test]
+    fn two_mapped_ranges_survive_until_runtime_drop() {
+        let setup = native_setup();
+        {
+            let runtime = Runtime::new().expect("quickjs runtime");
+            let wrapped = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+            runtime
+                .set_global_value("device", wrapped)
+                .expect("set device");
+            eval_drop(
+                &runtime,
+                r#"
+                    var teardownMapped = device.createBuffer({ size: 16, usage: 2, mappedAtCreation: true });
+                    var teardownFirst = teardownMapped.getMappedRange(0, 4);
+                    var teardownSecond = teardownMapped.getMappedRange(8, 4);
+                    new Uint8Array(teardownFirst)[0] = 17;
+                    new Uint8Array(teardownSecond)[0] = 23;
+                "#,
+                "two-ranges-teardown.js",
+            );
+        }
+    }
+
+    #[test]
+    fn pending_map_async_survives_until_runtime_drop() {
+        let setup = native_setup();
+        {
+            let runtime = Runtime::new().expect("quickjs runtime");
+            let wrapped = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+            runtime
+                .set_global_value("device", wrapped)
+                .expect("set device");
+            eval_drop(
+                &runtime,
+                r#"
+                    var pendingMap = device.createBuffer({ size: 16, usage: 2 });
+                    pendingMap.mapAsync(2, 0, 8);
+                "#,
+                "pending-map-teardown.js",
+            );
+        }
+        unsafe { wgpu::wgpuInstanceProcessEvents(setup.instance) };
+    }
+
+    #[test]
+    fn two_mapped_ranges_detach_together_on_unmap() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let wrapped = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("device", wrapped)
+            .expect("set device");
+        eval_drop(
+            &runtime,
+            r#"
+                var twoRangeMapped = device.createBuffer({ size: 16, usage: 2, mappedAtCreation: true });
+                var twoRangeFirst = twoRangeMapped.getMappedRange(0, 4);
+                var twoRangeSecond = twoRangeMapped.getMappedRange(8, 4);
+                var twoRangeFirstView = new Uint8Array(twoRangeFirst);
+                var twoRangeSecondView = new Uint8Array(twoRangeSecond);
+                twoRangeFirstView[0] = 31;
+                twoRangeSecondView[0] = 37;
+                twoRangeMapped.unmap();
+                if (twoRangeFirst.byteLength !== 0 || twoRangeFirstView.byteLength !== 0) {
+                    throw new Error('first range was not detached');
+                }
+                if (twoRangeSecond.byteLength !== 0 || twoRangeSecondView.byteLength !== 0) {
+                    throw new Error('second range was not detached');
+                }
+            "#,
+            "two-ranges-unmap.js",
+        );
+        eval_drop(
+            &runtime,
+            "twoRangeMapped = twoRangeFirst = twoRangeSecond = twoRangeFirstView = twoRangeSecondView = null;",
+            "two-ranges-cleanup.js",
+        );
+        runtime.clear_global("device").expect("clear device");
+        runtime.run_gc();
+        runtime.run_gc();
+        let _ = runtime.drain_releases().expect("drain");
+    }
+
+    #[test]
+    fn red_demo_detaching_only_first_range_leaves_second_readable() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let wrapped = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("device", wrapped)
+            .expect("set device");
+        eval_drop(
+            &runtime,
+            r#"
+                var redMapped = device.createBuffer({ size: 16, usage: 2, mappedAtCreation: true });
+                var redFirst = redMapped.getMappedRange(0, 4);
+                var redSecond = redMapped.getMappedRange(8, 4);
+                var redSecondView = new Uint8Array(redSecond);
+                redSecondView[0] = 43;
+            "#,
+            "red-one-range.js",
+        );
+        let first = global_value(&runtime, "redFirst");
+        unsafe { qjs::JS_DetachArrayBuffer(runtime.raw_context(), first) };
+        unsafe { qjs::JS_FreeValue(runtime.raw_context(), first) };
+        eval_drop(
+            &runtime,
+            r#"
+                if (redSecond.byteLength !== 4 || redSecondView[0] !== 43) {
+                    throw new Error('second range should remain readable when only first is detached');
+                }
+                redMapped.unmap();
+            "#,
+            "red-one-range-check.js",
+        );
+        eval_drop(
+            &runtime,
+            "redMapped = redFirst = redSecond = redSecondView = null;",
+            "red-one-range-cleanup.js",
         );
         runtime.clear_global("device").expect("clear device");
         runtime.run_gc();
