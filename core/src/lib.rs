@@ -201,13 +201,18 @@ pub struct GpuDispatch {
 pub struct Environment {
     gpu: GpuDispatch,
     queue: Arc<ReleaseQueue>,
+    settlements: Arc<SettlementQueue>,
 }
 
 impl Environment {
     /// Creates an environment from WebGPU dispatch functions and a release queue.
     #[must_use]
     pub fn new(gpu: GpuDispatch, queue: Arc<ReleaseQueue>) -> Self {
-        Self { gpu, queue }
+        Self {
+            gpu,
+            queue,
+            settlements: Arc::new(SettlementQueue::new()),
+        }
     }
 
     /// Returns the WebGPU dispatch table.
@@ -220,6 +225,12 @@ impl Environment {
     #[must_use]
     pub fn queue(&self) -> &Arc<ReleaseQueue> {
         &self.queue
+    }
+
+    /// Returns the async settlement queue.
+    #[must_use]
+    pub fn settlements(&self) -> &Arc<SettlementQueue> {
+        &self.settlements
     }
 }
 
@@ -321,9 +332,8 @@ pub trait JsEngine: Sized {
     type Context<'a>: Copy;
     /// Error representation for this engine.
     type Error;
-    /// Engine-owned context data that may outlive a single JS callback.
-    type AsyncContext: Copy + 'static;
-
+    /// Engine-owned registration for a deferred slot held by an async request.
+    type DeferredRegistration: Send + 'static;
     /// Mapped range behavior supported by this engine.
     const MAPPED_RANGE_STRATEGY: MappedRangeStrategy;
 
@@ -386,30 +396,14 @@ pub trait JsEngine: Sized {
     fn type_error(cx: Self::Context<'_>, message: &str) -> Self::Error;
     /// Creates a synchronous JavaScript operation error.
     fn operation_error(cx: Self::Context<'_>, message: &str) -> Self::Error;
-    /// Returns an async context token for callbacks that outlive this call.
-    fn async_context(cx: Self::Context<'_>) -> Self::AsyncContext;
-    /// Runs a callback with a scoped context created from an async context token.
-    ///
-    /// # Safety
-    ///
-    /// The caller must guarantee that the engine owning the async context is
-    /// still alive and that this call runs on the engine's thread.
-    unsafe fn with_async_scope<R>(
-        cx: Self::AsyncContext,
-        f: impl FnOnce(Self::Context<'_>) -> R,
-    ) -> R;
     /// Creates a rejection reason from a scoped context.
     fn async_error_value(cx: Self::Context<'_>, message: &str) -> Self::Value;
     /// Converts an already-created engine error into a rejection value.
     fn error_value_from_error(cx: Self::Context<'_>, error: Self::Error) -> Self::Value;
     /// Creates a promise and its owned deferred resolving functions.
     fn new_promise(cx: Self::Context<'_>) -> Result<(Self::Value, Deferred<Self>), Self::Error>;
-    /// Settles a deferred promise. This consumes the resolving functions.
-    fn settle_deferred(
-        cx: Self::Context<'_>,
-        deferred: Deferred<Self>,
-        result: std::result::Result<Self::Value, Self::Value>,
-    );
+    /// Settles a batch of deferred promises inside one JavaScript frame.
+    fn settle_deferreds(cx: Self::Context<'_>, settlements: Vec<DeferredSettlement<Self>>);
     /// Creates a script-visible ArrayBuffer over external memory.
     ///
     /// # Safety
@@ -445,9 +439,10 @@ pub trait JsEngine: Sized {
     /// Releases a value previously duplicated for core.
     fn release_value(cx: Self::Context<'_>, value: Self::Value);
     /// Registers a deferred slot owned by a raw async callback request.
-    fn register_deferred(cx: Self::Context<'_>, slot: NonNull<Option<Deferred<Self>>>);
-    /// Unregisters a deferred slot that is being settled by its callback.
-    fn unregister_deferred(cx: Self::Context<'_>, slot: NonNull<Option<Deferred<Self>>>);
+    fn register_deferred(
+        cx: Self::Context<'_>,
+        slot: NonNull<Option<Deferred<Self>>>,
+    ) -> Self::DeferredRegistration;
     /// Releases a deferred without settling it during engine teardown.
     fn release_deferred(cx: Self::Context<'_>, deferred: Deferred<Self>);
 }
@@ -484,6 +479,141 @@ impl<E: JsEngine> Deferred<E> {
     #[must_use]
     pub fn reject(&self) -> E::Value {
         self.reject
+    }
+}
+
+/// A deferred promise paired with the value it should settle with.
+pub type DeferredSettlement<E> = (
+    Deferred<E>,
+    std::result::Result<<E as JsEngine>::Value, <E as JsEngine>::Value>,
+);
+
+enum SettlementRequest<E: JsEngine + 'static> {
+    Adapter {
+        deferred: Deferred<E>,
+        adapter: WGPUAdapter,
+    },
+    Device {
+        deferred: Deferred<E>,
+        device: WGPUDevice,
+    },
+    Success {
+        deferred: Deferred<E>,
+    },
+    Error {
+        deferred: Deferred<E>,
+        message: &'static str,
+    },
+}
+
+// SAFETY: settlement requests are created by `AllowProcessEvents` callbacks and
+// are only drained by the engine-thread `tick()` after `wgpuInstanceProcessEvents`
+// returns. Engine values inside `Deferred` are moved through this queue but are
+// never dereferenced off the tick thread.
+unsafe impl<E: JsEngine + 'static> Send for SettlementRequest<E> {}
+
+impl<E: JsEngine + 'static> SettlementRequest<E> {
+    fn settle(self, cx: E::Context<'_>) -> DeferredSettlement<E> {
+        match self {
+            Self::Adapter { deferred, adapter } => {
+                let value =
+                    E::new_instance(cx, GPU_ADAPTER_CLASS, Box::new(AdapterPayload { adapter }));
+                match value {
+                    Ok(value) => (deferred, Ok(value)),
+                    Err(error) => (deferred, Err(E::error_value_from_error(cx, error))),
+                }
+            }
+            Self::Device { deferred, device } => {
+                let value =
+                    E::new_instance(cx, GPU_DEVICE_CLASS, Box::new(DevicePayload { device }));
+                match value {
+                    Ok(value) => (deferred, Ok(value)),
+                    Err(error) => (deferred, Err(E::error_value_from_error(cx, error))),
+                }
+            }
+            Self::Success { deferred } => (deferred, Ok(E::undefined(cx))),
+            Self::Error { deferred, message } => (deferred, Err(E::async_error_value(cx, message))),
+        }
+    }
+}
+
+/// Thread-safe FIFO queue of async promise settlements recorded by WebGPU callbacks.
+#[derive(Default)]
+pub struct SettlementQueue {
+    requests: Mutex<VecDeque<Box<dyn Any + Send>>>,
+}
+
+impl SettlementQueue {
+    /// Creates an empty settlement queue.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn enqueue<E: JsEngine + 'static>(
+        &self,
+        request: SettlementRequest<E>,
+    ) -> std::result::Result<(), QueueError> {
+        let mut requests = self
+            .requests
+            .lock()
+            .map_err(|_| QueueError::Poisoned("settlement queue"))?;
+        requests.push_back(Box::new(request));
+        Ok(())
+    }
+
+    /// Drains queued settlement records for the selected engine.
+    ///
+    /// `AllowProcessEvents` callbacks only fire inside `wgpuInstanceProcessEvents`,
+    /// which the host calls from `tick()`. Therefore callbacks record here and
+    /// only the engine-thread `tick()` drains and touches JavaScript.
+    pub fn drain<E: JsEngine + 'static>(
+        &self,
+        cx: E::Context<'_>,
+    ) -> std::result::Result<usize, QueueError> {
+        let mut requests = Vec::new();
+        loop {
+            let request = {
+                let mut queued = self
+                    .requests
+                    .lock()
+                    .map_err(|_| QueueError::Poisoned("settlement queue"))?;
+                queued.pop_front()
+            };
+            let Some(request) = request else {
+                break;
+            };
+            let request = request
+                .downcast::<SettlementRequest<E>>()
+                .map_err(|_| QueueError::UnexpectedSettlementType)?;
+            requests.push(request.settle(cx));
+        }
+        let count = requests.len();
+        if !requests.is_empty() {
+            E::settle_deferreds(cx, requests);
+        }
+        Ok(count)
+    }
+
+    /// Releases queued settlements for the selected engine without settling them.
+    pub fn release_pending<E: JsEngine + 'static>(&self, cx: E::Context<'_>) {
+        let requests = self
+            .requests
+            .lock()
+            .map(|mut requests| std::mem::take(&mut *requests))
+            .unwrap_or_default();
+        for request in requests {
+            if let Ok(request) = request.downcast::<SettlementRequest<E>>() {
+                match *request {
+                    SettlementRequest::Adapter { deferred, .. }
+                    | SettlementRequest::Device { deferred, .. }
+                    | SettlementRequest::Success { deferred }
+                    | SettlementRequest::Error { deferred, .. } => {
+                        E::release_deferred(cx, deferred)
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -775,6 +905,8 @@ impl ReleaseQueue {
 pub enum QueueError {
     /// A mutex was poisoned.
     Poisoned(&'static str),
+    /// A settlement queued for a different engine was encountered.
+    UnexpectedSettlementType,
 }
 
 /// Payload stored by a `GPUDevice` wrapper.
@@ -1276,10 +1408,14 @@ pub fn gpu_request_adapter<E: JsEngine + 'static>(
     };
     let (promise, deferred) = E::new_promise(cx)?;
     let mut request = Box::new(AdapterRequest::<E> {
-        async_cx: E::async_context(cx),
         deferred: Some(deferred),
+        settlements: Arc::clone(E::environment(cx).settlements()),
+        _registration: None,
     });
-    E::register_deferred(cx, NonNull::from(&mut request.deferred));
+    request._registration = Some(E::register_deferred(
+        cx,
+        NonNull::from(&mut request.deferred),
+    ));
     let info = WGPURequestAdapterCallbackInfo {
         nextInChain: ptr::null_mut(),
         mode: WGPUCallbackMode_WGPUCallbackMode_AllowProcessEvents,
@@ -1309,10 +1445,14 @@ pub fn adapter_request_device<E: JsEngine + 'static>(
     };
     let (promise, deferred) = E::new_promise(cx)?;
     let mut request = Box::new(DeviceRequest::<E> {
-        async_cx: E::async_context(cx),
         deferred: Some(deferred),
+        settlements: Arc::clone(E::environment(cx).settlements()),
+        _registration: None,
     });
-    E::register_deferred(cx, NonNull::from(&mut request.deferred));
+    request._registration = Some(E::register_deferred(
+        cx,
+        NonNull::from(&mut request.deferred),
+    ));
     let info = WGPURequestDeviceCallbackInfo {
         nextInChain: ptr::null_mut(),
         mode: WGPUCallbackMode_WGPUCallbackMode_AllowProcessEvents,
@@ -1364,12 +1504,16 @@ pub fn buffer_map_async<E: JsEngine + 'static>(
     };
     let (promise, deferred) = E::new_promise(cx)?;
     let mut request = Box::new(MapRequest::<E> {
-        async_cx: E::async_context(cx),
         deferred: Some(deferred),
+        settlements: Arc::clone(E::environment(cx).settlements()),
+        _registration: None,
         mode,
         state,
     });
-    E::register_deferred(cx, NonNull::from(&mut request.deferred));
+    request._registration = Some(E::register_deferred(
+        cx,
+        NonNull::from(&mut request.deferred),
+    ));
     let info = WGPUBufferMapCallbackInfo {
         nextInChain: ptr::null_mut(),
         mode: WGPUCallbackMode_WGPUCallbackMode_AllowProcessEvents,
@@ -1661,10 +1805,14 @@ pub fn queue_on_submitted_work_done<E: JsEngine + 'static>(
     };
     let (promise, deferred) = E::new_promise(cx)?;
     let mut request = Box::new(QueueWorkDoneRequest::<E> {
-        async_cx: E::async_context(cx),
         deferred: Some(deferred),
+        settlements: Arc::clone(E::environment(cx).settlements()),
+        _registration: None,
     });
-    E::register_deferred(cx, NonNull::from(&mut request.deferred));
+    request._registration = Some(E::register_deferred(
+        cx,
+        NonNull::from(&mut request.deferred),
+    ));
     let info = WGPUQueueWorkDoneCallbackInfo {
         nextInChain: ptr::null_mut(),
         mode: WGPUCallbackMode_WGPUCallbackMode_AllowProcessEvents,
@@ -2354,25 +2502,29 @@ pub fn finalize_buffer<E: JsEngine + 'static>(payload: Box<dyn Any + Send>, env:
 }
 
 struct AdapterRequest<E: JsEngine + 'static> {
-    async_cx: E::AsyncContext,
     deferred: Option<Deferred<E>>,
+    settlements: Arc<SettlementQueue>,
+    _registration: Option<E::DeferredRegistration>,
 }
 
 struct DeviceRequest<E: JsEngine + 'static> {
-    async_cx: E::AsyncContext,
     deferred: Option<Deferred<E>>,
+    settlements: Arc<SettlementQueue>,
+    _registration: Option<E::DeferredRegistration>,
 }
 
 struct MapRequest<E: JsEngine + 'static> {
-    async_cx: E::AsyncContext,
     deferred: Option<Deferred<E>>,
+    settlements: Arc<SettlementQueue>,
+    _registration: Option<E::DeferredRegistration>,
     mode: WGPUMapMode,
     state: Arc<Mutex<BufferState<E>>>,
 }
 
 struct QueueWorkDoneRequest<E: JsEngine + 'static> {
-    async_cx: E::AsyncContext,
     deferred: Option<Deferred<E>>,
+    settlements: Arc<SettlementQueue>,
+    _registration: Option<E::DeferredRegistration>,
 }
 
 unsafe extern "C" fn request_adapter_callback<E: JsEngine + 'static>(
@@ -2387,42 +2539,20 @@ unsafe extern "C" fn request_adapter_callback<E: JsEngine + 'static>(
             return;
         };
         let mut request = unsafe { Box::from_raw(raw.as_ptr()) };
-        let slot = NonNull::from(&mut request.deferred);
         let Some(deferred) = request.deferred.take() else {
             return;
         };
-        if status == WGPURequestAdapterStatus_WGPURequestAdapterStatus_Success && !adapter.is_null()
+        let settlement = if status == WGPURequestAdapterStatus_WGPURequestAdapterStatus_Success
+            && !adapter.is_null()
         {
-            // SAFETY: callbacks use AllowProcessEvents, so they are processed
-            // while the engine is alive on the event-processing thread.
-            unsafe {
-                E::with_async_scope(request.async_cx, |cx| {
-                    E::unregister_deferred(cx, slot);
-                    let value = E::new_instance(
-                        cx,
-                        GPU_ADAPTER_CLASS,
-                        Box::new(AdapterPayload { adapter }),
-                    );
-                    match value {
-                        Ok(value) => E::settle_deferred(cx, deferred, Ok(value)),
-                        Err(reason) => {
-                            let reason = E::error_value_from_error(cx, reason);
-                            E::settle_deferred(cx, deferred, Err(reason));
-                        }
-                    }
-                })
-            };
+            SettlementRequest::Adapter { deferred, adapter }
         } else {
-            // SAFETY: callbacks use AllowProcessEvents, so they are processed
-            // while the engine is alive on the event-processing thread.
-            unsafe {
-                E::with_async_scope(request.async_cx, |cx| {
-                    E::unregister_deferred(cx, slot);
-                    let reason = E::async_error_value(cx, "requestAdapter failed");
-                    E::settle_deferred(cx, deferred, Err(reason));
-                })
-            };
-        }
+            SettlementRequest::Error {
+                deferred,
+                message: "requestAdapter failed",
+            }
+        };
+        let _ = request.settlements.enqueue::<E>(settlement);
     }));
 }
 
@@ -2438,38 +2568,20 @@ unsafe extern "C" fn request_device_callback<E: JsEngine + 'static>(
             return;
         };
         let mut request = unsafe { Box::from_raw(raw.as_ptr()) };
-        let slot = NonNull::from(&mut request.deferred);
         let Some(deferred) = request.deferred.take() else {
             return;
         };
-        if status == WGPURequestDeviceStatus_WGPURequestDeviceStatus_Success && !device.is_null() {
-            // SAFETY: callbacks use AllowProcessEvents, so they are processed
-            // while the engine is alive on the event-processing thread.
-            unsafe {
-                E::with_async_scope(request.async_cx, |cx| {
-                    E::unregister_deferred(cx, slot);
-                    let value =
-                        E::new_instance(cx, GPU_DEVICE_CLASS, Box::new(DevicePayload { device }));
-                    match value {
-                        Ok(value) => E::settle_deferred(cx, deferred, Ok(value)),
-                        Err(reason) => {
-                            let reason = E::error_value_from_error(cx, reason);
-                            E::settle_deferred(cx, deferred, Err(reason));
-                        }
-                    }
-                })
-            };
+        let settlement = if status == WGPURequestDeviceStatus_WGPURequestDeviceStatus_Success
+            && !device.is_null()
+        {
+            SettlementRequest::Device { deferred, device }
         } else {
-            // SAFETY: callbacks use AllowProcessEvents, so they are processed
-            // while the engine is alive on the event-processing thread.
-            unsafe {
-                E::with_async_scope(request.async_cx, |cx| {
-                    E::unregister_deferred(cx, slot);
-                    let reason = E::async_error_value(cx, "requestDevice failed");
-                    E::settle_deferred(cx, deferred, Err(reason));
-                })
-            };
-        }
+            SettlementRequest::Error {
+                deferred,
+                message: "requestDevice failed",
+            }
+        };
+        let _ = request.settlements.enqueue::<E>(settlement);
     }));
 }
 
@@ -2484,26 +2596,17 @@ unsafe extern "C" fn buffer_map_callback<E: JsEngine + 'static>(
             return;
         };
         let mut request = unsafe { Box::from_raw(raw.as_ptr()) };
-        let slot = NonNull::from(&mut request.deferred);
         let Some(deferred) = request.deferred.take() else {
             return;
         };
-        if status == WGPUMapAsyncStatus_WGPUMapAsyncStatus_Success {
+        let settlement = if status == WGPUMapAsyncStatus_WGPUMapAsyncStatus_Success {
             if let Ok(mut state) = request.state.lock() {
                 state.mapped = true;
                 state.map_mode = request.mode;
             }
-            // SAFETY: callbacks use AllowProcessEvents, so they are processed
-            // while the engine is alive on the event-processing thread.
-            unsafe {
-                E::with_async_scope(request.async_cx, |cx| {
-                    E::unregister_deferred(cx, slot);
-                    let value = E::undefined(cx);
-                    E::settle_deferred(cx, deferred, Ok(value));
-                })
-            };
+            SettlementRequest::Success { deferred }
         } else {
-            let reason = if status == WGPUMapAsyncStatus_WGPUMapAsyncStatus_Error {
+            let message = if status == WGPUMapAsyncStatus_WGPUMapAsyncStatus_Error {
                 "mapAsync error"
             } else if status == WGPUMapAsyncStatus_WGPUMapAsyncStatus_Aborted {
                 "mapAsync aborted"
@@ -2512,16 +2615,9 @@ unsafe extern "C" fn buffer_map_callback<E: JsEngine + 'static>(
             } else {
                 "mapAsync failed"
             };
-            // SAFETY: callbacks use AllowProcessEvents, so they are processed
-            // while the engine is alive on the event-processing thread.
-            unsafe {
-                E::with_async_scope(request.async_cx, |cx| {
-                    E::unregister_deferred(cx, slot);
-                    let reason = E::async_error_value(cx, reason);
-                    E::settle_deferred(cx, deferred, Err(reason));
-                })
-            };
-        }
+            SettlementRequest::Error { deferred, message }
+        };
+        let _ = request.settlements.enqueue::<E>(settlement);
     }));
 }
 
@@ -2536,21 +2632,18 @@ unsafe extern "C" fn queue_work_done_callback<E: JsEngine + 'static>(
             return;
         };
         let mut request = unsafe { Box::from_raw(raw.as_ptr()) };
-        let slot = NonNull::from(&mut request.deferred);
         let Some(deferred) = request.deferred.take() else {
             return;
         };
-        unsafe {
-            E::with_async_scope(request.async_cx, |cx| {
-                E::unregister_deferred(cx, slot);
-                if status == WGPUQueueWorkDoneStatus_WGPUQueueWorkDoneStatus_Success {
-                    E::settle_deferred(cx, deferred, Ok(E::undefined(cx)));
-                } else {
-                    let reason = E::async_error_value(cx, "onSubmittedWorkDone failed");
-                    E::settle_deferred(cx, deferred, Err(reason));
-                }
-            })
+        let settlement = if status == WGPUQueueWorkDoneStatus_WGPUQueueWorkDoneStatus_Success {
+            SettlementRequest::Success { deferred }
+        } else {
+            SettlementRequest::Error {
+                deferred,
+                message: "onSubmittedWorkDone failed",
+            }
         };
+        let _ = request.settlements.enqueue::<E>(settlement);
     }));
 }
 

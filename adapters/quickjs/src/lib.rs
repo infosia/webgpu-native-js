@@ -83,6 +83,29 @@ impl Runtime {
                 raw_state,
             );
         }
+        let source =
+            c"(function(fns, values) { for (let i = 0; i < fns.length; i++) fns[i](values[i]); })";
+        let name = c"webgpu-native-js-settle-trampoline.js";
+        let trampoline = unsafe {
+            qjs::JS_Eval(
+                ctx.as_ptr(),
+                source.as_ptr(),
+                source.to_bytes().len(),
+                name.as_ptr(),
+                qjs::JS_EVAL_TYPE_GLOBAL as c_int,
+            )
+        };
+        if unsafe { qjs::JS_IsException(trampoline) } {
+            let message = take_exception(ctx.as_ptr(), "settle trampoline install");
+            unsafe {
+                qjs::JS_SetHostPromiseRejectionTracker(rt.as_ptr(), None, ptr::null_mut());
+                qjs::JS_FreeContext(ctx.as_ptr());
+                qjs::JS_FreeRuntime(rt.as_ptr());
+                drop(Rc::from_raw(raw_state.cast::<State>()));
+            }
+            return Err(Error::Exception(message));
+        }
+        state.set_settle_trampoline(trampoline);
         Ok(Self { rt, ctx, state })
     }
 
@@ -193,6 +216,13 @@ impl Runtime {
     /// that is concurrently being released.
     pub unsafe fn tick(&self, instance: ffi_wgpu::WGPUInstance) -> Result<usize> {
         unsafe { ffi_wgpu::wgpuInstanceProcessEvents(instance) };
+        with_scope(self.raw_context(), |cx| {
+            self.state
+                .env
+                .settlements()
+                .drain::<Engine>(cx)
+                .map_err(|_| Error::Exception("settlement queue is poisoned".to_owned()))
+        })?;
         loop {
             let mut job_ctx = ptr::null_mut();
             let rc = unsafe { qjs::JS_ExecutePendingJob(self.rt.as_ptr(), &mut job_ctx) };
@@ -241,11 +271,13 @@ impl Drop for Runtime {
             qjs::JS_SetHostPromiseRejectionTracker(self.rt.as_ptr(), None, ptr::null_mut());
             let raw = qjs::JS_GetRuntimeOpaque(self.rt.as_ptr()).cast::<State>();
             if let Some(state) = raw.as_ref() {
-                // `AllowProcessEvents` callbacks only run from `tick()`, and
-                // `tick()` cannot run concurrently with `Drop` for this
-                // single-threaded runtime. Leave request boxes allocated for a
-                // later backend callback; it will observe `None` and return.
                 state.release_outstanding_deferreds(self.ctx.as_ptr());
+                with_scope(self.ctx.as_ptr(), |cx| {
+                    state.env.settlements().release_pending::<Engine>(cx);
+                });
+                if let Some(trampoline) = state.take_settle_trampoline() {
+                    qjs::JS_FreeValue(self.ctx.as_ptr(), trampoline);
+                }
             }
             qjs::JS_FreeContext(self.ctx.as_ptr());
             qjs::JS_FreeRuntime(self.rt.as_ptr());
@@ -264,8 +296,25 @@ struct State {
     classes: Mutex<BTreeMap<core::ClassId, ClassEntry>>,
     quickjs_to_core: Mutex<BTreeMap<qjs::JSClassID, core::ClassId>>,
     callbacks: Mutex<Vec<CallbackTarget>>,
-    outstanding_deferreds: Mutex<Vec<usize>>,
+    outstanding_deferreds: Arc<Mutex<Vec<usize>>>,
     unhandled_rejections: Mutex<Vec<UnhandledRejection>>,
+    settle_trampoline: Mutex<Option<qjs::JSValue>>,
+}
+
+/// Registration guard for a deferred slot owned by a pending WebGPU callback.
+pub struct DeferredRegistration {
+    slots: Arc<Mutex<Vec<usize>>>,
+    slot: usize,
+}
+
+impl Drop for DeferredRegistration {
+    fn drop(&mut self) {
+        if let Ok(mut slots) = self.slots.lock() {
+            if let Some(index) = slots.iter().position(|candidate| *candidate == self.slot) {
+                slots.swap_remove(index);
+            }
+        }
+    }
 }
 
 impl State {
@@ -279,8 +328,9 @@ impl State {
             classes: Mutex::new(BTreeMap::new()),
             quickjs_to_core: Mutex::new(BTreeMap::new()),
             callbacks: Mutex::new(Vec::new()),
-            outstanding_deferreds: Mutex::new(Vec::new()),
+            outstanding_deferreds: Arc::new(Mutex::new(Vec::new())),
             unhandled_rejections: Mutex::new(Vec::new()),
+            settle_trampoline: Mutex::new(None),
         }
     }
 
@@ -337,20 +387,37 @@ impl State {
         Some(format!("Unhandled promise rejection: {message}"))
     }
 
-    fn register_deferred(&self, slot: NonNull<Option<core::Deferred<Engine>>>) {
-        if let Ok(mut slots) = self.outstanding_deferreds.lock() {
-            slots.push(slot.as_ptr() as usize);
+    fn set_settle_trampoline(&self, value: qjs::JSValue) {
+        if let Ok(mut trampoline) = self.settle_trampoline.lock() {
+            *trampoline = Some(value);
         }
     }
 
-    fn unregister_deferred(&self, slot: NonNull<Option<core::Deferred<Engine>>>) {
+    fn take_settle_trampoline(&self) -> Option<qjs::JSValue> {
+        self.settle_trampoline
+            .lock()
+            .ok()
+            .and_then(|mut trampoline| trampoline.take())
+    }
+
+    fn settle_trampoline(&self) -> Option<qjs::JSValue> {
+        self.settle_trampoline
+            .lock()
+            .ok()
+            .and_then(|trampoline| *trampoline)
+    }
+
+    fn register_deferred(
+        &self,
+        slot: NonNull<Option<core::Deferred<Engine>>>,
+    ) -> DeferredRegistration {
+        let slot = slot.as_ptr() as usize;
         if let Ok(mut slots) = self.outstanding_deferreds.lock() {
-            if let Some(index) = slots
-                .iter()
-                .position(|candidate| *candidate == slot.as_ptr() as usize)
-            {
-                slots.swap_remove(index);
-            }
+            slots.push(slot);
+        }
+        DeferredRegistration {
+            slots: Arc::clone(&self.outstanding_deferreds),
+            slot,
         }
     }
 
@@ -460,7 +527,7 @@ impl core::JsEngine for Engine {
     type Value = qjs::JSValue;
     type Context<'a> = Context<'a>;
     type Error = qjs::JSValue;
-    type AsyncContext = *mut qjs::JSContext;
+    type DeferredRegistration = DeferredRegistration;
 
     const MAPPED_RANGE_STRATEGY: core::MappedRangeStrategy =
         core::MappedRangeStrategy::ZeroCopyDetach;
@@ -649,17 +716,6 @@ impl core::JsEngine for Engine {
         throw_message(cx.ctx, message, false)
     }
 
-    fn async_context(cx: Self::Context<'_>) -> Self::AsyncContext {
-        cx.ctx
-    }
-
-    unsafe fn with_async_scope<R>(
-        cx: Self::AsyncContext,
-        f: impl FnOnce(Self::Context<'_>) -> R,
-    ) -> R {
-        with_scope(cx, f)
-    }
-
     fn async_error_value(cx: Self::Context<'_>, message: &str) -> Self::Value {
         match CString::new(message) {
             Ok(message) => {
@@ -687,25 +743,65 @@ impl core::JsEngine for Engine {
         Ok((promise, core::Deferred::new(resolving[0], resolving[1])))
     }
 
-    fn settle_deferred(
-        cx: Self::Context<'_>,
-        deferred: core::Deferred<Self>,
-        result: std::result::Result<Self::Value, Self::Value>,
-    ) {
-        let (func, arg) = match result {
-            Ok(value) => (deferred.resolve(), value),
-            Err(value) => (deferred.reject(), value),
-        };
-        let this = qjs_value_with_tag(qjs::JS_TAG_UNDEFINED as i64);
-        let mut argv = [arg];
-        cx.scope.escape(arg);
-        let call = unsafe { qjs::JS_Call(cx.ctx, func, this, 1, argv.as_mut_ptr()) };
-        unsafe {
-            qjs::JS_FreeValue(cx.ctx, call);
-            qjs::JS_FreeValue(cx.ctx, arg);
-            qjs::JS_FreeValue(cx.ctx, deferred.resolve());
-            qjs::JS_FreeValue(cx.ctx, deferred.reject());
+    fn settle_deferreds(cx: Self::Context<'_>, settlements: Vec<core::DeferredSettlement<Self>>) {
+        if settlements.is_empty() {
+            return;
         }
+        let state = state_from_context(cx.ctx);
+        let Some(trampoline) = state.settle_trampoline() else {
+            for (deferred, result) in settlements {
+                let value = result.unwrap_or_else(|value| value);
+                unsafe {
+                    qjs::JS_FreeValue(cx.ctx, value);
+                    qjs::JS_FreeValue(cx.ctx, deferred.resolve());
+                    qjs::JS_FreeValue(cx.ctx, deferred.reject());
+                }
+            }
+            return;
+        };
+        let fns = unsafe { qjs::JS_NewArray(cx.ctx) };
+        let values = unsafe { qjs::JS_NewArray(cx.ctx) };
+        if unsafe { qjs::JS_IsException(fns) || qjs::JS_IsException(values) } {
+            unsafe {
+                qjs::JS_FreeValue(cx.ctx, fns);
+                qjs::JS_FreeValue(cx.ctx, values);
+            }
+            for (deferred, result) in settlements {
+                let value = result.unwrap_or_else(|value| value);
+                unsafe {
+                    qjs::JS_FreeValue(cx.ctx, value);
+                    qjs::JS_FreeValue(cx.ctx, deferred.resolve());
+                    qjs::JS_FreeValue(cx.ctx, deferred.reject());
+                }
+            }
+            clear_pending_exception(cx.ctx);
+            return;
+        }
+        cx.scope.track(fns);
+        cx.scope.track(values);
+        for (index, (deferred, result)) in settlements.into_iter().enumerate() {
+            let (func, value) = match result {
+                Ok(value) => {
+                    unsafe { qjs::JS_FreeValue(cx.ctx, deferred.reject()) };
+                    (deferred.resolve(), value)
+                }
+                Err(value) => {
+                    unsafe { qjs::JS_FreeValue(cx.ctx, deferred.resolve()) };
+                    (deferred.reject(), value)
+                }
+            };
+            cx.scope.escape(value);
+            let index = u32::try_from(index).unwrap_or(u32::MAX);
+            unsafe {
+                qjs::JS_SetPropertyUint32(cx.ctx, fns, index, func);
+                qjs::JS_SetPropertyUint32(cx.ctx, values, index, value);
+            }
+        }
+        let this = qjs_value_with_tag(qjs::JS_TAG_UNDEFINED as i64);
+        let mut argv = [fns, values];
+        let call = unsafe { qjs::JS_Call(cx.ctx, trampoline, this, 2, argv.as_mut_ptr()) };
+        unsafe { qjs::JS_FreeValue(cx.ctx, call) };
+        clear_pending_exception(cx.ctx);
     }
 
     unsafe fn new_external_arraybuffer(
@@ -811,12 +907,11 @@ impl core::JsEngine for Engine {
         unsafe { qjs::JS_FreeValue(cx.ctx, value) };
     }
 
-    fn register_deferred(cx: Self::Context<'_>, slot: NonNull<Option<core::Deferred<Self>>>) {
-        state_from_context(cx.ctx).register_deferred(slot);
-    }
-
-    fn unregister_deferred(cx: Self::Context<'_>, slot: NonNull<Option<core::Deferred<Self>>>) {
-        state_from_context(cx.ctx).unregister_deferred(slot);
+    fn register_deferred(
+        cx: Self::Context<'_>,
+        slot: NonNull<Option<core::Deferred<Self>>>,
+    ) -> Self::DeferredRegistration {
+        state_from_context(cx.ctx).register_deferred(slot)
     }
 
     fn release_deferred(cx: Self::Context<'_>, deferred: core::Deferred<Self>) {
@@ -2706,6 +2801,66 @@ mod tests {
             "check.js",
         );
         eval_drop(&runtime, "gotDevice = undefined;", "cleanup.js");
+        runtime.clear_global("gpu").expect("clear gpu");
+        runtime.run_gc();
+        let _ = runtime.drain_releases().expect("drain");
+    }
+
+    #[test]
+    fn two_adapter_settlements_observe_one_tick_settle_before_then_order() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let gpu = runtime.wrap_gpu(setup.instance).expect("wrap gpu");
+        runtime.set_global_value("gpu", gpu).expect("set gpu");
+        eval_drop(
+            &runtime,
+            r#"
+                var firstAdapter;
+                gpu.requestAdapter().then(function (adapter) { firstAdapter = adapter; });
+            "#,
+            "adapter-prototype-source.js",
+        );
+        unsafe { runtime.tick(setup.instance) }.expect("prototype adapter tick");
+        eval_drop(
+            &runtime,
+            r#"
+                var order = [];
+                var settleIndex = 0;
+                Object.defineProperty(Object.getPrototypeOf(firstAdapter), 'then', {
+                    configurable: true,
+                    get: function () {
+                        order.push('settle' + (++settleIndex));
+                        return undefined;
+                    }
+                });
+                gpu.requestAdapter().then(function () { order.push('then1'); });
+                gpu.requestAdapter().then(function () { order.push('then2'); });
+            "#,
+            "adapter-settle-order.js",
+        );
+        unsafe { runtime.tick(setup.instance) }.expect("ordered adapter tick");
+        eval_drop(
+            &runtime,
+            r#"
+                var actual = order.join(',');
+                if (actual !== 'settle1,settle2,then1,then2') {
+                    throw new Error('settlement order was ' + actual);
+                }
+                // QuickJS cannot catch removal of the trampoline: N direct
+                // resolver calls still defer continuations until
+                // JS_ExecutePendingJob. JSC is the engine that goes red.
+            "#,
+            "adapter-settle-order-check.js",
+        );
+        eval_drop(
+            &runtime,
+            r#"
+                delete Object.getPrototypeOf(firstAdapter).then;
+                firstAdapter = undefined;
+                order = undefined;
+            "#,
+            "adapter-settle-order-cleanup.js",
+        );
         runtime.clear_global("gpu").expect("clear gpu");
         runtime.run_gc();
         let _ = runtime.drain_releases().expect("drain");

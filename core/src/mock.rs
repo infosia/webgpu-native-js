@@ -294,7 +294,7 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
     type Value = Value;
     type Context<'a> = Context<'a>;
     type Error = String;
-    type AsyncContext = *const Runtime;
+    type DeferredRegistration = ();
 
     const MAPPED_RANGE_STRATEGY: MappedRangeStrategy = if COPY_IN_COPY_OUT {
         MappedRangeStrategy::CopyInCopyOut
@@ -455,17 +455,6 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
         format!("OperationError: {message}")
     }
 
-    fn async_context(cx: Self::Context<'_>) -> Self::AsyncContext {
-        cx.runtime
-    }
-
-    unsafe fn with_async_scope<R>(
-        cx: Self::AsyncContext,
-        f: impl FnOnce(Self::Context<'_>) -> R,
-    ) -> R {
-        unsafe { &*cx }.with_scope(f)
-    }
-
     fn async_error_value(cx: Self::Context<'_>, message: &str) -> Self::Value {
         cx.runtime.string(message)
     }
@@ -490,35 +479,33 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
         Ok((promise, Deferred::new(resolve, reject)))
     }
 
-    fn settle_deferred(
-        cx: Self::Context<'_>,
-        deferred: Deferred<Self>,
-        result: std::result::Result<Self::Value, Self::Value>,
-    ) {
-        let runtime = cx.runtime;
-        let resolver = match result {
-            Ok(_) => deferred.resolve(),
-            Err(_) => deferred.reject(),
-        };
-        let MockValue::Resolver { promise, resolve } = runtime.get(resolver) else {
-            return;
-        };
-        let actual_is_ok = result.is_ok();
-        if resolve != actual_is_ok {
-            return;
-        }
-        let _ = runtime.with_value(promise, |value| {
-            if let MockValue::Promise {
-                settled,
-                result: stored,
-            } = value
-            {
-                if !*settled {
-                    *settled = true;
-                    *stored = Some(result);
-                }
+    fn settle_deferreds(cx: Self::Context<'_>, settlements: Vec<crate::DeferredSettlement<Self>>) {
+        for (deferred, result) in settlements {
+            let runtime = cx.runtime;
+            let resolver = match result {
+                Ok(_) => deferred.resolve(),
+                Err(_) => deferred.reject(),
+            };
+            let MockValue::Resolver { promise, resolve } = runtime.get(resolver) else {
+                continue;
+            };
+            let actual_is_ok = result.is_ok();
+            if resolve != actual_is_ok {
+                continue;
             }
-        });
+            let _ = runtime.with_value(promise, |value| {
+                if let MockValue::Promise {
+                    settled,
+                    result: stored,
+                } = value
+                {
+                    if !*settled {
+                        *settled = true;
+                        *stored = Some(result);
+                    }
+                }
+            });
+        }
     }
 
     unsafe fn new_external_arraybuffer(
@@ -614,13 +601,10 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
         }
     }
 
-    fn register_deferred(_cx: Self::Context<'_>, _slot: std::ptr::NonNull<Option<Deferred<Self>>>) {
-    }
-
-    fn unregister_deferred(
+    fn register_deferred(
         _cx: Self::Context<'_>,
         _slot: std::ptr::NonNull<Option<Deferred<Self>>>,
-    ) {
+    ) -> Self::DeferredRegistration {
     }
 
     fn release_deferred(_cx: Self::Context<'_>, _deferred: Deferred<Self>) {}
@@ -1914,9 +1898,17 @@ mod tests {
 
         PENDING_MAP_CALLBACKS.with(|callbacks| assert_eq!(callbacks.borrow().len(), 2));
         resolve_pending_map(1, crate::WGPUMapAsyncStatus_WGPUMapAsyncStatus_Error);
+        Engine::environment(cx)
+            .settlements()
+            .drain::<Engine>(cx)
+            .expect("drain settlements");
         assert!(matches!(rt.promise_result(second), Some(Err(_))));
         assert_eq!(rt.promise_result(first), None);
         resolve_pending_map(0, crate::WGPUMapAsyncStatus_WGPUMapAsyncStatus_Success);
+        Engine::environment(cx)
+            .settlements()
+            .drain::<Engine>(cx)
+            .expect("drain settlements");
         assert!(matches!(rt.promise_result(first), Some(Ok(_))));
     }
 
@@ -1928,8 +1920,11 @@ mod tests {
         let resolve = deferred.resolve();
         let reject = deferred.reject();
         let first = rt.number(1.0);
-        Engine::settle_deferred(cx, deferred, Ok(first));
-        Engine::settle_deferred(cx, Deferred::new(resolve, reject), Err(rt.string("late")));
+        Engine::settle_deferreds(cx, vec![(deferred, Ok(first))]);
+        Engine::settle_deferreds(
+            cx,
+            vec![(Deferred::new(resolve, reject), Err(rt.string("late")))],
+        );
 
         assert_eq!(rt.promise_result(promise), Some(Ok(first)));
     }
