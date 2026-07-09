@@ -168,10 +168,34 @@ queue drains in.**
 
 Verified by draining **parent-first on purpose**, the worst case. Observed native
 release sequence: `["Instance", "Adapter", "AdapterParentInstanceRef"]` — the
-wrapper's own instance release runs first, the adapter is still valid when its
-release runs, and the child-held parent reference drops last. ASan reported no
-double-free and no use-after-free. (macOS ships no LeakSanitizer, so that run
-does not speak to leaks; the exactly-once assertions do.)
+wrapper's own instance release runs first, and the child-held parent reference
+drops last. ASan reported no double-free and no use-after-free.
+
+**Retraction (Phase 0 review, `phase-reviews.md` → P0-M3).** An earlier version of
+this paragraph said "macOS ships no LeakSanitizer, so that run does not speak to
+leaks; **the exactly-once assertions do**." The second half was false, and it is
+exactly the tautology this project has been catching elsewhere. The assertions
+compare `native_release_order` against an expected vector — but that vector is
+pushed by `record_native_release`, which *our own release functions call
+unconditionally, immediately after* invoking `wgpuXxxRelease`. **If
+`wgpuAdapterRelease` were a no-op, or leaked, every assertion would still pass.**
+The log proves the queue invoked each release function once. It says nothing about
+what the backend did with the call.
+
+What the run therefore supports, precisely: the queue drains each request exactly
+once, in FIFO order, and parent-first draining triggers no double-free or
+use-after-free. Leak-freedom is **not** established. `event-loop.md` → E6 already
+states the honest form of this limit — the C ABI exposes no refcount
+introspection, so the strongest available check is a liveness probe on an extra
+reference. **That probe now exists** (`assert_drain_does_not_over_release`): an
+extra native reference is held across the drain, the handles are exercised through
+ordinary C ABI calls afterwards, and the probe references are then released. It
+establishes **no over-release**. It does not establish leak-freedom, and its doc
+comment says so.
+
+Also stated: this claims "the adapter is still valid when its release runs" only
+insofar as ASan flagged no use-after-free in the `AddRef`/`Release` sequence. That
+is a UAF check, not a validity proof.
 
 **The queue remains a plain FIFO. No ordering logic was added.**
 

@@ -84,7 +84,10 @@ For yawgpu, point it at `target/release` of a yawgpu checkout. That directory is
 self-contained since D6 was fixed upstream: it colocates `libtint_shim.dylib`,
 and `libyawgpu.dylib` resolves it via `@loader_path`.
 
-**The spike crates are outside the workspace** and are gated individually:
+**Spikes are split.** `spikes/event-loop-pump` and `spikes/release-queue` depend on
+`ffi` and are **workspace members**, gated with `-p <name> --features
+ffi/backend-yawgpu`. `spikes/jsc-detach` and `spikes/quickjs-detach` have no
+workspace dependency and are **excluded**, gated individually with
 `cargo test --offline --manifest-path spikes/<name>/Cargo.toml`.
 
 **Headless-first** (`CLAUDE.md` principle 7): every gate above must pass with no

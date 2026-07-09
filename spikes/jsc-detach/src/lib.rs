@@ -1,4 +1,7 @@
+#![warn(missing_docs)]
 #![cfg_attr(not(target_os = "macos"), allow(unused))]
+
+//! Spike proving JavaScriptCore mapped ranges use copy-in/copy-out plus detach.
 
 #[cfg(not(target_os = "macos"))]
 compile_error!("The jsc-detach spike links the macOS JavaScriptCore framework.");
@@ -365,11 +368,6 @@ mod imp {
     }
 
     impl MappedRange {
-        /// Returns the JavaScript `ArrayBuffer` object for this mapping.
-        pub fn object(&self) -> *mut c_void {
-            self.buffer.as_ptr().cast()
-        }
-
         /// Returns the buffer byte length according to JavaScriptCore's C API.
         pub fn byte_length(&self) -> Result<usize> {
             array_buffer_len(self.ctx, self.buffer.as_ptr())

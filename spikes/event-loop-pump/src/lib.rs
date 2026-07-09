@@ -7,6 +7,7 @@ use std::cell::Cell;
 use std::ffi::{c_void, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr::{self, NonNull};
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread::ThreadId;
 
@@ -57,10 +58,6 @@ pub enum Error {
     SetGlobalFailed(&'static str),
     /// Calling a JavaScript function failed.
     CallFailed(&'static str),
-    /// A WebGPU request completed with a non-success status.
-    RequestAdapterFailed(wgpu::WGPURequestAdapterStatus),
-    /// The callback panicked and the extern boundary caught it.
-    CallbackPanicked,
     /// The global request-adapter test slot was poisoned.
     SlotPoisoned,
 }
@@ -302,7 +299,7 @@ impl Drop for RequestState {
 /// A pending request-adapter promise plus callback observations.
 pub struct AdapterRequest {
     promise: qjs::JSValue,
-    state: Box<RequestState>,
+    state: Arc<RequestState>,
 }
 
 impl AdapterRequest {
@@ -359,10 +356,6 @@ impl AdapterRequest {
     pub fn callback_thread_id(&self) -> Option<ThreadId> {
         self.state.thread_id.get()
     }
-
-    fn state_ptr(&self) -> *mut RequestState {
-        ptr::from_ref(self.state.as_ref()).cast_mut()
-    }
 }
 
 impl Drop for AdapterRequest {
@@ -372,6 +365,7 @@ impl Drop for AdapterRequest {
 }
 
 /// Calls `wgpuInstanceRequestAdapter` and bridges completion to a QuickJS Promise.
+#[allow(clippy::arc_with_non_send_sync)]
 pub fn request_adapter_promise(instance: &Instance, js: &QuickJs) -> Result<AdapterRequest> {
     let mut resolving_funcs = [js_undefined(), js_undefined()];
     let promise = unsafe { qjs::JS_NewPromiseCapability(js.ctx(), resolving_funcs.as_mut_ptr()) };
@@ -379,18 +373,25 @@ pub fn request_adapter_promise(instance: &Instance, js: &QuickJs) -> Result<Adap
         return js.take_exception("JS_NewPromiseCapability");
     }
 
-    let state = Box::new(RequestState::new(
+    let state = Arc::new(RequestState::new(
         js.ctx(),
         resolving_funcs[0],
         resolving_funcs[1],
     ));
-    let request = AdapterRequest { promise, state };
+    let request = AdapterRequest {
+        promise,
+        state: Arc::clone(&state),
+    };
+    // RequestState is intentionally !Send because it holds a JSContext and JSValues.
+    // AllowProcessEvents runs this callback on the pumping thread, so this Arc is
+    // only shared for lifetime ownership and is never sent to another thread.
+    let callback_state = Arc::into_raw(state).cast::<c_void>().cast_mut();
 
     let callback_info = wgpu::WGPURequestAdapterCallbackInfo {
         nextInChain: ptr::null_mut(),
         mode: wgpu::WGPUCallbackMode_WGPUCallbackMode_AllowProcessEvents,
         callback: Some(request_adapter_callback),
-        userdata1: request.state_ptr().cast::<c_void>(),
+        userdata1: callback_state,
         userdata2: ptr::null_mut(),
     };
 
@@ -408,18 +409,18 @@ extern "C" fn request_adapter_callback(
     userdata1: *mut c_void,
     _userdata2: *mut c_void,
 ) {
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        if userdata1.is_null() {
-            return;
-        }
+    if userdata1.is_null() {
+        return;
+    }
 
-        let state = unsafe { &*userdata1.cast::<RequestState>() };
+    let state = unsafe { Arc::from_raw(userdata1.cast::<RequestState>()) };
+    let result = catch_unwind(AssertUnwindSafe(|| {
         state.callback_count.set(state.callback_count.get() + 1);
         state.thread_id.set(Some(std::thread::current().id()));
 
         if status == wgpu::WGPURequestAdapterStatus_WGPURequestAdapterStatus_Success {
-            retain_callback_adapter_for_test(adapter, state);
-            release_callback_adapter(adapter, state);
+            retain_callback_adapter_for_test(adapter, &state);
+            release_callback_adapter(adapter, &state);
 
             let mut value = js_undefined();
             let ret =
@@ -436,8 +437,7 @@ extern "C" fn request_adapter_callback(
         }
     }));
 
-    if result.is_err() && !userdata1.is_null() {
-        let state = unsafe { &*userdata1.cast::<RequestState>() };
+    if result.is_err() {
         state.panicked.set(true);
     }
 }
@@ -480,6 +480,12 @@ pub fn install_request_adapter_function(
     {
         let mut state = slot.state.lock().map_err(|_| Error::SlotPoisoned)?;
         state.instance = instance.raw() as usize;
+        for request in state.requests.drain(..) {
+            let ptr = request as *mut AdapterRequest;
+            if !ptr.is_null() {
+                drop(unsafe { Box::from_raw(ptr) });
+            }
+        }
     }
 
     let function = unsafe {
@@ -503,7 +509,7 @@ pub struct RequestAdapterSlot {
 
 struct RequestAdapterSlotState {
     instance: usize,
-    request: usize,
+    requests: Vec<usize>,
 }
 
 impl RequestAdapterSlot {
@@ -513,7 +519,7 @@ impl RequestAdapterSlot {
         Self {
             state: Mutex::new(RequestAdapterSlotState {
                 instance: 0,
-                request: 0,
+                requests: Vec::new(),
             }),
         }
     }
@@ -521,8 +527,19 @@ impl RequestAdapterSlot {
     /// Takes ownership of the most recent adapter request started from JavaScript.
     pub fn take_request(&self) -> Result<Option<Box<AdapterRequest>>> {
         let mut state = self.state.lock().map_err(|_| Error::SlotPoisoned)?;
-        let ptr = std::mem::replace(&mut state.request, 0) as *mut AdapterRequest;
+        let ptr = state.requests.pop().unwrap_or_default() as *mut AdapterRequest;
         Ok(NonNull::new(ptr).map(|ptr| unsafe { Box::from_raw(ptr.as_ptr()) }))
+    }
+
+    #[cfg(test)]
+    fn take_requests_for_test(&self) -> Result<Vec<AdapterRequest>> {
+        let mut state = self.state.lock().map_err(|_| Error::SlotPoisoned)?;
+        let requests = std::mem::take(&mut state.requests)
+            .into_iter()
+            .filter_map(|ptr| NonNull::new(ptr as *mut AdapterRequest))
+            .map(|ptr| unsafe { *Box::from_raw(ptr.as_ptr()) })
+            .collect();
+        Ok(requests)
     }
 }
 
@@ -538,6 +555,7 @@ extern "C" fn js_request_adapter(
     _argc: i32,
     _argv: *mut qjs::JSValue,
 ) -> qjs::JSValue {
+    #[allow(clippy::arc_with_non_send_sync)]
     let result = catch_unwind(AssertUnwindSafe(|| {
         let slot = &REQUEST_ADAPTER_SLOT;
         let instance = match slot.state.lock() {
@@ -554,17 +572,24 @@ extern "C" fn js_request_adapter(
             return promise;
         }
 
-        let state = Box::new(RequestState::new(
+        let state = Arc::new(RequestState::new(
             ctx,
             resolving_funcs[0],
             resolving_funcs[1],
         ));
-        let request = Box::new(AdapterRequest { promise, state });
+        let request = Box::new(AdapterRequest {
+            promise,
+            state: Arc::clone(&state),
+        });
+        // RequestState is intentionally !Send because it holds a JSContext and JSValues.
+        // AllowProcessEvents runs this callback on the pumping thread, so this Arc is
+        // only shared for lifetime ownership and is never sent to another thread.
+        let callback_state = Arc::into_raw(state).cast::<c_void>().cast_mut();
         let callback_info = wgpu::WGPURequestAdapterCallbackInfo {
             nextInChain: ptr::null_mut(),
             mode: wgpu::WGPUCallbackMode_WGPUCallbackMode_AllowProcessEvents,
             callback: Some(request_adapter_callback),
-            userdata1: request.state_ptr().cast::<c_void>(),
+            userdata1: callback_state,
             userdata2: ptr::null_mut(),
         };
 
@@ -573,12 +598,9 @@ extern "C" fn js_request_adapter(
         }
 
         let promise = unsafe { qjs::JS_DupValue(ctx, request.promise) };
-        let old = match slot.state.lock() {
-            Ok(mut state) => std::mem::replace(&mut state.request, Box::into_raw(request) as usize),
+        match slot.state.lock() {
+            Ok(mut state) => state.requests.push(Box::into_raw(request) as usize),
             Err(_) => return js_exception(),
-        } as *mut AdapterRequest;
-        if !old.is_null() {
-            drop(unsafe { Box::from_raw(old) });
         }
         promise
     }));
@@ -603,6 +625,7 @@ mod tests {
 
         assert_eq!(request.callback_count(), 0);
         assert!(!request.callback_panicked());
+        process_events(&instance);
         Ok(())
     }
 
@@ -646,6 +669,42 @@ mod tests {
         js.drain_microtasks()?;
         assert!(js.eval_bool("globalThis.ran")?);
         assert!(!js.is_job_pending());
+        Ok(())
+    }
+
+    #[test]
+    fn double_request_adapter_keeps_both_pending_states_alive() -> Result<()> {
+        let _guard = TEST_LOCK.lock().expect("test lock is not poisoned");
+        let js = QuickJs::new()?;
+        let instance = Instance::new_headless()?;
+        install_request_adapter_function(&instance, &js, &REQUEST_ADAPTER_SLOT)?;
+
+        js.eval(
+            "globalThis.ran1 = false;
+             globalThis.ran2 = false;
+             globalThis.p1 = requestAdapter();
+             globalThis.p2 = requestAdapter();
+             globalThis.p1.then(() => { globalThis.ran1 = true; });
+             globalThis.p2.then(() => { globalThis.ran2 = true; });",
+        )?;
+        let requests = REQUEST_ADAPTER_SLOT.take_requests_for_test()?;
+
+        assert_eq!(requests.len(), 2);
+        assert!(requests
+            .iter()
+            .all(|request| request.promise_state() == PromiseState::Pending));
+        process_events(&instance);
+        assert!(requests.iter().all(|request| request.callback_count() == 1));
+        assert!(requests.iter().all(|request| request.is_resolved()));
+        assert!(requests
+            .iter()
+            .all(|request| request.promise_state() == PromiseState::Fulfilled));
+        assert!(js.is_job_pending());
+
+        js.drain_microtasks()?;
+        assert!(js.eval_bool("globalThis.ran1")?);
+        assert!(js.eval_bool("globalThis.ran2")?);
+        js.eval("globalThis.p1 = undefined; globalThis.p2 = undefined;")?;
         Ok(())
     }
 

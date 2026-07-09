@@ -1,3 +1,7 @@
+#![warn(missing_docs)]
+
+//! Spike proving QuickJS can detach zero-copy ArrayBuffers used for mapped ranges.
+
 use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -14,23 +18,36 @@ mod qjs {
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 }
 
-type Result<T> = std::result::Result<T, Error>;
+/// Crate-local result type.
+pub type Result<T> = std::result::Result<T, Error>;
 
+/// Errors returned by the QuickJS detach spike.
 #[derive(Debug, Eq, PartialEq)]
 pub enum Error {
+    /// A string passed to C contained an interior NUL byte.
     InteriorNul,
+    /// A C API returned null where a live value was required.
     Null(&'static str),
+    /// QuickJS raised an exception with the contained message.
     Exception(String),
+    /// QuickJS returned an exception while an exception was already being read.
     EvalReturnedException,
+    /// QuickJS boolean conversion failed.
     ToBoolFailed,
+    /// The value to detach was not an ArrayBuffer.
     NotArrayBuffer,
+    /// Detach verification failed with a static diagnostic.
     DetachVerificationFailed(&'static str),
+    /// The mapped range was already unmapped.
     AlreadyUnmapped,
 }
 
+/// Observation recorded when QuickJS invokes the ArrayBuffer free callback.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FreeEvent {
+    /// Whether QuickJS passed a null bytes pointer.
     pub ptr_is_null: bool,
+    /// Whether this callback invocation released the foreign allocation bytes.
     pub freed_allocation: bool,
 }
 
@@ -38,6 +55,7 @@ thread_local! {
     static FREE_EVENTS: RefCell<Vec<FreeEvent>> = const { RefCell::new(Vec::new()) };
 }
 
+/// Takes and clears the thread-local free callback observations.
 pub fn take_free_events() -> Vec<FreeEvent> {
     FREE_EVENTS.with(|events| events.take())
 }
@@ -88,12 +106,14 @@ unsafe extern "C" fn free_array_buffer(
     }));
 }
 
+/// A minimal QuickJS runtime/context pair.
 pub struct QuickJs {
     rt: NonNull<qjs::JSRuntime>,
     ctx: NonNull<qjs::JSContext>,
 }
 
 impl QuickJs {
+    /// Creates a QuickJS runtime and context.
     pub fn new() -> Result<Self> {
         let rt = unsafe { qjs::JS_NewRuntime() };
         let rt = NonNull::new(rt).ok_or(Error::Null("JS_NewRuntime"))?;
@@ -106,6 +126,7 @@ impl QuickJs {
         self.ctx.as_ptr()
     }
 
+    /// Evaluates JavaScript and converts the result to a boolean.
     pub fn eval_bool(&self, script: &str) -> Result<bool> {
         let value = self.eval_value(script)?;
         let result = unsafe { qjs::JS_ToBool(self.ctx(), value) };
@@ -117,6 +138,7 @@ impl QuickJs {
         }
     }
 
+    /// Evaluates JavaScript and converts the result to a string.
     pub fn eval_string(&self, script: &str) -> Result<String> {
         let value = self.eval_value(script)?;
         let raw = unsafe { qjs::JS_ToCString(self.ctx(), value) };
@@ -168,6 +190,7 @@ impl QuickJs {
         Err(Error::Exception(message))
     }
 
+    /// Creates a zero-copy mapped range backed by foreign Rust memory.
     pub fn mapped_range(&self, bytes: Vec<u8>) -> Result<MappedRange> {
         let (ptr, state) = ForeignAllocation::new(bytes)?;
         let len = unsafe { state.as_ref().bytes.as_ref().map_or(0, |bytes| bytes.len()) };
@@ -228,6 +251,7 @@ impl QuickJs {
         Ok(())
     }
 
+    /// Detaches a global ArrayBuffer and verifies that script observes detachment.
     pub fn detach_global_and_verify(&self, global: &str) -> Result<()> {
         let global_name = CString::new(global).map_err(|_| Error::InteriorNul)?;
         let global_obj = unsafe { qjs::JS_GetGlobalObject(self.ctx()) };
@@ -265,6 +289,7 @@ impl QuickJs {
         unsafe { qjs::JS_FreeValue(self.ctx(), exception) };
     }
 
+    /// Forces a QuickJS garbage collection.
     pub fn run_gc(&self) {
         unsafe { qjs::JS_RunGC(self.rt.as_ptr()) };
     }
@@ -279,6 +304,7 @@ impl Drop for QuickJs {
     }
 }
 
+/// Zero-copy mapped range represented as a QuickJS ArrayBuffer.
 pub struct MappedRange {
     ctx: NonNull<qjs::JSContext>,
     buffer: qjs::JSValue,
@@ -288,6 +314,7 @@ pub struct MappedRange {
 }
 
 impl MappedRange {
+    /// Installs this mapping's ArrayBuffer as a JavaScript global.
     pub fn install_global(&self, name: &str) -> Result<()> {
         let name = CString::new(name).map_err(|_| Error::InteriorNul)?;
         let global = unsafe { qjs::JS_GetGlobalObject(self.ctx.as_ptr()) };
@@ -306,6 +333,7 @@ impl MappedRange {
         Ok(())
     }
 
+    /// Mutates one byte in the foreign allocation while the mapping is live.
     pub fn mutate(&mut self, offset: usize, value: u8) -> Result<()> {
         if !self.mapped {
             return Err(Error::AlreadyUnmapped);
@@ -319,6 +347,7 @@ impl MappedRange {
         Ok(())
     }
 
+    /// Detaches the ArrayBuffer and marks the mapped range as unmapped.
     pub fn unmap(&mut self) -> Result<()> {
         if !self.mapped {
             return Err(Error::AlreadyUnmapped);

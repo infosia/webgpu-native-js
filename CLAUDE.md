@@ -58,8 +58,14 @@ The plan's §7 has the full evidence. These are the conclusions that are now
    Callback threading is a contract the caller chooses, not a property to be
    discovered. `AllowSpontaneous` is forbidden on JS-facing paths — `webgpu.h`
    documents re-entrant API calls from such callbacks as undefined behaviour.
-   The device-lost and uncaptured-error callbacks have no configurable mode and
-   must marshal to the JS thread.
+   **Device-lost is configurable too** and must use `AllowProcessEvents` like
+   everything else: `WGPUDeviceLostCallbackInfo` has a `mode` field
+   (`webgpu.h`, "Controls when the callback may be called"). **Only
+   `WGPUUncapturedErrorCallbackInfo` has no mode** — the header warns it "may be
+   called at any time (like `AllowSpontaneous`)", so calls into `webgpu.h` from
+   it are unsafe and it alone must marshal to the JS thread. *(Corrected
+   2026-07-09 by the Phase 0 review; the two callbacks had been conflated. See
+   `specs/tracking/phase-reviews.md` → P0-C1.)*
 3. **The host pumps two queues per frame, and this is public API.**
    `wgpuInstanceProcessEvents()` fires the WebGPU callbacks that resolve
    `Promise`s; the engine's microtask queue then runs the `.then()`
@@ -196,9 +202,14 @@ the parity actually holds rather than assuming it.
    `dyn` in the conversion path. Descriptor conversion is written once in
    `core/` against the trait (invariant 1).
 4. **Finalizers never call `webgpu.h` directly.** They push onto the release
-   queue; a designated thread drains it. `webgpu.h` guarantees no thread-safety
-   for `wgpuXxxRelease`, and JSC finalizers may fire on any thread
-   (invariant 4). Release ordering must respect child-before-parent.
+   queue; the `tick()` thread drains it. Reason: `webgpu.h` is thread-safe
+   **only "where multithreading is supported"**, an implementation may confine
+   every object but `WGPUInstance` to its creating thread, and **nothing in the
+   API lets you ask which you have**. The queue is a **plain FIFO and never
+   sorts**; child-before-parent is made irrelevant by each child wrapper taking
+   a native `wgpuXxxAddRef` on its parent handle. Evidence and the full
+   correction: `specs/tracking/release-queue.md` → Q1, Q2, Q3. See also design
+   invariant 4, which this principle must always agree with.
 5. **GC is a backstop, not a resource-management strategy.** WebGPU has
    explicit `destroy()` on buffers, textures, and devices for a reason. On
    mobile, waiting for a finalizer to free GPU memory is a bug. Scripts are

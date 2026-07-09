@@ -86,8 +86,6 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Errors returned by the release-queue spike.
 #[derive(Debug, Eq, PartialEq)]
 pub enum Error {
-    /// A string passed to C contained an interior NUL byte.
-    InteriorNul,
     /// A C API returned null where a live handle was required.
     Null(&'static str),
     /// QuickJS raised an exception.
@@ -587,15 +585,17 @@ unsafe extern "C" fn qjs_gc_mark(
     value: qjs::JSValue,
     mark_func: qjs::JS_MarkFunc,
 ) {
-    let class_id = QUICKJS_CLASS_ID.load(Ordering::SeqCst) as qjs::JSClassID;
-    let payload = unsafe { qjs::JS_GetOpaque(value, class_id) }.cast::<QuickJsPayload>();
-    let Some(payload) = NonNull::new(payload) else {
-        return;
-    };
-    let payload = unsafe { payload.as_ref() };
-    if let Some(parent) = payload.parent {
-        qjs::JS_MarkValue(rt, parent, mark_func);
-    }
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        let class_id = QUICKJS_CLASS_ID.load(Ordering::SeqCst) as qjs::JSClassID;
+        let payload = unsafe { qjs::JS_GetOpaque(value, class_id) }.cast::<QuickJsPayload>();
+        let Some(payload) = NonNull::new(payload) else {
+            return;
+        };
+        let payload = unsafe { payload.as_ref() };
+        if let Some(parent) = payload.parent {
+            qjs::JS_MarkValue(rt, parent, mark_func);
+        }
+    }));
 }
 
 fn exception_message(ctx: *mut qjs::JSContext, fallback: &'static str) -> String {
@@ -683,14 +683,15 @@ impl JscContext {
             },
             parent: parent_ref,
         });
-        let object = unsafe {
-            jsc::JSObjectMake(
-                self.ctx(),
-                self.class.as_ptr(),
-                Box::into_raw(payload).cast(),
-            )
+        let payload = Box::into_raw(payload);
+        let object = unsafe { jsc::JSObjectMake(self.ctx(), self.class.as_ptr(), payload.cast()) };
+        let Some(object) = NonNull::new(object) else {
+            let mut payload = unsafe { Box::from_raw(payload) };
+            if let Some(parent) = payload.parent.take() {
+                unsafe { jsc::JSValueUnprotect(parent.ctx, parent.object.cast_const()) };
+            }
+            return Err(Error::Null("JSObjectMake"));
         };
-        let object = NonNull::new(object).ok_or(Error::Null("JSObjectMake"))?;
         unsafe { jsc::JSValueProtect(self.ctx(), object.as_ptr().cast_const()) };
         Ok(object.as_ptr())
     }
@@ -756,6 +757,37 @@ mod tests {
         TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Probes that queue draining did not over-release the handles.
+    ///
+    /// The C ABI exposes no refcount introspection, so this does not prove
+    /// leak-freedom. It keeps one extra native reference to each handle, drains
+    /// the queue, then calls ordinary C ABI functions on the handles before
+    /// releasing those extra probe references.
+    fn assert_drain_does_not_over_release(
+        queue: &ReleaseQueue,
+        instance: wgpu::WGPUInstance,
+        adapter: wgpu::WGPUAdapter,
+    ) -> Result<usize> {
+        unsafe {
+            wgpu::wgpuInstanceAddRef(instance);
+            wgpu::wgpuAdapterAddRef(adapter);
+        }
+
+        let drained = queue.drain();
+
+        unsafe {
+            wgpu::wgpuInstanceProcessEvents(instance);
+            let _ = wgpu::wgpuAdapterHasFeature(
+                adapter,
+                wgpu::WGPUFeatureName_WGPUFeatureName_CoreFeaturesAndLimits,
+            );
+            wgpu::wgpuAdapterRelease(adapter);
+            wgpu::wgpuInstanceRelease(instance);
+        }
+
+        drained
     }
 
     #[derive(Debug)]
@@ -882,7 +914,10 @@ mod tests {
             Arc::clone(&log),
         ))?;
 
-        assert_eq!(queue.drain()?, 2);
+        assert_eq!(
+            assert_drain_does_not_over_release(&queue, raw_instance, adapter)?,
+            2
+        );
         assert_eq!(log.drain_order()?, vec!["Instance", "Adapter"]);
         assert_eq!(
             log.native_release_order()?,

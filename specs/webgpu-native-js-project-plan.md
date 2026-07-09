@@ -218,7 +218,12 @@ each call. Rev 1 omitted this entirely.
 ### 2.5 Object lifetime: release queue, and why
 
 QuickJS finalizers fire deterministically on a known thread (refcounting GC).
-JSC finalizers **may fire on any thread** (documented engine behavior).
+JSC finalizers are widely held to fire on **any thread** — but note that Phase 0
+could not observe this: `JSGarbageCollect` never ran a finalizer at all, and the
+spike's foreign-thread case is *simulated*, not observed (`release-queue.md` →
+R3). Treat "any thread" as an unverified premise. It is no longer load-bearing:
+the queue's justification is Q1's unqueryable thread-safety, which holds even for
+a single-threaded finalizer.
 
 **Rev 1 justified the release queue by that JSC fact and called it "the
 highest-risk piece of the whole design." Both halves need correcting.**
@@ -308,9 +313,21 @@ at all.** `AllowSpontaneous` is forbidden on JS-facing paths: `webgpu.h`
 explicitly documents that re-entrantly calling the API from inside a spontaneous
 callback is undefined behaviour.
 
-`WGPUDeviceLostCallback` / uncaptured-error are the exception — the header states
-they have no configurable mode and may fire at any time. Those must marshal to
-the JS thread through a queue and must not call back into `webgpu.h`.
+**Corrected 2026-07-09 (Phase 0 review, `specs/tracking/phase-reviews.md` → P0-C1).**
+Rev 2 wrote that device-lost *and* uncaptured-error "have no configurable mode".
+Only one of them does not.
+
+- `WGPUDeviceLostCallbackInfo` **has a `mode` field** ("Controls when the callback
+  may be called"). Device-lost is therefore an ordinary JS-facing async callback
+  and takes `AllowProcessEvents`, like everything else.
+- `WGPUUncapturedErrorCallbackInfo` **has no `mode`.** The header warns it "may
+  be called at any time (like `AllowSpontaneous`)", so calls into `webgpu.h` from
+  it are unsafe. It alone must marshal to the JS thread and must not call back
+  into the API.
+
+This was inferred from prose rather than read off the struct, and the two
+callbacks were conflated. It is the same failure mode as the §2.5 thread-safety
+error: reasoning about a header without opening it.
 
 ### 2.7 The host event-loop contract (Rev 1 omitted this entirely)
 
@@ -733,6 +750,42 @@ assumptions by being restated confidently in a later document.
 
 ## 7. Revision history
 
+### Rev 3 (2026-07-09) — Phase 0 evidence, and corrections to Rev 2's corrections
+
+Rev 2 fixed twelve of Rev 1's claims. Phase 0 then executed against real headers,
+real engines, and real backends, and overturned four of Rev 2's own assertions.
+Two of them Rev 2 had introduced *as corrections*. Full findings:
+`specs/tracking/phase-reviews.md`.
+
+| # | Rev 2 claim | Status | Where |
+|---|---|---|---|
+| A | "Release queue's real reason: `webgpu.h` guarantees no thread-safety for `wgpuXxxRelease`" (Rev 2 §7 row 4, §2.5) | **Wrong.** The API *is* thread-safe — but only "where multithreading is supported", an implementation may confine every object but `WGPUInstance` to its creating thread, and **the capability is not queryable**. Inferred from the header's silence instead of reading `doc/articles/Multithreading.md`. Conclusion survives; justification replaced. | §2.5, `release-queue.md` → Q1 |
+| B | "The queue is the natural place to enforce child-before-parent ordering" | **Wrong mechanism.** Measured: QuickJS orders child-first (refcounting); JSC ran **parent first**, and never finalizes during GC at all. The queue stays a plain FIFO; each child wrapper takes a native `AddRef` on its parent handle instead. | §2.5, `release-queue.md` → Q2/R5 |
+| C | "The device-lost and uncaptured-error callbacks have no configurable mode" | **Half wrong.** `WGPUDeviceLostCallbackInfo` **has** a `mode` field; only `WGPUUncapturedErrorCallbackInfo` lacks one. Same failure mode as (A): reasoning about a struct without opening the header. | §2.6, `phase-reviews.md` → P0-C1 |
+| D | "The queue keeps release calls out of any `ProcessEvents` callstack" | **Void.** `webgpu.h` forbids re-entrancy only from **spontaneous** callbacks and explicitly exempts the `ProcessEvents` / `WaitAny` callstacks. | §2.5, §2.6 |
+
+Newly established by Phase 0, with running code behind each:
+
+- **`JSGarbageCollect` does not run finalizers.** An unreferenced JSC object with a
+  finalizer survives four calls and is finalized only at `JSGlobalContextRelease`.
+  So under JSC a forgotten `destroy()` may hold GPU memory until the context dies,
+  and nobody can force the finalizer. Invariant 7 is now evidence, not prudence.
+  (`release-queue.md` → R3.)
+- **Taking a C bytes pointer of a JSC `ArrayBuffer` permanently disables detach**,
+  and `transfer()` then *silently* no-ops. (`engine-boundary.md` → Q1b/E5.)
+- **QuickJS's `free_func` fires twice** — at detach with the real pointer, at
+  finalize with `NULL`. (`engine-boundary.md` → E7/E8.)
+- **Neither engine reports a failed detach**, so `unmap()` must verify. That check
+  is shared logic and belongs in `core/` once — which is what a correctly drawn
+  boundary predicts. (`engine-boundary.md` → E9.)
+- **The two-queue pump contract holds**, and yawgpu genuinely defers an
+  `AllowProcessEvents` callback rather than firing it inline.
+  (`event-loop.md` → E1/E2.)
+
+Unchanged and reconfirmed: `trait JsEngine` with associated types (§2.4) remains
+the central bet and the boundary absorbed every engine divergence found so far as
+an *additive* capability, never as `core/` logic churn.
+
 ### Rev 2 (2026-07-09) — corrections applied
 
 Each item below was verified against a primary source, not against recollection:
@@ -747,7 +800,7 @@ recorded here so Rev 1's claims are not reintroduced from memory.
 | 1 | "Blocking unknown: which thread do yawgpu's callbacks fire on" | **Wrong — not an unknown.** `WGPUCallbackMode` makes it a caller-chosen contract; yawgpu implements all three modes plus `ProcessEvents`/`WaitAny`. | §2.6 |
 | 2 | `PromiseBridge::resolve(value: JsValueHandle)`; one `NativeClassSpec` "consumed identically by every engine" | **Wrong — cannot be implemented.** No engine-agnostic value handle exists. Replaced with `trait JsEngine` + associated types. | §2.4 |
 | 3 | "Generate `NativeClassSpec` from `webgpu.yml`" | **Wrong input.** `webgpu.yml` is the C ABI; it carries no defaults, string enums, flag namespaces, `Promise` types, or coercion rules. `dawn.node` generates from **WebIDL**. Corrected to a WebIDL ⋈ yml join. | §2.3 |
-| 4 | Release queue justified by JSC's any-thread finalizers; "the highest-risk piece of the whole design" | **Right conclusion, wrong reason, wrong risk ranking.** Real reason: `webgpu.h` guarantees no thread-safety for `wgpuXxxRelease` at all. Risk: it is an ordinary MPSC queue; §2.4 is the risky part. | §2.5 |
+| 4 | Release queue justified by JSC's any-thread finalizers; "the highest-risk piece of the whole design" | **Right conclusion, wrong reason, wrong risk ranking.** ~~Real reason: `webgpu.h` guarantees no thread-safety for `wgpuXxxRelease` at all.~~ **That "correction" was itself wrong — see Rev 3 below.** Risk ranking stands: it is an ordinary MPSC queue; §2.4 is the risky part. | §2.5 |
 | 5 | Phase 1 slice = `requestAdapter` → `requestDevice` → `createBuffer` → `mapAsync` | **Browser-shaped, not host-shaped.** The host already owns the device. Primary entry is handle adoption; the first slice is now synchronous. | §2.8, Phase 1 |
 | 6 | (absent) | **Omission: the host event-loop contract.** Resolving a Promise does not run `.then()`. The host must pump `ProcessEvents` *and* the microtask queue each frame. | §2.7 |
 | 7 | (absent) | **Omission: per-call arena.** `WGPUStringView` is non-null-terminated; `count+pointer` arrays must outlive the call. | §2.4 |
