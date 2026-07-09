@@ -9,8 +9,8 @@ use std::sync::Arc;
 use crate::{
     Arena, ClassId, ClassSpec, Deferred, Environment, GpuDispatch, JsEngine, MappedRangeStrategy,
     ReleaseQueue, Result, WGPUAdapter, WGPUBuffer, WGPUBufferDescriptor, WGPUBufferMapCallbackInfo,
-    WGPUDevice, WGPUMapMode, WGPURequestAdapterCallbackInfo, WGPURequestDeviceCallbackInfo,
-    WGPUStringView, WGPUStringViewExt,
+    WGPUDevice, WGPUMapAsyncStatus, WGPUMapMode, WGPURequestAdapterCallbackInfo,
+    WGPURequestDeviceCallbackInfo, WGPUStringView, WGPUStringViewExt,
 };
 
 /// Mock JavaScript value handle.
@@ -1308,12 +1308,12 @@ mod tests {
         webgpu_native_js_ffi::native::WGPUFuture { id: 10 }
     }
 
-    fn resolve_pending_map(index: usize) {
+    fn resolve_pending_map(index: usize, status: WGPUMapAsyncStatus) {
         let info = PENDING_MAP_CALLBACKS.with(|callbacks| callbacks.borrow_mut().remove(index));
         let callback = info.callback.expect("callback");
         unsafe {
             callback(
-                crate::WGPUMapAsyncStatus_WGPUMapAsyncStatus_Success,
+                status,
                 WGPUStringView::from_bytes(b""),
                 info.userdata1,
                 info.userdata2,
@@ -1341,36 +1341,11 @@ mod tests {
             buffer_map_async::<Engine>(cx, second_buffer, &[rt.number(2.0)]).expect("promise");
 
         PENDING_MAP_CALLBACKS.with(|callbacks| assert_eq!(callbacks.borrow().len(), 2));
-        resolve_pending_map(1);
-        assert!(matches!(rt.promise_result(second), Some(Ok(_))));
+        resolve_pending_map(1, crate::WGPUMapAsyncStatus_WGPUMapAsyncStatus_Error);
+        assert!(matches!(rt.promise_result(second), Some(Err(_))));
         assert_eq!(rt.promise_result(first), None);
-        resolve_pending_map(0);
+        resolve_pending_map(0, crate::WGPUMapAsyncStatus_WGPUMapAsyncStatus_Success);
         assert!(matches!(rt.promise_result(first), Some(Ok(_))));
-    }
-
-    #[test]
-    fn a7_red_demo_overwritten_userdata_loses_first_async_request() {
-        let rt = runtime();
-        let cx = rt.context();
-        let (first, first_deferred) = Engine::new_promise(cx).expect("first promise");
-        let (second, second_deferred) = Engine::new_promise(cx).expect("second promise");
-        let mut single_userdata_slot = Some(first_deferred);
-        single_userdata_slot = Some(second_deferred);
-
-        let overwritten = single_userdata_slot
-            .take()
-            .expect("second request overwrote first userdata");
-        Engine::settle_deferred(cx, overwritten, Ok(rt.undefined()));
-
-        assert_eq!(
-            rt.promise_result(first),
-            None,
-            "the first request is lost when a second async op overwrites userdata"
-        );
-        assert!(
-            matches!(rt.promise_result(second), Some(Ok(_))),
-            "the second request receives the first callback's completion"
-        );
     }
 
     #[test]

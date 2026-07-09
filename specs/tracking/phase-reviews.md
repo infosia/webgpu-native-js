@@ -132,11 +132,43 @@ mocks. `trace_payload` is implementable by both — a no-op on JSC, wasteful but
 correct. **Phase 3 decides, when JavaScriptCore has a vote.** The debt is recorded
 in block 02 → A27 rather than left to be rediscovered.
 
+### The fourth tautology, caught by clippy
+
+The A7 "red demonstration" that landed with the fixes was
+`a7_red_demo_overwritten_userdata_loses_first_async_request`. It built a
+single-slot design **in the test's own local `Option`**, overwrote it, and asserted
+the local behaved as written. It never called into `core/`. It would have passed
+whatever `core/` did — and it tested the wrong hazard besides: A7's failure mode is
+a **use-after-free**, not an unresolved promise.
+
+`cargo clippy -D warnings` found it, as `value assigned to
+single_userdata_slot is never read`. **The lint was pointing at the test being
+wrong, not at a style nit.** It is now deleted and replaced by
+`a7_two_concurrent_map_async_operations_settle_independently`, which drives two
+outstanding `mapAsync` calls through `core/` and shows each settling its own
+promise.
+
+That is the fourth: P0-M3 asserted our release-call log, P1-M3 our `add_ref`
+counter, P2-M4 the mock's reclaim counter, P2-M7 the test's own local variable.
+
+**A7's red demonstration is not re-run, and that is deliberate.** A deterministic
+assertion is impossible — the hazard is a dangling `userdata1`. It was already seen
+red, under ASan, in **Phase 0** (`phase-reviews.md` → Phase 0, P0-C2:
+`heap-use-after-free … in core::cell::Cell::get`), for exactly this pattern and for
+exactly this reason. Citing that demonstration is honest; manufacturing a second
+one that passes for the wrong reason is not.
+
 ### Gate — PASSED. Phase 2 is COMPLETE.
 
-Gates re-run directly: `core` with the backend env var **unset** EXIT=0 (28 tests);
-`cargo test --workspace` EXIT=0; `cargo clippy --workspace --all-targets -D
-warnings` EXIT=0; both detach spikes EXIT=0.
+Gates re-run directly by Claude: `core` with the backend env var **unset** EXIT=0
+(27 tests); `cargo test --workspace` EXIT=0; `cargo clippy --workspace --all-targets
+-- -D warnings` EXIT=0; both detach spikes EXIT=0.
+
+**Correction to the record.** The commit that declared Phase 2 complete stated
+`clippy -D warnings EXIT=0`. It did not. Clippy was failing on the tautological test
+above, and the claim was written from the previous run rather than from the one
+being reported. The gate is green now, and this note stays because a project that
+retracts its own tautologies should also retract its own unverified gate claims.
 
 Verified fixed: P2-C1 … P2-C5, P2-M1 … P2-M6, P2-m1 … P2-m5.
 Block 02 gained A13 (rewritten), A24, A25, A26, A27, A28; A11 and A26 were revised
