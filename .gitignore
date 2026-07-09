@@ -1,0 +1,20 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+
+# Generated bindings are build artifacts ($OUT_DIR), never committed
+# (see CLAUDE.md, principle 9)
+
+# Agent / editor local state
+/.claude/
+.vscode/
+.idea/
+*.code-workspace
+
+# Local test transcripts and scratch output
+/transcripts/
+*.log
+
+# OS noise
+.DS_Store
+Thumbs.db
