@@ -49,6 +49,12 @@ canonical `WGPU_EXPORT` functions: **25 missing.** Confirmed to be genuinely
 unimplemented — the corresponding `pub extern "C" fn`s are absent from yawgpu's
 source, so this is not a stale build artifact.
 
+Mind the arithmetic: yawgpu exports **178** `wgpu*` symbols, but that is not 178
+*canonical* symbols. One export — `wgpuCommandEncoderWriteBuffer`, a Dawn
+extension — is not declared by canonical at all. So canonical coverage is
+**177 / 202**, and 177 + 25 = 202 reconciles. Any future symbol-count gate must
+account for the extension, or it will be off by one.
+
 | Group | Missing symbols |
 |---|---|
 | **`SetLabel` (16)** | `wgpuBindGroupSetLabel`, `wgpuBindGroupLayoutSetLabel`, `wgpuBufferSetLabel`, `wgpuCommandBufferSetLabel`, `wgpuCommandEncoderSetLabel`, `wgpuComputePassEncoderSetLabel`, `wgpuComputePipelineSetLabel`, `wgpuPipelineLayoutSetLabel`, `wgpuRenderBundleSetLabel`, `wgpuRenderBundleEncoderSetLabel`, `wgpuRenderPassEncoderSetLabel`, `wgpuRenderPipelineSetLabel`, `wgpuSamplerSetLabel`, `wgpuShaderModuleSetLabel`, `wgpuTextureSetLabel`, `wgpuTextureViewSetLabel` |
