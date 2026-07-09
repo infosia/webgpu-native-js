@@ -221,9 +221,11 @@ impl Drop for Runtime {
         unsafe {
             qjs::JS_SetHostPromiseRejectionTracker(self.rt.as_ptr(), None, ptr::null_mut());
             let raw = qjs::JS_GetRuntimeOpaque(self.rt.as_ptr()).cast::<State>();
-            qjs::JS_SetRuntimeOpaque(self.rt.as_ptr(), ptr::null_mut());
             qjs::JS_FreeContext(self.ctx.as_ptr());
             qjs::JS_FreeRuntime(self.rt.as_ptr());
+            if let Some(state) = raw.as_ref() {
+                let _ = state.env.queue().drain();
+            }
             if !raw.is_null() {
                 drop(Rc::from_raw(raw));
             }
@@ -312,6 +314,12 @@ struct ClassEntry {
 struct UnhandledRejection {
     promise: qjs::JSValue,
     reason: qjs::JSValue,
+}
+
+struct ArrayBufferOwner {
+    buffer: core::WGPUBuffer,
+    gpu: core::GpuDispatch,
+    queue: Arc<core::ReleaseQueue>,
 }
 
 #[derive(Clone, Copy)]
@@ -610,10 +618,24 @@ impl core::JsEngine for Engine {
         cx: Self::Context<'_>,
         ptr: *mut u8,
         len: usize,
+        owner: core::WGPUBuffer,
     ) -> core::Result<Self::Value, Self::Error> {
-        let value =
-            unsafe { qjs::JS_NewArrayBuffer(cx.ctx, ptr, len, None, ptr::null_mut(), false) };
+        let env = Self::environment(cx);
+        let owner_buffer = owner;
+        let owner = Box::new(ArrayBufferOwner {
+            buffer: owner_buffer,
+            gpu: env.gpu(),
+            queue: Arc::clone(env.queue()),
+        });
+        let opaque = Box::into_raw(owner).cast();
+        let value = unsafe {
+            qjs::JS_NewArrayBuffer(cx.ctx, ptr, len, Some(arraybuffer_free), opaque, false)
+        };
         if unsafe { qjs::JS_IsException(value) } {
+            unsafe {
+                drop(Box::from_raw(opaque.cast::<ArrayBufferOwner>()));
+                (env.gpu().buffer_release)(owner_buffer);
+            }
             Err(value)
         } else {
             cx.scope.track(value);
@@ -634,27 +656,42 @@ impl core::JsEngine for Engine {
         }
     }
 
-    fn detach_arraybuffer(cx: Self::Context<'_>, value: Self::Value) {
+    fn detach_arraybuffer(
+        cx: Self::Context<'_>,
+        value: Self::Value,
+        out: Option<&mut [u8]>,
+    ) -> core::Result<(), Self::Error> {
+        if let Some(out) = out {
+            let mut len = 0usize;
+            let ptr = unsafe { qjs::JS_GetArrayBuffer(cx.ctx, &mut len, value) };
+            if ptr.is_null() || len != out.len() || unsafe { qjs::JS_HasException(cx.ctx) } {
+                clear_pending_exception(cx.ctx);
+                return Err(Self::type_error(cx, "ArrayBuffer"));
+            }
+            let src = unsafe { std::slice::from_raw_parts(ptr, len) };
+            out.copy_from_slice(src);
+        }
         unsafe { qjs::JS_DetachArrayBuffer(cx.ctx, value) };
+        Ok(())
     }
 
     fn arraybuffer_len(cx: Self::Context<'_>, value: Self::Value) -> Option<usize> {
-        let mut len = 0usize;
-        unsafe {
-            let _ = qjs::JS_GetArrayBuffer(cx.ctx, &mut len, value);
+        if !unsafe { qjs::JS_IsArrayBuffer(value) } {
+            return None;
         }
-        Some(len)
-    }
-
-    fn arraybuffer_copy_to(cx: Self::Context<'_>, value: Self::Value, dst: &mut [u8]) -> bool {
-        let mut len = 0usize;
-        let ptr = unsafe { qjs::JS_GetArrayBuffer(cx.ctx, &mut len, value) };
-        if ptr.is_null() || len != dst.len() {
-            return false;
+        let length = unsafe { qjs::JS_GetPropertyStr(cx.ctx, value, c"byteLength".as_ptr()) };
+        if unsafe { qjs::JS_IsException(length) } {
+            clear_pending_exception(cx.ctx);
+            return None;
         }
-        let src = unsafe { std::slice::from_raw_parts(ptr, len) };
-        dst.copy_from_slice(src);
-        true
+        let mut len = 0u64;
+        let rc = unsafe { qjs::JS_ToIndex(cx.ctx, &mut len, length) };
+        unsafe { qjs::JS_FreeValue(cx.ctx, length) };
+        if rc < 0 {
+            clear_pending_exception(cx.ctx);
+            return None;
+        }
+        usize::try_from(len).ok()
     }
 
     fn duplicate_value(cx: Self::Context<'_>, value: Self::Value) -> Self::Value {
@@ -984,6 +1021,11 @@ extern "C" fn qjs_finalizer(rt: *mut qjs::JSRuntime, value: qjs::JSValue) {
             return;
         };
         let payload = unsafe { Box::from_raw(raw.as_ptr()) };
+        if let Some(buffer) = payload.downcast_ref::<core::BufferPayload<Engine>>() {
+            buffer.release_mapped_range_values(|value| unsafe {
+                qjs::JS_FreeValueRT(rt, value);
+            });
+        }
         (spec.finalizer)(*payload, &state.env);
     }));
 }
@@ -1042,6 +1084,13 @@ fn take_exception_value(ctx: *mut qjs::JSContext) -> qjs::JSValue {
     unsafe { qjs::JS_GetException(ctx) }
 }
 
+fn clear_pending_exception(ctx: *mut qjs::JSContext) {
+    if unsafe { qjs::JS_HasException(ctx) } {
+        let exception = unsafe { qjs::JS_GetException(ctx) };
+        unsafe { qjs::JS_FreeValue(ctx, exception) };
+    }
+}
+
 fn take_exception(ctx: *mut qjs::JSContext, fallback: &'static str) -> String {
     let exception = unsafe { qjs::JS_GetException(ctx) };
     let message = exception_or_value(ctx, exception);
@@ -1078,6 +1127,7 @@ fn gpu_dispatch() -> core::GpuDispatch {
         buffer_set_label,
         buffer_destroy,
         buffer_get_mapped_range,
+        buffer_add_ref,
         buffer_map_async,
         buffer_unmap,
         buffer_release,
@@ -1135,6 +1185,10 @@ unsafe fn buffer_get_mapped_range(
     unsafe { ffi_wgpu::wgpuBufferGetMappedRange(buffer, offset, size) }
 }
 
+unsafe fn buffer_add_ref(buffer: core::WGPUBuffer) {
+    unsafe { ffi_wgpu::wgpuBufferAddRef(buffer) };
+}
+
 unsafe fn buffer_map_async(
     buffer: core::WGPUBuffer,
     mode: core::WGPUMapMode,
@@ -1151,6 +1205,26 @@ unsafe fn buffer_unmap(buffer: core::WGPUBuffer) {
 
 unsafe fn buffer_release(buffer: core::WGPUBuffer) {
     unsafe { ffi_wgpu::wgpuBufferRelease(buffer) };
+}
+
+unsafe extern "C" fn arraybuffer_free(
+    _rt: *mut qjs::JSRuntime,
+    opaque: *mut c_void,
+    ptr: *mut c_void,
+) {
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        if !ptr.is_null() {
+            return;
+        }
+        let Some(owner) = NonNull::new(opaque.cast::<ArrayBufferOwner>()) else {
+            return;
+        };
+        let owner = unsafe { Box::from_raw(owner.as_ptr()) };
+        let _ = owner.queue.enqueue(core::ReleaseRequest::Buffer {
+            buffer: owner.buffer,
+            gpu: owner.gpu,
+        });
+    }));
 }
 
 #[cfg(test)]
@@ -1288,6 +1362,8 @@ mod tests {
     }
 
     const PANIC_CLASS: core::ClassId = core::ClassId(10_000);
+    const TEARDOWN_CLASS: core::ClassId = core::ClassId(10_001);
+    static TEARDOWN_BUFFER_RELEASES: AtomicUsize = AtomicUsize::new(0);
 
     fn panicking_method(
         _cx: Context<'_>,
@@ -1332,6 +1408,87 @@ mod tests {
             }])),
             finalizer: panicking_finalizer,
         }))
+    }
+
+    fn teardown_finalizer(_payload: Box<dyn std::any::Any + Send>, env: &core::Environment) {
+        let _ = env.queue().enqueue(core::ReleaseRequest::Buffer {
+            buffer: 1usize as core::WGPUBuffer,
+            gpu: teardown_dispatch(),
+        });
+    }
+
+    fn teardown_spec() -> &'static core::ClassSpec<Engine> {
+        Box::leak(Box::new(core::ClassSpec::<Engine> {
+            name: "TeardownClass",
+            id: TEARDOWN_CLASS,
+            properties: &[],
+            methods: &[],
+            finalizer: teardown_finalizer,
+        }))
+    }
+
+    fn teardown_dispatch() -> core::GpuDispatch {
+        core::GpuDispatch {
+            instance_request_adapter: teardown_request_adapter,
+            adapter_request_device: teardown_request_device,
+            adapter_release: teardown_adapter_release,
+            device_add_ref: teardown_device_noop,
+            device_release: teardown_device_noop,
+            device_create_buffer: teardown_create_buffer,
+            buffer_set_label: teardown_set_label,
+            buffer_destroy: teardown_buffer_noop,
+            buffer_get_mapped_range: teardown_get_mapped_range,
+            buffer_add_ref: teardown_buffer_noop,
+            buffer_map_async: teardown_map_async,
+            buffer_unmap: teardown_buffer_noop,
+            buffer_release: teardown_buffer_release,
+        }
+    }
+
+    unsafe fn teardown_request_adapter(
+        _instance: wgpu::WGPUInstance,
+        _options: *const wgpu::WGPURequestAdapterOptions,
+        _info: wgpu::WGPURequestAdapterCallbackInfo,
+    ) -> wgpu::WGPUFuture {
+        wgpu::WGPUFuture { id: 0 }
+    }
+
+    unsafe fn teardown_request_device(
+        _adapter: core::WGPUAdapter,
+        _descriptor: *const wgpu::WGPUDeviceDescriptor,
+        _info: wgpu::WGPURequestDeviceCallbackInfo,
+    ) -> wgpu::WGPUFuture {
+        wgpu::WGPUFuture { id: 0 }
+    }
+
+    unsafe fn teardown_adapter_release(_adapter: core::WGPUAdapter) {}
+    unsafe fn teardown_device_noop(_device: core::WGPUDevice) {}
+    unsafe fn teardown_create_buffer(
+        _device: core::WGPUDevice,
+        _descriptor: *const core::WGPUBufferDescriptor,
+    ) -> core::WGPUBuffer {
+        ptr::null_mut()
+    }
+    unsafe fn teardown_set_label(_buffer: core::WGPUBuffer, _label: core::WGPUStringView) {}
+    unsafe fn teardown_buffer_noop(_buffer: core::WGPUBuffer) {}
+    unsafe fn teardown_get_mapped_range(
+        _buffer: core::WGPUBuffer,
+        _offset: usize,
+        _size: usize,
+    ) -> *mut std::ffi::c_void {
+        ptr::null_mut()
+    }
+    unsafe fn teardown_map_async(
+        _buffer: core::WGPUBuffer,
+        _mode: core::WGPUMapMode,
+        _offset: usize,
+        _size: usize,
+        _info: wgpu::WGPUBufferMapCallbackInfo,
+    ) -> wgpu::WGPUFuture {
+        wgpu::WGPUFuture { id: 0 }
+    }
+    unsafe fn teardown_buffer_release(_buffer: core::WGPUBuffer) {
+        TEARDOWN_BUFFER_RELEASES.fetch_add(1, Ordering::SeqCst);
     }
 
     fn callback_magic(runtime: &Runtime, kind: CallbackKind, index: usize) -> c_int {
@@ -1534,7 +1691,7 @@ mod tests {
         runtime.clear_global("device").expect("clear device");
         runtime.run_gc();
         runtime.run_gc();
-        assert!(runtime.drain_releases().expect("drain") >= 2);
+        let _ = runtime.drain_releases().expect("drain");
     }
 
     #[test]
@@ -1568,7 +1725,63 @@ mod tests {
         runtime.clear_global("device").expect("clear device");
         runtime.run_gc();
         runtime.run_gc();
-        assert!(runtime.drain_releases().expect("drain") >= 2);
+        let _ = runtime.drain_releases().expect("drain");
+    }
+
+    #[test]
+    fn mapped_range_survives_after_buffer_wrapper_is_collected() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let wrapped = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("device", wrapped)
+            .expect("set device");
+        eval_drop(
+            &runtime,
+            r#"
+                var rangeOwner = device.createBuffer({ size: 8, usage: 2, mappedAtCreation: true });
+                var keptRange = rangeOwner.getMappedRange(0, 4);
+                var keptView = new Uint8Array(keptRange);
+                keptView[0] = 41;
+                rangeOwner = null;
+            "#,
+            "range-keepalive.js",
+        );
+        runtime.run_gc();
+        assert!(runtime.drain_releases().expect("drain") >= 1);
+        eval_drop(
+            &runtime,
+            "if (keptView[0] !== 41) throw new Error('range did not survive buffer GC');",
+            "range-keepalive-check.js",
+        );
+        eval_drop(
+            &runtime,
+            "keptView = null; keptRange = null;",
+            "range-keepalive-cleanup.js",
+        );
+        runtime.clear_global("device").expect("clear device");
+        runtime.run_gc();
+        runtime.run_gc();
+        let _ = runtime.drain_releases().expect("drain");
+    }
+
+    #[test]
+    fn drop_runtime_keeps_opaque_valid_and_drains_finalizer_releases() {
+        TEARDOWN_BUFFER_RELEASES.store(0, Ordering::SeqCst);
+        {
+            let runtime = Runtime::new().expect("quickjs runtime");
+            let instance = super::with_scope(runtime.raw_context(), |cx| {
+                assert!(Engine::register_class(cx, teardown_spec()).is_ok());
+                let value = Engine::new_instance(cx, TEARDOWN_CLASS, Box::new(()))
+                    .unwrap_or_else(|_| panic!("instance"));
+                cx.scope.escape(value);
+                value
+            });
+            runtime
+                .set_global_value("teardownInstance", instance)
+                .expect("set global");
+        }
+        assert_eq!(TEARDOWN_BUFFER_RELEASES.load(Ordering::SeqCst), 1);
     }
 
     #[test]

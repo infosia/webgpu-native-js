@@ -36,6 +36,7 @@ pub struct Runtime {
     values: RefCell<Vec<MockValue>>,
     classes: RefCell<BTreeMap<ClassId, &'static str>>,
     reclaimed_values: Cell<usize>,
+    detach_noop: Cell<bool>,
 }
 
 impl Runtime {
@@ -47,6 +48,7 @@ impl Runtime {
             values: RefCell::new(vec![MockValue::Undefined]),
             classes: RefCell::new(BTreeMap::new()),
             reclaimed_values: Cell::new(0),
+            detach_noop: Cell::new(false),
         }
     }
 
@@ -125,22 +127,56 @@ impl Runtime {
 
     /// Replaces an ArrayBuffer's bytes for tests.
     pub fn write_arraybuffer(&self, value: Value, bytes: &[u8]) -> bool {
-        self.with_value(value, |stored| {
-            let MockValue::ArrayBuffer {
+        self.with_value(value, |stored| match stored {
+            MockValue::ArrayBuffer {
                 bytes: stored,
                 detached: false,
-                ..
-            } = stored
-            else {
-                return false;
-            };
-            if stored.len() != bytes.len() {
-                return false;
+            } => {
+                if stored.len() != bytes.len() {
+                    return false;
+                }
+                stored.copy_from_slice(bytes);
+                true
             }
-            stored.copy_from_slice(bytes);
-            true
+            MockValue::ExternalArrayBuffer {
+                ptr,
+                len,
+                detached: false,
+            } => {
+                if ptr.is_null() || *len != bytes.len() {
+                    return false;
+                }
+                unsafe {
+                    std::slice::from_raw_parts_mut(*ptr, *len).copy_from_slice(bytes);
+                }
+                true
+            }
+            _ => false,
         })
         .unwrap_or(false)
+    }
+
+    /// Configures detach to silently leave buffers attached.
+    pub fn set_detach_noop(&self, value: bool) {
+        self.detach_noop.set(value);
+    }
+
+    /// Reads a copy of an ArrayBuffer's bytes while it is attached.
+    #[must_use]
+    pub fn read_arraybuffer(&self, value: Value) -> Option<Vec<u8>> {
+        self.with_value(value, |stored| match stored {
+            MockValue::ArrayBuffer {
+                bytes,
+                detached: false,
+            } => Some(bytes.clone()),
+            MockValue::ExternalArrayBuffer {
+                ptr,
+                len,
+                detached: false,
+            } if !ptr.is_null() => Some(unsafe { std::slice::from_raw_parts(*ptr, *len).to_vec() }),
+            _ => None,
+        })
+        .flatten()
     }
 
     fn insert(&self, value: MockValue) -> Value {
@@ -190,7 +226,11 @@ enum MockValue {
     ArrayBuffer {
         bytes: Vec<u8>,
         detached: bool,
-        copy_out: bool,
+    },
+    ExternalArrayBuffer {
+        ptr: *mut u8,
+        len: usize,
+        detached: bool,
     },
     Instance {
         class: ClassId,
@@ -252,6 +292,7 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
             | MockValue::Promise { .. }
             | MockValue::Resolver { .. }
             | MockValue::ArrayBuffer { .. }
+            | MockValue::ExternalArrayBuffer { .. }
             | MockValue::Instance { .. } => Err("number".to_owned()),
         }
     }
@@ -266,6 +307,7 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
             | MockValue::Promise { .. }
             | MockValue::Resolver { .. }
             | MockValue::ArrayBuffer { .. }
+            | MockValue::ExternalArrayBuffer { .. }
             | MockValue::Instance { .. } => true,
         }
     }
@@ -284,6 +326,7 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
             | MockValue::Promise { .. }
             | MockValue::Resolver { .. }
             | MockValue::ArrayBuffer { .. }
+            | MockValue::ExternalArrayBuffer { .. }
             | MockValue::Instance { .. } => Ok(arena.alloc_str("[object Object]")),
         }
     }
@@ -409,16 +452,12 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
         cx: Self::Context<'_>,
         ptr: *mut u8,
         len: usize,
+        _owner: WGPUBuffer,
     ) -> Result<Self::Value, Self::Error> {
-        let bytes = if ptr.is_null() {
-            Vec::new()
-        } else {
-            unsafe { std::slice::from_raw_parts(ptr, len).to_vec() }
-        };
-        Ok(cx.runtime.insert(MockValue::ArrayBuffer {
-            bytes,
+        Ok(cx.runtime.insert(MockValue::ExternalArrayBuffer {
+            ptr,
+            len,
             detached: false,
-            copy_out: false,
         }))
     }
 
@@ -429,24 +468,44 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
         Ok(cx.runtime.insert(MockValue::ArrayBuffer {
             bytes: bytes.to_vec(),
             detached: false,
-            copy_out: true,
         }))
     }
 
-    fn detach_arraybuffer(cx: Self::Context<'_>, value: Self::Value) {
-        let _ = cx.runtime.with_value(value, |stored| {
-            if let MockValue::ArrayBuffer {
-                bytes,
-                detached,
-                copy_out,
-            } = stored
-            {
-                if !*copy_out {
-                    bytes.clear();
+    fn detach_arraybuffer(
+        cx: Self::Context<'_>,
+        value: Self::Value,
+        out: Option<&mut [u8]>,
+    ) -> Result<(), Self::Error> {
+        if cx.runtime.detach_noop.get() {
+            return Ok(());
+        }
+        cx.runtime
+            .with_value(value, |stored| match stored {
+                MockValue::ArrayBuffer { bytes, detached } => {
+                    if *detached {
+                        return Ok(());
+                    }
+                    if let Some(out) = out {
+                        if out.len() != bytes.len() {
+                            return Err("arraybuffer length mismatch".to_owned());
+                        }
+                        let product = bytes.clone();
+                        *detached = true;
+                        bytes.clear();
+                        out.copy_from_slice(&product);
+                    } else {
+                        *detached = true;
+                        bytes.clear();
+                    }
+                    Ok(())
                 }
-                *detached = true;
-            }
-        });
+                MockValue::ExternalArrayBuffer { detached, .. } => {
+                    *detached = true;
+                    Ok(())
+                }
+                _ => Err("arraybuffer".to_owned()),
+            })
+            .unwrap_or_else(|| Err("arraybuffer".to_owned()))
     }
 
     fn arraybuffer_len(cx: Self::Context<'_>, value: Self::Value) -> Option<usize> {
@@ -454,21 +513,10 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
             MockValue::ArrayBuffer {
                 bytes, detached, ..
             } => Some(if detached { 0 } else { bytes.len() }),
-            _ => None,
-        }
-    }
-
-    fn arraybuffer_copy_to(cx: Self::Context<'_>, value: Self::Value, dst: &mut [u8]) -> bool {
-        match cx.runtime.get(value) {
-            MockValue::ArrayBuffer {
-                bytes,
-                detached,
-                copy_out,
-            } if (!detached || copy_out) && bytes.len() == dst.len() => {
-                dst.copy_from_slice(&bytes);
-                true
+            MockValue::ExternalArrayBuffer { len, detached, .. } => {
+                Some(if detached { 0 } else { len })
             }
-            _ => false,
+            _ => None,
         }
     }
 
@@ -487,6 +535,7 @@ thread_local! {
 struct MockGpuState {
     next: usize,
     device_add_refs: usize,
+    buffer_add_refs: usize,
     device_releases: usize,
     buffer_releases: usize,
     buffer_destroys: usize,
@@ -536,6 +585,7 @@ pub fn dispatch() -> GpuDispatch {
         buffer_set_label,
         buffer_destroy,
         buffer_get_mapped_range,
+        buffer_add_ref,
         buffer_map_async,
         buffer_unmap,
         buffer_release,
@@ -676,6 +726,14 @@ unsafe fn buffer_get_mapped_range(
         }
         unsafe { bytes.as_mut_ptr().add(offset).cast() }
     })
+}
+
+unsafe fn buffer_add_ref(_buffer: WGPUBuffer) {
+    GPU_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        state.buffer_add_refs += 1;
+        state.native_order.push("buffer_add_ref");
+    });
 }
 
 unsafe fn buffer_map_async(
@@ -1023,11 +1081,20 @@ mod tests {
         assert_eq!(MockEngine::<COPY>::arraybuffer_len(cx, second), Some(4));
         assert!(rt.write_arraybuffer(first, &[1, 2, 3, 4]));
         assert!(rt.write_arraybuffer(second, &[5, 6, 7, 8]));
+        if MockEngine::<COPY>::MAPPED_RANGE_STRATEGY == MappedRangeStrategy::ZeroCopyDetach {
+            assert_eq!(
+                buffer_bytes(native).expect("bytes")[..8],
+                [1, 2, 3, 4, 5, 6, 7, 8],
+                "zero-copy mapped ranges must alias backend memory"
+            );
+        }
 
         let _ = buffer_unmap::<MockEngine<COPY>>(cx, buffer, &[]).expect("unmap");
 
         assert_eq!(MockEngine::<COPY>::arraybuffer_len(cx, first), Some(0));
         assert_eq!(MockEngine::<COPY>::arraybuffer_len(cx, second), Some(0));
+        assert_eq!(rt.read_arraybuffer(first), None);
+        assert_eq!(rt.read_arraybuffer(second), None);
         if MockEngine::<COPY>::MAPPED_RANGE_STRATEGY == MappedRangeStrategy::CopyInCopyOut {
             assert_eq!(
                 buffer_bytes(native).expect("bytes")[..8],
@@ -1044,6 +1111,32 @@ mod tests {
     #[test]
     fn a10_a20_copy_in_copy_out_detaches_and_copies_back() {
         assert_unmap_detaches_all_mapped_ranges::<true>();
+    }
+
+    #[test]
+    fn r19_a12_guard_fires_when_detach_silently_noops() {
+        reset_gpu();
+        let rt = runtime();
+        rt.set_detach_noop(true);
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let desc = descriptor(
+            &rt,
+            &[
+                ("size", rt.number(16.0)),
+                ("usage", rt.number(2.0)),
+                ("mappedAtCreation", rt.bool(true)),
+            ],
+        );
+        let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("buffer");
+        let range =
+            buffer_get_mapped_range::<Engine>(cx, buffer, &[rt.number(0.0), rt.number(4.0)])
+                .expect("range");
+
+        let error = buffer_unmap::<Engine>(cx, buffer, &[]).expect_err("unmap must fail");
+
+        assert_eq!(error, "OperationError: mapped range detach failed");
+        assert_eq!(Engine::arraybuffer_len(cx, range), Some(4));
     }
 
     #[test]
@@ -1148,6 +1241,7 @@ mod tests {
         }
         unsafe fn noop_label(_buffer: WGPUBuffer, _label: WGPUStringView) {}
         unsafe fn noop_destroy(_buffer: WGPUBuffer) {}
+        unsafe fn noop_add_ref(_buffer: WGPUBuffer) {}
         unsafe fn noop_adapter_release(_adapter: WGPUAdapter) {}
         unsafe fn noop_request_adapter(
             _instance: webgpu_native_js_ffi::native::WGPUInstance,
@@ -1200,6 +1294,7 @@ mod tests {
                     buffer_set_label: noop_label,
                     buffer_destroy: noop_destroy,
                     buffer_get_mapped_range: noop_get_range,
+                    buffer_add_ref: noop_add_ref,
                     buffer_map_async: noop_map_async,
                     buffer_unmap: noop_unmap,
                     buffer_release: child_release,

@@ -104,6 +104,8 @@ pub struct GpuDispatch {
     pub buffer_destroy: unsafe fn(WGPUBuffer),
     /// `wgpuBufferGetMappedRange`.
     pub buffer_get_mapped_range: unsafe fn(WGPUBuffer, usize, usize) -> *mut c_void,
+    /// `wgpuBufferAddRef`.
+    pub buffer_add_ref: unsafe fn(WGPUBuffer),
     /// `wgpuBufferMapAsync`.
     pub buffer_map_async: unsafe fn(
         WGPUBuffer,
@@ -268,18 +270,21 @@ pub trait JsEngine: Sized {
         cx: Self::Context<'_>,
         ptr: *mut u8,
         len: usize,
+        owner: WGPUBuffer,
     ) -> Result<Self::Value, Self::Error>;
     /// Creates a script-visible ArrayBuffer by copying bytes.
     fn new_arraybuffer_copy(
         cx: Self::Context<'_>,
         bytes: &[u8],
     ) -> Result<Self::Value, Self::Error>;
-    /// Detaches a script-visible ArrayBuffer.
-    fn detach_arraybuffer(cx: Self::Context<'_>, value: Self::Value);
+    /// Detaches a script-visible ArrayBuffer, optionally capturing its bytes first.
+    fn detach_arraybuffer(
+        cx: Self::Context<'_>,
+        value: Self::Value,
+        out: Option<&mut [u8]>,
+    ) -> Result<(), Self::Error>;
     /// Reads an ArrayBuffer byte length through the engine API.
     fn arraybuffer_len(cx: Self::Context<'_>, value: Self::Value) -> Option<usize>;
-    /// Copies an ArrayBuffer's bytes into `dst`.
-    fn arraybuffer_copy_to(cx: Self::Context<'_>, value: Self::Value, dst: &mut [u8]) -> bool;
     /// Duplicates a value so core can hold it beyond the current call.
     fn duplicate_value(cx: Self::Context<'_>, value: Self::Value) -> Self::Value;
     /// Releases a value previously duplicated for core.
@@ -403,6 +408,13 @@ pub enum ReleaseRequest {
         /// Dispatch table used on the drain thread.
         gpu: GpuDispatch,
     },
+    /// Release a standalone buffer reference.
+    Buffer {
+        /// Buffer handle to release.
+        buffer: WGPUBuffer,
+        /// Dispatch table used on the drain thread.
+        gpu: GpuDispatch,
+    },
 }
 
 unsafe impl Send for ReleaseRequest {}
@@ -423,6 +435,9 @@ impl ReleaseRequest {
             } => unsafe {
                 (gpu.buffer_release)(buffer);
                 (gpu.device_release)(device);
+            },
+            Self::Buffer { buffer, gpu } => unsafe {
+                (gpu.buffer_release)(buffer);
             },
         }
     }
@@ -516,6 +531,16 @@ impl<E: JsEngine> BufferPayload<E> {
     #[must_use]
     pub fn state(&self) -> &Arc<Mutex<BufferState<E>>> {
         &self.state
+    }
+
+    /// Removes tracked mapped ranges and passes their held values to `release`.
+    pub fn release_mapped_range_values(&self, mut release: impl FnMut(E::Value)) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        for range in std::mem::take(&mut state.ranges) {
+            release(range.value);
+        }
     }
 }
 
@@ -870,9 +895,12 @@ pub fn buffer_get_mapped_range<E: JsEngine + 'static>(
         }
         let value = match E::MAPPED_RANGE_STRATEGY {
             MappedRangeStrategy::ZeroCopyDetach => {
+                unsafe {
+                    (E::environment(cx).gpu().buffer_add_ref)(state.buffer);
+                }
                 // SAFETY: `wgpuBufferGetMappedRange` returned a non-null mapped
                 // range for `size` bytes, and the range is tracked until unmap.
-                unsafe { E::new_external_arraybuffer(cx, ptr.cast::<u8>(), size)? }
+                unsafe { E::new_external_arraybuffer(cx, ptr.cast::<u8>(), size, state.buffer)? }
             }
             MappedRangeStrategy::CopyInCopyOut => {
                 let bytes = unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), size) };
@@ -1257,7 +1285,17 @@ fn detach_all_ranges<E: JsEngine>(
 ) -> Result<(), E::Error> {
     let ranges = std::mem::take(&mut state.ranges);
     for range in ranges {
-        E::detach_arraybuffer(cx, range.value);
+        let mut copy_back = Vec::new();
+        let out = if range.strategy == MappedRangeStrategy::CopyInCopyOut {
+            copy_back.resize(range.size, 0);
+            Some(copy_back.as_mut_slice())
+        } else {
+            None
+        };
+        if let Err(error) = E::detach_arraybuffer(cx, range.value, out) {
+            E::release_value(cx, range.value);
+            return Err(error);
+        }
         let detached = E::arraybuffer_len(cx, range.value) == Some(0);
         if !detached {
             E::release_value(cx, range.value);
@@ -1275,9 +1313,7 @@ fn detach_all_ranges<E: JsEngine>(
                 return Err(E::operation_error(cx, "mapped range is unavailable"));
             }
             let dst = unsafe { std::slice::from_raw_parts_mut(ptr.cast::<u8>(), range.size) };
-            if !E::arraybuffer_copy_to(cx, range.value, dst) {
-                return Err(E::operation_error(cx, "mapped range copy-back failed"));
-            }
+            dst.copy_from_slice(&copy_back);
         }
         E::release_value(cx, range.value);
     }

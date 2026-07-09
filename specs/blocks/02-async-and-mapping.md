@@ -256,9 +256,25 @@ pending on the context after every successful `unmap()`.
 Deleting the A12 guard entirely left all 22 `core/` tests green; a reviewer
 proved it. The guard was dead code with a side effect.
 
-Return `Option`: `None` when the value is not an `ArrayBuffer` or the engine
-raised, `Some(len)` otherwise — and clear any pending exception the query
-provoked. A12's check then means what it says.
+Return `Option`, and mind the trap in the obvious phrasing.
+
+> *"Return `None` when the engine raised"* — **too broad, and wrong.** A detached
+> buffer is exactly what makes `JS_GetArrayBuffer` raise, and A12 needs that case
+> to be `Some(0)`. Written that way, the guard would fire after **every
+> successful** detach.
+>
+> *(Caught by the implementing agent, who was invited to say when the spec is
+> wrong. This is the second time that invitation has paid.)*
+
+So: confirm the value **is** an `ArrayBuffer` first (`JS_IsArrayBuffer`), then read
+its `byteLength` — which is `0` for a detached buffer and does not raise. Return
+`None` only for a non-`ArrayBuffer` or a genuine engine failure, and **clear any
+pending exception the query provoked** either way.
+
+The general lesson: a predicate that conflates "the answer is zero" with "there is
+no answer" cannot guard anything. `arraybuffer_len` returned `Some(0)` for
+detached, for non-buffers, and for exceptions alike — three different facts, one
+value — which is why deleting the A12 guard changed nothing.
 
 **A12 — detach cannot fail loudly, so `unmap()` must verify.** `JS_DetachArrayBuffer`
 returns `void` and silently no-ops on a non-buffer or an already-detached buffer
