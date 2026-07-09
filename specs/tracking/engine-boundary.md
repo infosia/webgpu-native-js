@@ -625,6 +625,76 @@ attach.
 
 ---
 
+## Q6 — JavaScriptCore's vote on the two deferred decisions
+
+Both were deferred with the same reasoning: *shaping an abstraction with one engine
+in the tree is the error that produced P2-C3.* JSC now votes, on evidence measured
+against the system framework.
+
+### A27 — `trace_payload`, not `associate_value`. **Keep it.**
+
+`JSClassDefinition` has **no `gc_mark`** — only `initialize` and `finalize`
+(`JSObjectRef.h:355`). JSC keeps a value alive by protecting it outright, so
+`trace_payload` is simply a **no-op** there, and `duplicate_value` /
+`release_value` map to `JSValueProtect` / `JSValueUnprotect`.
+
+The payloads that hold engine values are the mapped ranges, and they form **no
+cycle** back to their wrapper — the range's `ArrayBuffer` holds a native handle in
+its `opaque`, not a JS reference. So protection is sufficient, and the
+`associate_value` primitive A27 sketched buys nothing. **`trace_payload` stays.**
+
+The cost A27 recorded — `core/` grew a lock-free side list because `gc_mark` runs
+inside the collector and cannot take a lock — is therefore permanent, and paid for
+QuickJS alone. That is the honest accounting: the hook is engine-neutral in its
+signature and QuickJS-shaped in its existence.
+
+### B20 — WebIDL sequence conversion is implementable. **Fix it.**
+
+Measured: JSC reaches `Symbol.iterator` through two plain string property reads
+(`globalThis.Symbol`, then `.iterator`), yielding a symbol `JSValueRef` that
+`JSObjectGetPropertyForKey` accepts. **No `eval` required.** A `Set` has the
+property; `{length:2, 0:1, 1:2}` does not; iterating the `Set` to completion works
+from pure C.
+
+QuickJS reaches it the same way. So the primitive is engine-neutral and additive —
+`global`, `get_property_value`, `call` — and the `length`+index shortcut goes.
+Array-likes must be **rejected**; `Set`s and generators **accepted**. B20's
+deviation tests become conformance tests.
+
+---
+
+## Q7 — the JSC exit gate fired, and it caught engine-shaped `core/`
+
+**Measured.** JSC's public C API has **no microtask pump**, and it drains
+microtasks **when the JS stack empties**: resolving a promise from C runs its
+`.then()` *before the C call returns*. Verified by resolving from C and then
+reading `globalThis.ran` with `JSObjectGetProperty`, which executes no JS.
+
+QuickJS does the opposite — `event-loop.md` → E2 measured that resolving leaves the
+continuation pending until `JS_ExecutePendingJob`.
+
+So the WebGPU callback, which runs inside `wgpuInstanceProcessEvents`, would
+execute **script** inside that callstack under JSC and not under QuickJS. Two
+engines, two orderings, one script. `CLAUDE.md` makes behavioural parity a
+first-class concern; this breaks it.
+
+**And the cause is that `core/` had encoded QuickJS's checkpoint semantics as
+universal.** Nobody wrote that assumption down; it was simply what "settle the
+promise in the callback" means on a refcounted engine with an explicit job queue.
+
+The fix, block 04 → J1/J2: the callback becomes **pure Rust** — it records a
+result and returns, touching no engine — and `tick()` settles every recorded
+result **inside a single JS frame**, then drains. Measured: two separate C→JS
+resolve calls give JSC two microtask checkpoints; one trampoline gives one, which
+is what QuickJS does natively.
+
+This is the **second** time the JSC gate has caught engine-shaped `core/` logic
+before codegen could multiply it by forty. The first was P2-C3, a phase early. The
+gate is doing exactly what `CLAUDE.md` built it for, and both findings argue for
+running Phase 3 *before* Phase 4 rather than after.
+
+---
+
 ## Q5 — Did the boundary survive Phase 2?
 
 **Status: YES, and this is the first result worth much.** Phase 1 only needed
