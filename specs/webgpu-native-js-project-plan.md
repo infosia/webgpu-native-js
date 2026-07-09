@@ -452,9 +452,13 @@ invalidate §2.4.
    to detach**, so post-detach verification belongs in `core/` once.
 2. Set up the `bindgen`-generated Rust FFI crate from `webgpu.h`; verify a
    trivial program (`wgpuCreateInstance` → `wgpuInstanceRelease`) links and runs
-   against yawgpu and wgpu-native, reusing `webgpu-native-cts`'s
-   backend-selection approach as Cargo features. (Dawn's build is heavy; defer
-   linking it to Phase 7 CI unless it is cheap.)
+   against yawgpu and wgpu-native. ✅ **DONE 2026-07-09.** `ffi/` generates from
+   the pinned canonical header; the backend is a Cargo feature; the library
+   directory comes from an env var or `pkg-config`, never a path in a committed
+   file. Both backends pass headless. Two packaging defects surfaced —
+   `backend-deltas.md` → D5 (absolute `install_name`, so the *artifact* embeds a
+   developer path even though the source does not) and D6 (yawgpu's Tint shim is
+   not colocated). Dawn deferred to Phase 7 CI; it has no local build.
 3. Confirm yawgpu's `webgpu.h` surface matches (or document deltas from) the
    canonical `webgpu-headers` version. ✅ **ANSWERED 2026-07-09** —
    `specs/tracking/backend-deltas.md` → D1–D3. The *header* surfaces match (202

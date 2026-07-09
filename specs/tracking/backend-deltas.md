@@ -42,7 +42,40 @@ vendored copy (`CLAUDE.md` principle 2).
 
 ## D2 — yawgpu implements 178 of the 202 canonical functions
 
-**Status: OPEN (upstream, blocks Phase 4 label support). Found 2026-07-09.**
+**Status: CLOSED 2026-07-09. Fixed upstream in yawgpu.**
+
+Re-measured after the upstream fix: `libyawgpu.dylib` now exports **200** `wgpu*`
+symbols — **199 of 202 canonical**, plus the `wgpuCommandEncoderWriteBuffer`
+extension. The three still absent are exactly the three named as deliberate
+non-goals: `wgpuGetProcAddress`, `wgpuBufferReadMappedRange`,
+`wgpuBufferWriteMappedRange`. The predicted counts matched exactly.
+
+All 16 `SetLabel` functions landed (21 total, with the 5 that pre-existed), as
+did `wgpuDeviceGetAdapterInfo`, `wgpuTextureGetTextureBindingViewDimension`, and
+the instance capability quartet.
+
+**The `WGPUStringView` trap was handled correctly**, which was the part most
+likely to go wrong. yawgpu added a `label_from_string_view` distinct from
+`string_view_to_str`, and it discriminates on **length before nullness**:
+
+| Input | Spec | yawgpu |
+|---|---|---|
+| `{NULL, WGPU_STRLEN}` | the null value | `None` ✓ |
+| `{non_null, WGPU_STRLEN}` | null-terminated | `CStr` ✓ |
+| `{any, 0}` | the **empty string** | `Some("")` ✓ |
+| `{NULL, non_zero}` | not allowed | `None`, no dereference ✓ |
+
+A minor observation, not raised as a defect: `string_view_to_str` (the non-label
+path, used for e.g. entry points) returns `None` for `{NULL, 0}` but `Some("")`
+for `{non_null, 0}`, though the spec calls both the empty string. That is a
+deliberate, documented choice for treating an unset entry point as absent. It
+does not affect labels, and it is pre-existing.
+
+The original entry follows, for provenance.
+
+---
+
+**Status when opened: OPEN (upstream, blocks Phase 4 label support). Found 2026-07-09.**
 
 Symbols exported by the release `libyawgpu.dylib`, diffed against the 202
 canonical `WGPU_EXPORT` functions: **25 missing.** Confirmed to be genuinely
@@ -213,7 +246,20 @@ exactly what becomes load-bearing the moment (1) lands. Do not delete it as
 
 ## D6 — yawgpu's dylib has a transitive `@rpath/libtint_shim.dylib` not colocated
 
-**Status: OPEN (upstream). Found 2026-07-09 during Phase 0.2.**
+**Status: OPEN (upstream). Found 2026-07-09 during Phase 0.2. Still reproduces
+after the D2 fix — D5 and D6 were not part of that change.**
+
+Reproduced directly against the rebuilt library. Pointing
+`WEBGPU_NATIVE_JS_BACKEND_LIB_DIR` at yawgpu's own `target/release`:
+
+```
+dyld: Library not loaded: @rpath/libtint_shim.dylib
+```
+
+Copying `libtint_shim.dylib` next to `libyawgpu.dylib` in a curated directory
+makes the Phase 0.2 tests pass (2 passed). That curated directory is how yawgpu
+is exercised until this is fixed, and it is the reason `specs/reference/workflow.md`
+tells contributors to build one.
 
 ```
 libyawgpu.dylib

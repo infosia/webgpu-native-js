@@ -69,9 +69,14 @@ whole point of going through the C ABI.
 
 | Backend | Prebuilt locally | Notes |
 |---|---|---|
-| yawgpu | `.a` + `.dylib` (release) | Tier 1. **Exports 178 of the canonical 202 functions** — see `specs/tracking/backend-deltas.md` → D2. |
-| wgpu-native | `.a` + `.dylib` (release) | Tier 2. Exports 227 — a superset; no canonical symbol missing. |
+| yawgpu | `.a` + `.dylib` (release) | Tier 1. Exports 199 of the canonical 202; the three absent are deliberate non-goals (D2, closed). **Its directory must also contain `libtint_shim.dylib`** — yawgpu does not colocate it (D6, open). |
+| wgpu-native | `.a` + `.dylib` (release) | Tier 2. Exports 227 — a superset; no canonical symbol missing, no non-system dylib dependency. |
 | Dawn | none | Tier 2. Heavy build (GN + depot_tools). Deferred to Phase 7 CI per plan §4. |
+
+Both backends' dylibs currently carry an absolute `install_name` into their build
+tree (D5, open), so a linked binary embeds that path and ignores our `LC_RPATH`.
+The build works; the artifact is not relocatable. This blocks iOS packaging, not
+development.
 
 Dawn exists locally as two checkouts, an upstream one and a fork. They pin
 **identical** `webgpu-headers`, so either serves as a header reference. Prefer
