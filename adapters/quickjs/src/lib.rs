@@ -471,6 +471,10 @@ impl core::JsEngine for Engine {
         unsafe { qjs::JS_IsUndefined(value) }
     }
 
+    fn is_null(_cx: Self::Context<'_>, value: Self::Value) -> bool {
+        unsafe { qjs::JS_IsNull(value) }
+    }
+
     fn to_f64(cx: Self::Context<'_>, value: Self::Value) -> core::Result<f64, Self::Error> {
         let mut out = 0.0;
         if unsafe { qjs::JS_ToFloat64(cx.ctx, &mut out, value) } < 0 {
@@ -764,6 +768,16 @@ impl core::JsEngine for Engine {
             return None;
         }
         usize::try_from(len).ok()
+    }
+
+    fn arraybuffer_copy(cx: Self::Context<'_>, value: Self::Value) -> Option<Vec<u8>> {
+        let mut len = 0usize;
+        let ptr = unsafe { qjs::JS_GetArrayBuffer(cx.ctx, &mut len, value) };
+        if ptr.is_null() || unsafe { qjs::JS_HasException(cx.ctx) } {
+            clear_pending_exception(cx.ctx);
+            return None;
+        }
+        Some(unsafe { std::slice::from_raw_parts(ptr, len).to_vec() })
     }
 
     fn duplicate_value(cx: Self::Context<'_>, value: Self::Value) -> Self::Value {
@@ -1220,13 +1234,46 @@ fn gpu_dispatch() -> core::GpuDispatch {
         device_add_ref,
         device_release,
         device_create_buffer,
+        device_get_queue,
+        device_create_shader_module,
+        device_create_bind_group_layout,
+        device_create_pipeline_layout,
+        device_create_bind_group,
+        device_create_compute_pipeline,
+        device_create_command_encoder,
         buffer_set_label,
         buffer_destroy,
         buffer_get_mapped_range,
+        buffer_get_const_mapped_range,
         buffer_add_ref,
         buffer_map_async,
         buffer_unmap,
         buffer_release,
+        queue_add_ref,
+        queue_release,
+        queue_write_buffer,
+        queue_submit,
+        queue_on_submitted_work_done,
+        shader_module_add_ref,
+        shader_module_release,
+        bind_group_layout_add_ref,
+        bind_group_layout_release,
+        pipeline_layout_add_ref,
+        pipeline_layout_release,
+        bind_group_add_ref,
+        bind_group_release,
+        compute_pipeline_add_ref,
+        compute_pipeline_release,
+        command_encoder_release,
+        command_encoder_copy_buffer_to_buffer,
+        command_encoder_begin_compute_pass,
+        command_encoder_finish,
+        command_buffer_release,
+        compute_pass_encoder_release,
+        compute_pass_encoder_set_pipeline,
+        compute_pass_encoder_set_bind_group,
+        compute_pass_encoder_dispatch_workgroups,
+        compute_pass_encoder_end,
     }
 }
 
@@ -1265,6 +1312,52 @@ unsafe fn device_create_buffer(
     unsafe { ffi_wgpu::wgpuDeviceCreateBuffer(device, descriptor) }
 }
 
+unsafe fn device_get_queue(device: core::WGPUDevice) -> core::WGPUQueue {
+    unsafe { ffi_wgpu::wgpuDeviceGetQueue(device) }
+}
+
+unsafe fn device_create_shader_module(
+    device: core::WGPUDevice,
+    descriptor: *const core::WGPUShaderModuleDescriptor,
+) -> core::WGPUShaderModule {
+    unsafe { ffi_wgpu::wgpuDeviceCreateShaderModule(device, descriptor) }
+}
+
+unsafe fn device_create_bind_group_layout(
+    device: core::WGPUDevice,
+    descriptor: *const core::WGPUBindGroupLayoutDescriptor,
+) -> core::WGPUBindGroupLayout {
+    unsafe { ffi_wgpu::wgpuDeviceCreateBindGroupLayout(device, descriptor) }
+}
+
+unsafe fn device_create_pipeline_layout(
+    device: core::WGPUDevice,
+    descriptor: *const core::WGPUPipelineLayoutDescriptor,
+) -> core::WGPUPipelineLayout {
+    unsafe { ffi_wgpu::wgpuDeviceCreatePipelineLayout(device, descriptor) }
+}
+
+unsafe fn device_create_bind_group(
+    device: core::WGPUDevice,
+    descriptor: *const core::WGPUBindGroupDescriptor,
+) -> core::WGPUBindGroup {
+    unsafe { ffi_wgpu::wgpuDeviceCreateBindGroup(device, descriptor) }
+}
+
+unsafe fn device_create_compute_pipeline(
+    device: core::WGPUDevice,
+    descriptor: *const core::WGPUComputePipelineDescriptor,
+) -> core::WGPUComputePipeline {
+    unsafe { ffi_wgpu::wgpuDeviceCreateComputePipeline(device, descriptor) }
+}
+
+unsafe fn device_create_command_encoder(
+    device: core::WGPUDevice,
+    descriptor: *const core::WGPUCommandEncoderDescriptor,
+) -> core::WGPUCommandEncoder {
+    unsafe { ffi_wgpu::wgpuDeviceCreateCommandEncoder(device, descriptor) }
+}
+
 unsafe fn buffer_set_label(buffer: core::WGPUBuffer, label: core::WGPUStringView) {
     unsafe { ffi_wgpu::wgpuBufferSetLabel(buffer, label) };
 }
@@ -1279,6 +1372,14 @@ unsafe fn buffer_get_mapped_range(
     size: usize,
 ) -> *mut c_void {
     unsafe { ffi_wgpu::wgpuBufferGetMappedRange(buffer, offset, size) }
+}
+
+unsafe fn buffer_get_const_mapped_range(
+    buffer: core::WGPUBuffer,
+    offset: usize,
+    size: usize,
+) -> *const c_void {
+    unsafe { ffi_wgpu::wgpuBufferGetConstMappedRange(buffer, offset, size) }
 }
 
 unsafe fn buffer_add_ref(buffer: core::WGPUBuffer) {
@@ -1303,6 +1404,157 @@ unsafe fn buffer_release(buffer: core::WGPUBuffer) {
     unsafe { ffi_wgpu::wgpuBufferRelease(buffer) };
 }
 
+unsafe fn queue_add_ref(queue: core::WGPUQueue) {
+    unsafe { ffi_wgpu::wgpuQueueAddRef(queue) };
+}
+
+unsafe fn queue_release(queue: core::WGPUQueue) {
+    unsafe { ffi_wgpu::wgpuQueueRelease(queue) };
+}
+
+unsafe fn queue_write_buffer(
+    queue: core::WGPUQueue,
+    buffer: core::WGPUBuffer,
+    offset: u64,
+    data: *const c_void,
+    size: usize,
+) {
+    unsafe { ffi_wgpu::wgpuQueueWriteBuffer(queue, buffer, offset, data, size) };
+}
+
+unsafe fn queue_submit(
+    queue: core::WGPUQueue,
+    count: usize,
+    commands: *const core::WGPUCommandBuffer,
+) {
+    unsafe { ffi_wgpu::wgpuQueueSubmit(queue, count, commands) };
+}
+
+unsafe fn queue_on_submitted_work_done(
+    queue: core::WGPUQueue,
+    info: core::WGPUQueueWorkDoneCallbackInfo,
+) -> core::WGPUFuture {
+    unsafe { ffi_wgpu::wgpuQueueOnSubmittedWorkDone(queue, info) }
+}
+
+unsafe fn shader_module_add_ref(module: core::WGPUShaderModule) {
+    unsafe { ffi_wgpu::wgpuShaderModuleAddRef(module) };
+}
+
+unsafe fn shader_module_release(module: core::WGPUShaderModule) {
+    unsafe { ffi_wgpu::wgpuShaderModuleRelease(module) };
+}
+
+unsafe fn bind_group_layout_add_ref(layout: core::WGPUBindGroupLayout) {
+    unsafe { ffi_wgpu::wgpuBindGroupLayoutAddRef(layout) };
+}
+
+unsafe fn bind_group_layout_release(layout: core::WGPUBindGroupLayout) {
+    unsafe { ffi_wgpu::wgpuBindGroupLayoutRelease(layout) };
+}
+
+unsafe fn pipeline_layout_add_ref(layout: core::WGPUPipelineLayout) {
+    unsafe { ffi_wgpu::wgpuPipelineLayoutAddRef(layout) };
+}
+
+unsafe fn pipeline_layout_release(layout: core::WGPUPipelineLayout) {
+    unsafe { ffi_wgpu::wgpuPipelineLayoutRelease(layout) };
+}
+
+unsafe fn bind_group_add_ref(bind_group: core::WGPUBindGroup) {
+    unsafe { ffi_wgpu::wgpuBindGroupAddRef(bind_group) };
+}
+
+unsafe fn bind_group_release(bind_group: core::WGPUBindGroup) {
+    unsafe { ffi_wgpu::wgpuBindGroupRelease(bind_group) };
+}
+
+unsafe fn compute_pipeline_add_ref(pipeline: core::WGPUComputePipeline) {
+    unsafe { ffi_wgpu::wgpuComputePipelineAddRef(pipeline) };
+}
+
+unsafe fn compute_pipeline_release(pipeline: core::WGPUComputePipeline) {
+    unsafe { ffi_wgpu::wgpuComputePipelineRelease(pipeline) };
+}
+
+unsafe fn command_encoder_release(encoder: core::WGPUCommandEncoder) {
+    unsafe { ffi_wgpu::wgpuCommandEncoderRelease(encoder) };
+}
+
+unsafe fn command_encoder_copy_buffer_to_buffer(
+    encoder: core::WGPUCommandEncoder,
+    source: core::WGPUBuffer,
+    source_offset: u64,
+    destination: core::WGPUBuffer,
+    destination_offset: u64,
+    size: u64,
+) {
+    unsafe {
+        ffi_wgpu::wgpuCommandEncoderCopyBufferToBuffer(
+            encoder,
+            source,
+            source_offset,
+            destination,
+            destination_offset,
+            size,
+        )
+    };
+}
+
+unsafe fn command_encoder_begin_compute_pass(
+    encoder: core::WGPUCommandEncoder,
+    descriptor: *const core::WGPUComputePassDescriptor,
+) -> core::WGPUComputePassEncoder {
+    unsafe { ffi_wgpu::wgpuCommandEncoderBeginComputePass(encoder, descriptor) }
+}
+
+unsafe fn command_encoder_finish(
+    encoder: core::WGPUCommandEncoder,
+    descriptor: *const core::WGPUCommandBufferDescriptor,
+) -> core::WGPUCommandBuffer {
+    unsafe { ffi_wgpu::wgpuCommandEncoderFinish(encoder, descriptor) }
+}
+
+unsafe fn command_buffer_release(command_buffer: core::WGPUCommandBuffer) {
+    unsafe { ffi_wgpu::wgpuCommandBufferRelease(command_buffer) };
+}
+
+unsafe fn compute_pass_encoder_release(pass: core::WGPUComputePassEncoder) {
+    unsafe { ffi_wgpu::wgpuComputePassEncoderRelease(pass) };
+}
+
+unsafe fn compute_pass_encoder_set_pipeline(
+    pass: core::WGPUComputePassEncoder,
+    pipeline: core::WGPUComputePipeline,
+) {
+    unsafe { ffi_wgpu::wgpuComputePassEncoderSetPipeline(pass, pipeline) };
+}
+
+unsafe fn compute_pass_encoder_set_bind_group(
+    pass: core::WGPUComputePassEncoder,
+    index: u32,
+    bind_group: core::WGPUBindGroup,
+    offset_count: usize,
+    offsets: *const u32,
+) {
+    unsafe {
+        ffi_wgpu::wgpuComputePassEncoderSetBindGroup(pass, index, bind_group, offset_count, offsets)
+    };
+}
+
+unsafe fn compute_pass_encoder_dispatch_workgroups(
+    pass: core::WGPUComputePassEncoder,
+    x: u32,
+    y: u32,
+    z: u32,
+) {
+    unsafe { ffi_wgpu::wgpuComputePassEncoderDispatchWorkgroups(pass, x, y, z) };
+}
+
+unsafe fn compute_pass_encoder_end(pass: core::WGPUComputePassEncoder) {
+    unsafe { ffi_wgpu::wgpuComputePassEncoderEnd(pass) };
+}
+
 unsafe extern "C" fn arraybuffer_free(
     _rt: *mut qjs::JSRuntime,
     opaque: *mut c_void,
@@ -1325,6 +1577,7 @@ unsafe extern "C" fn arraybuffer_free(
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::ptr;
     use std::rc::Rc;
@@ -1333,9 +1586,14 @@ mod tests {
     use super::{c_int, core, ffi_wgpu as wgpu, qjs, CallbackKind, Context, Engine, Runtime};
     use webgpu_native_js_core::JsEngine;
 
-    struct RequestState {
-        status: AtomicUsize,
-        handle: AtomicUsize,
+    struct AdapterRequestState {
+        status: Cell<wgpu::WGPURequestAdapterStatus>,
+        handle: Cell<wgpu::WGPUAdapter>,
+    }
+
+    struct DeviceRequestState {
+        status: Cell<wgpu::WGPURequestDeviceStatus>,
+        handle: Cell<wgpu::WGPUDevice>,
     }
 
     struct NativeSetup {
@@ -1360,7 +1618,7 @@ mod tests {
 
         // AllowProcessEvents runs callbacks on the thread that calls
         // wgpuInstanceProcessEvents, so the userdata clone is single-threaded.
-        let adapter_state = Rc::new(RequestState::new());
+        let adapter_state = Rc::new(AdapterRequestState::new());
         let adapter_callback_state = Rc::into_raw(Rc::clone(&adapter_state)).cast_mut().cast();
         let adapter_info = wgpu::WGPURequestAdapterCallbackInfo {
             nextInChain: ptr::null_mut(),
@@ -1374,15 +1632,15 @@ mod tests {
             wgpu::wgpuInstanceProcessEvents(instance);
         }
         assert_eq!(
-            adapter_state.status.load(Ordering::SeqCst) as wgpu::WGPURequestAdapterStatus,
+            adapter_state.status.get(),
             wgpu::WGPURequestAdapterStatus_WGPURequestAdapterStatus_Success
         );
-        let adapter = adapter_state.handle.load(Ordering::SeqCst) as wgpu::WGPUAdapter;
+        let adapter = adapter_state.handle.get();
         assert!(!adapter.is_null());
 
         // AllowProcessEvents runs callbacks on the thread that calls
         // wgpuInstanceProcessEvents, so the userdata clone is single-threaded.
-        let device_state = Rc::new(RequestState::new());
+        let device_state = Rc::new(DeviceRequestState::new());
         let device_callback_state = Rc::into_raw(Rc::clone(&device_state)).cast_mut().cast();
         let device_info = wgpu::WGPURequestDeviceCallbackInfo {
             nextInChain: ptr::null_mut(),
@@ -1396,10 +1654,10 @@ mod tests {
             wgpu::wgpuInstanceProcessEvents(instance);
         }
         assert_eq!(
-            device_state.status.load(Ordering::SeqCst) as wgpu::WGPURequestDeviceStatus,
+            device_state.status.get(),
             wgpu::WGPURequestDeviceStatus_WGPURequestDeviceStatus_Success
         );
-        let device = device_state.handle.load(Ordering::SeqCst) as wgpu::WGPUDevice;
+        let device = device_state.handle.get();
         assert!(!device.is_null());
 
         NativeSetup {
@@ -1423,11 +1681,24 @@ mod tests {
         value
     }
 
-    impl RequestState {
+    impl AdapterRequestState {
         fn new() -> Self {
             Self {
-                status: AtomicUsize::new(0),
-                handle: AtomicUsize::new(0),
+                status: Cell::new(
+                    wgpu::WGPURequestAdapterStatus_WGPURequestAdapterStatus_CallbackCancelled,
+                ),
+                handle: Cell::new(ptr::null_mut()),
+            }
+        }
+    }
+
+    impl DeviceRequestState {
+        fn new() -> Self {
+            Self {
+                status: Cell::new(
+                    wgpu::WGPURequestDeviceStatus_WGPURequestDeviceStatus_CallbackCancelled,
+                ),
+                handle: Cell::new(ptr::null_mut()),
             }
         }
     }
@@ -1443,9 +1714,9 @@ mod tests {
             if userdata1.is_null() {
                 return;
             }
-            let state = unsafe { Rc::from_raw(userdata1.cast::<RequestState>()) };
-            state.status.store(status as usize, Ordering::SeqCst);
-            state.handle.store(adapter as usize, Ordering::SeqCst);
+            let state = unsafe { Rc::from_raw(userdata1.cast::<AdapterRequestState>()) };
+            state.status.set(status);
+            state.handle.set(adapter);
         }));
     }
 
@@ -1460,9 +1731,9 @@ mod tests {
             if userdata1.is_null() {
                 return;
             }
-            let state = unsafe { Rc::from_raw(userdata1.cast::<RequestState>()) };
-            state.status.store(status as usize, Ordering::SeqCst);
-            state.handle.store(device as usize, Ordering::SeqCst);
+            let state = unsafe { Rc::from_raw(userdata1.cast::<DeviceRequestState>()) };
+            state.status.set(status);
+            state.handle.set(device);
         }));
     }
 
@@ -1533,65 +1804,11 @@ mod tests {
     }
 
     fn teardown_dispatch() -> core::GpuDispatch {
-        core::GpuDispatch {
-            instance_request_adapter: teardown_request_adapter,
-            adapter_request_device: teardown_request_device,
-            adapter_release: teardown_adapter_release,
-            device_add_ref: teardown_device_noop,
-            device_release: teardown_device_noop,
-            device_create_buffer: teardown_create_buffer,
-            buffer_set_label: teardown_set_label,
-            buffer_destroy: teardown_buffer_noop,
-            buffer_get_mapped_range: teardown_get_mapped_range,
-            buffer_add_ref: teardown_buffer_noop,
-            buffer_map_async: teardown_map_async,
-            buffer_unmap: teardown_buffer_noop,
-            buffer_release: teardown_buffer_release,
-        }
+        let mut gpu = super::gpu_dispatch();
+        gpu.buffer_release = teardown_buffer_release;
+        gpu
     }
 
-    unsafe fn teardown_request_adapter(
-        _instance: wgpu::WGPUInstance,
-        _options: *const wgpu::WGPURequestAdapterOptions,
-        _info: wgpu::WGPURequestAdapterCallbackInfo,
-    ) -> wgpu::WGPUFuture {
-        wgpu::WGPUFuture { id: 0 }
-    }
-
-    unsafe fn teardown_request_device(
-        _adapter: core::WGPUAdapter,
-        _descriptor: *const wgpu::WGPUDeviceDescriptor,
-        _info: wgpu::WGPURequestDeviceCallbackInfo,
-    ) -> wgpu::WGPUFuture {
-        wgpu::WGPUFuture { id: 0 }
-    }
-
-    unsafe fn teardown_adapter_release(_adapter: core::WGPUAdapter) {}
-    unsafe fn teardown_device_noop(_device: core::WGPUDevice) {}
-    unsafe fn teardown_create_buffer(
-        _device: core::WGPUDevice,
-        _descriptor: *const core::WGPUBufferDescriptor,
-    ) -> core::WGPUBuffer {
-        ptr::null_mut()
-    }
-    unsafe fn teardown_set_label(_buffer: core::WGPUBuffer, _label: core::WGPUStringView) {}
-    unsafe fn teardown_buffer_noop(_buffer: core::WGPUBuffer) {}
-    unsafe fn teardown_get_mapped_range(
-        _buffer: core::WGPUBuffer,
-        _offset: usize,
-        _size: usize,
-    ) -> *mut std::ffi::c_void {
-        ptr::null_mut()
-    }
-    unsafe fn teardown_map_async(
-        _buffer: core::WGPUBuffer,
-        _mode: core::WGPUMapMode,
-        _offset: usize,
-        _size: usize,
-        _info: wgpu::WGPUBufferMapCallbackInfo,
-    ) -> wgpu::WGPUFuture {
-        wgpu::WGPUFuture { id: 0 }
-    }
     unsafe fn teardown_buffer_release(_buffer: core::WGPUBuffer) {
         TEARDOWN_BUFFER_RELEASES.fetch_add(1, Ordering::SeqCst);
     }
@@ -1748,6 +1965,7 @@ mod tests {
             "handled.js",
         );
         unsafe { runtime.tick(setup.instance) }.expect("tick");
+        unsafe { runtime.tick(setup.instance) }.expect("second tick");
         eval_drop(
             &runtime,
             "if (!handled) throw new Error('catch did not run');",
@@ -1792,6 +2010,62 @@ mod tests {
             &runtime,
             "asyncMapped = null; asyncDone = undefined;",
             "map-async-cleanup.js",
+        );
+        runtime.clear_global("device").expect("clear device");
+        runtime.run_gc();
+        runtime.run_gc();
+        let _ = runtime.drain_releases().expect("drain");
+    }
+
+    #[test]
+    fn queue_write_copy_submit_map_round_trip() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let wrapped = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("device", wrapped)
+            .expect("set device");
+        eval_drop(
+            &runtime,
+            r#"
+                var src = device.createBuffer({ size: 8, usage: 12 });
+                var dst = device.createBuffer({ size: 8, usage: 9 });
+                var bytes = new ArrayBuffer(8);
+                var write = new Uint8Array(bytes);
+                write.set([3, 1, 4, 1, 5, 9, 2, 6]);
+                device.queue.writeBuffer(src, 0, bytes, 0, 8);
+                var encoder = device.createCommandEncoder();
+                encoder.copyBufferToBuffer(src, 0, dst, 0, 8);
+                var command = encoder.finish();
+                device.queue.submit([command]);
+                var copyDone = false;
+                device.queue.onSubmittedWorkDone().then(function () {
+                    return dst.mapAsync(1, 0, 8);
+                }).then(function () {
+                    var got = new Uint8Array(dst.getMappedRange());
+                    var expected = [3, 1, 4, 1, 5, 9, 2, 6];
+                    for (var i = 0; i < expected.length; i++) {
+                        if (got[i] !== expected[i]) {
+                            throw new Error('copy byte mismatch at ' + i + ': ' + got[i]);
+                        }
+                    }
+                    dst.unmap();
+                    copyDone = true;
+                });
+            "#,
+            "copy-round-trip.js",
+        );
+        unsafe { runtime.tick(setup.instance) }.expect("tick");
+        unsafe { runtime.tick(setup.instance) }.expect("second tick");
+        eval_drop(
+            &runtime,
+            "if (!copyDone) throw new Error('copy round trip did not finish');",
+            "copy-round-trip-check.js",
+        );
+        eval_drop(
+            &runtime,
+            "src = null; dst = null; bytes = null; write = null; encoder = null; command = null; copyDone = undefined;",
+            "copy-round-trip-cleanup.js",
         );
         runtime.clear_global("device").expect("clear device");
         runtime.run_gc();
@@ -2023,6 +2297,170 @@ mod tests {
             &runtime,
             "keptView = null; keptRange = null;",
             "range-keepalive-cleanup.js",
+        );
+        runtime.clear_global("device").expect("clear device");
+        runtime.run_gc();
+        runtime.run_gc();
+        let _ = runtime.drain_releases().expect("drain");
+    }
+
+    #[test]
+    fn creates_block03_objects_and_submits_compute_pass() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let wrapped = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("device", wrapped)
+            .expect("set device");
+        eval_drop(
+            &runtime,
+            r#"
+                var objectShader = device.createShaderModule({
+                    code: '@group(0) @binding(0) var<storage, read_write> data: array<u32>; @compute @workgroup_size(1) fn main() { data[0] = data[0] + 1u; }'
+                });
+                var objectBgl = device.createBindGroupLayout({
+                    entries: [{ binding: 0, visibility: 4, buffer: { type: 'storage' } }]
+                });
+                var objectPipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [objectBgl] });
+                var objectPipeline = device.createComputePipeline({
+                    layout: objectPipelineLayout,
+                    compute: { module: objectShader }
+                });
+                var objectBuffer = device.createBuffer({ size: 4, usage: 140 });
+                var objectBindGroup = device.createBindGroup({
+                    layout: objectBgl,
+                    entries: [{ binding: 0, resource: { buffer: objectBuffer } }]
+                });
+                var objectEncoder = device.createCommandEncoder();
+                var objectPass = objectEncoder.beginComputePass();
+                objectPass.setPipeline(objectPipeline);
+                objectPass.setBindGroup(0, objectBindGroup);
+                objectPass.dispatchWorkgroups(1);
+                objectPass.end();
+                var objectCommand = objectEncoder.finish();
+                device.queue.submit([objectCommand]);
+            "#,
+            "block03-objects.js",
+        );
+        unsafe { runtime.tick(setup.instance) }.expect("tick");
+        eval_drop(
+            &runtime,
+            "objectShader = objectBgl = objectPipelineLayout = objectPipeline = objectBuffer = objectBindGroup = objectEncoder = objectPass = objectCommand = null;",
+            "block03-objects-cleanup.js",
+        );
+        runtime.clear_global("device").expect("clear device");
+        runtime.run_gc();
+        runtime.run_gc();
+        let _ = runtime.drain_releases().expect("drain");
+    }
+
+    #[test]
+    fn invalid_encoder_and_pass_states_throw_synchronously() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let wrapped = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("device", wrapped)
+            .expect("set device");
+        eval_drop(
+            &runtime,
+            r#"
+                function mustThrow(fn, needle) {
+                    var threw = false;
+                    try {
+                        fn();
+                    } catch (e) {
+                        threw = String(e).indexOf(needle) >= 0;
+                    }
+                    if (!threw) {
+                        throw new Error('expected throw containing: ' + needle);
+                    }
+                }
+
+                var twiceEncoder = device.createCommandEncoder();
+                twiceEncoder.finish();
+                mustThrow(function () { twiceEncoder.finish(); }, 'GPUCommandEncoder is finished');
+
+                var afterFinishEncoder = device.createCommandEncoder();
+                var tmpA = device.createBuffer({ size: 4, usage: 4 });
+                var tmpB = device.createBuffer({ size: 4, usage: 8 });
+                afterFinishEncoder.finish();
+                mustThrow(function () {
+                    afterFinishEncoder.copyBufferToBuffer(tmpA, 0, tmpB, 0, 4);
+                }, 'GPUCommandEncoder is finished');
+
+                var passEncoder = device.createCommandEncoder();
+                var pass = passEncoder.beginComputePass();
+                pass.end();
+                mustThrow(function () { pass.end(); }, 'GPUComputePassEncoder is ended');
+            "#,
+            "invalid-states.js",
+        );
+        eval_drop(
+            &runtime,
+            "twiceEncoder = afterFinishEncoder = tmpA = tmpB = passEncoder = pass = null;",
+            "invalid-states-cleanup.js",
+        );
+        runtime.clear_global("device").expect("clear device");
+        runtime.run_gc();
+        runtime.run_gc();
+        let _ = runtime.drain_releases().expect("drain");
+    }
+
+    #[test]
+    fn bind_group_outlives_buffer_js_wrappers() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let wrapped = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("device", wrapped)
+            .expect("set device");
+        eval_drop(
+            &runtime,
+            r#"
+                var lifetimeShader = device.createShaderModule({
+                    code: '@group(0) @binding(0) var<storage, read_write> data: array<u32>; @compute @workgroup_size(1) fn main() { data[0] = data[0] + 1u; }'
+                });
+                var lifetimeBgl = device.createBindGroupLayout({
+                    entries: [{ binding: 0, visibility: 4, buffer: { type: 'storage' } }]
+                });
+                var lifetimePipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [lifetimeBgl] });
+                var lifetimePipeline = device.createComputePipeline({
+                    layout: lifetimePipelineLayout,
+                    compute: { module: lifetimeShader }
+                });
+                var lifetimeBuffer = device.createBuffer({ size: 4, usage: 140 });
+                var lifetimeBindGroup = device.createBindGroup({
+                    layout: lifetimeBgl,
+                    entries: [{ binding: 0, resource: { buffer: lifetimeBuffer } }]
+                });
+                lifetimeBuffer = null;
+            "#,
+            "bind-group-lifetime-setup.js",
+        );
+        runtime.run_gc();
+        runtime.run_gc();
+        let _ = runtime.drain_releases().expect("drain buffer wrapper");
+        unsafe { runtime.tick(setup.instance) }.expect("tick after buffer wrapper drop");
+        eval_drop(
+            &runtime,
+            r#"
+                var lifetimeEncoder = device.createCommandEncoder();
+                var lifetimePass = lifetimeEncoder.beginComputePass();
+                lifetimePass.setPipeline(lifetimePipeline);
+                lifetimePass.setBindGroup(0, lifetimeBindGroup);
+                lifetimePass.dispatchWorkgroups(1);
+                lifetimePass.end();
+                var lifetimeCommand = lifetimeEncoder.finish();
+                device.queue.submit([lifetimeCommand]);
+            "#,
+            "bind-group-lifetime-use.js",
+        );
+        unsafe { runtime.tick(setup.instance) }.expect("tick");
+        eval_drop(
+            &runtime,
+            "lifetimeShader = lifetimeBgl = lifetimePipelineLayout = lifetimePipeline = lifetimeBindGroup = lifetimeEncoder = lifetimePass = lifetimeCommand = null;",
+            "bind-group-lifetime-cleanup.js",
         );
         runtime.clear_global("device").expect("clear device");
         runtime.run_gc();

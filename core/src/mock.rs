@@ -12,6 +12,14 @@ use crate::{
     WGPUDevice, WGPUMapAsyncStatus, WGPUMapMode, WGPURequestAdapterCallbackInfo,
     WGPURequestDeviceCallbackInfo, WGPUStringView, WGPUStringViewExt,
 };
+use crate::{
+    WGPUBindGroup, WGPUBindGroupDescriptor, WGPUBindGroupLayout, WGPUBindGroupLayoutDescriptor,
+    WGPUCommandBuffer, WGPUCommandBufferDescriptor, WGPUCommandEncoder,
+    WGPUCommandEncoderDescriptor, WGPUComputePassDescriptor, WGPUComputePassEncoder,
+    WGPUComputePipeline, WGPUComputePipelineDescriptor, WGPUFuture, WGPUPipelineLayout,
+    WGPUPipelineLayoutDescriptor, WGPUQueue, WGPUQueueWorkDoneCallbackInfo, WGPUShaderModule,
+    WGPUShaderModuleDescriptor,
+};
 
 /// Mock JavaScript value handle.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -105,6 +113,12 @@ impl Runtime {
     #[must_use]
     pub fn bool(&self, value: bool) -> Value {
         self.insert(MockValue::Bool(value))
+    }
+
+    /// Creates a null value.
+    #[must_use]
+    pub fn null(&self) -> Value {
+        self.insert(MockValue::Null)
     }
 
     /// Creates a string value.
@@ -242,6 +256,7 @@ impl Drop for Scope<'_> {
 #[derive(Clone)]
 enum MockValue {
     Undefined,
+    Null,
     Number(f64),
     Bool(bool),
     String(String),
@@ -313,12 +328,17 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
         matches!(cx.runtime.get(value), MockValue::Undefined)
     }
 
+    fn is_null(cx: Self::Context<'_>, value: Self::Value) -> bool {
+        matches!(cx.runtime.get(value), MockValue::Null)
+    }
+
     fn to_f64(cx: Self::Context<'_>, value: Self::Value) -> Result<f64, Self::Error> {
         match cx.runtime.get(value) {
             MockValue::Number(value) => Ok(value),
             MockValue::Bool(value) => Ok(if value { 1.0 } else { 0.0 }),
             MockValue::String(value) => value.parse::<f64>().map_err(|_| "number".to_owned()),
             MockValue::Undefined
+            | MockValue::Null
             | MockValue::Object(_)
             | MockValue::Promise { .. }
             | MockValue::Resolver { .. }
@@ -331,6 +351,7 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
     fn to_bool(cx: Self::Context<'_>, value: Self::Value) -> bool {
         match cx.runtime.get(value) {
             MockValue::Undefined => false,
+            MockValue::Null => false,
             MockValue::Bool(value) => value,
             MockValue::Number(value) => value != 0.0 && !value.is_nan(),
             MockValue::String(value) => !value.is_empty(),
@@ -350,6 +371,7 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
     ) -> Result<&'a str, Self::Error> {
         match cx.runtime.get(value) {
             MockValue::Undefined => Ok(arena.alloc_str("undefined")),
+            MockValue::Null => Ok(arena.alloc_str("null")),
             MockValue::Number(value) => Ok(arena.alloc_str(&value.to_string())),
             MockValue::Bool(value) => Ok(arena.alloc_str(if value { "true" } else { "false" })),
             MockValue::String(value) => Ok(arena.alloc_str(&value)),
@@ -571,6 +593,10 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
         }
     }
 
+    fn arraybuffer_copy(cx: Self::Context<'_>, value: Self::Value) -> Option<Vec<u8>> {
+        cx.runtime.read_arraybuffer(value)
+    }
+
     fn duplicate_value(cx: Self::Context<'_>, value: Self::Value) -> Self::Value {
         let mut duplicated = cx.runtime.duplicated_values.borrow_mut();
         *duplicated.entry(value).or_insert(0) += 1;
@@ -612,11 +638,13 @@ struct MockGpuState {
     device_releases: usize,
     buffer_releases: usize,
     buffer_destroys: usize,
+    mapped_range_calls: usize,
+    const_mapped_range_calls: usize,
     labels: Vec<Vec<u8>>,
     descriptors: Vec<RecordedDescriptor>,
     null_create_buffer: bool,
     native_order: Vec<&'static str>,
-    buffers: BTreeMap<usize, Vec<u8>>,
+    buffers: BTreeMap<WGPUBuffer, Vec<u8>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -655,13 +683,46 @@ pub fn dispatch() -> GpuDispatch {
         device_add_ref,
         device_release,
         device_create_buffer,
+        device_get_queue,
+        device_create_shader_module,
+        device_create_bind_group_layout,
+        device_create_pipeline_layout,
+        device_create_bind_group,
+        device_create_compute_pipeline,
+        device_create_command_encoder,
         buffer_set_label,
         buffer_destroy,
         buffer_get_mapped_range,
+        buffer_get_const_mapped_range,
         buffer_add_ref,
         buffer_map_async,
         buffer_unmap,
         buffer_release,
+        queue_add_ref,
+        queue_release,
+        queue_write_buffer,
+        queue_submit,
+        queue_on_submitted_work_done,
+        shader_module_add_ref,
+        shader_module_release,
+        bind_group_layout_add_ref,
+        bind_group_layout_release,
+        pipeline_layout_add_ref,
+        pipeline_layout_release,
+        bind_group_add_ref,
+        bind_group_release,
+        compute_pipeline_add_ref,
+        compute_pipeline_release,
+        command_encoder_release,
+        command_encoder_copy_buffer_to_buffer,
+        command_encoder_begin_compute_pass,
+        command_encoder_finish,
+        command_buffer_release,
+        compute_pass_encoder_release,
+        compute_pass_encoder_set_pipeline,
+        compute_pass_encoder_set_bind_group,
+        compute_pass_encoder_dispatch_workgroups,
+        compute_pass_encoder_end,
     }
 }
 
@@ -674,11 +735,15 @@ pub fn fake_device() -> WGPUDevice {
 /// Returns a copy of mock native buffer bytes.
 #[must_use]
 pub fn buffer_bytes(buffer: WGPUBuffer) -> Option<Vec<u8>> {
-    GPU_STATE.with(|state| state.borrow().buffers.get(&(buffer as usize)).cloned())
+    GPU_STATE.with(|state| state.borrow().buffers.get(&buffer).cloned())
 }
 
 fn fake_buffer(id: usize) -> WGPUBuffer {
     id as WGPUBuffer
+}
+
+fn fake_handle<T>(id: usize) -> *mut T {
+    id as *mut T
 }
 
 unsafe fn device_add_ref(_device: WGPUDevice) {
@@ -755,8 +820,81 @@ unsafe fn device_create_buffer(
         });
         state.next += 1;
         let id = state.next;
-        state.buffers.insert(id, vec![0; descriptor.size as usize]);
-        fake_buffer(id)
+        let buffer = fake_buffer(id);
+        state
+            .buffers
+            .insert(buffer, vec![0; descriptor.size as usize]);
+        buffer
+    })
+}
+
+unsafe fn device_get_queue(_device: WGPUDevice) -> WGPUQueue {
+    fake_handle(1001)
+}
+
+unsafe fn device_create_shader_module(
+    _device: WGPUDevice,
+    _descriptor: *const WGPUShaderModuleDescriptor,
+) -> WGPUShaderModule {
+    GPU_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        state.next += 1;
+        fake_handle(2000 + state.next)
+    })
+}
+
+unsafe fn device_create_bind_group_layout(
+    _device: WGPUDevice,
+    _descriptor: *const WGPUBindGroupLayoutDescriptor,
+) -> WGPUBindGroupLayout {
+    GPU_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        state.next += 1;
+        fake_handle(3000 + state.next)
+    })
+}
+
+unsafe fn device_create_pipeline_layout(
+    _device: WGPUDevice,
+    _descriptor: *const WGPUPipelineLayoutDescriptor,
+) -> WGPUPipelineLayout {
+    GPU_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        state.next += 1;
+        fake_handle(4000 + state.next)
+    })
+}
+
+unsafe fn device_create_bind_group(
+    _device: WGPUDevice,
+    _descriptor: *const WGPUBindGroupDescriptor,
+) -> WGPUBindGroup {
+    GPU_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        state.next += 1;
+        fake_handle(5000 + state.next)
+    })
+}
+
+unsafe fn device_create_compute_pipeline(
+    _device: WGPUDevice,
+    _descriptor: *const WGPUComputePipelineDescriptor,
+) -> WGPUComputePipeline {
+    GPU_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        state.next += 1;
+        fake_handle(6000 + state.next)
+    })
+}
+
+unsafe fn device_create_command_encoder(
+    _device: WGPUDevice,
+    _descriptor: *const WGPUCommandEncoderDescriptor,
+) -> WGPUCommandEncoder {
+    GPU_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        state.next += 1;
+        fake_handle(7000 + state.next)
     })
 }
 
@@ -783,7 +921,8 @@ unsafe fn buffer_get_mapped_range(
 ) -> *mut std::ffi::c_void {
     GPU_STATE.with(|state| {
         let mut state = state.borrow_mut();
-        let Some(bytes) = state.buffers.get_mut(&(buffer as usize)) else {
+        state.mapped_range_calls += 1;
+        let Some(bytes) = state.buffers.get_mut(&buffer) else {
             return ptr::null_mut();
         };
         let len = if size == crate::WGPU_WHOLE_MAP_SIZE as usize {
@@ -798,6 +937,32 @@ unsafe fn buffer_get_mapped_range(
             return ptr::null_mut();
         }
         unsafe { bytes.as_mut_ptr().add(offset).cast() }
+    })
+}
+
+unsafe fn buffer_get_const_mapped_range(
+    buffer: WGPUBuffer,
+    offset: usize,
+    size: usize,
+) -> *const std::ffi::c_void {
+    GPU_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        state.const_mapped_range_calls += 1;
+        let Some(bytes) = state.buffers.get(&buffer) else {
+            return ptr::null();
+        };
+        let len = if size == crate::WGPU_WHOLE_MAP_SIZE as usize {
+            bytes.len().saturating_sub(offset)
+        } else {
+            size
+        };
+        let Some(end) = offset.checked_add(len) else {
+            return ptr::null();
+        };
+        if end > bytes.len() {
+            return ptr::null();
+        }
+        unsafe { bytes.as_ptr().add(offset).cast() }
     })
 }
 
@@ -839,6 +1004,139 @@ unsafe fn buffer_release(_buffer: WGPUBuffer) {
     });
 }
 
+unsafe fn queue_add_ref(_queue: WGPUQueue) {}
+unsafe fn queue_release(_queue: WGPUQueue) {}
+
+unsafe fn queue_write_buffer(
+    _queue: WGPUQueue,
+    buffer: WGPUBuffer,
+    offset: u64,
+    data: *const std::ffi::c_void,
+    size: usize,
+) {
+    GPU_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let Some(bytes) = state.buffers.get_mut(&buffer) else {
+            return;
+        };
+        let Ok(offset) = usize::try_from(offset) else {
+            return;
+        };
+        let Some(end) = offset.checked_add(size) else {
+            return;
+        };
+        if data.is_null() || end > bytes.len() {
+            return;
+        }
+        bytes[offset..end]
+            .copy_from_slice(unsafe { std::slice::from_raw_parts(data.cast::<u8>(), size) });
+    });
+}
+
+unsafe fn queue_submit(_queue: WGPUQueue, _count: usize, _commands: *const WGPUCommandBuffer) {}
+
+unsafe fn queue_on_submitted_work_done(
+    _queue: WGPUQueue,
+    info: WGPUQueueWorkDoneCallbackInfo,
+) -> WGPUFuture {
+    if let Some(callback) = info.callback {
+        unsafe {
+            callback(
+                crate::WGPUQueueWorkDoneStatus_WGPUQueueWorkDoneStatus_Success,
+                WGPUStringView::from_bytes(b""),
+                info.userdata1,
+                info.userdata2,
+            );
+        }
+    }
+    WGPUFuture { id: 4 }
+}
+
+unsafe fn shader_module_add_ref(_module: WGPUShaderModule) {}
+unsafe fn shader_module_release(_module: WGPUShaderModule) {}
+unsafe fn bind_group_layout_add_ref(_layout: WGPUBindGroupLayout) {}
+unsafe fn bind_group_layout_release(_layout: WGPUBindGroupLayout) {}
+unsafe fn pipeline_layout_add_ref(_layout: WGPUPipelineLayout) {}
+unsafe fn pipeline_layout_release(_layout: WGPUPipelineLayout) {}
+unsafe fn bind_group_add_ref(_bind_group: WGPUBindGroup) {}
+unsafe fn bind_group_release(_bind_group: WGPUBindGroup) {}
+unsafe fn compute_pipeline_add_ref(_pipeline: WGPUComputePipeline) {}
+unsafe fn compute_pipeline_release(_pipeline: WGPUComputePipeline) {}
+unsafe fn command_encoder_release(_encoder: WGPUCommandEncoder) {}
+
+unsafe fn command_encoder_copy_buffer_to_buffer(
+    _encoder: WGPUCommandEncoder,
+    source: WGPUBuffer,
+    source_offset: u64,
+    destination: WGPUBuffer,
+    destination_offset: u64,
+    size: u64,
+) {
+    GPU_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let Some(src) = state.buffers.get(&source).cloned() else {
+            return;
+        };
+        let Some(dst) = state.buffers.get_mut(&destination) else {
+            return;
+        };
+        let (Ok(source_offset), Ok(destination_offset), Ok(size)) = (
+            usize::try_from(source_offset),
+            usize::try_from(destination_offset),
+            usize::try_from(size),
+        ) else {
+            return;
+        };
+        let Some(src_end) = source_offset.checked_add(size) else {
+            return;
+        };
+        let Some(dst_end) = destination_offset.checked_add(size) else {
+            return;
+        };
+        if src_end <= src.len() && dst_end <= dst.len() {
+            dst[destination_offset..dst_end].copy_from_slice(&src[source_offset..src_end]);
+        }
+    });
+}
+
+unsafe fn command_encoder_begin_compute_pass(
+    _encoder: WGPUCommandEncoder,
+    _descriptor: *const WGPUComputePassDescriptor,
+) -> WGPUComputePassEncoder {
+    fake_handle(8001)
+}
+
+unsafe fn command_encoder_finish(
+    _encoder: WGPUCommandEncoder,
+    _descriptor: *const WGPUCommandBufferDescriptor,
+) -> WGPUCommandBuffer {
+    fake_handle(9001)
+}
+
+unsafe fn command_buffer_release(_command_buffer: WGPUCommandBuffer) {}
+unsafe fn compute_pass_encoder_release(_pass: WGPUComputePassEncoder) {}
+unsafe fn compute_pass_encoder_set_pipeline(
+    _pass: WGPUComputePassEncoder,
+    _pipeline: WGPUComputePipeline,
+) {
+}
+unsafe fn compute_pass_encoder_set_bind_group(
+    _pass: WGPUComputePassEncoder,
+    _index: u32,
+    _bind_group: WGPUBindGroup,
+    _offset_count: usize,
+    _offsets: *const u32,
+) {
+}
+unsafe fn compute_pass_encoder_dispatch_workgroups(
+    _pass: WGPUComputePassEncoder,
+    _x: u32,
+    _y: u32,
+    _z: u32,
+) {
+}
+unsafe fn compute_pass_encoder_end(_pass: WGPUComputePassEncoder) {}
+
 fn read_view(view: WGPUStringView) -> Vec<u8> {
     if view.data.is_null() || view.length == crate::wgpu_strlen() {
         return Vec::new();
@@ -852,8 +1150,12 @@ mod tests {
     use crate::{
         buffer_destroy, buffer_get_mapped_range, buffer_label_get, buffer_label_set,
         buffer_map_async, buffer_size_get, buffer_unmap, buffer_usage_get,
-        convert_buffer_descriptor, device_create_buffer, finalize_buffer, finalize_device,
-        wrap_device, BufferPayload, DevicePayload, JsEngine,
+        convert_bind_group_descriptor, convert_bind_group_layout_descriptor,
+        convert_buffer_binding_layout, convert_buffer_descriptor,
+        convert_compute_pipeline_descriptor, convert_shader_module_descriptor,
+        device_create_bind_group, device_create_buffer, device_queue_get, finalize_buffer,
+        finalize_device, queue_write_buffer, wrap_device, BindGroupLayoutPayload, BufferPayload,
+        DevicePayload, JsEngine, ShaderModulePayload,
     };
 
     fn descriptor(rt: &Runtime, fields: &[(&str, Value)]) -> Value {
@@ -995,6 +1297,248 @@ mod tests {
             length: 1
         }
         .is_valid());
+    }
+
+    #[test]
+    fn b3_wgsl_chain_sets_stype_and_points_at_source() {
+        let rt = runtime();
+        let cx = rt.context();
+        let desc = descriptor(
+            &rt,
+            &[(
+                "code",
+                rt.string("@compute @workgroup_size(1) fn main() {}"),
+            )],
+        );
+        let arena = Arena::new();
+
+        let native = convert_shader_module_descriptor::<Engine>(cx, desc, &arena)
+            .expect("shader descriptor");
+
+        assert!(!native.nextInChain.is_null());
+        let chain = unsafe { &*native.nextInChain };
+        assert_eq!(chain.sType, crate::WGPUSType_WGPUSType_ShaderSourceWGSL);
+        let source = native.nextInChain.cast::<crate::WGPUShaderSourceWGSL>();
+        assert_eq!(
+            read_view(unsafe { (*source).code }),
+            b"@compute @workgroup_size(1) fn main() {}".to_vec()
+        );
+    }
+
+    #[test]
+    fn b4_nullable_entry_point_differs_from_non_null_label() {
+        let rt = runtime();
+        let cx = rt.context();
+        let module = Engine::new_instance(
+            cx,
+            crate::GPU_SHADER_MODULE_CLASS,
+            Box::new(ShaderModulePayload {
+                module: fake_handle(42),
+            }),
+        )
+        .expect("shader module");
+        let label_desc = descriptor(
+            &rt,
+            &[("code", rt.string("fn only() {}")), ("label", rt.null())],
+        );
+        let arena = Arena::new();
+        let shader = convert_shader_module_descriptor::<Engine>(cx, label_desc, &arena)
+            .expect("shader descriptor");
+        assert!(!shader.label.data.is_null());
+        assert_eq!(shader.label.length, 0);
+
+        let absent_compute = descriptor(&rt, &[("module", module)]);
+        let absent_desc = descriptor(&rt, &[("compute", absent_compute)]);
+        let absent = convert_compute_pipeline_descriptor::<Engine>(cx, absent_desc, &arena)
+            .expect("pipeline descriptor");
+        assert!(absent.compute.entryPoint.data.is_null());
+        assert_eq!(absent.compute.entryPoint.length, crate::wgpu_strlen());
+
+        let empty_compute = descriptor(&rt, &[("module", module), ("entryPoint", rt.string(""))]);
+        let empty_desc = descriptor(&rt, &[("compute", empty_compute)]);
+        let empty = convert_compute_pipeline_descriptor::<Engine>(cx, empty_desc, &arena)
+            .expect("pipeline descriptor");
+        assert!(!empty.compute.entryPoint.data.is_null());
+        assert_eq!(empty.compute.entryPoint.length, 0);
+    }
+
+    #[test]
+    fn b5_empty_and_nonempty_sequences_have_valid_count_pointer_shapes() {
+        let rt = runtime();
+        let cx = rt.context();
+        let arena = Arena::new();
+
+        let empty_entries = descriptor(&rt, &[("length", rt.number(0.0))]);
+        let empty_desc = descriptor(&rt, &[("entries", empty_entries)]);
+        let empty = convert_bind_group_layout_descriptor::<Engine>(cx, empty_desc, &arena)
+            .expect("empty layout");
+        assert_eq!(empty.entryCount, 0);
+        assert!(empty.entries.is_null());
+
+        let buffer_layout = descriptor(&rt, &[("type", rt.string("uniform"))]);
+        let entry = descriptor(
+            &rt,
+            &[
+                ("binding", rt.number(0.0)),
+                ("visibility", rt.number(1.0)),
+                ("buffer", buffer_layout),
+            ],
+        );
+        let entries = descriptor(&rt, &[("length", rt.number(1.0)), ("0", entry)]);
+        let desc = descriptor(&rt, &[("entries", entries)]);
+        let one = convert_bind_group_layout_descriptor::<Engine>(cx, desc, &arena)
+            .expect("one-entry layout");
+        assert_eq!(one.entryCount, 1);
+        assert!(!one.entries.is_null());
+        assert_eq!(unsafe { (*one.entries).binding }, 0);
+    }
+
+    #[test]
+    fn b6_buffer_binding_type_rejects_unknown_strings_and_numbers() {
+        let rt = runtime();
+        let cx = rt.context();
+
+        let unknown = descriptor(&rt, &[("type", rt.string("definitely-not-a-buffer-type"))]);
+        assert_eq!(
+            convert_buffer_binding_layout::<Engine>(cx, unknown).expect_err("unknown enum"),
+            "TypeError: GPUBufferBindingType"
+        );
+
+        let number = descriptor(&rt, &[("type", rt.number(1.0))]);
+        assert_eq!(
+            convert_buffer_binding_layout::<Engine>(cx, number).expect_err("numeric enum"),
+            "TypeError: GPUBufferBindingType"
+        );
+    }
+
+    #[test]
+    fn b7_write_buffer_rejects_size_that_would_truncate_on_32_bit_hosts() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let queue = device_queue_get::<Engine>(cx, device).expect("queue");
+        let desc = descriptor(&rt, &[("size", rt.number(16.0)), ("usage", rt.number(8.0))]);
+        let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("buffer");
+        let data = Engine::new_arraybuffer_copy(cx, &[1, 2, 3, 4]).expect("arraybuffer");
+
+        let error = queue_write_buffer::<Engine>(
+            cx,
+            queue,
+            &[
+                buffer,
+                rt.number(0.0),
+                data,
+                rt.number(0.0),
+                rt.number(4_294_967_296.0),
+            ],
+        )
+        .expect_err("oversized size must fail");
+
+        assert_eq!(error, "TypeError: size");
+    }
+
+    #[test]
+    fn failed_bind_group_sequence_conversion_leaks_no_addref_and_allocates_no_entries() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let buffer_desc = descriptor(&rt, &[("size", rt.number(16.0)), ("usage", rt.number(8.0))]);
+        let buffer = device_create_buffer::<Engine>(cx, device, &[buffer_desc]).expect("buffer");
+        let layout = Engine::new_instance(
+            cx,
+            crate::GPU_BIND_GROUP_LAYOUT_CLASS,
+            Box::new(BindGroupLayoutPayload {
+                layout: fake_handle(77),
+            }),
+        )
+        .expect("layout");
+        let first_resource = descriptor(&rt, &[("buffer", buffer)]);
+        let first_entry = descriptor(
+            &rt,
+            &[("binding", rt.number(0.0)), ("resource", first_resource)],
+        );
+        let bad_entry = descriptor(&rt, &[("binding", rt.number(1.0))]);
+        let entries = descriptor(
+            &rt,
+            &[
+                ("length", rt.number(2.0)),
+                ("0", first_entry),
+                ("1", bad_entry),
+            ],
+        );
+        let desc = descriptor(&rt, &[("layout", layout), ("entries", entries)]);
+        let arena = Arena::new();
+
+        assert!(convert_bind_group_descriptor::<Engine>(cx, desc, &arena).is_err());
+        assert_eq!(arena.bind_group_entries.borrow().len(), 0);
+        assert!(device_create_bind_group::<Engine>(cx, device, &[desc]).is_err());
+        GPU_STATE.with(|state| {
+            assert_eq!(state.borrow().buffer_add_refs, 0);
+        });
+    }
+
+    /// This asserts we call `AddRef` once per stored buffer. It does not prove
+    /// the backend needs it. The C ABI has no refcount introspection, so this
+    /// is the strongest available check.
+    #[test]
+    fn b8_bind_group_addrefs_each_stored_buffer() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let buffer_desc = descriptor(&rt, &[("size", rt.number(16.0)), ("usage", rt.number(8.0))]);
+        let buffer = device_create_buffer::<Engine>(cx, device, &[buffer_desc]).expect("buffer");
+        let layout = Engine::new_instance(
+            cx,
+            crate::GPU_BIND_GROUP_LAYOUT_CLASS,
+            Box::new(BindGroupLayoutPayload {
+                layout: fake_handle(77),
+            }),
+        )
+        .expect("layout");
+        let resource = descriptor(&rt, &[("buffer", buffer)]);
+        let entry = descriptor(&rt, &[("binding", rt.number(0.0)), ("resource", resource)]);
+        let entries = descriptor(&rt, &[("length", rt.number(1.0)), ("0", entry)]);
+        let desc = descriptor(&rt, &[("layout", layout), ("entries", entries)]);
+
+        let _bind_group =
+            device_create_bind_group::<Engine>(cx, device, &[desc]).expect("bind group");
+
+        GPU_STATE.with(|state| {
+            assert_eq!(state.borrow().buffer_add_refs, 1);
+        });
+    }
+
+    #[test]
+    fn b18_a29_read_mapping_uses_const_range_and_write_uses_mutable_range() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let desc = descriptor(&rt, &[("size", rt.number(8.0)), ("usage", rt.number(3.0))]);
+        let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("buffer");
+
+        let _ = buffer_map_async::<Engine>(cx, buffer, &[rt.number(1.0)]).expect("read map");
+        let _ = buffer_get_mapped_range::<Engine>(cx, buffer, &[rt.number(0.0), rt.number(4.0)])
+            .expect("read range");
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.const_mapped_range_calls, 1);
+            assert_eq!(state.mapped_range_calls, 0);
+        });
+
+        let _ = buffer_unmap::<Engine>(cx, buffer, &[]).expect("unmap");
+        let _ = buffer_map_async::<Engine>(cx, buffer, &[rt.number(2.0)]).expect("write map");
+        let _ = buffer_get_mapped_range::<Engine>(cx, buffer, &[rt.number(0.0), rt.number(4.0)])
+            .expect("write range");
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.const_mapped_range_calls, 1);
+            assert_eq!(state.mapped_range_calls, 1);
+        });
+        let _ = buffer_unmap::<Engine>(cx, buffer, &[]).expect("final unmap");
     }
 
     #[test]
@@ -1440,73 +1984,19 @@ mod tests {
             }
         }
 
-        unsafe fn noop_device(_device: WGPUDevice) {}
-        unsafe fn noop_create(
-            _device: WGPUDevice,
-            _descriptor: *const WGPUBufferDescriptor,
-        ) -> WGPUBuffer {
-            ptr::null_mut()
-        }
-        unsafe fn noop_label(_buffer: WGPUBuffer, _label: WGPUStringView) {}
-        unsafe fn noop_destroy(_buffer: WGPUBuffer) {}
-        unsafe fn noop_add_ref(_buffer: WGPUBuffer) {}
-        unsafe fn noop_adapter_release(_adapter: WGPUAdapter) {}
-        unsafe fn noop_request_adapter(
-            _instance: webgpu_native_js_ffi::native::WGPUInstance,
-            _options: *const webgpu_native_js_ffi::native::WGPURequestAdapterOptions,
-            _info: WGPURequestAdapterCallbackInfo,
-        ) -> webgpu_native_js_ffi::native::WGPUFuture {
-            webgpu_native_js_ffi::native::WGPUFuture { id: 0 }
-        }
-        unsafe fn noop_request_device(
-            _adapter: WGPUAdapter,
-            _descriptor: *const webgpu_native_js_ffi::native::WGPUDeviceDescriptor,
-            _info: WGPURequestDeviceCallbackInfo,
-        ) -> webgpu_native_js_ffi::native::WGPUFuture {
-            webgpu_native_js_ffi::native::WGPUFuture { id: 0 }
-        }
-        unsafe fn noop_get_range(
-            _buffer: WGPUBuffer,
-            _offset: usize,
-            _size: usize,
-        ) -> *mut std::ffi::c_void {
-            ptr::null_mut()
-        }
-        unsafe fn noop_map_async(
-            _buffer: WGPUBuffer,
-            _mode: WGPUMapMode,
-            _offset: usize,
-            _size: usize,
-            _info: WGPUBufferMapCallbackInfo,
-        ) -> webgpu_native_js_ffi::native::WGPUFuture {
-            webgpu_native_js_ffi::native::WGPUFuture { id: 0 }
-        }
-        unsafe fn noop_unmap(_buffer: WGPUBuffer) {}
-
         let parent = Box::into_raw(Box::new(Parent {
             marker: 0xfeed_face,
         }));
         let child = Box::into_raw(Box::new(Child { parent }));
+        let mut gpu = dispatch();
+        gpu.device_release = parent_release;
+        gpu.buffer_release = child_release;
         let queue = ReleaseQueue::new();
         queue
             .enqueue(crate::ReleaseRequest::BufferWithDeviceRef {
                 buffer: child.cast(),
                 device: parent.cast(),
-                gpu: GpuDispatch {
-                    instance_request_adapter: noop_request_adapter,
-                    adapter_request_device: noop_request_device,
-                    adapter_release: noop_adapter_release,
-                    device_add_ref: noop_device,
-                    device_release: parent_release,
-                    device_create_buffer: noop_create,
-                    buffer_set_label: noop_label,
-                    buffer_destroy: noop_destroy,
-                    buffer_get_mapped_range: noop_get_range,
-                    buffer_add_ref: noop_add_ref,
-                    buffer_map_async: noop_map_async,
-                    buffer_unmap: noop_unmap,
-                    buffer_release: child_release,
-                },
+                gpu,
             })
             .expect("enqueue");
 

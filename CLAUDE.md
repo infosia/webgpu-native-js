@@ -264,6 +264,16 @@ script executed under **both** engines with identical expected output.
   `E`.
 - bindgen output is `include!`d into a `pub mod native { ... }`; never edit
   generated code.
+- **Every `unsafe impl Send`/`Sync` carries a `// SAFETY:` comment, and a Phase
+  Review greps for the ones that do not.** They are *necessary* here: a payload
+  must be `Send` because a JSC finalizer may run on any thread, and a
+  `WGPUxxx` handle is a raw pointer. The justification is that handles are
+  **moved** across threads and never **dereferenced** off the `tick()` thread —
+  `webgpu.h` allows an implementation to make off-thread *use* undefined
+  (`release-queue.md` → Q1), and moving is not use. Write that at each impl.
+  Phase 2 shipped four of them with no comment; three reviewers and every gate
+  walked past. **Never smuggle a handle as `usize` to dodge `Send`** — that
+  discards the type and does not remove the obligation (block 01 → R18).
 - **`#[allow]` on a correctness or soundness lint is a silenced review.** It
   needs a `// SAFETY`-style comment saying why the lint is wrong *here*, and it
   is a Phase Review finding without one. Phase 1 shipped

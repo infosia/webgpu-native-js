@@ -364,6 +364,33 @@ is "exercised". Copy arithmetic is exercised. The safety protocol is not.
 Calling it before the map promise settles, or after `unmap()`/`destroy()`, is an
 `OperationError`.
 
+**A29 — `getMappedRange()` is one JS method and *two* C functions.** *(Found in
+block 03, when the copy round-trip returned a null pointer.)*
+
+```c
+void       *wgpuBufferGetMappedRange(WGPUBuffer, size_t offset, size_t size);
+void const *wgpuBufferGetConstMappedRange(WGPUBuffer, size_t offset, size_t size);
+```
+
+Asking for the **writable** pointer on a **read** mapping returns `NULL`.
+Confirmed in yawgpu: `mapped_range_ptr(buffer, const_access, …)` returns `None`
+when a mutable pointer is requested for a `MAP_READ` mapping. So:
+
+| Map mode | C function |
+|---|---|
+| `WGPUMapMode_Read` | `wgpuBufferGetConstMappedRange` |
+| `WGPUMapMode_Write`, or `mappedAtCreation` | `wgpuBufferGetMappedRange` |
+
+WebIDL has one method and returns a **writable** `ArrayBuffer` in both cases —
+writes to a read-mapped range are simply never written back. So the read path
+const-casts, and that must be **documented at the cast, not discovered at it**:
+the memory is the implementation's read-staging, writes into it are invisible,
+and `unmap()` copies back only for write mappings.
+
+A null return here is a **binding bug**, not a validation error. Do not surface it
+to script as an `OperationError` without first checking you asked for the right
+pointer.
+
 **A15 — a buffer may have several mapped ranges, and `unmap()` detaches all of
 them.** Track every `ArrayBuffer` handed out. Detaching only the most recent one
 leaves script holding a live view over memory `wgpuBufferUnmap` has reclaimed —

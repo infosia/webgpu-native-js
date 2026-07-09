@@ -254,7 +254,58 @@ cannot be reproduced from the tree is on the honour system.
 6. Full workspace gate green; clippy clean with no new `#[allow]`; Phase Review
    clean of CRITICAL and MAJOR.
 
-## 7. Open questions this block will answer
+## 7. Answers this block produced
+
+- **B9 — `wgpuQueueSubmit` does not take ownership.** The header says nothing, and
+  yawgpu's implementation neither `AddRef`s nor `Release`s the command buffers.
+  The caller keeps each `WGPUCommandBuffer` and releases it through the queue like
+  any other wrapper. (A `GPUCommandBuffer` is nonetheless *consumed* in WebGPU's
+  sense — resubmitting it is a validation error — which is a wrapper-state
+  question, not a refcount one. See B10.)
+
+- **`JsEngine` needed no sequence primitive.** `length` plus indexed
+  `get_property` sufficed. The cost is one engine call per element and one index
+  stringification. Revisit only if a profile says so; a new trait method is a
+  permanent tax on every engine.
+
+- **`getMappedRange()` is one JS method and two C functions** — the writable
+  pointer returns `NULL` on a read mapping. This block's copy round-trip found it.
+  Recorded as block 02 → **A29**, because it belongs with the mapping rules.
+
+- **Roughly 80–85% of a descriptor conversion is mechanical**, by the implementing
+  agent's count. What a human had to decide, and WebIDL did not say: which chained
+  `sType`s to accept and which to reject; that bind-group resources are
+  buffer-only for now; nullable versus non-null string treatment (B4); dynamic
+  offsets and pipeline constants deferred; and how a null handle from a
+  `createXxx` maps to a synchronous error while error scopes do not exist (B15).
+
+  **That list is Phase 4's real difficulty**, and it is short. Every item on it is
+  a *policy* decision that a generator can be told once, not a per-descriptor
+  judgement. That is the strongest evidence so far that codegen is tractable.
+
+- **B8's use-after-free cannot be demonstrated against yawgpu**, and that is not a
+  refutation of B8. `yawgpu-core/src/bind_group.rs` stores `buffer: Arc<Buffer>` —
+  **yawgpu retains bind-group resources internally**, so removing our `AddRef`
+  changes nothing there. `webgpu.h` guarantees no such thing, and this project
+  links three backends. Same reasoning as `specs/tracking/backend-deltas.md`:
+  never depend on what one implementation happens to do.
+
+  The substituted guard, `b8_bind_group_addrefs_each_stored_buffer`, asserts *we
+  call `AddRef` once per stored buffer*. It does **not** prove the backend needs
+  it. The C ABI exposes no refcount introspection, so that is the strongest
+  available check — the same limit `release-queue.md` records for its own
+  exactly-once assertion. The test's doc comment says so.
+
+- **`unsafe impl Send` is necessary, and was undocumented.** A payload must be
+  `Send` because a JSC finalizer may run on any thread, and a `WGPUxxx` handle is
+  a raw pointer. The justification is that handles are **moved** across threads
+  and never **dereferenced** off the `tick()` thread — `webgpu.h` makes off-thread
+  *use* undefined, and moving is not use. Phase 2 shipped four bare `unsafe impl
+  Send` in `core/`; three reviewers and every gate walked past them. `CLAUDE.md`
+  now requires a `// SAFETY:` comment on each, and forbids dodging the obligation
+  by storing a handle as `usize`.
+
+## 8. Open questions still open
 
 - **Does `JsEngine` need a sequence/iteration primitive**, or can `core/` read
   `length` and index with the property accessor it already has? The second costs
