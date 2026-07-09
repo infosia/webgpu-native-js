@@ -64,7 +64,10 @@ The plan's §7 has the full evidence. These are the conclusions that are now
    `wgpuInstanceProcessEvents()` fires the WebGPU callbacks that resolve
    `Promise`s; the engine's microtask queue then runs the `.then()`
    continuations. Resolving a Promise does not run its callbacks. A binding
-   that pumps only the first passes every test that avoids `await`.
+   that pumps only the first passes every test that avoids `await`. **Verified
+   end-to-end** in `specs/tracking/event-loop.md`. `JS_ExecutePendingJob`
+   returns `>0` / `0` / `<0`; the `<0` case must surface the exception, or a
+   throwing `.then()` vanishes silently.
 4. **Finalizers never call `webgpu.h` directly.** They push onto the release
    queue. Not because of JSC's any-thread finalizers, but because `webgpu.h`
    guarantees *no* thread-safety for `wgpuXxxRelease`; that all three backends

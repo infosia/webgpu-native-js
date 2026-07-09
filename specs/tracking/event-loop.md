@@ -84,7 +84,67 @@ otherwise invisible.
 
 ---
 
-## Review of the spike — VERDICT: result accepted, revision required
+## Revision landed (2026-07-09) — Q1 CLOSED
+
+Gates re-run directly: `cargo test --offline -p event-loop-pump --features
+ffi/backend-yawgpu` → **8 passed**, EXIT=0; clippy `-D warnings` → EXIT=0.
+
+### E5 — the engine agrees with our bookkeeping, and now we assert the engine
+
+`JS_PromiseState` reports `JS_PROMISE_FULFILLED` at exactly the point the old
+Rust flag flipped. **They do not diverge.** So E2's conclusion was right all
+along — but it is now first-hand evidence rather than a proxy for it.
+
+The crux test closes the full loop:
+
+```rust
+assert_eq!(request.promise_state(), PromiseState::Pending);   // before
+process_events(&instance);
+assert_eq!(request.promise_state(), PromiseState::Fulfilled); // engine says so
+assert!(js.is_job_pending());
+assert!(!js.eval_bool("globalThis.ran")?);                    // continuation unrun
+js.drain_microtasks()?;
+assert!(js.eval_bool("globalThis.ran")?);
+```
+
+`callback_count()` is retained, because "did the C callback run?" is a genuinely
+different question from "is the Promise fulfilled?", and E1's pre-pump test
+depends on the former.
+
+### E6 — the adapter is released, and the C ABI limits how well we can prove it
+
+`request_adapter_callback` now calls `wgpuAdapterRelease` on success, with a doc
+comment recording that this is legal (`webgpu.h` forbids re-entrant calls only
+from **spontaneous** callbacks and exempts the `ProcessEvents` / `WaitAny`
+callstacks) and that a real binding will enqueue a release request instead.
+
+**Stated limitation, not papered over.** `webgpu.h` exposes no refcount
+introspection, so "released exactly once" cannot be observed directly. The test
+asserts our own release-call count is `1`, holds an extra reference taken with
+`wgpuAdapterAddRef`, probes that the handle is still usable via
+`wgpuAdapterHasFeature`, and confirms a second `ProcessEvents` does not release
+again. That is a bookkeeping assertion plus a liveness probe — strictly weaker
+than a refcount check, and it is the best the C ABI allows. macOS ships no
+LeakSanitizer, so ASan adds nothing here either.
+
+The test-only `AddRef` is gated behind a `Cell<bool>` that is off by default, so
+the other tests are unaffected.
+
+### E7 — the aliasing fix is by construction, not by tooling
+
+No `&mut` is derived from `userdata1` any more: the callback takes `&*` and the
+counters are `Cell`s. **Miri could not verify this.** `nightly` and `miri` are
+installed, but Miri aborts on the first foreign function call
+(`JS_NewRuntime`) — it does not support FFI on macOS. So the fix rests on
+inspection, not on a checker. Recorded so nobody later assumes it was
+machine-verified.
+
+`drain_microtasks` now carries the failing job's exception message out on the
+`<0` path, with a test for it.
+
+---
+
+## Original review of the spike — VERDICT: result accepted, revision required
 
 Gates re-run directly: `cargo test --offline -p event-loop-pump --features
 ffi/backend-yawgpu` → 6 passed, EXIT=0; clippy `-D warnings` → EXIT=0. `ffi` and

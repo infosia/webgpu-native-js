@@ -3,6 +3,7 @@
 //! Spike proving that `wgpuInstanceProcessEvents` and QuickJS microtask
 //! draining are separate queues that must be pumped in order.
 
+use std::cell::Cell;
 use std::ffi::{c_void, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr::{self, NonNull};
@@ -49,7 +50,7 @@ pub enum Error {
     /// QuickJS raised an exception with the contained message.
     Exception(String),
     /// QuickJS reported a pending-job execution failure.
-    PendingJobFailed,
+    PendingJobFailed(String),
     /// QuickJS boolean conversion failed.
     ToBoolFailed,
     /// Installing a JavaScript global failed.
@@ -62,6 +63,30 @@ pub enum Error {
     CallbackPanicked,
     /// The global request-adapter test slot was poisoned.
     SlotPoisoned,
+}
+
+/// State reported by QuickJS for a Promise.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PromiseState {
+    /// The value passed to `JS_PromiseState` was not a Promise.
+    NotAPromise,
+    /// The Promise has not settled.
+    Pending,
+    /// The Promise has been fulfilled.
+    Fulfilled,
+    /// The Promise has been rejected.
+    Rejected,
+}
+
+impl PromiseState {
+    fn from_raw(raw: qjs::JSPromiseStateEnum) -> Self {
+        match raw {
+            qjs::JSPromiseStateEnum_JS_PROMISE_PENDING => Self::Pending,
+            qjs::JSPromiseStateEnum_JS_PROMISE_FULFILLED => Self::Fulfilled,
+            qjs::JSPromiseStateEnum_JS_PROMISE_REJECTED => Self::Rejected,
+            _ => Self::NotAPromise,
+        }
+    }
 }
 
 /// A minimal QuickJS runtime/context pair.
@@ -101,7 +126,10 @@ impl QuickJs {
             match rc {
                 1.. => ran += 1,
                 0 => break,
-                _ => return Err(Error::PendingJobFailed),
+                _ => {
+                    let message = exception_message(job_ctx, "JS_ExecutePendingJob");
+                    return Err(Error::PendingJobFailed(message));
+                }
             }
         }
         Ok(ran)
@@ -154,20 +182,28 @@ impl QuickJs {
     }
 
     fn take_exception<T>(&self, fallback: &'static str) -> Result<T> {
-        let exception = unsafe { qjs::JS_GetException(self.ctx()) };
-        let raw = unsafe { qjs::JS_ToCString(self.ctx(), exception) };
-        let message = if raw.is_null() {
-            fallback.to_owned()
-        } else {
-            let text = unsafe { CStr::from_ptr(raw) }
-                .to_string_lossy()
-                .into_owned();
-            unsafe { qjs::JS_FreeCString(self.ctx(), raw) };
-            text
-        };
-        unsafe { qjs::JS_FreeValue(self.ctx(), exception) };
-        Err(Error::Exception(message))
+        Err(Error::Exception(exception_message(self.ctx(), fallback)))
     }
+}
+
+fn exception_message(ctx: *mut qjs::JSContext, fallback: &'static str) -> String {
+    if ctx.is_null() {
+        return fallback.to_owned();
+    }
+
+    let exception = unsafe { qjs::JS_GetException(ctx) };
+    let raw = unsafe { qjs::JS_ToCString(ctx, exception) };
+    let message = if raw.is_null() {
+        fallback.to_owned()
+    } else {
+        let text = unsafe { CStr::from_ptr(raw) }
+            .to_string_lossy()
+            .into_owned();
+        unsafe { qjs::JS_FreeCString(ctx, raw) };
+        text
+    };
+    unsafe { qjs::JS_FreeValue(ctx, exception) };
+    message
 }
 
 impl Drop for QuickJs {
@@ -224,10 +260,13 @@ struct RequestState {
     ctx: *mut qjs::JSContext,
     resolve: qjs::JSValue,
     reject: qjs::JSValue,
-    callback_count: usize,
-    resolved: bool,
-    panicked: bool,
-    thread_id: Option<ThreadId>,
+    callback_count: Cell<usize>,
+    resolver_called: Cell<bool>,
+    adapter_release_count: Cell<usize>,
+    retain_callback_adapter: Cell<bool>,
+    retained_adapter: Cell<usize>,
+    panicked: Cell<bool>,
+    thread_id: Cell<Option<ThreadId>>,
 }
 
 impl RequestState {
@@ -236,10 +275,13 @@ impl RequestState {
             ctx,
             resolve,
             reject,
-            callback_count: 0,
-            resolved: false,
-            panicked: false,
-            thread_id: None,
+            callback_count: Cell::new(0),
+            resolver_called: Cell::new(false),
+            adapter_release_count: Cell::new(0),
+            retain_callback_adapter: Cell::new(false),
+            retained_adapter: Cell::new(0),
+            panicked: Cell::new(false),
+            thread_id: Cell::new(None),
         }
     }
 }
@@ -249,6 +291,10 @@ impl Drop for RequestState {
         unsafe {
             qjs::JS_FreeValue(self.ctx, self.resolve);
             qjs::JS_FreeValue(self.ctx, self.reject);
+        }
+        let adapter = self.retained_adapter.replace(0) as wgpu::WGPUAdapter;
+        if !adapter.is_null() {
+            unsafe { wgpu::wgpuAdapterRelease(adapter) };
         }
     }
 }
@@ -269,29 +315,53 @@ impl AdapterRequest {
     /// Returns how many times the WebGPU callback has run.
     #[must_use]
     pub fn callback_count(&self) -> usize {
-        self.state.callback_count
+        self.state.callback_count.get()
     }
 
     /// Returns whether the Promise resolver has been called.
     #[must_use]
     pub fn is_resolved(&self) -> bool {
-        self.state.resolved
+        self.state.resolver_called.get()
+    }
+
+    /// Returns the Promise state reported by QuickJS.
+    #[must_use]
+    pub fn promise_state(&self) -> PromiseState {
+        let raw = unsafe { qjs::JS_PromiseState(self.state.ctx, self.promise) };
+        PromiseState::from_raw(raw)
+    }
+
+    /// Returns how many successful adapter handles the callback released.
+    #[must_use]
+    pub fn adapter_release_count(&self) -> usize {
+        self.state.adapter_release_count.get()
+    }
+
+    #[cfg(test)]
+    fn retain_callback_adapter_for_test(&self) {
+        self.state.retain_callback_adapter.set(true);
+    }
+
+    #[cfg(test)]
+    fn retained_callback_adapter(&self) -> Option<wgpu::WGPUAdapter> {
+        let adapter = self.state.retained_adapter.get() as wgpu::WGPUAdapter;
+        NonNull::new(adapter).map(NonNull::as_ptr)
     }
 
     /// Returns whether the extern callback caught a panic.
     #[must_use]
     pub fn callback_panicked(&self) -> bool {
-        self.state.panicked
+        self.state.panicked.get()
     }
 
     /// Returns the thread that executed the WebGPU callback.
     #[must_use]
     pub fn callback_thread_id(&self) -> Option<ThreadId> {
-        self.state.thread_id
+        self.state.thread_id.get()
     }
 
-    fn state_ptr(&mut self) -> *mut RequestState {
-        self.state.as_mut()
+    fn state_ptr(&self) -> *mut RequestState {
+        ptr::from_ref(self.state.as_ref()).cast_mut()
     }
 }
 
@@ -314,7 +384,7 @@ pub fn request_adapter_promise(instance: &Instance, js: &QuickJs) -> Result<Adap
         resolving_funcs[0],
         resolving_funcs[1],
     ));
-    let mut request = AdapterRequest { promise, state };
+    let request = AdapterRequest { promise, state };
 
     let callback_info = wgpu::WGPURequestAdapterCallbackInfo {
         nextInChain: ptr::null_mut(),
@@ -333,7 +403,7 @@ pub fn request_adapter_promise(instance: &Instance, js: &QuickJs) -> Result<Adap
 
 extern "C" fn request_adapter_callback(
     status: wgpu::WGPURequestAdapterStatus,
-    _adapter: wgpu::WGPUAdapter,
+    adapter: wgpu::WGPUAdapter,
     _message: wgpu::WGPUStringView,
     userdata1: *mut c_void,
     _userdata2: *mut c_void,
@@ -343,16 +413,19 @@ extern "C" fn request_adapter_callback(
             return;
         }
 
-        let state = unsafe { &mut *userdata1.cast::<RequestState>() };
-        state.callback_count += 1;
-        state.thread_id = Some(std::thread::current().id());
+        let state = unsafe { &*userdata1.cast::<RequestState>() };
+        state.callback_count.set(state.callback_count.get() + 1);
+        state.thread_id.set(Some(std::thread::current().id()));
 
         if status == wgpu::WGPURequestAdapterStatus_WGPURequestAdapterStatus_Success {
+            retain_callback_adapter_for_test(adapter, state);
+            release_callback_adapter(adapter, state);
+
             let mut value = js_undefined();
             let ret =
                 unsafe { qjs::JS_Call(state.ctx, state.resolve, js_undefined(), 1, &mut value) };
             if unsafe { !qjs::JS_IsException(ret) } {
-                state.resolved = true;
+                state.resolver_called.set(true);
             }
             unsafe { qjs::JS_FreeValue(state.ctx, ret) };
         } else {
@@ -364,9 +437,38 @@ extern "C" fn request_adapter_callback(
     }));
 
     if result.is_err() && !userdata1.is_null() {
-        let state = unsafe { &mut *userdata1.cast::<RequestState>() };
-        state.panicked = true;
+        let state = unsafe { &*userdata1.cast::<RequestState>() };
+        state.panicked.set(true);
     }
+}
+
+/// Releases the owned adapter reference delivered to a request-adapter callback.
+///
+/// Releasing here is legal: `webgpu.h` prohibits re-entrant API calls only from
+/// spontaneous callbacks and explicitly allows nested calls from
+/// `wgpuInstanceProcessEvents` and `wgpuInstanceWaitAny` callback stacks. A real
+/// binding will not release inline; it will enqueue a release request for Phase
+/// 0.5's release queue. This callback is the first point where a `webgpu.h`
+/// handle crosses a callback boundary into our ownership, which is exactly what
+/// that queue exists to manage.
+fn release_callback_adapter(adapter: wgpu::WGPUAdapter, state: &RequestState) {
+    if adapter.is_null() {
+        return;
+    }
+
+    unsafe { wgpu::wgpuAdapterRelease(adapter) };
+    state
+        .adapter_release_count
+        .set(state.adapter_release_count.get() + 1);
+}
+
+fn retain_callback_adapter_for_test(adapter: wgpu::WGPUAdapter, state: &RequestState) {
+    if !state.retain_callback_adapter.get() || adapter.is_null() {
+        return;
+    }
+
+    unsafe { wgpu::wgpuAdapterAddRef(adapter) };
+    state.retained_adapter.set(adapter as usize);
 }
 
 /// Installs the `requestAdapter` JavaScript function used by the tests.
@@ -457,7 +559,7 @@ extern "C" fn js_request_adapter(
             resolving_funcs[0],
             resolving_funcs[1],
         ));
-        let mut request = Box::new(AdapterRequest { promise, state });
+        let request = Box::new(AdapterRequest { promise, state });
         let callback_info = wgpu::WGPURequestAdapterCallbackInfo {
             nextInChain: ptr::null_mut(),
             mode: wgpu::WGPUCallbackMode_WGPUCallbackMode_AllowProcessEvents,
@@ -534,8 +636,10 @@ mod tests {
             .take_request()?
             .ok_or(Error::Null("requestAdapter request"))?;
 
+        assert_eq!(request.promise_state(), PromiseState::Pending);
         process_events(&instance);
         assert!(request.is_resolved());
+        assert_eq!(request.promise_state(), PromiseState::Fulfilled);
         assert!(js.is_job_pending());
         assert!(!js.eval_bool("globalThis.ran")?);
 
@@ -610,5 +714,60 @@ mod tests {
         assert_eq!(request.callback_count(), 1);
         assert_eq!(request.callback_thread_id(), Some(pumping_thread));
         Ok(())
+    }
+
+    #[test]
+    fn successful_request_releases_callback_adapter_exactly_once() -> Result<()> {
+        let _guard = TEST_LOCK.lock().expect("test lock is not poisoned");
+        let js = QuickJs::new()?;
+        let instance = Instance::new_headless()?;
+        let request = request_adapter_promise(&instance, &js)?;
+        request.retain_callback_adapter_for_test();
+
+        process_events(&instance);
+
+        assert_eq!(request.callback_count(), 1);
+        assert_eq!(request.adapter_release_count(), 1);
+        let adapter = request
+            .retained_callback_adapter()
+            .ok_or(Error::Null("retained callback adapter"))?;
+        let _ = unsafe {
+            wgpu::wgpuAdapterHasFeature(
+                adapter,
+                wgpu::WGPUFeatureName_WGPUFeatureName_CoreFeaturesAndLimits,
+            )
+        };
+
+        process_events(&instance);
+        assert_eq!(request.callback_count(), 1);
+        assert_eq!(request.adapter_release_count(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn drain_microtasks_reports_pending_job_exception_message() -> Result<()> {
+        let _guard = TEST_LOCK.lock().expect("test lock is not poisoned");
+        let js = QuickJs::new()?;
+        let rc = unsafe { qjs::JS_EnqueueJob(js.ctx(), Some(throwing_job), 0, ptr::null_mut()) };
+        assert_eq!(rc, 0);
+
+        let err = js.drain_microtasks().expect_err("microtask should throw");
+
+        match err {
+            Error::PendingJobFailed(message) => {
+                assert!(message.contains("microtask boom"), "{message}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        Ok(())
+    }
+
+    unsafe extern "C" fn throwing_job(
+        ctx: *mut qjs::JSContext,
+        _argc: i32,
+        _argv: *mut qjs::JSValue,
+    ) -> qjs::JSValue {
+        let message = qjs::JS_NewString(ctx, c"microtask boom".as_ptr());
+        qjs::JS_Throw(ctx, message)
     }
 }
