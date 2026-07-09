@@ -84,7 +84,113 @@ queue at all — the queue is the backstop for the uncommon one.
 
 ## Q2 — Does the queue need to enforce child-before-parent ordering?
 
-**Status: REFRAMED. Probably not — and if it does, the queue is the wrong place.**
+**Status: ANSWERED (2026-07-09). No. The queue stays a plain FIFO. Ordering is
+made irrelevant by holding a *native* reference to the parent, not by sorting
+release requests and not by relying on GC order.**
+Spike: `spikes/release-queue/`, 10 tests, headless, yawgpu Noop.
+
+### R1 — the four observations
+
+An `Instance` (parent) and an `Adapter` (child) were each wrapped in a JS object
+whose finalizer enqueues a release request. Both JS references were dropped, GC
+was requested four times, and the finalizer log was snapshotted **before** the
+context was torn down, then again after.
+
+| Engine | Parent ref | Finalizers during GC | Finalizers at teardown | Drain order |
+|---|---|---|---|---|
+| QuickJS | with | `["Adapter", "Instance"]` | — | Adapter, Instance |
+| QuickJS | without | `["Adapter", "Instance"]` | — | Adapter, Instance |
+| JSC | with | **none (0 of 2)** | `["Instance", "Adapter"]` | Instance, Adapter |
+| JSC | without | **none (0 of 2)** | `["Instance", "Adapter"]` | Instance, Adapter |
+
+### R2 — the first reading of this experiment was wrong, and the fix mattered
+
+The spike's first version read the finalizer log *after* releasing the
+`JSGlobalContext`, and reported `["Instance", "Adapter"]` as JSC's ordering. That
+number was real; the interpretation was not. Releasing a `JSGlobalContext`
+finalizes every surviving object in unspecified order, so the measurement could
+not distinguish a **GC-phase** ordering (which would be a finding about JSC's
+collector) from a **teardown** ordering (which says nothing).
+
+Snapshotting before teardown separated them, and the answer turned out to be more
+interesting than either hypothesis: under JSC **no finalizer ran during GC at
+all.**
+
+### R3 — `JSGarbageCollect` does not run finalizers (independently reproduced)
+
+Confirmed outside the spike, with a minimal program linking the system framework:
+a `JSObjectRef` of a class with a `finalize` callback, its only reference
+dropped, is **not** finalized after four `JSGarbageCollect` calls. It is
+finalized at `JSGlobalContextRelease`. The result is unchanged when the object is
+created in a `noinline` frame that has returned and the machine stack is
+overwritten, so conservative stack rooting is not a sufficient explanation.
+
+`JSBase.h` documents `JSGarbageCollect` as performing a collection, and notes
+that values are destroyed when the last reference to the context group is
+released. It is silent on whether finalizers run promptly. The **public C API
+offers no other GC entry point**, and no synchronous-collect function.
+
+We do not claim to know the mechanism — deferred sweeping and conservative
+rooting are both plausible. The observable fact is enough:
+
+> **Finalizer timing is not controllable through JSC's public C API.**
+
+### R4 — consequence for invariant 7 ("GC is a backstop")
+
+This is now evidence, not prudence. Under JSC, a script that forgets `destroy()`
+may hold GPU memory **until the context is torn down**, and neither the host nor
+the binding can force the finalizer to run. On iOS that is a memory-pressure
+crash waiting to happen.
+
+`destroy()` is therefore not "good practice". Under JSC it is the **only bounded
+path**. This belongs in the user-facing docs in exactly those words.
+
+It also means: **no test may depend on provoking a JSC finalizer via GC.** The
+spike's JSC finalizer test is honestly named `..._is_simulated_from_foreign_thread`
+for this reason.
+
+### R5 — the design: a native parent reference makes ordering a non-question
+
+QuickJS is refcounted, so dropping the child decrements the parent and the child
+is finalized first — deterministically. JSC is a tracing collector, and at
+teardown the order is unspecified; here it ran **parent first**. So finalizer
+order differs by engine, and under JSC it is unspecified by construction.
+Depending on it is depending on sand — in *either* engine, since teardown has no
+ordering guarantee anywhere.
+
+Rather than teach the queue to topologically sort, **each child wrapper takes a
+native reference on its parent handle**: wrapping an `Adapter` calls
+`wgpuInstanceAddRef(instance)` and stores the handle in the child's release
+payload. The child's release request releases the adapter *and then* drops that
+parent reference. The parent's native object cannot be destroyed while a child's
+native reference exists — **whatever order finalizers ran in, whatever order the
+queue drains in.**
+
+Verified by draining **parent-first on purpose**, the worst case. Observed native
+release sequence: `["Instance", "Adapter", "AdapterParentInstanceRef"]` — the
+wrapper's own instance release runs first, the adapter is still valid when its
+release runs, and the child-held parent reference drops last. ASan reported no
+double-free and no use-after-free. (macOS ships no LeakSanitizer, so that run
+does not speak to leaks; the exactly-once assertions do.)
+
+**The queue remains a plain FIFO. No ordering logic was added.**
+
+Note what this separates. The JS-level parent reference is about keeping the
+parent's *wrapper identity* alive for `.parent`-style accessors. The native
+`AddRef` is about keeping the parent's *native object* alive. Rev 2 conflated
+these two jobs into one mechanism, and the mechanism it picked only works under a
+refcounting engine.
+
+Caveat, stated: this was verified against yawgpu, whose handles are `Arc`-based
+and therefore tolerant. It demonstrates that the native-reference design is
+*sufficient*; it cannot demonstrate that a less tolerant backend would have
+failed without it. That is the point of holding the reference rather than
+assuming the backend retains its parents internally — the specification says
+nothing either way.
+
+### Superseded framing
+
+**Status when opened: REFRAMED. Probably not — and if it does, the queue is the wrong place.**
 
 `CLAUDE.md` invariant 4 says "the queue also enforces child-released-before-parent
 ordering". The specification is **silent** on whether a child object keeps its
@@ -114,8 +220,19 @@ child's, under each engine.
 
 ## Q3 — Who owns the drain thread?
 
-**Status: OPEN.** Plan §6 Q2. Given that `wgpuInstanceProcessEvents` is
-explicitly thread-safe and the pump already runs once per frame on the host's
-thread (`specs/tracking/event-loop.md`), the obvious answer is "the thread that
-calls `tick()`". Confirm in Phase 0.5; do not spin up a thread this project owns
-without a reason.
+**Status: ANSWERED (2026-07-09). The thread that calls `tick()`. This project
+spins up no thread of its own.**
+
+`wgpuInstanceProcessEvents` and `wgpuInstanceWaitAny` are explicitly thread-safe
+(Q1), and `WGPUInstance` is the one object the specification guarantees is usable
+from any thread. The pump already runs once per frame on the host's thread
+(`specs/tracking/event-loop.md`). Draining there costs nothing extra and keeps
+every `wgpuXxxRelease` on a single, known thread.
+
+The spike asserts this by thread id: every release executes on the thread that
+called `drain()`, never on a finalizer's thread. A finalizer that panics is
+contained, does not unwind across the engine's C boundary, does not poison the
+queue, and does not leak its handle — the queue still drains afterwards.
+
+This closes plan §6 Q2. Revisit only if a host appears whose frame thread must
+not block on GPU teardown.

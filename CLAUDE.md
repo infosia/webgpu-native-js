@@ -78,20 +78,29 @@ The plan's §7 has the full evidence. These are the conclusions that are now
    fires on an arbitrary GC thread, so calling `wgpuXxxRelease` from it is UB
    against a conformant backend, undetectably. `WGPUInstance`,
    `wgpuInstanceProcessEvents`, and the `destroy()` family *are* unconditionally
-   thread-safe — which is what lets the pump thread be the drain thread.
-   Child-before-parent ordering is a separate question, reframed in
-   `release-queue.md` → Q2: prefer having each JS wrapper keep its parent
-   wrapper alive over teaching the queue to sort.
+   thread-safe — which is what lets the pump thread be the drain thread, and the
+   drain thread is the `tick()` thread (`release-queue.md` → Q3).
+   **The queue is a plain FIFO and never sorts.** Ordering is made irrelevant
+   instead: each child wrapper takes a *native* `wgpuXxxAddRef` on its parent
+   handle and drops it with the child's release. Finalizer order differs by
+   engine — QuickJS is refcounted and orders child-first; JSC gives no ordering
+   at all — so no design may depend on it (`release-queue.md` → Q2).
 5. **Codegen input is WebIDL joined with `webgpu.yml`.** `webgpu.yml` describes
    the C ABI and carries no dictionary defaults, string enums, flag namespaces,
    `Promise` types, or `[EnforceRange]` coercion. `dawn.node` generates from
    WebIDL for exactly this reason.
 6. **Handle adoption is the primary entry point.** `wrap_device(WGPUDevice)`,
    not `requestAdapter()`. The host owns the GPU before the script VM starts.
-7. **GC is a backstop, not a resource-management strategy.** Scripts call
-   `destroy()`; the finalizer exists so that forgetting is a leak-until-GC
-   rather than a leak-forever. On mobile, waiting for a finalizer to free GPU
-   memory is a bug. Say so in user-facing docs.
+7. **GC is a backstop, not a resource-management strategy** — and **under JSC
+   it is barely even that.** Measured (`release-queue.md` → R3): a JSC object
+   whose only reference is dropped is **not** finalized by `JSGarbageCollect`,
+   even after four calls; it is finalized at `JSGlobalContextRelease`. The
+   public C API offers no other GC entry point and no synchronous collect. So a
+   script that forgets `destroy()` may hold GPU memory until the context dies,
+   and neither host nor binding can force the finalizer. `destroy()` is not
+   "good practice" — under JSC it is the **only bounded path**. Say exactly that
+   in user-facing docs. Corollary: **no test may provoke a JSC finalizer via
+   GC.**
 8. **Scripts are trusted.** First-party game logic, not a browser sandbox.
    Spend no effort hardening against adversarial JS; spend it on catching
    honest mistakes with clear, early errors.

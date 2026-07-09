@@ -249,14 +249,21 @@ and so are `wgpuDeviceDestroy` / `wgpuBufferDestroy` / `wgpuTextureDestroy` /
 all. **The queue is the backstop for the forgetful path, not the common one.**
 
 On **child-before-parent ordering**, Rev 2 said the queue is "the natural place to
-enforce" it. That is now doubted (`release-queue.md` → Q2). The specification is
-silent on whether a child keeps its parent alive, and an ordering-aware queue
-means modelling the object graph in `core/` and topologically sorting release
-requests. A cheaper mechanism dissolves the question: let each JS wrapper hold a
-reference to its **parent's wrapper**, so the engine's own GC cannot collect a
-parent while a child lives. Finalizers then run in a valid order by construction
-and the queue stays a plain FIFO. This is what `dawn.node` does. **Decide it in
-Phase 0.5 with a test, not by assertion.**
+enforce" it. **Wrong, and settled by measurement** (`release-queue.md` → Q2/R5).
+The queue is a plain FIFO and never sorts.
+
+Finalizer order cannot be depended on: QuickJS, being refcounted, orders
+child-first deterministically; JSC ran **parent first**, and at context teardown
+neither engine guarantees anything. Instead, **each child wrapper takes a native
+`wgpuXxxAddRef` on its parent handle** and drops it with the child's release.
+The parent's native object then cannot die while a child's native reference
+lives, whatever order finalizers or drains happen in. Verified by draining
+parent-first on purpose, ASan-clean.
+
+Note the separation Rev 2 missed: a JS-level parent reference keeps the parent's
+*wrapper* alive; a native `AddRef` keeps the parent's *native object* alive.
+Those are different jobs, and the JS-level mechanism only works on a refcounting
+engine.
 
 Rev 2 also claimed the queue "keeps release calls out of any
 `wgpuInstanceProcessEvents` callstack". That motivation is void: `webgpu.h`
@@ -507,7 +514,17 @@ invalidate §2.4.
    removes cross-thread signalling entirely. Residual: two review findings
    (the crux test asserts our own flag rather than `JS_PromiseState`; the
    callback leaks its `WGPUAdapter`) — handoff issued.
-5. Prototype the release queue (§2.5) standalone: allocate one buffer handle,
+5. Prototype the release queue (§2.5) standalone. ✅ **DONE 2026-07-09** —
+   `specs/tracking/release-queue.md`. Finalizer → enqueue → drain, exactly once,
+   releases on the `tick()` thread only, no `webgpu.h` call inside any
+   finalizer, a panicking finalizer contained. Three corrections came out of it:
+   the thread-safety justification (Q1), the ordering mechanism (Q2/R5 — native
+   parent `AddRef`, FIFO queue), and the discovery that **`JSGarbageCollect`
+   does not run finalizers at all** (R3), which turns invariant 7 from prudence
+   into evidence. The JSC-finalizer-on-a-foreign-thread case is **simulated, not
+   observed**, precisely because of R3; the spike says so in its test name.
+
+   *(original wording)* allocate one buffer handle,
    trigger release from a QuickJS finalizer and separately from a JSC finalizer,
    confirm the queue delivers exactly one `wgpuBufferRelease` from the designated
    thread in both cases.
