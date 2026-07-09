@@ -202,6 +202,21 @@ context-primed reviewer rationalizes away.
 The Clean Review reviewer is a throwaway subagent per phase, with no memory of
 previous phases beyond what the diff shows. This is deliberate.
 
+**Reviewers that mutate the tree get their own `git worktree`.** Block 03's review
+ran three lenses in parallel over one working tree. One of them proved a guard by
+deleting it and re-running; another, running its suite at that moment, saw the
+resulting failure and reported it as a **non-deterministic flake in the guard's
+own test** — a finding it could then never reproduce in fifty attempts.
+
+The reported failure was `a21_rejects_offsets…: "mapAsync offset=2^32 must be
+rejected"`, which is *exactly and only* the assertion that fails when that guard
+is removed. It was not a flake. It was another reviewer's experiment.
+
+An experiment that deletes a guard is the most valuable thing a Clean Review can
+do (block 03's fifth tautology was found that way). It must not be paid for with a
+phantom defect in someone else's report. **Give any reviewer licensed to edit the
+tree an isolated worktree, or run it alone.**
+
 ### The JSC phase carries an extra exit gate
 
 Per `CLAUDE.md`, wiring the JavaScriptCore adapter must require **zero changes to

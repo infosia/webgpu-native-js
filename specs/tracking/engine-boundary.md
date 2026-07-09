@@ -586,6 +586,29 @@ divergence from the IDL**, written down here rather than quietly shipped. When
 error scopes land, `createBuffer` must stop throwing and start returning an
 invalid buffer.
 
+### B15 — recorded deviation: every `createXxx` failure, not just `createBuffer`
+
+R13 recorded that `createBuffer` throws on a null handle where the IDL returns an
+*invalid* `GPUBuffer` and routes to an error scope. Block 03 added **eight more
+constructors** with the same throw-on-null shape: `createShaderModule`,
+`createBindGroupLayout`, `createPipelineLayout`, `createBindGroup`,
+`createComputePipeline`, `createCommandEncoder`, `commandEncoder.finish`, and
+`beginComputePass`. All are recorded here now, not just the first.
+
+**And there is a sharper problem the null check does not reach.** Only
+`wgpuDeviceCreateBuffer` is declared `WGPU_NULLABLE`. The other seven **cannot
+return null**: on a validation failure they return a non-null **invalid** handle,
+which the binding wraps and hands to script as though it were fine. The failure
+surfaces **nowhere** — not as an exception, not in an error scope, because error
+scopes are Phase 6.
+
+So the deviation is asymmetric: `createBuffer` fails loudly and wrongly; the other
+seven fail silently and wrongly. Both are temporary. When error scopes land, all
+nine must stop throwing, return their invalid object, and route the error.
+
+Until then, this is written down rather than shipped quietly — which is the whole
+point of B15.
+
 ### R11 — recorded limit: `GPUSize64` through a JS `Number`
 
 `size` is `[EnforceRange] unsigned long long` in WebIDL and `uint64_t` in the C

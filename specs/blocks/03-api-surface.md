@@ -259,14 +259,53 @@ cannot be reproduced from the tree is on the honour system.
 - **B9 — `wgpuQueueSubmit` does not take ownership.** The header says nothing, and
   yawgpu's implementation neither `AddRef`s nor `Release`s the command buffers.
   The caller keeps each `WGPUCommandBuffer` and releases it through the queue like
-  any other wrapper. (A `GPUCommandBuffer` is nonetheless *consumed* in WebGPU's
-  sense — resubmitting it is a validation error — which is a wrapper-state
-  question, not a refcount one. See B10.)
+  any other wrapper.
 
-- **`JsEngine` needed no sequence primitive.** `length` plus indexed
-  `get_property` sufficed. The cost is one engine call per element and one index
-  stringification. Revisit only if a profile says so; a new trait method is a
-  permanent tax on every engine.
+  > **Retraction.** This entry originally continued: *"A `GPUCommandBuffer` is
+  > nonetheless consumed in WebGPU's sense — resubmitting it is a validation
+  > error — which is a wrapper-state question, not a refcount one. See B10."*
+  > That sentence reads as though single-use were handled. **It is not.**
+  > `CommandBufferPayload` carries only a handle, no `consumed` flag, and
+  > `queue_submit` marks nothing, so a script can submit the same
+  > `GPUCommandBuffer` twice and reach `wgpuQueueSubmit` with the same handle.
+  > B10's state tracking was implemented for the encoder and the pass and not for
+  > the command buffer. I wrote the sentence; a reviewer caught that it described
+  > work nobody had done. **B19** now requires it.
+
+**B19 — `GPUCommandBuffer` is single-use.** `finish()` produces it; `submit()`
+consumes it. A second `submit()` of the same command buffer is a validation error
+raised by the binding, in the same way `finish()` twice and `end()` twice are
+(B10). Track it in the wrapper. The handle is still released by the finalizer
+through the queue — consumption and release are different, exactly as `destroy()`
+and release are (block 01 → R14).
+
+- **`getMappedRange()` is one JS method and two C functions** — see block 02 → A29.
+
+- **`JsEngine` needed no sequence primitive — but the shortcut is not WebIDL.**
+  `sequence_len` reads `.length`; `sequence_item` reads the stringified index. That
+  is **array-like** access. WebIDL's `sequence<T>` conversion is **iterator-based**
+  (`Symbol.iterator`), and the two accept different things:
+
+  | Value | WebIDL | us |
+  |---|---|---|
+  | `{ length: 2, 0: a, 1: b }` | rejected | **accepted** |
+  | `new Set([a, b])`, a generator | accepted | **rejected** |
+
+  Both directions are wrong, and **a green suite cannot see either** — nothing
+  constructs an array-like or a non-array iterable. It would surface only against
+  the upstream TypeScript CTS, which this project names as the binding layer's
+  natural oracle.
+
+  **B20 — record the divergence, and pin it with a test.** Add tests asserting
+  today's behaviour (array-like accepted, `Set` rejected) and mark them as
+  documenting a **known deviation**, not a desired one. Then decide the primitive
+  when Phase 4's codegen emits sequence conversions and JavaScriptCore has a vote
+  on its shape — the same reasoning that deferred `associate_value` (block 02 →
+  A27). A trait method is a permanent tax on every engine; choosing it with one
+  engine in the tree is the error that produced P2-C3.
+
+  The honest form of the original claim: *"a non-conforming `length`+index
+  shortcut avoided adding a primitive,"* not *"no primitive was needed."*
 
 - **`getMappedRange()` is one JS method and two C functions** — the writable
   pointer returns `NULL` on a read mapping. This block's copy round-trip found it.

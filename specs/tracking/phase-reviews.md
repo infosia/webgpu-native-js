@@ -5,6 +5,81 @@ Fix)". Findings, triage decisions, fixes, and gate results live here.
 
 ---
 
+## Block 03 Review — 2026-07-10
+
+Three fresh no-context reviewers. **No CRITICAL.** Six MAJOR, and two of them are
+mine.
+
+The central bet held under real pressure: ten interfaces with struct chaining,
+dictionary arrays, string enums, nullable-vs-non-null strings and stored handles,
+and **block 03 added zero methods to `JsEngine` and zero `core/` logic for
+QuickJS**. Two reviewers verified that independently. The arena is address-stable
+(`Box<[T]>` behind a `Vec`, so `Vec` reallocation moves the boxes, not the data).
+Partial sequence failure leaks nothing. All 19 `unsafe impl Send`/`Sync` carry
+accurate `// SAFETY:` comments, checked type by type.
+
+**And the mock was not a mirror this time.** The conversion tests inspect the real
+produced C structs — `chain.sType`, `native.entries`, `entryPoint.data/length` —
+not a Rust shadow the conversion also wrote.
+
+### Findings and triage
+
+| ID | Sev | Where | Finding | Disposition |
+|---|---|---|---|---|
+| **B3-M1** | MAJOR | `core/src/lib.rs:1499` | `wgpuDeviceGetQueue` is documented `@ref ReturnedWithOwnership` — it **already returns an owned reference**. `device_queue_get` takes it and calls `queue_add_ref` on top; `finalize_queue` releases once. **One native ref leaks per `device.queue` read.** The mock's queue add/release are counter-less no-ops, so no test sees it. | **Confirmed at source** (`webgpu.h:6360`, `doc/articles/Ownership.md:12`). Handed over. |
+| **B3-M2** | MAJOR | `adapters/quickjs/src/lib.rs:1564` | `arraybuffer_free` early-returns unless `ptr` is null. On the **unmap** path QuickJS calls it twice (real pointer, then `NULL`) and the release fires. On the **GC-only** path — script drops a mapped range and never calls `unmap()` — it is called **once, with a real pointer**, and the `buffer_add_ref` and owner `Box` leak **forever**. `CLAUDE.md` principle 5 promises *leak-until-GC, not leak-forever*. `mapped_range_survives_after_buffer_wrapper_is_collected` walks that path and asserts nothing about releases. | **Confirmed.** Handed over. |
+| **B3-M3** | MAJOR | `core/src/mock.rs:1415` | **The fifth tautology.** `b7_write_buffer_rejects_size_that_would_truncate_on_32_bit_hosts` passes with its guard removed: `end > data.len()` then throws the same `TypeError: size` the test asserts. The named B18 demonstration is dead; the real coverage is incidental, via `a21`. | **Reproduced by Claude**: guard removed → `b7` **passes**, `a21` **fails**. Unlike `b8`, this one was **undisclosed**. Handed over. |
+| **B3-M4** | MAJOR | block 03 §7 | §7 claimed command-buffer single-use is *"a wrapper-state question, not a refcount one. See B10."* **`CommandBufferPayload` has no `consumed` flag** and `queue_submit` marks nothing. A script can submit the same `GPUCommandBuffer` twice. | **My overclaim.** I wrote a sentence describing work nobody had done. Retracted in §7; **B19** now requires it. Handed over. |
+| **B3-M5** | MAJOR | `core/src/lib.rs:2649` | `sequence_len`/`sequence_item` read `.length` and stringified indices. WebIDL's `sequence<T>` conversion is **iterator-based**. So `{length:2, 0:a, 1:b}` is accepted where WebIDL rejects, and a `Set` or generator is rejected where WebIDL accepts. **Both directions wrong; a green suite sees neither.** §7's *"no primitive was needed"* was an overclaim — mine. | **Confirmed.** §7 rewritten; **B20** records the deviation and pins it with tests. The primitive is chosen in Phase 4, with JSC voting — the same reasoning that deferred `associate_value`. |
+| **B3-M6** | MAJOR | `core/src/lib.rs:309` | `.expect("just-pushed WGSL source")` in library code. Unreachable today and caught by the callback's `catch_unwind` before any C boundary — but `CLAUDE.md` principle 8 admits one exception and this is not it. Its sibling arena allocators return `map_or(&[][..], …)`. | Handed over. |
+| B3-m1 | MINOR | `core/src/lib.rs:2685, 2772` | `binding` is read with `get_property(..).ok()`, substituting `0` when the getter **throws**. WebIDL propagates. Uniform across engines, so not a boundary defect. | Handed over. |
+| B3-m2 | MINOR | `core/src/lib.rs` (`detach_all_ranges`) | The `CopyInCopyOut` arm copies back on **read** mappings too — it never checks `map_mode` — contradicting its own SAFETY comment. Dead for QuickJS. **Live the day JSC lands.** | Handed over. Fix now, while it is free. |
+| B3-m3 | MINOR | `core/src/lib.rs` (`TracedValues`) | `unsafe impl Sync` is sound only under QuickJS's on-thread GC. A JSC any-thread finalizer breaks it. | Recorded as a **Phase 3 landmine**; the SAFETY comment must say so. |
+| B3-m4 | MINOR | `engine-boundary.md` | B15 asks that the synchronous-exception divergence be recorded "alongside R13's". Only `createBuffer` is. The eight new constructors are not — and for the seven **non-nullable** ones a backend validation failure returns an *invalid* handle the binding wraps silently, surfacing nowhere until Phase 6. | Fixed by Claude below. |
+| B3-m5 | MINOR | every `device_create_*` | On the `E::new_instance` error path (engine OOM) the `AddRef`'d handles and the fresh native object leak — the payload `Box` drops without its finalizer. | Handed over. |
+
+### The "flake" that was another reviewer's experiment
+
+The compliance lens reported a **non-deterministic failure**: on its first run,
+`a21_rejects_offsets_that_would_truncate_on_32_bit_hosts` failed with *"mapAsync
+offset=2^32 must be rejected"*, then passed fifty-plus subsequent runs. It could
+not root-cause it and, correctly, refused to wave it away.
+
+It is not a flake, and the guard is fine. **I ran the suite forty times: zero
+failures.** The explanation is that the three lenses shared one working tree, and
+the adversarial lens was proving a guard **by deleting it** — and the assertion it
+observed is *exactly and only* the one that fails when that guard is gone. I
+reproduced that myself.
+
+**This is a defect in my review process, not in the product.** Deleting a guard to
+see it go red is the single most valuable thing a Clean Review does — it is how the
+fifth tautology was found. It must not be paid for with a phantom defect in another
+reviewer's report. `workflow.md` now requires an isolated `git worktree` for any
+reviewer licensed to edit the tree.
+
+### Which vacuous rules came back
+
+The question that caught Phase 2's two aborts, asked again. **R7 did not** become
+applicable: all nine new payloads hold `WGPU*` handles only, no `E::Value`. But
+**R25 did** — block 03 introduced `Mutex<CommandEncoderState>` and
+`Mutex<ComputePassState>`, and `live_compute_pass` takes nested locks. A reviewer
+checked that every guard is dropped before re-entering `core/` and that the lock
+order is consistent, so R25 is **satisfied — and now newly applicable, recorded
+rather than assumed**.
+
+### Two of the six are mine
+
+B3-M4 and B3-M5 are both **overclaims in a document I wrote**, in the section
+titled *"Answers this block produced"*. One described work nobody had done; the
+other reported a shortcut as a design conclusion. Neither was caught by the two
+lenses reading the code — only by the lens told to hunt for claims the evidence
+does not support.
+
+That is the third phase running in which the most valuable finding came from
+asking *"what does green not mean?"* rather than *"is the code correct?"*
+
+---
+
 ## Phase 2 Review — 2026-07-09
 
 Three fresh no-context reviewers. The third lens was pointed at a single
