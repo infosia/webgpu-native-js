@@ -223,20 +223,45 @@ JSC finalizers **may fire on any thread** (documented engine behavior).
 **Rev 1 justified the release queue by that JSC fact and called it "the
 highest-risk piece of the whole design." Both halves need correcting.**
 
-The firmer justification: **`webgpu.h` documents no general thread-safety
-guarantee for `wgpuXxxRelease`.** (The header's only "any thread" statement
-concerns the uncaptured-error callback.) Every current implementation happens to
-be thread-safe by construction — yawgpu and wgpu-native use `Arc`, Dawn uses
-atomic refcounts — but that is an *implementation accident*, and depending on it
-across three swappable backends is exactly the coupling this project exists to
-avoid.
+The firmer justification, **corrected 2026-07-09** (`specs/tracking/release-queue.md`
+→ Q1; Rev 2 asserted the opposite and was wrong):
 
-Two further reasons Rev 1 did not give:
+`webgpu.h` **is** thread-safe — but only *"where multithreading is supported"*,
+and `doc/articles/Multithreading.md` explicitly allows an implementation to
+require that every returned object **except `WGPUInstance`** be used only on its
+creating thread, *"causing undefined behavior otherwise"*. Native implementations
+merely **should** support multithreading. And **nothing in the API exposes which
+kind of implementation you have** — the token `multithread` appears nowhere in
+`webgpu.h`, and the instance-feature enum offers only `TimedWaitAny`,
+`ShaderSourceSPIRV`, and `MultipleDevicesPerAdapter`.
 
-- It is the natural place to enforce **child-released-before-parent** ordering.
-  Rev 1 deferred that to Phase 6 as a robustness pass; it is a **design input**.
-- It keeps release calls out of any `wgpuInstanceProcessEvents` callstack, which
-  `webgpu.h` warns about (§2.6).
+So a JSC finalizer, firing on an arbitrary GC thread, calling `wgpuBufferRelease`
+is undefined behaviour against a conformant backend — **undetectably**. That is
+why finalizers enqueue. Rev 2's reasoning ("the header promises nothing; the
+backends' `Arc` refcounting is an accident") reached the right conclusion by the
+wrong route: it was right about the risk and wrong about the specification.
+
+The exceptions are the ones we need: `WGPUInstance` is usable from any thread,
+`wgpuInstanceProcessEvents` and `wgpuInstanceWaitAny` are explicitly thread-safe,
+and so are `wgpuDeviceDestroy` / `wgpuBufferDestroy` / `wgpuTextureDestroy` /
+`wgpuQuerySetDestroy`. The pump thread can therefore be the drain thread, and the
+`destroy()` path — which scripts are expected to take — never needs the queue at
+all. **The queue is the backstop for the forgetful path, not the common one.**
+
+On **child-before-parent ordering**, Rev 2 said the queue is "the natural place to
+enforce" it. That is now doubted (`release-queue.md` → Q2). The specification is
+silent on whether a child keeps its parent alive, and an ordering-aware queue
+means modelling the object graph in `core/` and topologically sorting release
+requests. A cheaper mechanism dissolves the question: let each JS wrapper hold a
+reference to its **parent's wrapper**, so the engine's own GC cannot collect a
+parent while a child lives. Finalizers then run in a valid order by construction
+and the queue stays a plain FIFO. This is what `dawn.node` does. **Decide it in
+Phase 0.5 with a test, not by assertion.**
+
+Rev 2 also claimed the queue "keeps release calls out of any
+`wgpuInstanceProcessEvents` callstack". That motivation is void: `webgpu.h`
+prohibits re-entrant calls only from **spontaneous** callbacks and explicitly
+exempts the `ProcessEvents` and `WaitAny` callstacks (§2.6).
 
 So: all finalizers, regardless of engine, push a release request onto a shared
 thread-safe queue rather than calling `wgpuXxxRelease` directly. A designated

@@ -69,12 +69,19 @@ The plan's §7 has the full evidence. These are the conclusions that are now
    returns `>0` / `0` / `<0`; the `<0` case must surface the exception, or a
    throwing `.then()` vanishes silently.
 4. **Finalizers never call `webgpu.h` directly.** They push onto the release
-   queue. Not because of JSC's any-thread finalizers, but because `webgpu.h`
-   guarantees *no* thread-safety for `wgpuXxxRelease`; that all three backends
-   happen to be `Arc`/atomic-refcounted is an implementation accident, and
-   depending on it is the coupling this project exists to avoid. The queue also
-   enforces child-released-before-parent ordering — a design input, not a late
-   robustness pass.
+   queue; a designated thread drains it. Reason (corrected 2026-07-09, evidence
+   in `specs/tracking/release-queue.md` → Q1): `webgpu.h` *is* thread-safe —
+   **but only "where multithreading is supported"**, and an implementation is
+   explicitly allowed to confine every object except `WGPUInstance` to its
+   creating thread, making off-thread use undefined behaviour. **Nothing in the
+   API lets a caller ask which kind of implementation it has.** A JSC finalizer
+   fires on an arbitrary GC thread, so calling `wgpuXxxRelease` from it is UB
+   against a conformant backend, undetectably. `WGPUInstance`,
+   `wgpuInstanceProcessEvents`, and the `destroy()` family *are* unconditionally
+   thread-safe — which is what lets the pump thread be the drain thread.
+   Child-before-parent ordering is a separate question, reframed in
+   `release-queue.md` → Q2: prefer having each JS wrapper keep its parent
+   wrapper alive over teaching the queue to sort.
 5. **Codegen input is WebIDL joined with `webgpu.yml`.** `webgpu.yml` describes
    the C ABI and carries no dictionary defaults, string enums, flag namespaces,
    `Promise` types, or `[EnforceRange]` coercion. `dawn.node` generates from
