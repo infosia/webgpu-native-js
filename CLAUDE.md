@@ -94,6 +94,15 @@ The plan's §7 has the full evidence. These are the conclusions that are now
    over `E`. Copying at `unmap()` is spec-conformant — WebGPU defines mapped
    contents as becoming visible to the GPU at `unmap()` — so this is a
    performance difference on the Tier 2 engine, not a behavioural one.
+10. **Under JSC, never take the C bytes pointer of a buffer script can see.**
+    `JSObjectGetArrayBufferBytesPtr` and `JSObjectGetTypedArrayBytesPtr` invoke
+    WebKit's `pinAndLock()`: the buffer becomes permanently non-detachable, and
+    a later `transfer()` **silently succeeds without detaching**. The obvious
+    `CopyInCopyOut` implementation therefore leaves script holding a live buffer
+    after `unmap()` with no error raised anywhere. Copy through a private
+    staging buffer and detach via `transfer()` *before* touching any pointer —
+    protocol in `engine-boundary.md` → Q1b. Treat any C pointer taken from a
+    script-reachable buffer as a CRITICAL finding.
 
 ## Engine support tiers
 

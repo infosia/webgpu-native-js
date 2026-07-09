@@ -1,5 +1,5 @@
-# Rust build artifacts
-/target/
+# Rust build artifacts (any depth — spikes/ and future workspace members)
+target/
 **/*.rs.bk
 
 # Generated bindings are build artifacts ($OUT_DIR), never committed

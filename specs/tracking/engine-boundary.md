@@ -99,10 +99,17 @@ enum MappedRangeStrategy {
 
 **This is spec-conformant, not a deviation.** WebGPU defines the contents of a
 mapped range as becoming visible to the GPU at `unmap()`, so copying at `unmap()`
-is exactly the contract. The cost is one `memcpy` per mapped range per map cycle
-on the JSC tier — a **performance** difference, recorded here, not a behavioural
-one. JSC is Tier 2 / experimental (`CLAUDE.md` → Engine support tiers), so this
-is an acceptable price.
+is exactly the contract. The cost is a bounded number of `memcpy`s per mapped
+range per map cycle on the JSC tier — a **performance** difference, not a
+behavioural one. JSC is Tier 2 / experimental (`CLAUDE.md` → Engine support
+tiers), so this is an acceptable price.
+
+> **Amended 2026-07-09 after the Q1b spike.** The original wording here said
+> "one `memcpy`". That was wrong, and the reason it was wrong is important
+> enough to have its own section — see **Q1b, the pinning hazard**. The copy
+> cannot be done through the obvious C pointer at all. The corrected protocol
+> is in Q1b → "Decided JSC mapping protocol"; it costs two copies per
+> direction, still O(n) `memcpy` and not O(n) engine calls.
 
 ### Why this validates the boundary rather than breaking it
 
@@ -118,6 +125,144 @@ gate. `CLAUDE.md` invariant 1 stands.
 
 Had we discovered this in Phase 3 instead of Phase 0, the copy path would have
 been retrofitted into ~40 generated interfaces. This is what Phase 0 is for.
+
+---
+
+## Q1b — The pinning hazard (found by the JSC spike, 2026-07-09)
+
+**Status: ANSWERED. This is the most dangerous thing found so far.**
+
+The Q1a JSC-arm spike (`spikes/jsc-detach/`) came back with an unexpected
+report: taking the buffer's C bytes pointer appeared to prevent later detach.
+Independently reproduced, and it is **worse than reported**.
+
+### E5 — taking a C bytes pointer permanently and *silently* disables detach
+
+| Sequence on an engine-owned `new ArrayBuffer(8)` | `transfer()` result |
+|---|---|
+| no C pointer taken | `detached = true` ✅ |
+| `JSObjectGetArrayBufferBytesPtr` taken first | `detached = **false**`, no exception |
+| `JSObjectGetTypedArrayBytesPtr` taken first | `detached = **false**`, no exception |
+
+This is WebKit's `ArrayBuffer::pinAndLock()`: once a C client takes the pointer,
+the buffer is non-detachable for the rest of its life. `transfer()` does not
+throw — it **silently degrades to a copy** and leaves the original attached.
+
+**Why this is the worst possible failure mode.** The natural, obvious
+implementation of `CopyInCopyOut` is: allocate an engine-owned `ArrayBuffer`,
+take its bytes pointer, `memcpy`, hand it to script; at `unmap()`, `memcpy` back
+and `transfer()` to detach. **Every step succeeds. No error is raised. And the
+buffer is never detached** — script keeps a live, readable, writable view after
+`unmap()`. The exact hazard `CopyInCopyOut` exists to prevent is reintroduced
+through the back door, with no diagnostic.
+
+A test suite that never calls `bytes_ptr()` and `unmap()` on the *same* mapping
+will not catch this. The spike's own tests do not: `read_mapping_…` calls
+`bytes_ptr()` but never unmaps.
+
+### E6 — the staging + `transfer()` protocol restores a fast, safe path
+
+Verified directly. `transfer()` on a *pinned* buffer still returns a **new,
+unpinned, correctly-populated** buffer; and the product of `transfer()` is itself
+detachable.
+
+```
+staging (pinned, memcpy'd from foreign) --transfer()--> visible  [bytes intact]
+visible.transfer() -> detached = true                            [detachable ✅]
+
+v2 (script-visible, never pinned) --transfer()--> out            [v2 detached ✅]
+C bytes pointer of `out` -> memcpy to foreign                    [safe: out is private]
+```
+
+### Decided JSC mapping protocol
+
+**Rule: the C bytes pointer of any buffer script can see must never be taken.**
+
+- **`getMappedRange()` (copy-in).** Allocate a *staging* `ArrayBuffer`; take its
+  C pointer (pinning it — it is private); `memcpy` foreign → staging; then
+  `visible = staging.transfer()`. Hand `visible` to script and drop `staging`.
+  `visible` is unpinned, populated, and detachable.
+- **`unmap()` (copy-out).** `out = visible.transfer()` — this detaches the
+  script-visible buffer (the required semantics) and yields a private copy.
+  *Then* take `out`'s C pointer and `memcpy` out → foreign.
+
+Cost: two copies per direction (one `memcpy`, one engine-internal transfer copy),
+both O(n) bytes. **Not** O(n) engine calls. Acceptable for a Tier 2 engine.
+
+This protocol also removes the ordering trap: detach happens *before* we ever
+touch a pointer, so a pinned buffer can never reach script.
+
+### Review of the spike — VERDICT: accepted as evidence, revision required
+
+Gates re-run directly (not via the agent): `cargo test` → 6 passed, EXIT=0;
+`cargo clippy --all-targets -- -D warnings` → EXIT=0; zero external crates
+(`Cargo.lock` has one package); agent reports ASan EXIT=0.
+
+The spike **does** prove the JSC arm's core claim: after `unmap()`, a script that
+stashed the buffer observes `stash.byteLength === 0` and cannot read through it.
+That result stands.
+
+Findings:
+
+- **MAJOR-1 — `MappedRange::bytes_ptr()` is a public footgun.** It pins the
+  script-visible buffer, silently disabling the detach that `unmap()` depends on.
+  It exists only so one test can assert the pointer differs from the foreign
+  pointer. No API that can permanently break `unmap()` may be reachable that way.
+  The invariant is currently unenforced *and* untested.
+- **MAJOR-2 — the copy is O(n) engine calls, not O(n) bytes.**
+  `copy_from_foreign`/`copy_to_foreign` walk the range one byte at a time through
+  `JSObjectSetPropertyAtIndex` / `JSObjectGetPropertyAtIndex`. The agent chose
+  this *because* of E5, which was the right instinct, but the cost is
+  unacceptable: a 4 MiB mapped range becomes ~4 million engine calls. E6's
+  protocol gets it back to `memcpy`.
+- **MINOR-1** — `copy_to_foreign` does `number as u8`; a `NaN` (from an
+  `undefined` slot) silently becomes `0` rather than erroring.
+- **MINOR-2** — `Error::Exception(&'static str)` discards the JavaScript
+  exception's message, which will make every future JSC failure hard to diagnose.
+- **MINOR-3** — `temporary_uint8_view` sets and deletes a global named
+  `__mapped_range_buffer`, which is observable from script.
+
+MAJOR-1 and MAJOR-2 must be fixed before this informs adapter design.
+
+### Revision handoff → coding agent
+
+```
+## Task: engine-boundary — revise the JSC spike to the staging/transfer protocol
+
+Phase: 0 (spike revision). Read specs/tracking/engine-boundary.md -> Q1b first.
+
+Fix, in order:
+- MAJOR-2: replace the per-byte JSObjectSet/GetPropertyAtIndex copies with the
+  E6 protocol. copy-in: staging ArrayBuffer -> take C ptr -> memcpy ->
+  visible = staging.transfer(). copy-out: out = visible.transfer() (detaches
+  the script-visible buffer) -> take out's C ptr -> memcpy to foreign.
+  The copies must be std::ptr::copy_nonoverlapping, not loops over JS indices.
+- MAJOR-1: delete the public bytes_ptr(). Replace the "pointer is not the
+  foreign pointer" assertion with a stronger, behavioural test: mutate foreign
+  memory from Rust while the range is mapped and prove script does NOT observe
+  the change (for a Read mapping). That tests the property we actually care
+  about without pinning anything.
+- Add a regression test that would have caught E5: take a C bytes pointer of a
+  script-visible buffer, then unmap, and assert that detach FAILS loudly.
+  Encode E5 as a documented, tested invariant rather than folklore.
+- MINOR-1: make out-of-range / non-numeric slots an error, not a silent 0.
+- MINOR-2: carry the JS exception message in Error::Exception.
+- MINOR-3: avoid the observable global; keep the Uint8Array view in C.
+
+Out of scope: QuickJS arm, real GPU, core/ changes, commits, specs/ edits.
+
+Acceptance criteria:
+- [ ] no C bytes pointer is ever taken from a buffer script can reach
+- [ ] copies are memcpy, not per-element engine calls
+- [ ] the E5 regression test exists and passes
+- [ ] post-unmap: stash.byteLength === 0 from script
+- [ ] Read mapping: foreign mutation while mapped is NOT visible to script
+- [ ] zero external crates; builds offline; clippy clean with -D warnings
+- [ ] ASan clean, or a plain statement of why it could not run
+
+Report back: files changed, gate output, and whether E6 held under memcpy-sized
+ranges (try >= 1 MiB) rather than the 4-16 byte toys used so far.
+```
 
 ---
 
