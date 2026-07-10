@@ -1,0 +1,12 @@
+schema_version = 1
+
+[[subset]]
+interface = "GPUDevice"
+members = ["createBuffer"]
+
+[[descriptor]]
+dictionary = "GPUBufferDescriptor"
+
+[[descriptor.strings]]
+member = "label"
+nullable = false

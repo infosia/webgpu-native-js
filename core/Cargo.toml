@@ -10,3 +10,6 @@ mock = []
 
 [dependencies]
 webgpu-native-js-ffi = { path = "../ffi", default-features = false }
+
+[build-dependencies]
+webgpu-native-js-codegen = { path = "../codegen" }

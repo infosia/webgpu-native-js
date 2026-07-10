@@ -1,0 +1,29 @@
+bitflags:
+  - name: buffer_usage
+    entries: []
+structs:
+  - name: buffer_descriptor
+    type: extensible
+    members:
+      - name: label
+        type: string_with_default_empty
+      - name: usage
+        type: bitflag.buffer_usage
+        default: none
+      - name: size
+        type: uint64
+      - name: mapped_at_creation
+        type: bool
+        default: false
+objects:
+  - name: device
+    methods:
+      - name: create_buffer
+        returns:
+          type: object.buffer
+        args:
+          - name: descriptor
+            type: struct.buffer_descriptor
+            pointer: immutable
+  - name: buffer
+    methods: []

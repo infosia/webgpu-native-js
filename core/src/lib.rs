@@ -16,6 +16,14 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 pub use webgpu_native_js_ffi::native::*;
 
+mod generated {
+    use super::*;
+
+    include!(concat!(env!("OUT_DIR"), "/generated_conversions.rs"));
+}
+
+use generated::convert_buffer_descriptor;
+
 /// Result type used by the core crate.
 pub type Result<T, E> = std::result::Result<T, E>;
 
@@ -3136,32 +3144,6 @@ fn convert_compute_pass_descriptor<E: JsEngine>(
         nextInChain: ptr::null_mut(),
         label: WGPUStringView::from_bytes(label.as_bytes()),
         timestampWrites: ptr::null(),
-    })
-}
-
-fn convert_buffer_descriptor<E: JsEngine>(
-    cx: E::Context<'_>,
-    value: E::Value,
-    arena: &Arena,
-) -> Result<BufferDescriptor, E::Error> {
-    let size_value = required_member::<E>(cx, value, "size")?;
-    let usage_value = required_member::<E>(cx, value, "usage")?;
-    let mapped_value = E::get_property(cx, value, "mappedAtCreation")?;
-    let label_value = E::get_property(cx, value, "label")?;
-    let label = if E::is_undefined(cx, label_value) {
-        ""
-    } else {
-        E::to_str(cx, label_value, arena)?
-    };
-    Ok(BufferDescriptor {
-        size: enforce_u64::<E>(cx, size_value, "size")?,
-        usage: u64::from(enforce_u32::<E>(cx, usage_value, "usage")?),
-        mapped_at_creation: if E::is_undefined(cx, mapped_value) {
-            false
-        } else {
-            E::to_bool(cx, mapped_value)
-        },
-        label: label.to_owned(),
     })
 }
 

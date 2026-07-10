@@ -6,7 +6,12 @@
 # that join by the GPU -> WGPU naming discipline but have no entry are skipped
 # and reported. Members omitted from a selected interface are likewise skipped
 # and reported when they have a C counterpart; one-sided names remain loud
-# mismatches. Later G5 policy kinds will add tables beside this subset list.
+# mismatches.
+#
+# `[[descriptor]]` selects each descriptor conversion emitted into `core`.
+# Its nested `[[descriptor.strings]]` entries are the required B4
+# nullable/non-nullable classification for every joined string member. Unknown,
+# duplicate, dead, disagreeing, or missing string policy fails generation.
 
 schema_version = 1
 
@@ -63,3 +68,10 @@ members = ["setPipeline", "setBindGroup", "dispatchWorkgroups", "end"]
 [[subset]]
 interface = "GPUCommandBuffer"
 members = []
+
+[[descriptor]]
+dictionary = "GPUBufferDescriptor"
+
+[[descriptor.strings]]
+member = "label"
+nullable = false

@@ -1068,3 +1068,15 @@ serde_yaml 0.9.34, toml 1.1.2.
 
 Slice 2 turns this list into `policy.toml` entries and emits the first
 generated conversion behind the G7 oracle.
+
+**Phase 4 slice 2a landed (2026-07-10): the first generated conversion, behind
+the G7 oracle.** `convert_buffer_descriptor` is now emitted by `codegen/` from
+the joined model + `policy.toml` into `$OUT_DIR`, included by `core/`; the
+hand-written implementation is deleted (grep: zero definitions in `core/src`),
+and the generator itself contains no descriptor-name literal — the name flows
+through as data, verified by grep. Every suite passed unchanged: core 61,
+quickjs 41 (parity byte-identical), JSC 17, workspace green. The emitted code
+cites its rule IDs (R8, B4, B7, DR-M3) at each guard, per G11. Policy gained
+its first `[[descriptor]]` entry with both-directions enforcement (dead,
+duplicate, disagreeing, and missing string policy all fail the run, each with
+a test).

@@ -417,6 +417,7 @@ dependencies = [
 name = "webgpu-native-js-core"
 version = "0.1.0"
 dependencies = [
+ "webgpu-native-js-codegen",
  "webgpu-native-js-ffi",
 ]
 

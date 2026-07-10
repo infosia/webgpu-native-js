@@ -1,8 +1,9 @@
 #![warn(missing_docs)]
-//! Parses the pinned WebIDL and C-API YAML inputs and joins their shared surface.
-//!
-//! This crate intentionally reports a typed intermediate model. It does not emit
-//! code into `core`; emission belongs to the next codegen slice.
+//! Parses the pinned WebIDL and C-API YAML inputs, joins their shared surface,
+//! and emits engine-generic descriptor conversions for the selected policy.
+
+/// Rust source emission from a joined WebIDL and C-ABI model.
+pub mod emission;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::{self, Write as _};
@@ -97,6 +98,9 @@ pub struct ValueModel {
     pub default_value: Option<String>,
     /// Whether WebIDL applies `[EnforceRange]` directly or through a typedef.
     pub enforce_range: bool,
+    /// Width of an integer representation after resolving WebIDL typedefs or
+    /// C-ABI aliases such as bitflags.
+    pub integer_width: Option<u8>,
     /// Whether WebIDL permits `null`.
     pub nullable: bool,
     /// Whether the value is required rather than optional/omittable.
@@ -228,14 +232,15 @@ pub fn join_inputs(idl: &str, yaml: &str, policy: &str) -> Result<JoinReport, Co
 
     let index = IdlIndex::new(&definitions);
     validate_policy(&policy, &index)?;
-    Ok(build_report(
-        idl,
-        definitions.len(),
-        rewrites,
-        &index,
-        &yaml,
-        &policy,
-    ))
+    let report = build_report(idl, definitions.len(), rewrites, &index, &yaml, &policy);
+    emission::validate_policy(&report, &policy)?;
+    Ok(report)
+}
+
+/// Joins pinned-format inputs and emits the conversions selected by policy.
+pub fn generate_conversions(idl: &str, yaml: &str, policy: &str) -> Result<String, CodegenError> {
+    let report = join_inputs(idl, yaml, policy)?;
+    emission::emit_conversions(&report, policy)
 }
 
 /// Renders a deterministic text report suitable for the `report` CLI and reviews.
@@ -303,17 +308,34 @@ pub fn render_report(report: &JoinReport) -> String {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Policy {
-    schema_version: u32,
-    subset: Vec<SubsetEntry>,
+pub(crate) struct Policy {
+    pub(crate) schema_version: u32,
+    pub(crate) subset: Vec<SubsetEntry>,
+    #[serde(default)]
+    pub(crate) descriptor: Vec<DescriptorEntry>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SubsetEntry {
-    interface: String,
+pub(crate) struct SubsetEntry {
+    pub(crate) interface: String,
     #[serde(default)]
-    members: Vec<String>,
+    pub(crate) members: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DescriptorEntry {
+    pub(crate) dictionary: String,
+    #[serde(default)]
+    pub(crate) strings: Vec<StringPolicy>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StringPolicy {
+    pub(crate) member: String,
+    pub(crate) nullable: bool,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -634,13 +656,35 @@ fn validate_policy(policy: &Policy, index: &IdlIndex<'_>) -> Result<(), CodegenE
             .into_iter()
             .map(|member| member.name)
             .collect();
+        let mut seen_members = BTreeSet::new();
         for member in &entry.members {
+            if !seen_members.insert(member.as_str()) {
+                return Err(CodegenError::Policy(format!(
+                    "duplicate subset member {}.{member}",
+                    entry.interface
+                )));
+            }
             if !available.contains(member) {
                 return Err(CodegenError::Policy(format!(
                     "unknown subset member {}.{member}",
                     entry.interface
                 )));
             }
+        }
+    }
+    let mut seen_descriptors = BTreeSet::new();
+    for entry in &policy.descriptor {
+        if !seen_descriptors.insert(entry.dictionary.as_str()) {
+            return Err(CodegenError::Policy(format!(
+                "duplicate descriptor {}",
+                entry.dictionary
+            )));
+        }
+        if !index.dictionaries.contains_key(&entry.dictionary) {
+            return Err(CodegenError::Policy(format!(
+                "unknown descriptor {}",
+                entry.dictionary
+            )));
         }
     }
     Ok(())
@@ -1102,6 +1146,7 @@ fn idl_plain_value(
         type_name,
         default_value: default.map(render_default),
         enforce_range: attrs_contain(attributes, "EnforceRange") || typedef_enforced,
+        integer_width: idl_integer_width(type_, index),
         nullable: type_is_nullable(type_),
         required,
         ..ValueModel::default()
@@ -1142,7 +1187,8 @@ fn c_value(value: &YamlValue, yaml: &YamlRoot) -> ValueModel {
         type_name: c_render_type(base_type),
         default_value: value.default.as_ref().map(yaml_scalar),
         enforce_range: false,
-        nullable: value.optional,
+        integer_width: c_integer_width(base_type),
+        nullable: value.optional || base_type == "nullable_string",
         required: !value.optional,
         pointer: value.pointer.clone(),
         count_and_pointer: source_type.starts_with("array<"),
@@ -1153,6 +1199,39 @@ fn c_value(value: &YamlValue, yaml: &YamlRoot) -> ValueModel {
                 .find(|value| value.name == name)
                 .is_some_and(is_chained_struct)
         }),
+    }
+}
+
+fn idl_integer_width(type_: &Type<'_>, index: &IdlIndex<'_>) -> Option<u8> {
+    let rendered = render_type(type_);
+    resolved_idl_integer_width(&rendered, index, &mut BTreeSet::new())
+}
+
+fn resolved_idl_integer_width(
+    type_name: &str,
+    index: &IdlIndex<'_>,
+    seen: &mut BTreeSet<String>,
+) -> Option<u8> {
+    match type_name.trim_end_matches('?') {
+        "byte" | "octet" => Some(8),
+        "short" | "unsigned short" => Some(16),
+        "long" | "unsigned long" => Some(32),
+        "long long" | "unsigned long long" => Some(64),
+        identifier if seen.insert(identifier.to_owned()) => index
+            .typedefs
+            .get(identifier)
+            .and_then(|facts| resolved_idl_integer_width(&facts.type_name, index, seen)),
+        _ => None,
+    }
+}
+
+fn c_integer_width(type_name: &str) -> Option<u8> {
+    match type_name {
+        "uint16" | "int16" => Some(16),
+        "uint32" | "int32" => Some(32),
+        "uint64" | "int64" => Some(64),
+        value if value.starts_with("bitflag.") => Some(64),
+        _ => None,
     }
 }
 

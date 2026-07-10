@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use webgpu_native_js_codegen::{join_inputs, CodegenError, JoinReport};
+use webgpu_native_js_codegen::{generate_conversions, join_inputs, CodegenError, JoinReport};
 
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
@@ -94,4 +94,33 @@ fn full_pinned_inputs_parse_and_subset_join_offline() {
     assert!(report.parser.saw_enforce_range);
     assert!(report.parser.saw_same_object);
     assert!(report.parser.saw_exposed);
+}
+
+#[test]
+fn emitted_descriptor_matches_snapshot() {
+    let (idl, yaml, policy) = fixture("emission");
+    let emitted = generate_conversions(&idl, &yaml, &policy).expect("fixture emission");
+    let expected = fs::read_to_string(fixtures().join("emission.rs")).expect("snapshot");
+    assert_eq!(emitted, expected);
+}
+
+#[test]
+fn missing_string_policy_is_a_loud_unpoliced_deviation() {
+    let (idl, yaml, policy) = fixture("emission");
+    let policy = policy.replace(
+        "\n[[descriptor.strings]]\nmember = \"label\"\nnullable = false\n",
+        "\n",
+    );
+    let error = generate_conversions(&idl, &yaml, &policy).expect_err("missing policy");
+    assert!(matches!(error, CodegenError::Policy(message) if message.contains("unpoliced string")));
+}
+
+#[test]
+fn dead_string_policy_is_rejected() {
+    let (idl, yaml, policy) = fixture("emission");
+    let policy = policy.replace("member = \"label\"", "member = \"missing\"");
+    let error = generate_conversions(&idl, &yaml, &policy).expect_err("dead policy");
+    assert!(
+        matches!(error, CodegenError::Policy(message) if message.contains("dead string policy"))
+    );
 }

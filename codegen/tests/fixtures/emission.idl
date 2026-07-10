@@ -1,0 +1,14 @@
+interface GPUDevice {
+    GPUBuffer createBuffer(GPUBufferDescriptor descriptor);
+};
+interface GPUBuffer {};
+dictionary GPUObjectDescriptorBase {
+    USVString label = "";
+};
+dictionary GPUBufferDescriptor : GPUObjectDescriptorBase {
+    required GPUSize64 size;
+    required GPUBufferUsageFlags usage;
+    boolean mappedAtCreation = false;
+};
+typedef [EnforceRange] unsigned long GPUBufferUsageFlags;
+typedef [EnforceRange] unsigned long long GPUSize64;
