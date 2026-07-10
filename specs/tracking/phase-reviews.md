@@ -647,3 +647,40 @@ J19–J21, header renumberings.
 Production fixes: two handoffs to the coding agent — **DR-F1** (correctness:
 DR-C1, DR-M1..M5, DR-m1..m4) and **DR-F2** (structure + tests: DR-M6..M10,
 DR-m5..m8) — gates re-run and results appended below after each lands.
+
+### Gate — PASSED. DR-F1 is COMPLETE.
+
+Gates re-run directly: engine-agnostic `core` **41 passed**; workspace tests
+**PASSED** (`quickjs-adapter` 33, no ignored tests); workspace build **PASSED**;
+workspace/all-target clippy with `-D warnings` **PASSED**; `cargo fmt --check`
+and `git diff --check` **PASSED**. The build still prints the pre-existing
+warnings from vendored QuickJS C sources; no Rust warning survives the clippy
+gate.
+
+**B8 now means every stored handle.** A bind-group wrapper retains its layout as
+well as its buffers; a compute-pipeline wrapper retains its shader module and
+explicit layout. Construction rollback and finalization release the same set,
+through the queue. The mock counts both sides and asserts the balance.
+
+**R26 is one convention now.** Every failing QuickJS engine operation consumes
+the pending exception into a scope-tracked value. Callback glue is the one place
+that value becomes a throw, and it escapes the scope before `JS_Throw` consumes
+it. The real-engine tests cover both failures the review named: `size: 10n`
+throws a `TypeError` synchronously, and an owned error reaches a Promise as the
+rejection reason rather than the `JS_EXCEPTION` sentinel.
+
+`getMappedRange` converts both numeric arguments before taking the payload lock;
+a real `valueOf()` that re-enters `unmap()` returns an ordinary error instead of
+deadlocking. Required bind-group-layout members no longer default missing values
+or swallow conversion failures. Non-nullable `label: null` stringifies to
+`"null"` through every hand-written descriptor helper. Deferred slots keep their
+pointer type, with the `Send` obligation stated where it belongs, instead of
+crossing the barred `usize` escape hatch.
+
+The four MINOR paths are closed too: cold settlement fallbacks escape values
+before freeing them; undrained or wrong-engine settlements enqueue native
+adapter/device releases; every current WebGPU callback copies the backend's
+`WGPUStringView` diagnostic while it is valid; runtime teardown releases queued
+unhandled-rejection values.
+
+Verified fixed: **DR-C1, DR-M1..M5, DR-m1..m4**. **DR-F2 remains open.**

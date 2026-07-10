@@ -617,12 +617,19 @@ thread_local! {
 #[derive(Default)]
 struct MockGpuState {
     next: usize,
+    adapter_releases: usize,
     device_add_refs: usize,
     buffer_add_refs: usize,
     queue_add_refs: usize,
+    shader_module_add_refs: usize,
+    bind_group_layout_add_refs: usize,
+    pipeline_layout_add_refs: usize,
     device_releases: usize,
     buffer_releases: usize,
     queue_releases: usize,
+    shader_module_releases: usize,
+    bind_group_layout_releases: usize,
+    pipeline_layout_releases: usize,
     buffer_destroys: usize,
     mapped_range_calls: usize,
     const_mapped_range_calls: usize,
@@ -778,7 +785,9 @@ unsafe fn adapter_request_device(
     webgpu_native_js_ffi::native::WGPUFuture { id: 2 }
 }
 
-unsafe fn adapter_release(_adapter: WGPUAdapter) {}
+unsafe fn adapter_release(_adapter: WGPUAdapter) {
+    GPU_STATE.with(|state| state.borrow_mut().adapter_releases += 1);
+}
 
 unsafe fn device_release(_device: WGPUDevice) {
     GPU_STATE.with(|state| {
@@ -1051,12 +1060,24 @@ unsafe fn queue_on_submitted_work_done(
     WGPUFuture { id: 4 }
 }
 
-unsafe fn shader_module_add_ref(_module: WGPUShaderModule) {}
-unsafe fn shader_module_release(_module: WGPUShaderModule) {}
-unsafe fn bind_group_layout_add_ref(_layout: WGPUBindGroupLayout) {}
-unsafe fn bind_group_layout_release(_layout: WGPUBindGroupLayout) {}
-unsafe fn pipeline_layout_add_ref(_layout: WGPUPipelineLayout) {}
-unsafe fn pipeline_layout_release(_layout: WGPUPipelineLayout) {}
+unsafe fn shader_module_add_ref(_module: WGPUShaderModule) {
+    GPU_STATE.with(|state| state.borrow_mut().shader_module_add_refs += 1);
+}
+unsafe fn shader_module_release(_module: WGPUShaderModule) {
+    GPU_STATE.with(|state| state.borrow_mut().shader_module_releases += 1);
+}
+unsafe fn bind_group_layout_add_ref(_layout: WGPUBindGroupLayout) {
+    GPU_STATE.with(|state| state.borrow_mut().bind_group_layout_add_refs += 1);
+}
+unsafe fn bind_group_layout_release(_layout: WGPUBindGroupLayout) {
+    GPU_STATE.with(|state| state.borrow_mut().bind_group_layout_releases += 1);
+}
+unsafe fn pipeline_layout_add_ref(_layout: WGPUPipelineLayout) {
+    GPU_STATE.with(|state| state.borrow_mut().pipeline_layout_add_refs += 1);
+}
+unsafe fn pipeline_layout_release(_layout: WGPUPipelineLayout) {
+    GPU_STATE.with(|state| state.borrow_mut().pipeline_layout_releases += 1);
+}
 unsafe fn bind_group_add_ref(_bind_group: WGPUBindGroup) {}
 unsafe fn bind_group_release(_bind_group: WGPUBindGroup) {}
 unsafe fn compute_pipeline_add_ref(_pipeline: WGPUComputePipeline) {}
@@ -1151,10 +1172,15 @@ mod tests {
         buffer_map_async, buffer_size_get, buffer_unmap, buffer_usage_get,
         convert_bind_group_descriptor, convert_bind_group_layout_descriptor,
         convert_buffer_binding_layout, convert_buffer_descriptor,
-        convert_compute_pipeline_descriptor, convert_shader_module_descriptor,
-        device_create_bind_group, device_create_buffer, device_queue_get, finalize_buffer,
-        finalize_device, finalize_queue, optional_gpu_size_to_usize, wrap_device,
-        BindGroupLayoutPayload, BufferPayload, DevicePayload, JsEngine, QueuePayload,
+        convert_command_buffer_descriptor, convert_command_encoder_descriptor,
+        convert_compute_pass_descriptor, convert_compute_pipeline_descriptor,
+        convert_pipeline_layout_descriptor, convert_shader_module_descriptor,
+        device_create_bind_group, device_create_buffer, device_create_compute_pipeline,
+        device_queue_get, finalize_bind_group, finalize_buffer, finalize_compute_pipeline,
+        finalize_device, finalize_queue, optional_gpu_size_to_usize, queue_work_done_callback,
+        wrap_device, BindGroupLayoutPayload, BindGroupPayload, BufferPayload,
+        ComputePipelinePayload, DevicePayload, JsEngine, PendingNative, PendingNativeHandle,
+        PipelineLayoutPayload, QueueError, QueuePayload, QueueWorkDoneRequest, SettlementRequest,
         ShaderModulePayload,
     };
 
@@ -1177,6 +1203,110 @@ mod tests {
         assert_eq!(converted.usage, 8);
         assert!(!converted.mapped_at_creation);
         assert_eq!(converted.label, "");
+    }
+
+    #[test]
+    fn b4_null_non_nullable_labels_stringify_consistently() {
+        let rt = runtime();
+        let cx = rt.context();
+        let arena = Arena::new();
+        let buffer_desc = descriptor(
+            &rt,
+            &[
+                ("size", rt.number(4.0)),
+                ("usage", rt.number(8.0)),
+                ("label", rt.null()),
+            ],
+        );
+        let buffer = convert_buffer_descriptor::<Engine>(cx, buffer_desc, &arena)
+            .expect("buffer descriptor");
+        assert_eq!(buffer.label, "null");
+
+        let shader_desc = descriptor(
+            &rt,
+            &[
+                ("code", rt.string("@compute fn main() {}")),
+                ("label", rt.null()),
+            ],
+        );
+        let shader = convert_shader_module_descriptor::<Engine>(cx, shader_desc, &arena)
+            .expect("shader descriptor");
+        assert_eq!(read_view(shader.label), b"null");
+
+        let empty = descriptor(&rt, &[("length", rt.number(0.0))]);
+        let bind_group_layout_desc = descriptor(&rt, &[("label", rt.null()), ("entries", empty)]);
+        let bind_group_layout =
+            convert_bind_group_layout_descriptor::<Engine>(cx, bind_group_layout_desc, &arena)
+                .expect("bind group layout descriptor");
+        assert_eq!(read_view(bind_group_layout.label), b"null");
+
+        let pipeline_layout_desc =
+            descriptor(&rt, &[("label", rt.null()), ("bindGroupLayouts", empty)]);
+        let pipeline_layout =
+            convert_pipeline_layout_descriptor::<Engine>(cx, pipeline_layout_desc, &arena)
+                .expect("pipeline layout descriptor");
+        assert_eq!(read_view(pipeline_layout.label), b"null");
+
+        let layout_value = Engine::new_instance(
+            cx,
+            crate::GPU_BIND_GROUP_LAYOUT_CLASS,
+            Box::new(BindGroupLayoutPayload {
+                layout: fake_handle(41),
+            }),
+        )
+        .expect("bind group layout");
+        let bind_group_desc = descriptor(
+            &rt,
+            &[
+                ("label", rt.null()),
+                ("layout", layout_value),
+                ("entries", empty),
+            ],
+        );
+        let bind_group = convert_bind_group_descriptor::<Engine>(cx, bind_group_desc, &arena)
+            .expect("bind group descriptor");
+        assert_eq!(read_view(bind_group.native.label), b"null");
+
+        let module = Engine::new_instance(
+            cx,
+            crate::GPU_SHADER_MODULE_CLASS,
+            Box::new(ShaderModulePayload {
+                module: fake_handle(42),
+            }),
+        )
+        .expect("module");
+        let compute = descriptor(&rt, &[("module", module)]);
+        let compute_pipeline_desc = descriptor(&rt, &[("label", rt.null()), ("compute", compute)]);
+        let compute_pipeline =
+            convert_compute_pipeline_descriptor::<Engine>(cx, compute_pipeline_desc, &arena)
+                .expect("compute pipeline descriptor");
+        assert_eq!(read_view(compute_pipeline.native.label), b"null");
+
+        let label_only = descriptor(&rt, &[("label", rt.null())]);
+        assert_eq!(
+            read_view(
+                convert_command_encoder_descriptor::<Engine>(cx, label_only, &arena)
+                    .expect("command encoder descriptor")
+                    .label
+            ),
+            b"null"
+        );
+        assert_eq!(
+            read_view(
+                convert_command_buffer_descriptor::<Engine>(cx, label_only, &arena)
+                    .expect("command buffer descriptor")
+                    .label
+            ),
+            b"null"
+        );
+        assert_eq!(
+            read_view(
+                convert_compute_pass_descriptor::<Engine>(cx, label_only, &arena)
+                    .expect("compute pass descriptor")
+                    .label
+            ),
+            b"null"
+        );
     }
 
     #[test]
@@ -1345,21 +1475,24 @@ mod tests {
         let shader = convert_shader_module_descriptor::<Engine>(cx, label_desc, &arena)
             .expect("shader descriptor");
         assert!(!shader.label.data.is_null());
-        assert_eq!(shader.label.length, 0);
+        assert_eq!(read_view(shader.label), b"null");
 
         let absent_compute = descriptor(&rt, &[("module", module)]);
         let absent_desc = descriptor(&rt, &[("compute", absent_compute)]);
         let absent = convert_compute_pipeline_descriptor::<Engine>(cx, absent_desc, &arena)
             .expect("pipeline descriptor");
-        assert!(absent.compute.entryPoint.data.is_null());
-        assert_eq!(absent.compute.entryPoint.length, crate::wgpu_strlen());
+        assert!(absent.native.compute.entryPoint.data.is_null());
+        assert_eq!(
+            absent.native.compute.entryPoint.length,
+            crate::wgpu_strlen()
+        );
 
         let empty_compute = descriptor(&rt, &[("module", module), ("entryPoint", rt.string(""))]);
         let empty_desc = descriptor(&rt, &[("compute", empty_compute)]);
         let empty = convert_compute_pipeline_descriptor::<Engine>(cx, empty_desc, &arena)
             .expect("pipeline descriptor");
-        assert!(!empty.compute.entryPoint.data.is_null());
-        assert_eq!(empty.compute.entryPoint.length, 0);
+        assert!(!empty.native.compute.entryPoint.data.is_null());
+        assert_eq!(empty.native.compute.entryPoint.length, 0);
     }
 
     #[test]
@@ -1391,6 +1524,21 @@ mod tests {
         assert_eq!(one.entryCount, 1);
         assert!(!one.entries.is_null());
         assert_eq!(unsafe { (*one.entries).binding }, 0);
+    }
+
+    #[test]
+    fn b5_bind_group_layout_entry_requires_binding_and_visibility() {
+        let rt = runtime();
+        let cx = rt.context();
+        let arena = Arena::new();
+        for entry in [
+            descriptor(&rt, &[("visibility", rt.number(1.0))]),
+            descriptor(&rt, &[("binding", rt.number(0.0))]),
+        ] {
+            let entries = descriptor(&rt, &[("length", rt.number(1.0)), ("0", entry)]);
+            let desc = descriptor(&rt, &[("entries", entries)]);
+            assert!(convert_bind_group_layout_descriptor::<Engine>(cx, desc, &arena).is_err());
+        }
     }
 
     #[test]
@@ -1515,11 +1663,155 @@ mod tests {
         let entries = descriptor(&rt, &[("length", rt.number(1.0)), ("0", entry)]);
         let desc = descriptor(&rt, &[("layout", layout), ("entries", entries)]);
 
-        let _bind_group =
+        let bind_group =
             device_create_bind_group::<Engine>(cx, device, &[desc]).expect("bind group");
 
         GPU_STATE.with(|state| {
-            assert_eq!(state.borrow().buffer_add_refs, 1);
+            let state = state.borrow();
+            assert_eq!(state.buffer_add_refs, 1);
+            assert_eq!(state.bind_group_layout_add_refs, 1);
+        });
+        let payload = Engine::payload(cx, bind_group, crate::GPU_BIND_GROUP_CLASS)
+            .and_then(|payload| payload.downcast_ref::<BindGroupPayload>())
+            .expect("bind group payload");
+        finalize_bind_group(
+            Box::new(BindGroupPayload {
+                bind_group: payload.bind_group,
+                layout: payload.layout,
+                buffers: payload.buffers.clone(),
+            }),
+            &rt.env,
+        );
+        assert_eq!(rt.queue().drain().expect("drain retained handles"), 1);
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.buffer_releases, 1);
+            assert_eq!(state.bind_group_layout_releases, 1);
+        });
+    }
+
+    #[test]
+    fn b8_compute_pipeline_balances_module_and_explicit_layout_refs() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let module = Engine::new_instance(
+            cx,
+            crate::GPU_SHADER_MODULE_CLASS,
+            Box::new(ShaderModulePayload {
+                module: fake_handle(42),
+            }),
+        )
+        .expect("module");
+        let layout = Engine::new_instance(
+            cx,
+            crate::GPU_PIPELINE_LAYOUT_CLASS,
+            Box::new(PipelineLayoutPayload {
+                layout: fake_handle(43),
+            }),
+        )
+        .expect("layout");
+        let compute = descriptor(&rt, &[("module", module)]);
+        let desc = descriptor(&rt, &[("layout", layout), ("compute", compute)]);
+        let pipeline = device_create_compute_pipeline::<Engine>(cx, device, &[desc])
+            .expect("compute pipeline");
+
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.shader_module_add_refs, 1);
+            assert_eq!(state.pipeline_layout_add_refs, 1);
+        });
+        let payload = Engine::payload(cx, pipeline, crate::GPU_COMPUTE_PIPELINE_CLASS)
+            .and_then(|payload| payload.downcast_ref::<ComputePipelinePayload>())
+            .expect("compute pipeline payload");
+        finalize_compute_pipeline(
+            Box::new(ComputePipelinePayload {
+                pipeline: payload.pipeline,
+                module: payload.module,
+                layout: payload.layout,
+            }),
+            &rt.env,
+        );
+        assert_eq!(rt.queue().drain().expect("drain retained handles"), 1);
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.shader_module_releases, 1);
+            assert_eq!(state.pipeline_layout_releases, 1);
+        });
+    }
+
+    #[test]
+    fn a9_callback_rejection_preserves_backend_message() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let (promise, deferred) = Engine::new_promise(cx).expect("promise");
+        let request = Box::new(QueueWorkDoneRequest::<Engine> {
+            deferred: Some(deferred),
+            settlements: Arc::clone(rt.env.settlements()),
+            _registration: None,
+        });
+        unsafe {
+            queue_work_done_callback::<Engine>(
+                crate::WGPUQueueWorkDoneStatus_WGPUQueueWorkDoneStatus_Error,
+                WGPUStringView::from_bytes(b"backend diagnostic"),
+                Box::into_raw(request).cast(),
+                ptr::null_mut(),
+            );
+        }
+        assert_eq!(rt.env.settlements().drain::<Engine>(cx), Ok(1));
+        let reason = rt
+            .promise_result(promise)
+            .expect("settled promise")
+            .expect_err("rejected promise");
+        assert!(matches!(
+            rt.get(reason),
+            MockValue::String(message) if message.contains("backend diagnostic")
+        ));
+    }
+
+    #[test]
+    fn settlement_teardown_and_unexpected_type_release_native_handles() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let (_, deferred) = Engine::new_promise(cx).expect("promise");
+        rt.env
+            .settlements()
+            .enqueue::<Engine>(SettlementRequest::Adapter {
+                deferred,
+                native: PendingNative {
+                    handle: PendingNativeHandle::Adapter(fake_handle(91)),
+                    queue: Arc::clone(rt.queue()),
+                    gpu: dispatch(),
+                },
+            })
+            .expect("enqueue adapter");
+        rt.env.settlements().release_pending::<Engine>(cx);
+        assert_eq!(rt.queue().drain(), Ok(1));
+
+        let (_, deferred) = MockEngine::<true>::new_promise(cx).expect("promise");
+        rt.env
+            .settlements()
+            .enqueue::<MockEngine<true>>(SettlementRequest::Device {
+                deferred,
+                native: PendingNative {
+                    handle: PendingNativeHandle::Device(fake_device()),
+                    queue: Arc::clone(rt.queue()),
+                    gpu: dispatch(),
+                },
+            })
+            .expect("enqueue device");
+        assert_eq!(
+            rt.env.settlements().drain::<Engine>(cx),
+            Err(QueueError::UnexpectedSettlementType)
+        );
+        assert_eq!(rt.queue().drain(), Ok(1));
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.adapter_releases, 1);
+            assert_eq!(state.device_releases, 1);
         });
     }
 

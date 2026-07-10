@@ -271,6 +271,7 @@ impl Drop for Runtime {
             qjs::JS_SetHostPromiseRejectionTracker(self.rt.as_ptr(), None, ptr::null_mut());
             let raw = qjs::JS_GetRuntimeOpaque(self.rt.as_ptr()).cast::<State>();
             if let Some(state) = raw.as_ref() {
+                state.release_unhandled_rejections(self.ctx.as_ptr());
                 state.release_outstanding_deferreds(self.ctx.as_ptr());
                 with_scope(self.ctx.as_ptr(), |cx| {
                     state.env.settlements().release_pending::<Engine>(cx);
@@ -296,21 +297,34 @@ struct State {
     classes: Mutex<BTreeMap<core::ClassId, ClassEntry>>,
     quickjs_to_core: Mutex<BTreeMap<qjs::JSClassID, core::ClassId>>,
     callbacks: Mutex<Vec<CallbackTarget>>,
-    outstanding_deferreds: Arc<Mutex<Vec<usize>>>,
+    outstanding_deferreds: Arc<Mutex<Vec<DeferredSlot>>>,
     unhandled_rejections: Mutex<Vec<UnhandledRejection>>,
     settle_trampoline: Mutex<Option<qjs::JSValue>>,
 }
 
 /// Registration guard for a deferred slot owned by a pending WebGPU callback.
 pub struct DeferredRegistration {
-    slots: Arc<Mutex<Vec<usize>>>,
-    slot: usize,
+    slots: Arc<Mutex<Vec<DeferredSlot>>>,
+    slot: DeferredSlot,
 }
+
+#[derive(Clone, Copy)]
+struct DeferredSlot(NonNull<Option<core::Deferred<Engine>>>);
+
+// SAFETY: `DeferredSlot` points into a callback-request `Box` that remains
+// allocated until its `AllowProcessEvents` callback takes ownership. Runtime
+// teardown and those callbacks run on the same engine thread, so the pointer is
+// never dereferenced concurrently; registration drop removes it before the
+// `Box` dies.
+unsafe impl Send for DeferredSlot {}
 
 impl Drop for DeferredRegistration {
     fn drop(&mut self) {
         if let Ok(mut slots) = self.slots.lock() {
-            if let Some(index) = slots.iter().position(|candidate| *candidate == self.slot) {
+            if let Some(index) = slots
+                .iter()
+                .position(|candidate| candidate.0 == self.slot.0)
+            {
                 slots.swap_remove(index);
             }
         }
@@ -387,6 +401,18 @@ impl State {
         Some(format!("Unhandled promise rejection: {message}"))
     }
 
+    fn release_unhandled_rejections(&self, ctx: *mut qjs::JSContext) {
+        let Ok(mut rejections) = self.unhandled_rejections.lock() else {
+            return;
+        };
+        for entry in rejections.drain(..) {
+            unsafe {
+                qjs::JS_FreeValue(ctx, entry.promise);
+                qjs::JS_FreeValue(ctx, entry.reason);
+            }
+        }
+    }
+
     fn set_settle_trampoline(&self, value: qjs::JSValue) {
         if let Ok(mut trampoline) = self.settle_trampoline.lock() {
             *trampoline = Some(value);
@@ -411,7 +437,7 @@ impl State {
         &self,
         slot: NonNull<Option<core::Deferred<Engine>>>,
     ) -> DeferredRegistration {
-        let slot = slot.as_ptr() as usize;
+        let slot = DeferredSlot(slot);
         if let Ok(mut slots) = self.outstanding_deferreds.lock() {
             slots.push(slot);
         }
@@ -428,11 +454,8 @@ impl State {
             .map(|mut slots| std::mem::take(&mut *slots))
             .unwrap_or_default();
         for slot in slots {
-            let slot = slot as *mut Option<core::Deferred<Engine>>;
-            if slot.is_null() {
-                continue;
-            }
-            let Some(deferred) = (unsafe { &mut *slot }).take() else {
+            let Some(deferred) = (unsafe { slot.0.as_ptr().as_mut() }).and_then(Option::take)
+            else {
                 continue;
             };
             unsafe {
@@ -545,7 +568,7 @@ impl core::JsEngine for Engine {
         let key = CString::new(key).map_err(|_| Self::type_error(cx, "invalid property name"))?;
         let value = unsafe { qjs::JS_GetPropertyStr(cx.ctx, obj, key.as_ptr()) };
         if unsafe { qjs::JS_IsException(value) } {
-            Err(value)
+            Err(take_exception_value(cx))
         } else {
             cx.scope.track(value);
             Ok(value)
@@ -563,7 +586,7 @@ impl core::JsEngine for Engine {
     fn to_f64(cx: Self::Context<'_>, value: Self::Value) -> core::Result<f64, Self::Error> {
         let mut out = 0.0;
         if unsafe { qjs::JS_ToFloat64(cx.ctx, &mut out, value) } < 0 {
-            Err(take_exception_value(cx.ctx))
+            Err(take_exception_value(cx))
         } else {
             Ok(out)
         }
@@ -581,7 +604,7 @@ impl core::JsEngine for Engine {
         let mut len = 0usize;
         let raw = unsafe { qjs::JS_ToCStringLen(cx.ctx, &mut len, value) };
         if raw.is_null() {
-            return Err(take_exception_value(cx.ctx));
+            return Err(take_exception_value(cx));
         }
         let bytes = unsafe { std::slice::from_raw_parts(raw.cast::<u8>(), len) };
         let owned = String::from_utf8_lossy(bytes).into_owned();
@@ -621,7 +644,7 @@ impl core::JsEngine for Engine {
         }
         let proto = unsafe { qjs::JS_NewObject(cx.ctx) };
         if unsafe { qjs::JS_IsException(proto) } {
-            return Err(proto);
+            return Err(take_exception_value(cx));
         }
         install_methods(cx, state, proto, spec)?;
         install_properties(cx, state, proto, spec)?;
@@ -656,7 +679,7 @@ impl core::JsEngine for Engine {
         };
         let object = unsafe { qjs::JS_NewObjectClass(cx.ctx, entry.quickjs_id) };
         if unsafe { qjs::JS_IsException(object) } {
-            return Err(object);
+            return Err(take_exception_value(cx));
         }
         let holder = Box::new(ObjectPayload {
             spec: entry.spec,
@@ -709,11 +732,13 @@ impl core::JsEngine for Engine {
     }
 
     fn type_error(cx: Self::Context<'_>, message: &str) -> Self::Error {
-        throw_message(cx.ctx, message, true)
+        let _ = throw_message(cx.ctx, message, true);
+        take_exception_value(cx)
     }
 
     fn operation_error(cx: Self::Context<'_>, message: &str) -> Self::Error {
-        throw_message(cx.ctx, message, false)
+        let _ = throw_message(cx.ctx, message, false);
+        take_exception_value(cx)
     }
 
     fn async_error_value(cx: Self::Context<'_>, message: &str) -> Self::Value {
@@ -737,7 +762,7 @@ impl core::JsEngine for Engine {
         let mut resolving = [Self::undefined(cx), Self::undefined(cx)];
         let promise = unsafe { qjs::JS_NewPromiseCapability(cx.ctx, resolving.as_mut_ptr()) };
         if unsafe { qjs::JS_IsException(promise) } {
-            return Err(promise);
+            return Err(take_exception_value(cx));
         }
         cx.scope.track(promise);
         Ok((promise, core::Deferred::new(resolving[0], resolving[1])))
@@ -751,6 +776,7 @@ impl core::JsEngine for Engine {
         let Some(trampoline) = state.settle_trampoline() else {
             for (deferred, result) in settlements {
                 let value = result.unwrap_or_else(|value| value);
+                cx.scope.escape(value);
                 unsafe {
                     qjs::JS_FreeValue(cx.ctx, value);
                     qjs::JS_FreeValue(cx.ctx, deferred.resolve());
@@ -768,6 +794,7 @@ impl core::JsEngine for Engine {
             }
             for (deferred, result) in settlements {
                 let value = result.unwrap_or_else(|value| value);
+                cx.scope.escape(value);
                 unsafe {
                     qjs::JS_FreeValue(cx.ctx, value);
                     qjs::JS_FreeValue(cx.ctx, deferred.resolve());
@@ -827,7 +854,7 @@ impl core::JsEngine for Engine {
                 drop(Box::from_raw(opaque.cast::<ArrayBufferOwner>()));
                 (env.gpu().buffer_release)(owner_buffer);
             }
-            Err(value)
+            Err(take_exception_value(cx))
         } else {
             cx.scope.track(value);
             Ok(value)
@@ -840,7 +867,7 @@ impl core::JsEngine for Engine {
     ) -> core::Result<Self::Value, Self::Error> {
         let value = unsafe { qjs::JS_NewArrayBufferCopy(cx.ctx, bytes.as_ptr(), bytes.len()) };
         if unsafe { qjs::JS_IsException(value) } {
-            Err(value)
+            Err(take_exception_value(cx))
         } else {
             cx.scope.track(value);
             Ok(value)
@@ -943,7 +970,7 @@ fn install_methods(
             )
         };
         if unsafe { qjs::JS_IsException(func) } {
-            return Err(func);
+            return Err(take_exception_value(cx));
         }
         if unsafe {
             qjs::JS_DefinePropertyValueStr(
@@ -955,7 +982,7 @@ fn install_methods(
             )
         } < 0
         {
-            return Err(take_exception_value(cx.ctx));
+            return Err(take_exception_value(cx));
         }
     }
     Ok(())
@@ -1004,7 +1031,7 @@ fn install_properties(
         };
         unsafe { qjs::JS_FreeAtom(cx.ctx, atom) };
         if rc < 0 {
-            return Err(take_exception_value(cx.ctx));
+            return Err(take_exception_value(cx));
         }
     }
     Ok(())
@@ -1208,7 +1235,10 @@ where
             scope.escape(value);
             value
         }
-        Ok(Err(error)) => error,
+        Ok(Err(error)) => {
+            scope.escape(error);
+            unsafe { qjs::JS_Throw(ctx, error) }
+        }
         Err(_) => throw_message(ctx, "Rust callback panicked", false),
     }
 }
@@ -1308,8 +1338,10 @@ fn throw_message(ctx: *mut qjs::JSContext, message: &str, type_error: bool) -> q
     }
 }
 
-fn take_exception_value(ctx: *mut qjs::JSContext) -> qjs::JSValue {
-    unsafe { qjs::JS_GetException(ctx) }
+fn take_exception_value(cx: Context<'_>) -> qjs::JSValue {
+    let value = unsafe { qjs::JS_GetException(cx.ctx) };
+    cx.scope.track(value);
+    value
 }
 
 fn clear_pending_exception(ctx: *mut qjs::JSContext) {
@@ -2046,6 +2078,163 @@ mod tests {
         runtime.clear_global("device").expect("clear device");
         runtime.run_gc();
         assert!(runtime.drain_releases().expect("drain") >= 2);
+    }
+
+    #[test]
+    fn descriptor_coercion_errors_throw_owned_values() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let wrapped = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("device", wrapped)
+            .expect("set device");
+        eval_drop(
+            &runtime,
+            r#"
+                var bigintThrew = false;
+                try {
+                    device.createBuffer({ size: 10n, usage: 8 });
+                } catch (e) {
+                    bigintThrew = e instanceof TypeError;
+                }
+                if (!bigintThrew) throw new Error('BigInt coercion was returned instead of thrown');
+
+                var getterThrew = false;
+                try {
+                    device.createBuffer({
+                        get size() { throw new RangeError('size getter diagnostic'); },
+                        usage: 8
+                    });
+                } catch (e) {
+                    getterThrew = e instanceof RangeError && e.message === 'size getter diagnostic';
+                }
+                if (!getterThrew) throw new Error('property exception was not preserved');
+            "#,
+            "owned-errors.js",
+        );
+        runtime.clear_global("device").expect("clear device");
+        runtime.run_gc();
+        let _ = runtime.drain_releases().expect("drain");
+    }
+
+    #[test]
+    fn owned_error_value_is_an_actual_async_rejection_reason() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let promise = super::with_scope(runtime.raw_context(), |cx| {
+            let (promise, deferred) = Engine::new_promise(cx).unwrap_or_else(|_| panic!("promise"));
+            let error = Engine::type_error(cx, "async owned error");
+            let reason = Engine::error_value_from_error(cx, error);
+            Engine::settle_deferreds(cx, vec![(deferred, Err(reason))]);
+            cx.scope.escape(promise);
+            promise
+        });
+        runtime
+            .set_global_value("asyncFailure", promise)
+            .expect("set promise");
+        eval_drop(
+            &runtime,
+            r#"
+                var asyncReasonOk = false;
+                asyncFailure.catch(function (reason) {
+                    asyncReasonOk = reason instanceof TypeError && reason.message === 'async owned error';
+                });
+            "#,
+            "async-owned-error.js",
+        );
+        unsafe { runtime.tick(setup.instance) }.expect("tick rejection handler");
+        eval_drop(
+            &runtime,
+            "if (!asyncReasonOk) throw new Error('rejection reason was not the owned error');",
+            "async-owned-error-check.js",
+        );
+        runtime.clear_global("asyncFailure").expect("clear promise");
+    }
+
+    #[test]
+    fn settlement_cold_fallback_escapes_scoped_values_before_free() {
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let state = super::state_from_context(runtime.raw_context());
+        let trampoline = state.take_settle_trampoline().expect("trampoline");
+        super::with_scope(runtime.raw_context(), |cx| {
+            let (_, deferred) = Engine::new_promise(cx).unwrap_or_else(|_| panic!("promise"));
+            let error = Engine::type_error(cx, "cold fallback");
+            Engine::settle_deferreds(cx, vec![(deferred, Err(error))]);
+        });
+        state.set_settle_trampoline(trampoline);
+    }
+
+    #[test]
+    fn runtime_drop_releases_queued_unhandled_rejection_values() {
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let promise = unsafe { qjs::JS_NewObject(runtime.raw_context()) };
+        let reason =
+            unsafe { qjs::JS_NewString(runtime.raw_context(), c"pending reason".as_ptr()) };
+        let state = super::state_from_context(runtime.raw_context());
+        state.track_unhandled(runtime.raw_context(), promise, reason);
+        unsafe {
+            qjs::JS_FreeValue(runtime.raw_context(), promise);
+            qjs::JS_FreeValue(runtime.raw_context(), reason);
+        }
+        drop(runtime);
+    }
+
+    #[test]
+    fn get_mapped_range_coercion_can_reenter_unmap_without_deadlock() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let wrapped = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("device", wrapped)
+            .expect("set device");
+        eval_drop(
+            &runtime,
+            r#"
+                var reentrant = device.createBuffer({ size: 8, usage: 2, mappedAtCreation: true });
+                var size = { valueOf() { reentrant.unmap(); return 4; } };
+                var threw = false;
+                try {
+                    reentrant.getMappedRange(0, size);
+                } catch (e) {
+                    threw = true;
+                }
+                if (!threw) throw new Error('reentrant unmap must invalidate getMappedRange');
+                reentrant = null;
+            "#,
+            "mapped-range-reentrant-coercion.js",
+        );
+        runtime.clear_global("device").expect("clear device");
+        runtime.run_gc();
+        let _ = runtime.drain_releases().expect("drain");
+    }
+
+    #[test]
+    fn required_layout_members_and_null_label_follow_webidl() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let wrapped = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("device", wrapped)
+            .expect("set device");
+        eval_drop(
+            &runtime,
+            r#"
+                var nullLabel = device.createBuffer({ size: 4, usage: 8, label: null });
+                if (nullLabel.label !== 'null') throw new Error('null label did not stringify');
+                for (const entry of [{ visibility: 1 }, { binding: 0 }]) {
+                    var threw = false;
+                    try { device.createBindGroupLayout({ entries: [entry] }); }
+                    catch (e) { threw = e instanceof TypeError; }
+                    if (!threw) throw new Error('required layout member was defaulted');
+                }
+                nullLabel.destroy();
+                nullLabel = null;
+            "#,
+            "required-layout-members.js",
+        );
+        runtime.clear_global("device").expect("clear device");
+        runtime.run_gc();
+        let _ = runtime.drain_releases().expect("drain");
     }
 
     #[test]

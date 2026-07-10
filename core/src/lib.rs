@@ -488,21 +488,66 @@ pub type DeferredSettlement<E> = (
     std::result::Result<<E as JsEngine>::Value, <E as JsEngine>::Value>,
 );
 
+enum PendingNativeHandle {
+    Adapter(WGPUAdapter),
+    Device(WGPUDevice),
+    Transferred,
+}
+
+struct PendingNative {
+    handle: PendingNativeHandle,
+    queue: Arc<ReleaseQueue>,
+    gpu: GpuDispatch,
+}
+
+impl PendingNative {
+    fn take_adapter(&mut self) -> WGPUAdapter {
+        match std::mem::replace(&mut self.handle, PendingNativeHandle::Transferred) {
+            PendingNativeHandle::Adapter(adapter) => adapter,
+            PendingNativeHandle::Device(_) | PendingNativeHandle::Transferred => ptr::null_mut(),
+        }
+    }
+
+    fn take_device(&mut self) -> WGPUDevice {
+        match std::mem::replace(&mut self.handle, PendingNativeHandle::Transferred) {
+            PendingNativeHandle::Device(device) => device,
+            PendingNativeHandle::Adapter(_) | PendingNativeHandle::Transferred => ptr::null_mut(),
+        }
+    }
+}
+
+impl Drop for PendingNative {
+    fn drop(&mut self) {
+        let request = match self.handle {
+            PendingNativeHandle::Adapter(adapter) => ReleaseRequest::Adapter {
+                adapter,
+                gpu: self.gpu,
+            },
+            PendingNativeHandle::Device(device) => ReleaseRequest::Device {
+                device,
+                gpu: self.gpu,
+            },
+            PendingNativeHandle::Transferred => return,
+        };
+        let _ = self.queue.enqueue(request);
+    }
+}
+
 enum SettlementRequest<E: JsEngine + 'static> {
     Adapter {
         deferred: Deferred<E>,
-        adapter: WGPUAdapter,
+        native: PendingNative,
     },
     Device {
         deferred: Deferred<E>,
-        device: WGPUDevice,
+        native: PendingNative,
     },
     Success {
         deferred: Deferred<E>,
     },
     Error {
         deferred: Deferred<E>,
-        message: &'static str,
+        message: String,
     },
 }
 
@@ -513,26 +558,48 @@ enum SettlementRequest<E: JsEngine + 'static> {
 unsafe impl<E: JsEngine + 'static> Send for SettlementRequest<E> {}
 
 impl<E: JsEngine + 'static> SettlementRequest<E> {
-    fn settle(self, cx: E::Context<'_>) -> DeferredSettlement<E> {
+    fn settle(mut self, cx: E::Context<'_>) -> DeferredSettlement<E> {
         match self {
-            Self::Adapter { deferred, adapter } => {
+            Self::Adapter {
+                deferred,
+                ref mut native,
+            } => {
+                let adapter = native.take_adapter();
                 let value =
                     E::new_instance(cx, GPU_ADAPTER_CLASS, Box::new(AdapterPayload { adapter }));
                 match value {
                     Ok(value) => (deferred, Ok(value)),
-                    Err(error) => (deferred, Err(E::error_value_from_error(cx, error))),
+                    Err(error) => {
+                        let _ = native.queue.enqueue(ReleaseRequest::Adapter {
+                            adapter,
+                            gpu: native.gpu,
+                        });
+                        (deferred, Err(E::error_value_from_error(cx, error)))
+                    }
                 }
             }
-            Self::Device { deferred, device } => {
+            Self::Device {
+                deferred,
+                ref mut native,
+            } => {
+                let device = native.take_device();
                 let value =
                     E::new_instance(cx, GPU_DEVICE_CLASS, Box::new(DevicePayload { device }));
                 match value {
                     Ok(value) => (deferred, Ok(value)),
-                    Err(error) => (deferred, Err(E::error_value_from_error(cx, error))),
+                    Err(error) => {
+                        let _ = native.queue.enqueue(ReleaseRequest::Device {
+                            device,
+                            gpu: native.gpu,
+                        });
+                        (deferred, Err(E::error_value_from_error(cx, error)))
+                    }
                 }
             }
             Self::Success { deferred } => (deferred, Ok(E::undefined(cx))),
-            Self::Error { deferred, message } => (deferred, Err(E::async_error_value(cx, message))),
+            Self::Error { deferred, message } => {
+                (deferred, Err(E::async_error_value(cx, &message)))
+            }
         }
     }
 }
@@ -738,6 +805,8 @@ pub enum ReleaseRequest {
     BindGroup {
         /// Bind group handle to release.
         bind_group: WGPUBindGroup,
+        /// Layout reference held by the bind group wrapper.
+        layout: WGPUBindGroupLayout,
         /// Buffer references held by the bind group wrapper.
         buffers: Vec<WGPUBuffer>,
         /// Dispatch table used on the drain thread.
@@ -747,6 +816,10 @@ pub enum ReleaseRequest {
     ComputePipeline {
         /// Compute pipeline handle to release.
         pipeline: WGPUComputePipeline,
+        /// Shader module reference held by the compute pipeline wrapper.
+        module: WGPUShaderModule,
+        /// Explicit layout reference held by the wrapper, or null for auto layout.
+        layout: WGPUPipelineLayout,
         /// Dispatch table used on the drain thread.
         gpu: GpuDispatch,
     },
@@ -817,16 +890,27 @@ impl ReleaseRequest {
             },
             Self::BindGroup {
                 bind_group,
+                layout,
                 buffers,
                 gpu,
             } => unsafe {
                 (gpu.bind_group_release)(bind_group);
+                (gpu.bind_group_layout_release)(layout);
                 for buffer in buffers {
                     (gpu.buffer_release)(buffer);
                 }
             },
-            Self::ComputePipeline { pipeline, gpu } => unsafe {
+            Self::ComputePipeline {
+                pipeline,
+                module,
+                layout,
+                gpu,
+            } => unsafe {
                 (gpu.compute_pipeline_release)(pipeline);
+                (gpu.shader_module_release)(module);
+                if !layout.is_null() {
+                    (gpu.pipeline_layout_release)(layout);
+                }
             },
             Self::CommandEncoder { encoder, gpu } => unsafe {
                 (gpu.command_encoder_release)(encoder);
@@ -1118,6 +1202,7 @@ unsafe impl Send for PipelineLayoutPayload {}
 /// Payload stored by a `GPUBindGroup` wrapper.
 pub struct BindGroupPayload {
     bind_group: WGPUBindGroup,
+    layout: WGPUBindGroupLayout,
     buffers: Vec<WGPUBuffer>,
 }
 
@@ -1125,12 +1210,15 @@ pub struct BindGroupPayload {
 // references retained for its entries. A finalizer only transfers those handle
 // values into `ReleaseRequest::BindGroup`; the bind group and buffers are
 // released by queue drain on the creating `tick()` thread.
-// SAFETY: `WGPUBindGroup` and retained `WGPUBuffer`s are released during `tick()` drain.
+// SAFETY: `WGPUBindGroup`, its layout, and retained `WGPUBuffer`s are released
+// during `tick()` drain.
 unsafe impl Send for BindGroupPayload {}
 
 /// Payload stored by a `GPUComputePipeline` wrapper.
 pub struct ComputePipelinePayload {
     pipeline: WGPUComputePipeline,
+    module: WGPUShaderModule,
+    layout: WGPUPipelineLayout,
 }
 
 // SAFETY: `ComputePipelinePayload` stores a `WGPUComputePipeline`. The handle may
@@ -1410,6 +1498,8 @@ pub fn gpu_request_adapter<E: JsEngine + 'static>(
     let mut request = Box::new(AdapterRequest::<E> {
         deferred: Some(deferred),
         settlements: Arc::clone(E::environment(cx).settlements()),
+        release_queue: Arc::clone(E::environment(cx).queue()),
+        gpu: E::environment(cx).gpu(),
         _registration: None,
     });
     request._registration = Some(E::register_deferred(
@@ -1447,6 +1537,8 @@ pub fn adapter_request_device<E: JsEngine + 'static>(
     let mut request = Box::new(DeviceRequest::<E> {
         deferred: Some(deferred),
         settlements: Arc::clone(E::environment(cx).settlements()),
+        release_queue: Arc::clone(E::environment(cx).queue()),
+        gpu: E::environment(cx).gpu(),
         _registration: None,
     });
     request._registration = Some(E::register_deferred(
@@ -1534,15 +1626,19 @@ pub fn buffer_get_mapped_range<E: JsEngine + 'static>(
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
     let offset = optional_gpu_size_to_usize::<E>(cx, args.first().copied(), "offset", 0)?;
+    let explicit_size = match args.get(1).copied() {
+        Some(value) if !E::is_undefined(cx, value) => {
+            Some(optional_gpu_size_to_usize::<E>(cx, Some(value), "size", 0)?)
+        }
+        _ => None,
+    };
     with_buffer_payload_state::<E, _, _>(cx, this, |payload, state| {
         if state.destroyed || !state.mapped {
             return Err(E::operation_error(cx, "buffer is not mapped"));
         }
-        let size = match args.get(1).copied() {
-            Some(value) if !E::is_undefined(cx, value) => {
-                optional_gpu_size_to_usize::<E>(cx, Some(value), "size", 0)?
-            }
-            _ => state
+        let size = match explicit_size {
+            Some(size) => size,
+            None => state
                 .size
                 .checked_sub(offset as u64)
                 .and_then(|len| usize::try_from(len).ok())
@@ -1969,24 +2065,28 @@ pub fn device_create_bind_group<E: JsEngine + 'static>(
         ));
     }
     let gpu = E::environment(cx).gpu();
+    unsafe { (gpu.bind_group_layout_add_ref)(converted.layout) };
     for buffer in &converted.buffers {
         unsafe { (gpu.buffer_add_ref)(*buffer) };
     }
     if let Err(error) = E::register_class(cx, bind_group_class::<E>()) {
         unsafe {
             (gpu.bind_group_release)(bind_group);
+            (gpu.bind_group_layout_release)(converted.layout);
             for buffer in &converted.buffers {
                 (gpu.buffer_release)(*buffer);
             }
         }
         return Err(error);
     }
+    let retained_layout = converted.layout;
     let retained_buffers = converted.buffers.clone();
     match E::new_instance(
         cx,
         GPU_BIND_GROUP_CLASS,
         Box::new(BindGroupPayload {
             bind_group,
+            layout: converted.layout,
             buffers: converted.buffers,
         }),
     ) {
@@ -1994,6 +2094,7 @@ pub fn device_create_bind_group<E: JsEngine + 'static>(
         Err(error) => {
             unsafe {
                 (gpu.bind_group_release)(bind_group);
+                (gpu.bind_group_layout_release)(retained_layout);
                 for buffer in &retained_buffers {
                     (gpu.buffer_release)(*buffer);
                 }
@@ -2015,9 +2116,12 @@ pub fn device_create_compute_pipeline<E: JsEngine + 'static>(
         .copied()
         .ok_or_else(|| E::type_error(cx, "GPUComputePipelineDescriptor"))?;
     let arena = Arena::new();
-    let native = convert_compute_pipeline_descriptor::<E>(cx, desc, &arena)?;
+    let converted = convert_compute_pipeline_descriptor::<E>(cx, desc, &arena)?;
     let pipeline = unsafe {
-        (E::environment(cx).gpu().device_create_compute_pipeline)(device, ptr::from_ref(&native))
+        (E::environment(cx).gpu().device_create_compute_pipeline)(
+            device,
+            ptr::from_ref(&converted.native),
+        )
     };
     if pipeline.is_null() {
         return Err(E::operation_error(
@@ -2025,18 +2129,41 @@ pub fn device_create_compute_pipeline<E: JsEngine + 'static>(
             "wgpuDeviceCreateComputePipeline returned null",
         ));
     }
+    let gpu = E::environment(cx).gpu();
+    unsafe {
+        (gpu.shader_module_add_ref)(converted.module);
+        if !converted.layout.is_null() {
+            (gpu.pipeline_layout_add_ref)(converted.layout);
+        }
+    }
     if let Err(error) = E::register_class(cx, compute_pipeline_class::<E>()) {
-        unsafe { (E::environment(cx).gpu().compute_pipeline_release)(pipeline) };
+        unsafe {
+            (gpu.compute_pipeline_release)(pipeline);
+            (gpu.shader_module_release)(converted.module);
+            if !converted.layout.is_null() {
+                (gpu.pipeline_layout_release)(converted.layout);
+            }
+        };
         return Err(error);
     }
     match E::new_instance(
         cx,
         GPU_COMPUTE_PIPELINE_CLASS,
-        Box::new(ComputePipelinePayload { pipeline }),
+        Box::new(ComputePipelinePayload {
+            pipeline,
+            module: converted.module,
+            layout: converted.layout,
+        }),
     ) {
         Ok(value) => Ok(value),
         Err(error) => {
-            unsafe { (E::environment(cx).gpu().compute_pipeline_release)(pipeline) };
+            unsafe {
+                (gpu.compute_pipeline_release)(pipeline);
+                (gpu.shader_module_release)(converted.module);
+                if !converted.layout.is_null() {
+                    (gpu.pipeline_layout_release)(converted.layout);
+                }
+            };
             Err(error)
         }
     }
@@ -2406,6 +2533,7 @@ pub fn finalize_bind_group(payload: Box<dyn Any + Send>, env: &Environment) {
     };
     let _ = env.queue().enqueue(ReleaseRequest::BindGroup {
         bind_group: payload.bind_group,
+        layout: payload.layout,
         buffers: payload.buffers,
         gpu: env.gpu(),
     });
@@ -2418,6 +2546,8 @@ pub fn finalize_compute_pipeline(payload: Box<dyn Any + Send>, env: &Environment
     };
     let _ = env.queue().enqueue(ReleaseRequest::ComputePipeline {
         pipeline: payload.pipeline,
+        module: payload.module,
+        layout: payload.layout,
         gpu: env.gpu(),
     });
 }
@@ -2504,12 +2634,16 @@ pub fn finalize_buffer<E: JsEngine + 'static>(payload: Box<dyn Any + Send>, env:
 struct AdapterRequest<E: JsEngine + 'static> {
     deferred: Option<Deferred<E>>,
     settlements: Arc<SettlementQueue>,
+    release_queue: Arc<ReleaseQueue>,
+    gpu: GpuDispatch,
     _registration: Option<E::DeferredRegistration>,
 }
 
 struct DeviceRequest<E: JsEngine + 'static> {
     deferred: Option<Deferred<E>>,
     settlements: Arc<SettlementQueue>,
+    release_queue: Arc<ReleaseQueue>,
+    gpu: GpuDispatch,
     _registration: Option<E::DeferredRegistration>,
 }
 
@@ -2527,10 +2661,30 @@ struct QueueWorkDoneRequest<E: JsEngine + 'static> {
     _registration: Option<E::DeferredRegistration>,
 }
 
+unsafe fn callback_message(message: WGPUStringView, fallback: &'static str) -> String {
+    let backend = if message.data.is_null() {
+        String::new()
+    } else if message.length == wgpu_strlen() {
+        unsafe { std::ffi::CStr::from_ptr(message.data) }
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        String::from_utf8_lossy(unsafe {
+            std::slice::from_raw_parts(message.data.cast::<u8>(), message.length)
+        })
+        .into_owned()
+    };
+    if backend.is_empty() {
+        fallback.to_owned()
+    } else {
+        format!("{fallback}: {backend}")
+    }
+}
+
 unsafe extern "C" fn request_adapter_callback<E: JsEngine + 'static>(
     status: WGPURequestAdapterStatus,
     adapter: WGPUAdapter,
-    _message: WGPUStringView,
+    message: WGPUStringView,
     userdata1: *mut c_void,
     _userdata2: *mut c_void,
 ) {
@@ -2545,11 +2699,24 @@ unsafe extern "C" fn request_adapter_callback<E: JsEngine + 'static>(
         let settlement = if status == WGPURequestAdapterStatus_WGPURequestAdapterStatus_Success
             && !adapter.is_null()
         {
-            SettlementRequest::Adapter { deferred, adapter }
+            SettlementRequest::Adapter {
+                deferred,
+                native: PendingNative {
+                    handle: PendingNativeHandle::Adapter(adapter),
+                    queue: Arc::clone(&request.release_queue),
+                    gpu: request.gpu,
+                },
+            }
         } else {
+            if !adapter.is_null() {
+                let _ = request.release_queue.enqueue(ReleaseRequest::Adapter {
+                    adapter,
+                    gpu: request.gpu,
+                });
+            }
             SettlementRequest::Error {
                 deferred,
-                message: "requestAdapter failed",
+                message: unsafe { callback_message(message, "requestAdapter failed") },
             }
         };
         let _ = request.settlements.enqueue::<E>(settlement);
@@ -2559,7 +2726,7 @@ unsafe extern "C" fn request_adapter_callback<E: JsEngine + 'static>(
 unsafe extern "C" fn request_device_callback<E: JsEngine + 'static>(
     status: WGPURequestDeviceStatus,
     device: WGPUDevice,
-    _message: WGPUStringView,
+    message: WGPUStringView,
     userdata1: *mut c_void,
     _userdata2: *mut c_void,
 ) {
@@ -2574,11 +2741,24 @@ unsafe extern "C" fn request_device_callback<E: JsEngine + 'static>(
         let settlement = if status == WGPURequestDeviceStatus_WGPURequestDeviceStatus_Success
             && !device.is_null()
         {
-            SettlementRequest::Device { deferred, device }
+            SettlementRequest::Device {
+                deferred,
+                native: PendingNative {
+                    handle: PendingNativeHandle::Device(device),
+                    queue: Arc::clone(&request.release_queue),
+                    gpu: request.gpu,
+                },
+            }
         } else {
+            if !device.is_null() {
+                let _ = request.release_queue.enqueue(ReleaseRequest::Device {
+                    device,
+                    gpu: request.gpu,
+                });
+            }
             SettlementRequest::Error {
                 deferred,
-                message: "requestDevice failed",
+                message: unsafe { callback_message(message, "requestDevice failed") },
             }
         };
         let _ = request.settlements.enqueue::<E>(settlement);
@@ -2587,7 +2767,7 @@ unsafe extern "C" fn request_device_callback<E: JsEngine + 'static>(
 
 unsafe extern "C" fn buffer_map_callback<E: JsEngine + 'static>(
     status: WGPUMapAsyncStatus,
-    _message: WGPUStringView,
+    message: WGPUStringView,
     userdata1: *mut c_void,
     _userdata2: *mut c_void,
 ) {
@@ -2606,7 +2786,7 @@ unsafe extern "C" fn buffer_map_callback<E: JsEngine + 'static>(
             }
             SettlementRequest::Success { deferred }
         } else {
-            let message = if status == WGPUMapAsyncStatus_WGPUMapAsyncStatus_Error {
+            let fallback = if status == WGPUMapAsyncStatus_WGPUMapAsyncStatus_Error {
                 "mapAsync error"
             } else if status == WGPUMapAsyncStatus_WGPUMapAsyncStatus_Aborted {
                 "mapAsync aborted"
@@ -2615,7 +2795,10 @@ unsafe extern "C" fn buffer_map_callback<E: JsEngine + 'static>(
             } else {
                 "mapAsync failed"
             };
-            SettlementRequest::Error { deferred, message }
+            SettlementRequest::Error {
+                deferred,
+                message: unsafe { callback_message(message, fallback) },
+            }
         };
         let _ = request.settlements.enqueue::<E>(settlement);
     }));
@@ -2623,7 +2806,7 @@ unsafe extern "C" fn buffer_map_callback<E: JsEngine + 'static>(
 
 unsafe extern "C" fn queue_work_done_callback<E: JsEngine + 'static>(
     status: WGPUQueueWorkDoneStatus,
-    _message: WGPUStringView,
+    message: WGPUStringView,
     userdata1: *mut c_void,
     _userdata2: *mut c_void,
 ) {
@@ -2640,7 +2823,7 @@ unsafe extern "C" fn queue_work_done_callback<E: JsEngine + 'static>(
         } else {
             SettlementRequest::Error {
                 deferred,
-                message: "onSubmittedWorkDone failed",
+                message: unsafe { callback_message(message, "onSubmittedWorkDone failed") },
             }
         };
         let _ = request.settlements.enqueue::<E>(settlement);
@@ -2657,7 +2840,14 @@ struct BufferDescriptor {
 
 struct ConvertedBindGroupDescriptor {
     native: WGPUBindGroupDescriptor,
+    layout: WGPUBindGroupLayout,
     buffers: Vec<WGPUBuffer>,
+}
+
+struct ConvertedComputePipelineDescriptor {
+    native: WGPUComputePipelineDescriptor,
+    module: WGPUShaderModule,
+    layout: WGPUPipelineLayout,
 }
 
 fn convert_shader_module_descriptor<E: JsEngine>(
@@ -2749,6 +2939,7 @@ fn convert_bind_group_descriptor<E: JsEngine + 'static>(
                 entries.as_ptr()
             },
         },
+        layout,
         buffers,
     })
 }
@@ -2757,7 +2948,7 @@ fn convert_compute_pipeline_descriptor<E: JsEngine + 'static>(
     cx: E::Context<'_>,
     value: E::Value,
     arena: &Arena,
-) -> Result<WGPUComputePipelineDescriptor, E::Error> {
+) -> Result<ConvertedComputePipelineDescriptor, E::Error> {
     let label = optional_non_null_string::<E>(cx, value, "label", arena)?;
     let layout_value = E::get_property(cx, value, "layout")?;
     let layout = if E::is_undefined(cx, layout_value) || E::is_null(cx, layout_value) {
@@ -2768,17 +2959,21 @@ fn convert_compute_pipeline_descriptor<E: JsEngine + 'static>(
     let compute_value = required_member::<E>(cx, value, "compute")?;
     let module = shader_module_handle::<E>(cx, required_member::<E>(cx, compute_value, "module")?)?;
     let entry_point = optional_nullable_string::<E>(cx, compute_value, "entryPoint", arena)?;
-    Ok(WGPUComputePipelineDescriptor {
-        nextInChain: ptr::null_mut(),
-        label: WGPUStringView::from_bytes(label.as_bytes()),
-        layout,
-        compute: WGPUComputeState {
+    Ok(ConvertedComputePipelineDescriptor {
+        native: WGPUComputePipelineDescriptor {
             nextInChain: ptr::null_mut(),
-            module,
-            entryPoint: entry_point,
-            constantCount: 0,
-            constants: ptr::null(),
+            label: WGPUStringView::from_bytes(label.as_bytes()),
+            layout,
+            compute: WGPUComputeState {
+                nextInChain: ptr::null_mut(),
+                module,
+                entryPoint: entry_point,
+                constantCount: 0,
+                constants: ptr::null(),
+            },
         },
+        module,
+        layout,
     })
 }
 
@@ -2852,7 +3047,7 @@ fn optional_non_null_string<'a, E: JsEngine>(
     arena: &'a Arena,
 ) -> Result<&'a str, E::Error> {
     let value = E::get_property(cx, obj, name)?;
-    if E::is_undefined(cx, value) || E::is_null(cx, value) {
+    if E::is_undefined(cx, value) {
         Ok("")
     } else {
         E::to_str(cx, value, arena)
@@ -2914,18 +3109,12 @@ fn convert_bind_group_layout_entry<E: JsEngine>(
     cx: E::Context<'_>,
     value: E::Value,
 ) -> Result<WGPUBindGroupLayoutEntry, E::Error> {
-    let binding = optional_u32::<E>(
+    let binding = enforce_u32::<E>(cx, required_member::<E>(cx, value, "binding")?, "binding")?;
+    let visibility = u64::from(enforce_u32::<E>(
         cx,
-        Some(E::get_property(cx, value, "binding")?),
-        "binding",
-        0,
-    )?;
-    let visibility = optional_u32::<E>(
-        cx,
-        E::get_property(cx, value, "visibility").ok(),
+        required_member::<E>(cx, value, "visibility")?,
         "visibility",
-        0,
-    )? as u64;
+    )?);
     let buffer_value = E::get_property(cx, value, "buffer")?;
     let buffer = if E::is_undefined(cx, buffer_value) {
         WGPUBufferBindingLayout {
