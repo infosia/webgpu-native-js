@@ -2778,6 +2778,12 @@ unsafe extern "C" fn request_adapter_callback<E: JsEngine + 'static>(
         };
         let mut request = unsafe { Box::from_raw(raw.as_ptr()) };
         let Some(deferred) = request.deferred.take() else {
+            if !adapter.is_null() {
+                let _ = request.release_queue.enqueue(ReleaseRequest::Adapter {
+                    adapter,
+                    gpu: request.gpu,
+                });
+            }
             return;
         };
         let settlement = if status == WGPURequestAdapterStatus_WGPURequestAdapterStatus_Success
@@ -2820,6 +2826,12 @@ unsafe extern "C" fn request_device_callback<E: JsEngine + 'static>(
         };
         let mut request = unsafe { Box::from_raw(raw.as_ptr()) };
         let Some(deferred) = request.deferred.take() else {
+            if !device.is_null() {
+                let _ = request.release_queue.enqueue(ReleaseRequest::Device {
+                    device,
+                    gpu: request.gpu,
+                });
+            }
             return;
         };
         let settlement = if status == WGPURequestDeviceStatus_WGPURequestDeviceStatus_Success

@@ -1481,10 +1481,11 @@ mod tests {
         device_create_bind_group, device_create_buffer, device_create_command_encoder,
         device_create_compute_pipeline, device_queue_get, finalize_bind_group, finalize_buffer,
         finalize_compute_pipeline, finalize_device, finalize_queue, queue_submit,
-        queue_work_done_callback, queue_write_buffer, wrap_device, BindGroupLayoutPayload,
-        BindGroupPayload, BufferPayload, ComputePipelinePayload, DevicePayload, JsEngine,
-        PendingNative, PendingNativeHandle, PipelineLayoutPayload, QueueError, QueuePayload,
-        QueueWorkDoneRequest, SettlementRequest, ShaderModulePayload,
+        queue_work_done_callback, queue_write_buffer, request_adapter_callback,
+        request_device_callback, wrap_device, AdapterRequest, BindGroupLayoutPayload,
+        BindGroupPayload, BufferPayload, ComputePipelinePayload, DevicePayload, DeviceRequest,
+        JsEngine, PendingNative, PendingNativeHandle, PipelineLayoutPayload, QueueError,
+        QueuePayload, QueueWorkDoneRequest, SettlementRequest, ShaderModulePayload,
     };
 
     fn descriptor(rt: &Runtime, fields: &[(&str, Value)]) -> Value {
@@ -2386,6 +2387,70 @@ mod tests {
             rt.get(reason),
             MockValue::String(message) if message.contains("backend diagnostic")
         ));
+    }
+
+    #[test]
+    fn a28_late_adapter_callback_releases_success_handle_after_teardown() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let (_, deferred) = Engine::new_promise(cx).expect("promise");
+        let mut request = Box::new(AdapterRequest::<Engine> {
+            deferred: Some(deferred),
+            settlements: Arc::clone(rt.env.settlements()),
+            release_queue: Arc::clone(rt.queue()),
+            gpu: dispatch(),
+            _registration: None,
+        });
+        Engine::register_deferred(cx, std::ptr::NonNull::from(&mut request.deferred));
+        request._registration = Some(());
+        let deferred = request.deferred.take().expect("registered deferred");
+        Engine::release_deferred(cx, deferred);
+
+        unsafe {
+            request_adapter_callback::<Engine>(
+                crate::WGPURequestAdapterStatus_WGPURequestAdapterStatus_Success,
+                fake_handle(92),
+                WGPUStringView::from_bytes(b""),
+                Box::into_raw(request).cast(),
+                ptr::null_mut(),
+            );
+        }
+
+        assert_eq!(rt.queue().drain(), Ok(1));
+        GPU_STATE.with(|state| assert_eq!(state.borrow().adapter_releases, 1));
+    }
+
+    #[test]
+    fn a28_late_device_callback_releases_success_handle_after_teardown() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let (_, deferred) = Engine::new_promise(cx).expect("promise");
+        let mut request = Box::new(DeviceRequest::<Engine> {
+            deferred: Some(deferred),
+            settlements: Arc::clone(rt.env.settlements()),
+            release_queue: Arc::clone(rt.queue()),
+            gpu: dispatch(),
+            _registration: None,
+        });
+        Engine::register_deferred(cx, std::ptr::NonNull::from(&mut request.deferred));
+        request._registration = Some(());
+        let deferred = request.deferred.take().expect("registered deferred");
+        Engine::release_deferred(cx, deferred);
+
+        unsafe {
+            request_device_callback::<Engine>(
+                crate::WGPURequestDeviceStatus_WGPURequestDeviceStatus_Success,
+                fake_handle(93),
+                WGPUStringView::from_bytes(b""),
+                Box::into_raw(request).cast(),
+                ptr::null_mut(),
+            );
+        }
+
+        assert_eq!(rt.queue().drain(), Ok(1));
+        GPU_STATE.with(|state| assert_eq!(state.borrow().device_releases, 1));
     }
 
     #[test]

@@ -944,3 +944,17 @@ a `TypeError` with a less precise message; (2) an element-conversion failure
 does not invoke `IteratorClose` (`return()`), so a generator's `finally` does
 not run on abort. Both are honest-mistake-visible and trusted-script-acceptable
 (invariant 8); revisit if the upstream CTS is ever run.
+
+**The exit gate fired a third time (2026-07-10, P3b-1 dispatch).** The JSC
+adapter agent stopped without writing code, as J13 instructs: `core/`'s
+`request_adapter_callback`/`request_device_callback`, on the A28
+deferred-already-taken teardown path, dropped a Success-status non-null handle
+without enqueuing its release. Reachable in the target architecture — the host
+owns the `WGPUInstance`, it outlives the script runtime, and its next
+`ProcessEvents` after a runtime drop fires the late callback with a live
+handle. Silent native leak; the QuickJS suite never drives that sequence.
+Fixed by planner-authorized handoff: both `None`-deferred arms now enqueue
+non-null handles (callbacks stay pure Rust — enqueue only); two direct core
+tests, both seen red first (`Ok(0)` against expected `Ok(1)`). Map/work-done
+callbacks audited: they own no handles. Three gate firings, three core defects
+caught before an adapter existed to hide them.
