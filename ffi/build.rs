@@ -50,13 +50,46 @@ fn main() {
 
     println!("cargo:rerun-if-changed={}", header.display());
 
+    let ptr_width = env::var("CARGO_CFG_TARGET_POINTER_WIDTH")
+        .expect("CARGO_CFG_TARGET_POINTER_WIDTH is set by Cargo");
+    let size_max_literal = if ptr_width == "32" {
+        "0xffffffffU"
+    } else {
+        "0xffffffffffffffffULL"
+    };
+
+    let wrapper = format!(
+        r#"#include "{header}"
+/* MSVC's stdint.h expands UINT64_MAX/SIZE_MAX with MSVC-specific integer
+   suffixes (0x...ui64) that bindgen's macro evaluator cannot parse, so these
+   sentinel constants would be silently dropped from the bindings. Re-define
+   them with standard C literals; all are all-ones sentinels fixed by the
+   webgpu.h API contract. */
+#undef WGPU_WHOLE_SIZE
+#define WGPU_WHOLE_SIZE (0xffffffffffffffffULL)
+#undef WGPU_LIMIT_U64_UNDEFINED
+#define WGPU_LIMIT_U64_UNDEFINED (0xffffffffffffffffULL)
+#undef WGPU_STRLEN
+#define WGPU_STRLEN ({size_max})
+#undef WGPU_WHOLE_MAP_SIZE
+#define WGPU_WHOLE_MAP_SIZE ({size_max})
+"#,
+        header = header.display().to_string().replace('\\', "/"),
+        size_max = size_max_literal,
+    );
+
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set by Cargo"));
+    let wrapper_path = out_dir.join("webgpu_bindgen_wrapper.h");
+    std::fs::write(&wrapper_path, &wrapper)
+        .expect("bindgen wrapper header can be written to OUT_DIR");
+
     let bindings = bindgen::Builder::default()
-        .header(header.to_string_lossy())
+        .header(wrapper_path.to_string_lossy())
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
+        .clang_macro_fallback()
         .generate()
         .expect("bindgen can generate bindings from the canonical webgpu.h");
 
-    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set by Cargo"));
     bindings
         .write_to_file(out_dir.join("webgpu_bindings.rs"))
         .expect("generated bindings can be written to OUT_DIR");

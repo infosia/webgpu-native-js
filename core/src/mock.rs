@@ -6462,7 +6462,10 @@ mod tests {
         let native = fake_handle(1_235);
         let _device = unsafe { wrap_device::<Engine>(cx, native) }.expect("device");
         let forwarder = rt.env.device_event_forwarder();
-        for type_ in [crate::WGPUErrorType_WGPUErrorType_NoError, 0xdead_beef] {
+        for type_ in [
+            crate::WGPUErrorType_WGPUErrorType_NoError,
+            0xdead_beef_u32 as crate::WGPUErrorType,
+        ] {
             assert_eq!(
                 forwarder.forward_uncaptured_error::<Engine>(native, type_, "invalid"),
                 Err(QueueError::InvalidUncapturedErrorType(type_))
