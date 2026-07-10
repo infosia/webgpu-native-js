@@ -598,6 +598,8 @@ pub(crate) struct UnionFlattenPolicy {
     pub(crate) arm: String,
     pub(crate) unsupported_error: String,
     #[serde(default)]
+    pub(crate) handle_arms: Vec<String>,
+    #[serde(default)]
     pub(crate) fields: Vec<UnionFlattenField>,
     #[serde(default)]
     pub(crate) zero_c_members: Vec<String>,

@@ -7,6 +7,7 @@
     var finished = false;
     var labelBuffer;
     var retainedTextureView;
+    var retainedBindGroup;
 
     function log(line) {
         globalThis.parityLog.push(String(line));
@@ -361,6 +362,53 @@
         });
     }
 
+    function runBindGroups() {
+        var layout = device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: 4, buffer: { type: "uniform" } },
+                { binding: 1, visibility: 4, sampler: { type: "filtering" } },
+                { binding: 2, visibility: 4, texture: {
+                    sampleType: "float", viewDimension: "2d", multisampled: false
+                } }
+            ]
+        });
+        var resourceBuffer = device.createBuffer({ size: 4, usage: 64 });
+        var resourceSampler = device.createSampler();
+        var resourceTexture = device.createTexture({
+            size: [1], format: "rgba8unorm", usage: 4
+        });
+        var resourceView = resourceTexture.createView();
+        retainedBindGroup = device.createBindGroup({
+            layout: layout,
+            entries: [
+                { binding: 0, resource: { buffer: resourceBuffer } },
+                { binding: 1, resource: resourceSampler },
+                { binding: 2, resource: resourceView }
+            ]
+        });
+        log("bindGroup:resources:buffer,sampler,texture-view:ok");
+
+        var samplerTypeError = caught(function () {
+            device.createBindGroupLayout({
+                entries: [{ binding: 0, visibility: 4, sampler: { type: "bad" } }]
+            });
+        });
+        log(errorLine("bindGroup:sampler-type-rejection", samplerTypeError));
+
+        layout = resourceBuffer = resourceSampler = resourceTexture = resourceView = null;
+    }
+
+    function runBindGroupRetention() {
+        return gpu.requestAdapter().then(function () {
+            return gpu.requestAdapter();
+        }).then(function () {
+            log("bindGroup:outlives-resources:" +
+                (retainedBindGroup !== null &&
+                 typeof Object.getPrototypeOf(retainedBindGroup) === "object"));
+            retainedBindGroup = null;
+        });
+    }
+
     function runRequiredMembers() {
         var entriesError = caught(function () {
             device.createBindGroupLayout({});
@@ -490,6 +538,7 @@
 
     function finishConformance() {
         return runTextureRetention()
+            .then(runBindGroupRetention)
             .then(runErrorScopes)
             .then(runOrdering)
             .then(function () {
@@ -531,6 +580,7 @@
         log("sampler:" + paritySampler.label);
 
         runTextures();
+        runBindGroups();
 
         runCoercions();
         runStrings();

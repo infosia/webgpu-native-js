@@ -960,26 +960,45 @@ pub(super) fn convert_bind_group_entry<E: JsEngine + 'static>(
     // DR-M3: required dictionary members reject undefined.
     let binding_value = required_member::<E>(cx, value, "binding")?;
     let resource_value = required_member::<E>(cx, value, "resource")?;
+    // C2/R24: wrapper-union arms are selected by generated ClassSpec identity.
+    let sampler_resource = E::payload(cx, resource_value, GPU_SAMPLER_CLASS)
+        .and_then(|payload| payload.downcast_ref::<SamplerPayload>())
+        .map(|payload| payload.sampler);
+    // C2/R24: wrapper-union arms are selected by generated ClassSpec identity.
+    let texture_view_resource = E::payload(cx, resource_value, GPU_TEXTURE_VIEW_CLASS)
+        .and_then(|payload| payload.downcast_ref::<TextureViewPayload>())
+        .map(|payload| payload.texture_view);
     // B8: flattened handle conversion extracts only the native handle.
-    let buffer_value = E::get_property(cx, resource_value, "buffer")?;
-    let buffer = if E::is_undefined(cx, buffer_value) {
-        return Err(E::type_error(cx, "resource must be a GPUBufferBinding"));
+    let buffer = if sampler_resource.is_some() || texture_view_resource.is_some() {
+        ptr::null_mut()
     } else {
+        let buffer_value = E::get_property(cx, resource_value, "buffer")?;
+        if E::is_undefined(cx, buffer_value) {
+            return Err(E::type_error(cx, "resource must be a GPUBufferBinding"));
+        }
         buffer_handle::<E>(cx, buffer_value)?
     };
-    let offset_value = E::get_property(cx, resource_value, "offset")?;
     // R8: flattened `[EnforceRange]` members keep their WebIDL width.
-    let offset = if E::is_undefined(cx, offset_value) {
+    let offset = if sampler_resource.is_some() || texture_view_resource.is_some() {
         0
     } else {
-        enforce_u64::<E>(cx, offset_value, "offset")?
+        let offset_value = E::get_property(cx, resource_value, "offset")?;
+        if E::is_undefined(cx, offset_value) {
+            0
+        } else {
+            enforce_u64::<E>(cx, offset_value, "offset")?
+        }
     };
-    let size_value = E::get_property(cx, resource_value, "size")?;
     // R8: flattened `[EnforceRange]` members keep their WebIDL width.
-    let size = if E::is_undefined(cx, size_value) {
+    let size = if sampler_resource.is_some() || texture_view_resource.is_some() {
         WGPU_WHOLE_SIZE as u64
     } else {
-        enforce_u64::<E>(cx, size_value, "size")?
+        let size_value = E::get_property(cx, resource_value, "size")?;
+        if E::is_undefined(cx, size_value) {
+            WGPU_WHOLE_SIZE as u64
+        } else {
+            enforce_u64::<E>(cx, size_value, "size")?
+        }
     };
     Ok(WGPUBindGroupEntry {
         nextInChain: ptr::null_mut(),
@@ -988,8 +1007,8 @@ pub(super) fn convert_bind_group_entry<E: JsEngine + 'static>(
         buffer,
         offset,
         size,
-        sampler: ptr::null_mut(),
-        textureView: ptr::null_mut(),
+        sampler: sampler_resource.unwrap_or(ptr::null_mut()),
+        textureView: texture_view_resource.unwrap_or(ptr::null_mut()),
     })
 }
 
@@ -1020,6 +1039,14 @@ pub(super) fn convert_bind_group_descriptor<E: JsEngine + 'static>(
         .iter()
         .filter_map(|item| (!item.buffer.is_null()).then_some(item.buffer))
         .collect();
+    let samplers = entries
+        .iter()
+        .filter_map(|item| (!item.sampler.is_null()).then_some(item.sampler))
+        .collect();
+    let texture_views = entries
+        .iter()
+        .filter_map(|item| (!item.textureView.is_null()).then_some(item.textureView))
+        .collect();
     let native = WGPUBindGroupDescriptor {
         nextInChain: ptr::null_mut(),
         label: WGPUStringView::from_bytes(label.as_bytes()),
@@ -1035,6 +1062,8 @@ pub(super) fn convert_bind_group_descriptor<E: JsEngine + 'static>(
         native,
         layout,
         buffers,
+        samplers,
+        texture_views,
     })
 }
 
@@ -1295,6 +1324,234 @@ pub(super) fn convert_buffer_binding_layout<E: JsEngine>(
     })
 }
 
+/// Converts a JavaScript `GPUSamplerBindingLayout` into `WGPUSamplerBindingLayout`.
+pub(super) fn convert_sampler_binding_layout<E: JsEngine>(
+    cx: E::Context<'_>,
+    value: E::Value,
+) -> Result<WGPUSamplerBindingLayout, E::Error> {
+    let type_value = dictionary_member::<E>(cx, value, "type")?;
+    // B6: string enums are joined to C values; absence uses the IDL default or C sentinel.
+    let type_ = if E::is_undefined(cx, type_value) {
+        WGPUSamplerBindingType_WGPUSamplerBindingType_Filtering
+    } else {
+        let enum_arena = Arena::new();
+        match E::to_str(cx, type_value, &enum_arena)? {
+            "filtering" => WGPUSamplerBindingType_WGPUSamplerBindingType_Filtering,
+            "non-filtering" => WGPUSamplerBindingType_WGPUSamplerBindingType_NonFiltering,
+            "comparison" => WGPUSamplerBindingType_WGPUSamplerBindingType_Comparison,
+            _ => return Err(E::type_error(cx, "GPUSamplerBindingType")),
+        }
+    };
+    Ok(WGPUSamplerBindingLayout {
+        nextInChain: ptr::null_mut(),
+        type_,
+    })
+}
+
+/// Converts a JavaScript `GPUTextureBindingLayout` into `WGPUTextureBindingLayout`.
+pub(super) fn convert_texture_binding_layout<E: JsEngine>(
+    cx: E::Context<'_>,
+    value: E::Value,
+) -> Result<WGPUTextureBindingLayout, E::Error> {
+    let sample_type_value = dictionary_member::<E>(cx, value, "sampleType")?;
+    let view_dimension_value = dictionary_member::<E>(cx, value, "viewDimension")?;
+    let multisampled_value = dictionary_member::<E>(cx, value, "multisampled")?;
+    // B6: string enums are joined to C values; absence uses the IDL default or C sentinel.
+    let sample_type = if E::is_undefined(cx, sample_type_value) {
+        WGPUTextureSampleType_WGPUTextureSampleType_Float
+    } else {
+        let enum_arena = Arena::new();
+        match E::to_str(cx, sample_type_value, &enum_arena)? {
+            "float" => WGPUTextureSampleType_WGPUTextureSampleType_Float,
+            "unfilterable-float" => WGPUTextureSampleType_WGPUTextureSampleType_UnfilterableFloat,
+            "depth" => WGPUTextureSampleType_WGPUTextureSampleType_Depth,
+            "sint" => WGPUTextureSampleType_WGPUTextureSampleType_Sint,
+            "uint" => WGPUTextureSampleType_WGPUTextureSampleType_Uint,
+            _ => return Err(E::type_error(cx, "GPUTextureSampleType")),
+        }
+    };
+    // B6: string enums are joined to C values; absence uses the IDL default or C sentinel.
+    let view_dimension = if E::is_undefined(cx, view_dimension_value) {
+        WGPUTextureViewDimension_WGPUTextureViewDimension_2D
+    } else {
+        let enum_arena = Arena::new();
+        match E::to_str(cx, view_dimension_value, &enum_arena)? {
+            "1d" => WGPUTextureViewDimension_WGPUTextureViewDimension_1D,
+            "2d" => WGPUTextureViewDimension_WGPUTextureViewDimension_2D,
+            "2d-array" => WGPUTextureViewDimension_WGPUTextureViewDimension_2DArray,
+            "cube" => WGPUTextureViewDimension_WGPUTextureViewDimension_Cube,
+            "cube-array" => WGPUTextureViewDimension_WGPUTextureViewDimension_CubeArray,
+            "3d" => WGPUTextureViewDimension_WGPUTextureViewDimension_3D,
+            _ => return Err(E::type_error(cx, "GPUTextureViewDimension")),
+        }
+    };
+    Ok(WGPUTextureBindingLayout {
+        nextInChain: ptr::null_mut(),
+        sampleType: sample_type,
+        viewDimension: view_dimension,
+        // R8: an optional boolean defaults to false and otherwise uses `ToBoolean`.
+        multisampled: if E::is_undefined(cx, multisampled_value) {
+            0
+        } else {
+            u32::from(E::to_bool(cx, multisampled_value))
+        },
+    })
+}
+
+/// Converts a JavaScript `GPUStorageTextureBindingLayout` into `WGPUStorageTextureBindingLayout`.
+pub(super) fn convert_storage_texture_binding_layout<E: JsEngine>(
+    cx: E::Context<'_>,
+    value: E::Value,
+) -> Result<WGPUStorageTextureBindingLayout, E::Error> {
+    let access_value = dictionary_member::<E>(cx, value, "access")?;
+    // DR-M3: required dictionary members reject undefined.
+    let format_value = required_member::<E>(cx, value, "format")?;
+    let view_dimension_value = dictionary_member::<E>(cx, value, "viewDimension")?;
+    // B6: string enums are joined to C values; absence uses the IDL default or C sentinel.
+    let access = if E::is_undefined(cx, access_value) {
+        WGPUStorageTextureAccess_WGPUStorageTextureAccess_WriteOnly
+    } else {
+        let enum_arena = Arena::new();
+        match E::to_str(cx, access_value, &enum_arena)? {
+            "write-only" => WGPUStorageTextureAccess_WGPUStorageTextureAccess_WriteOnly,
+            "read-only" => WGPUStorageTextureAccess_WGPUStorageTextureAccess_ReadOnly,
+            "read-write" => WGPUStorageTextureAccess_WGPUStorageTextureAccess_ReadWrite,
+            _ => return Err(E::type_error(cx, "GPUStorageTextureAccess")),
+        }
+    };
+    // B6: string enums are joined to C values; absence uses the IDL default or C sentinel.
+    let format = if E::is_undefined(cx, format_value) {
+        WGPUTextureFormat_WGPUTextureFormat_Undefined
+    } else {
+        let enum_arena = Arena::new();
+        match E::to_str(cx, format_value, &enum_arena)? {
+            "r8unorm" => WGPUTextureFormat_WGPUTextureFormat_R8Unorm,
+            "r8snorm" => WGPUTextureFormat_WGPUTextureFormat_R8Snorm,
+            "r8uint" => WGPUTextureFormat_WGPUTextureFormat_R8Uint,
+            "r8sint" => WGPUTextureFormat_WGPUTextureFormat_R8Sint,
+            "r16unorm" => WGPUTextureFormat_WGPUTextureFormat_R16Unorm,
+            "r16snorm" => WGPUTextureFormat_WGPUTextureFormat_R16Snorm,
+            "r16uint" => WGPUTextureFormat_WGPUTextureFormat_R16Uint,
+            "r16sint" => WGPUTextureFormat_WGPUTextureFormat_R16Sint,
+            "r16float" => WGPUTextureFormat_WGPUTextureFormat_R16Float,
+            "rg8unorm" => WGPUTextureFormat_WGPUTextureFormat_RG8Unorm,
+            "rg8snorm" => WGPUTextureFormat_WGPUTextureFormat_RG8Snorm,
+            "rg8uint" => WGPUTextureFormat_WGPUTextureFormat_RG8Uint,
+            "rg8sint" => WGPUTextureFormat_WGPUTextureFormat_RG8Sint,
+            "r32uint" => WGPUTextureFormat_WGPUTextureFormat_R32Uint,
+            "r32sint" => WGPUTextureFormat_WGPUTextureFormat_R32Sint,
+            "r32float" => WGPUTextureFormat_WGPUTextureFormat_R32Float,
+            "rg16unorm" => WGPUTextureFormat_WGPUTextureFormat_RG16Unorm,
+            "rg16snorm" => WGPUTextureFormat_WGPUTextureFormat_RG16Snorm,
+            "rg16uint" => WGPUTextureFormat_WGPUTextureFormat_RG16Uint,
+            "rg16sint" => WGPUTextureFormat_WGPUTextureFormat_RG16Sint,
+            "rg16float" => WGPUTextureFormat_WGPUTextureFormat_RG16Float,
+            "rgba8unorm" => WGPUTextureFormat_WGPUTextureFormat_RGBA8Unorm,
+            "rgba8unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_RGBA8UnormSrgb,
+            "rgba8snorm" => WGPUTextureFormat_WGPUTextureFormat_RGBA8Snorm,
+            "rgba8uint" => WGPUTextureFormat_WGPUTextureFormat_RGBA8Uint,
+            "rgba8sint" => WGPUTextureFormat_WGPUTextureFormat_RGBA8Sint,
+            "bgra8unorm" => WGPUTextureFormat_WGPUTextureFormat_BGRA8Unorm,
+            "bgra8unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_BGRA8UnormSrgb,
+            "rgb9e5ufloat" => WGPUTextureFormat_WGPUTextureFormat_RGB9E5Ufloat,
+            "rgb10a2uint" => WGPUTextureFormat_WGPUTextureFormat_RGB10A2Uint,
+            "rgb10a2unorm" => WGPUTextureFormat_WGPUTextureFormat_RGB10A2Unorm,
+            "rg11b10ufloat" => WGPUTextureFormat_WGPUTextureFormat_RG11B10Ufloat,
+            "rg32uint" => WGPUTextureFormat_WGPUTextureFormat_RG32Uint,
+            "rg32sint" => WGPUTextureFormat_WGPUTextureFormat_RG32Sint,
+            "rg32float" => WGPUTextureFormat_WGPUTextureFormat_RG32Float,
+            "rgba16unorm" => WGPUTextureFormat_WGPUTextureFormat_RGBA16Unorm,
+            "rgba16snorm" => WGPUTextureFormat_WGPUTextureFormat_RGBA16Snorm,
+            "rgba16uint" => WGPUTextureFormat_WGPUTextureFormat_RGBA16Uint,
+            "rgba16sint" => WGPUTextureFormat_WGPUTextureFormat_RGBA16Sint,
+            "rgba16float" => WGPUTextureFormat_WGPUTextureFormat_RGBA16Float,
+            "rgba32uint" => WGPUTextureFormat_WGPUTextureFormat_RGBA32Uint,
+            "rgba32sint" => WGPUTextureFormat_WGPUTextureFormat_RGBA32Sint,
+            "rgba32float" => WGPUTextureFormat_WGPUTextureFormat_RGBA32Float,
+            "stencil8" => WGPUTextureFormat_WGPUTextureFormat_Stencil8,
+            "depth16unorm" => WGPUTextureFormat_WGPUTextureFormat_Depth16Unorm,
+            "depth24plus" => WGPUTextureFormat_WGPUTextureFormat_Depth24Plus,
+            "depth24plus-stencil8" => WGPUTextureFormat_WGPUTextureFormat_Depth24PlusStencil8,
+            "depth32float" => WGPUTextureFormat_WGPUTextureFormat_Depth32Float,
+            "depth32float-stencil8" => WGPUTextureFormat_WGPUTextureFormat_Depth32FloatStencil8,
+            "bc1-rgba-unorm" => WGPUTextureFormat_WGPUTextureFormat_BC1RGBAUnorm,
+            "bc1-rgba-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_BC1RGBAUnormSrgb,
+            "bc2-rgba-unorm" => WGPUTextureFormat_WGPUTextureFormat_BC2RGBAUnorm,
+            "bc2-rgba-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_BC2RGBAUnormSrgb,
+            "bc3-rgba-unorm" => WGPUTextureFormat_WGPUTextureFormat_BC3RGBAUnorm,
+            "bc3-rgba-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_BC3RGBAUnormSrgb,
+            "bc4-r-unorm" => WGPUTextureFormat_WGPUTextureFormat_BC4RUnorm,
+            "bc4-r-snorm" => WGPUTextureFormat_WGPUTextureFormat_BC4RSnorm,
+            "bc5-rg-unorm" => WGPUTextureFormat_WGPUTextureFormat_BC5RGUnorm,
+            "bc5-rg-snorm" => WGPUTextureFormat_WGPUTextureFormat_BC5RGSnorm,
+            "bc6h-rgb-ufloat" => WGPUTextureFormat_WGPUTextureFormat_BC6HRGBUfloat,
+            "bc6h-rgb-float" => WGPUTextureFormat_WGPUTextureFormat_BC6HRGBFloat,
+            "bc7-rgba-unorm" => WGPUTextureFormat_WGPUTextureFormat_BC7RGBAUnorm,
+            "bc7-rgba-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_BC7RGBAUnormSrgb,
+            "etc2-rgb8unorm" => WGPUTextureFormat_WGPUTextureFormat_ETC2RGB8Unorm,
+            "etc2-rgb8unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ETC2RGB8UnormSrgb,
+            "etc2-rgb8a1unorm" => WGPUTextureFormat_WGPUTextureFormat_ETC2RGB8A1Unorm,
+            "etc2-rgb8a1unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ETC2RGB8A1UnormSrgb,
+            "etc2-rgba8unorm" => WGPUTextureFormat_WGPUTextureFormat_ETC2RGBA8Unorm,
+            "etc2-rgba8unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ETC2RGBA8UnormSrgb,
+            "eac-r11unorm" => WGPUTextureFormat_WGPUTextureFormat_EACR11Unorm,
+            "eac-r11snorm" => WGPUTextureFormat_WGPUTextureFormat_EACR11Snorm,
+            "eac-rg11unorm" => WGPUTextureFormat_WGPUTextureFormat_EACRG11Unorm,
+            "eac-rg11snorm" => WGPUTextureFormat_WGPUTextureFormat_EACRG11Snorm,
+            "astc-4x4-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC4x4Unorm,
+            "astc-4x4-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC4x4UnormSrgb,
+            "astc-5x4-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC5x4Unorm,
+            "astc-5x4-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC5x4UnormSrgb,
+            "astc-5x5-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC5x5Unorm,
+            "astc-5x5-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC5x5UnormSrgb,
+            "astc-6x5-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC6x5Unorm,
+            "astc-6x5-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC6x5UnormSrgb,
+            "astc-6x6-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC6x6Unorm,
+            "astc-6x6-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC6x6UnormSrgb,
+            "astc-8x5-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC8x5Unorm,
+            "astc-8x5-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC8x5UnormSrgb,
+            "astc-8x6-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC8x6Unorm,
+            "astc-8x6-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC8x6UnormSrgb,
+            "astc-8x8-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC8x8Unorm,
+            "astc-8x8-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC8x8UnormSrgb,
+            "astc-10x5-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC10x5Unorm,
+            "astc-10x5-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC10x5UnormSrgb,
+            "astc-10x6-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC10x6Unorm,
+            "astc-10x6-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC10x6UnormSrgb,
+            "astc-10x8-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC10x8Unorm,
+            "astc-10x8-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC10x8UnormSrgb,
+            "astc-10x10-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC10x10Unorm,
+            "astc-10x10-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC10x10UnormSrgb,
+            "astc-12x10-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC12x10Unorm,
+            "astc-12x10-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC12x10UnormSrgb,
+            "astc-12x12-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC12x12Unorm,
+            "astc-12x12-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC12x12UnormSrgb,
+            _ => return Err(E::type_error(cx, "GPUTextureFormat")),
+        }
+    };
+    // B6: string enums are joined to C values; absence uses the IDL default or C sentinel.
+    let view_dimension = if E::is_undefined(cx, view_dimension_value) {
+        WGPUTextureViewDimension_WGPUTextureViewDimension_2D
+    } else {
+        let enum_arena = Arena::new();
+        match E::to_str(cx, view_dimension_value, &enum_arena)? {
+            "1d" => WGPUTextureViewDimension_WGPUTextureViewDimension_1D,
+            "2d" => WGPUTextureViewDimension_WGPUTextureViewDimension_2D,
+            "2d-array" => WGPUTextureViewDimension_WGPUTextureViewDimension_2DArray,
+            "cube" => WGPUTextureViewDimension_WGPUTextureViewDimension_Cube,
+            "cube-array" => WGPUTextureViewDimension_WGPUTextureViewDimension_CubeArray,
+            "3d" => WGPUTextureViewDimension_WGPUTextureViewDimension_3D,
+            _ => return Err(E::type_error(cx, "GPUTextureViewDimension")),
+        }
+    };
+    Ok(WGPUStorageTextureBindingLayout {
+        nextInChain: ptr::null_mut(),
+        access,
+        format,
+        viewDimension: view_dimension,
+    })
+}
+
 /// Converts a JavaScript `GPUBindGroupLayoutEntry` into `WGPUBindGroupLayoutEntry`.
 pub(super) fn convert_bind_group_layout_entry<E: JsEngine>(
     cx: E::Context<'_>,
@@ -1305,20 +1562,8 @@ pub(super) fn convert_bind_group_layout_entry<E: JsEngine>(
     let visibility_value = required_member::<E>(cx, value, "visibility")?;
     let buffer_value = dictionary_member::<E>(cx, value, "buffer")?;
     let sampler_value = dictionary_member::<E>(cx, value, "sampler")?;
-    // G7 carve-out: fail early instead of silently emitting a wrong layout.
-    if !E::is_undefined(cx, sampler_value) {
-        return Err(E::type_error(cx, "sampler bindings are not supported yet"));
-    }
     let texture_value = dictionary_member::<E>(cx, value, "texture")?;
-    // G7 carve-out: fail early instead of silently emitting a wrong layout.
-    if !E::is_undefined(cx, texture_value) {
-        return Err(E::type_error(cx, "texture bindings are not supported yet"));
-    }
     let storage_texture_value = dictionary_member::<E>(cx, value, "storageTexture")?;
-    // G7 carve-out: fail early instead of silently emitting a wrong layout.
-    if !E::is_undefined(cx, storage_texture_value) {
-        return Err(E::type_error(cx, "storageTexture bindings are not supported yet"));
-    }
     let external_texture_value = dictionary_member::<E>(cx, value, "externalTexture")?;
     // G7 carve-out: fail early instead of silently emitting a wrong layout.
     if !E::is_undefined(cx, external_texture_value) {
@@ -1331,6 +1576,27 @@ pub(super) fn convert_bind_group_layout_entry<E: JsEngine>(
     } else {
         convert_buffer_binding_layout::<E>(cx, buffer_value)?
     };
+    // G11: an absent nested dictionary preserves the C zero/default sentinel.
+    let sampler = if E::is_undefined(cx, sampler_value) {
+        // SAFETY: the joined C-ABI member declares `default: zero`.
+        unsafe { std::mem::zeroed() }
+    } else {
+        convert_sampler_binding_layout::<E>(cx, sampler_value)?
+    };
+    // G11: an absent nested dictionary preserves the C zero/default sentinel.
+    let texture = if E::is_undefined(cx, texture_value) {
+        // SAFETY: the joined C-ABI member declares `default: zero`.
+        unsafe { std::mem::zeroed() }
+    } else {
+        convert_texture_binding_layout::<E>(cx, texture_value)?
+    };
+    // G11: an absent nested dictionary preserves the C zero/default sentinel.
+    let storage_texture = if E::is_undefined(cx, storage_texture_value) {
+        // SAFETY: the joined C-ABI member declares `default: zero`.
+        unsafe { std::mem::zeroed() }
+    } else {
+        convert_storage_texture_binding_layout::<E>(cx, storage_texture_value)?
+    };
     Ok(WGPUBindGroupLayoutEntry {
         nextInChain: ptr::null_mut(),
         // R8: `[EnforceRange]` GPUIndex32 is checked at the 32-bit boundary.
@@ -1338,12 +1604,9 @@ pub(super) fn convert_bind_group_layout_entry<E: JsEngine>(
         // R8/B7: the 32-bit WebIDL value is checked before C-ABI widening.
         visibility: u64::from(enforce_u32::<E>(cx, visibility_value, "visibility")?),
         buffer,
-        // SAFETY: policy permits only a joined `default: zero` C member here.
-        sampler: unsafe { std::mem::zeroed() },
-        // SAFETY: policy permits only a joined `default: zero` C member here.
-        texture: unsafe { std::mem::zeroed() },
-        // SAFETY: policy permits only a joined `default: zero` C member here.
-        storageTexture: unsafe { std::mem::zeroed() },
+        sampler,
+        texture,
+        storageTexture: storage_texture,
         bindingArraySize: 0,
     })
 }
@@ -1500,6 +1763,8 @@ pub struct BindGroupPayload {
     pub(super) bind_group: WGPUBindGroup,
     pub(super) layout: WGPUBindGroupLayout,
     pub(super) buffers: Vec<WGPUBuffer>,
+    pub(super) samplers: Vec<WGPUSampler>,
+    pub(super) texture_views: Vec<WGPUTextureView>,
 }
 
 // SAFETY: `BindGroupPayload` stores WGPU handle values. Finalization only moves those values
@@ -1604,6 +1869,10 @@ pub enum ReleaseRequest {
         layout: WGPUBindGroupLayout,
         /// Retained descriptor handle or handles.
         buffers: Vec<WGPUBuffer>,
+        /// Retained descriptor handle or handles.
+        samplers: Vec<WGPUSampler>,
+        /// Retained descriptor handle or handles.
+        texture_views: Vec<WGPUTextureView>,
         /// Dispatch table used on the drain thread.
         gpu: GpuDispatch,
     },
@@ -1666,10 +1935,12 @@ impl ReleaseRequest {
             Self::PipelineLayout { layout, gpu } => unsafe {
                 (gpu.pipeline_layout_release)(layout);
             },
-            Self::BindGroup { bind_group, layout, buffers, gpu } => unsafe {
+            Self::BindGroup { bind_group, layout, buffers, samplers, texture_views, gpu } => unsafe {
                 (gpu.bind_group_release)(bind_group);
                 (gpu.bind_group_layout_release)(layout);
                 for handle in buffers { (gpu.buffer_release)(handle); }
+                for handle in samplers { (gpu.sampler_release)(handle); }
+                for handle in texture_views { (gpu.texture_view_release)(handle); }
             },
             Self::ComputePipeline { pipeline, module, layout, gpu } => unsafe {
                 (gpu.compute_pipeline_release)(pipeline);
@@ -2149,21 +2420,29 @@ pub fn device_create_bind_group<E: JsEngine + 'static>(
     unsafe {
         (gpu.bind_group_layout_add_ref)(converted.layout);
         for handle in &converted.buffers { (gpu.buffer_add_ref)(*handle); }
+        for handle in &converted.samplers { (gpu.sampler_add_ref)(*handle); }
+        for handle in &converted.texture_views { (gpu.texture_view_add_ref)(*handle); }
     }
     if let Err(error) = E::register_class(cx, bind_group_class::<E>()) {
         unsafe {
             (gpu.bind_group_release)(bind_group);
             (gpu.bind_group_layout_release)(converted.layout);
             for handle in &converted.buffers { (gpu.buffer_release)(*handle); }
+            for handle in &converted.samplers { (gpu.sampler_release)(*handle); }
+            for handle in &converted.texture_views { (gpu.texture_view_release)(*handle); }
         }
         return Err(error);
     }
     let retained_layout = converted.layout;
     let retained_buffers = converted.buffers.clone();
+    let retained_samplers = converted.samplers.clone();
+    let retained_texture_views = converted.texture_views.clone();
     match E::new_instance(cx, GPU_BIND_GROUP_CLASS, Box::new(BindGroupPayload {
         bind_group,
         layout: converted.layout,
         buffers: converted.buffers,
+        samplers: converted.samplers,
+        texture_views: converted.texture_views,
     })) {
         Ok(value) => Ok(value),
         Err(error) => {
@@ -2171,6 +2450,8 @@ pub fn device_create_bind_group<E: JsEngine + 'static>(
                 (gpu.bind_group_release)(bind_group);
                 (gpu.bind_group_layout_release)(retained_layout);
                 for handle in &retained_buffers { (gpu.buffer_release)(*handle); }
+                for handle in &retained_samplers { (gpu.sampler_release)(*handle); }
+                for handle in &retained_texture_views { (gpu.texture_view_release)(*handle); }
             }
             Err(error)
         }
@@ -2184,6 +2465,8 @@ pub fn finalize_bind_group(payload: Box<dyn Any + Send>, env: &Environment) {
         bind_group: payload.bind_group,
         layout: payload.layout,
         buffers: payload.buffers,
+        samplers: payload.samplers,
+        texture_views: payload.texture_views,
         gpu: env.gpu(),
     });
 }

@@ -748,15 +748,23 @@ fn validate_descriptor_policy(
         }
     }
 
-    let flattened_c: BTreeSet<&str> = descriptor
+    let flattened_c: BTreeSet<String> = descriptor
         .union_flatten
         .iter()
         .flat_map(|entry| {
             entry
                 .fields
                 .iter()
-                .map(|field| field.c_member.as_str())
-                .chain(entry.zero_c_members.iter().map(String::as_str))
+                .map(|field| field.c_member.clone())
+                .chain(entry.handle_arms.iter().map(|interface| {
+                    snake_case(
+                        interface
+                            .strip_prefix("GPU")
+                            .filter(|value| !value.is_empty())
+                            .unwrap_or(interface),
+                    )
+                }))
+                .chain(entry.zero_c_members.iter().cloned())
         })
         .collect();
 
@@ -1014,9 +1022,40 @@ fn validate_union_flatten_policy(
         })?;
     let mut claimed_idl = BTreeSet::new();
     let mut claimed_c = BTreeSet::new();
-    for field in &policy.fields {
-        if !claimed_idl.insert(field.member.as_str()) || !claimed_c.insert(field.c_member.as_str())
+    for interface in &policy.handle_arms {
+        let object = interface
+            .strip_prefix("GPU")
+            .filter(|value| !value.is_empty())
+            .unwrap_or(interface);
+        let c_member = snake_case(object);
+        if !claimed_c.insert(c_member.clone()) {
+            return Err(CodegenError::Policy(format!(
+                "duplicate flattened handle arm {}.{}.{}",
+                descriptor.dictionary, policy.member, interface
+            )));
+        }
+        let joined = report.interfaces.iter().any(|candidate| {
+            candidate.idl_name.as_deref() == Some(interface.as_str()) && candidate.c_name.is_some()
+        });
+        if !joined {
+            return Err(CodegenError::Policy(format!(
+                "dead flattened handle arm {}.{}.{}: interface is not joined",
+                descriptor.dictionary, policy.member, interface
+            )));
+        }
+        if !pair
+            .c_only_members
+            .iter()
+            .any(|member| member.name == c_member)
         {
+            return Err(CodegenError::Policy(format!(
+                "dead flattened handle arm {}.{}.{}: C field {} does not exist",
+                descriptor.dictionary, policy.member, interface, c_member
+            )));
+        }
+    }
+    for field in &policy.fields {
+        if !claimed_idl.insert(field.member.as_str()) || !claimed_c.insert(field.c_member.clone()) {
             return Err(CodegenError::Policy(format!(
                 "duplicate flattened field policy {}.{}.{}",
                 descriptor.dictionary, policy.member, field.member
@@ -1062,7 +1101,7 @@ fn validate_union_flatten_policy(
         }
     }
     for name in &policy.zero_c_members {
-        if !claimed_c.insert(name.as_str())
+        if !claimed_c.insert(name.clone())
             || !pair
                 .c_only_members
                 .iter()
@@ -1074,10 +1113,10 @@ fn validate_union_flatten_policy(
             )));
         }
     }
-    let all_c: BTreeSet<&str> = pair
+    let all_c: BTreeSet<String> = pair
         .c_only_members
         .iter()
-        .map(|member| member.name.as_str())
+        .map(|member| member.name.clone())
         .collect();
     if claimed_c != all_c {
         return Err(CodegenError::Policy(format!(
@@ -1500,6 +1539,19 @@ fn emit_descriptor(
                     let _ = writeln!(output, "        {rust_field}: {local},");
                 }
             }
+            for interface in &policy.handle_arms {
+                let object = interface
+                    .strip_prefix("GPU")
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or(interface);
+                let field = snake_case(object);
+                let resource = format!("{field}_resource");
+                let rust_field = rust_field_name(&field, true);
+                let _ = writeln!(
+                    output,
+                    "        {rust_field}: {resource}.unwrap_or(ptr::null_mut()),"
+                );
+            }
             for name in &policy.zero_c_members {
                 let field = rust_field_name(name, true);
                 let _ = writeln!(output, "        {field}: ptr::null_mut(),");
@@ -1615,6 +1667,44 @@ fn emit_union_flatten_locals(
     policy: &UnionFlattenPolicy,
 ) -> Result<(), CodegenError> {
     let arm = descriptor_pair(report, &policy.arm)?;
+    for interface in &policy.handle_arms {
+        let object = interface
+            .strip_prefix("GPU")
+            .filter(|value| !value.is_empty())
+            .unwrap_or(interface);
+        let field = snake_case(object);
+        let payload = format!("{object}Payload");
+        let class = format!("GPU_{}_CLASS", field.to_ascii_uppercase());
+        let resource = format!("{field}_resource");
+        output.push_str(
+            "    // C2/R24: wrapper-union arms are selected by generated ClassSpec identity.\n",
+        );
+        let _ = writeln!(
+            output,
+            "    let {resource} = E::payload(cx, {value}, {class})"
+        );
+        let _ = writeln!(
+            output,
+            "        .and_then(|payload| payload.downcast_ref::<{payload}>())"
+        );
+        let _ = writeln!(output, "        .map(|payload| payload.{field});");
+    }
+    let handle_resource = if policy.handle_arms.is_empty() {
+        "false".to_owned()
+    } else {
+        policy
+            .handle_arms
+            .iter()
+            .map(|interface| {
+                let object = interface
+                    .strip_prefix("GPU")
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or(interface);
+                format!("{}_resource.is_some()", snake_case(object))
+            })
+            .collect::<Vec<_>>()
+            .join(" || ")
+    };
     for field in &policy.fields {
         let idl = idl_dictionary_value(arm, &field.member).ok_or_else(|| {
             unsupported_shape(dictionary, &field.member, "missing union arm field")
@@ -1625,30 +1715,24 @@ fn emit_union_flatten_locals(
             output.push_str(
                 "    // B8: flattened handle conversion extracts only the native handle.\n",
             );
+            let _ = writeln!(output, "    let {local} = if {handle_resource} {{");
+            output.push_str("        ptr::null_mut()\n    } else {\n");
             let _ = writeln!(
                 output,
-                "    let {field_value} = E::get_property(cx, {value}, \"{}\")?;",
+                "        let {field_value} = E::get_property(cx, {value}, \"{}\")?;",
                 field.member
             );
+            let _ = writeln!(output, "        if E::is_undefined(cx, {field_value}) {{");
             let _ = writeln!(
                 output,
-                "    let {local} = if E::is_undefined(cx, {field_value}) {{"
-            );
-            let _ = writeln!(
-                output,
-                "        return Err(E::type_error(cx, \"{}\"));",
+                "            return Err(E::type_error(cx, \"{}\"));",
                 policy.unsupported_error
             );
-            output.push_str("    } else {\n");
+            output.push_str("        }\n");
             let _ = writeln!(output, "        {helper}::<E>(cx, {field_value})?");
             output.push_str("    };\n");
             continue;
         }
-        let _ = writeln!(
-            output,
-            "    let {field_value} = E::get_property(cx, {value}, \"{}\")?;",
-            field.member
-        );
         let default = if let Some(constant) = &field.absent_constant {
             format!("{constant} as u64")
         } else {
@@ -1672,13 +1756,19 @@ fn emit_union_flatten_locals(
             }
         };
         output.push_str("    // R8: flattened `[EnforceRange]` members keep their WebIDL width.\n");
-        let _ = writeln!(
-            output,
-            "    let {local} = if E::is_undefined(cx, {field_value}) {{"
-        );
+        let _ = writeln!(output, "    let {local} = if {handle_resource} {{");
         let _ = writeln!(output, "        {default}");
         output.push_str("    } else {\n");
-        let _ = writeln!(output, "        {conversion}");
+        let _ = writeln!(
+            output,
+            "        let {field_value} = E::get_property(cx, {value}, \"{}\")?;",
+            field.member
+        );
+        let _ = writeln!(output, "        if E::is_undefined(cx, {field_value}) {{");
+        let _ = writeln!(output, "            {default}");
+        output.push_str("        } else {\n");
+        let _ = writeln!(output, "            {conversion}");
+        output.push_str("        }\n");
         output.push_str("    };\n");
     }
     Ok(())

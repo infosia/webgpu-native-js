@@ -405,7 +405,7 @@ member = "resource"
 union_type = "GPUBindingResource"
 arm = "GPUBufferBinding"
 unsupported_error = "resource must be a GPUBufferBinding"
-zero_c_members = ["sampler", "texture_view"]
+handle_arms = ["GPUSampler", "GPUTextureView"]
 
 [[descriptor.union_flatten.fields]]
 member = "buffer"
@@ -444,6 +444,16 @@ source = "layout"
 field = "buffers"
 source = "entries"
 element_field = "buffer"
+
+[[descriptor.wrapper.sequence_captures]]
+field = "samplers"
+source = "entries"
+element_field = "sampler"
+
+[[descriptor.wrapper.sequence_captures]]
+field = "texture_views"
+source = "entries"
+element_field = "textureView"
 
 [[descriptor]]
 dictionary = "GPUPipelineLayoutDescriptor"
@@ -549,8 +559,17 @@ reject_if_present = true
 dictionary = "GPUBufferBindingLayout"
 
 [[descriptor]]
+dictionary = "GPUSamplerBindingLayout"
+
+[[descriptor]]
+dictionary = "GPUTextureBindingLayout"
+
+[[descriptor]]
+dictionary = "GPUStorageTextureBindingLayout"
+
+[[descriptor]]
 dictionary = "GPUBindGroupLayoutEntry"
-unsupported = ["sampler", "texture", "storageTexture", "externalTexture"]
+unsupported = ["externalTexture"]
 zero = ["binding_array_size"]
 
 [[descriptor]]

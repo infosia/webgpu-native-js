@@ -1830,17 +1830,18 @@ mod tests {
     use crate::{
         adapter_request_device, buffer_destroy, buffer_get_mapped_range, buffer_label_get,
         buffer_label_set, buffer_map_async, buffer_size_get, buffer_unmap, buffer_usage_get,
-        command_encoder_finish, convert_bind_group_descriptor,
+        command_encoder_finish, convert_bind_group_descriptor, convert_bind_group_entry,
         convert_bind_group_layout_descriptor, convert_buffer_binding_layout,
         convert_buffer_descriptor, convert_command_buffer_descriptor,
         convert_command_encoder_descriptor, convert_compute_pass_descriptor,
         convert_compute_pipeline_descriptor, convert_gpu_extent3d, convert_gpu_origin3d,
-        convert_pipeline_layout_descriptor, convert_sampler_descriptor,
-        convert_shader_module_descriptor, convert_texture_descriptor,
-        convert_texture_view_descriptor, device_create_bind_group, device_create_buffer,
-        device_create_command_encoder, device_create_compute_pipeline, device_create_sampler,
-        device_create_texture, device_lost_get, device_lost_info_message_get,
-        device_lost_info_reason_get, device_on_uncaptured_error_get,
+        convert_pipeline_layout_descriptor, convert_sampler_binding_layout,
+        convert_sampler_descriptor, convert_shader_module_descriptor,
+        convert_storage_texture_binding_layout, convert_texture_binding_layout,
+        convert_texture_descriptor, convert_texture_view_descriptor, device_create_bind_group,
+        device_create_buffer, device_create_command_encoder, device_create_compute_pipeline,
+        device_create_sampler, device_create_texture, device_lost_get,
+        device_lost_info_message_get, device_lost_info_reason_get, device_on_uncaptured_error_get,
         device_on_uncaptured_error_set, device_pop_error_scope, device_push_error_scope,
         device_queue_get, finalize_bind_group, finalize_buffer, finalize_compute_pipeline,
         finalize_device, finalize_queue, finalize_sampler, finalize_texture, finalize_texture_view,
@@ -3171,18 +3172,160 @@ mod tests {
     }
 
     #[test]
-    fn sampler_layout_binding_is_rejected_early() {
-        assert_unsupported_layout_binding("sampler");
+    fn sampler_texture_and_storage_texture_layout_bindings_convert_nested_members() {
+        let rt = runtime();
+        let cx = rt.context();
+        let entries = rt.set_like(&[
+            descriptor(
+                &rt,
+                &[
+                    ("binding", rt.number(0.0)),
+                    ("visibility", rt.number(1.0)),
+                    (
+                        "sampler",
+                        descriptor(&rt, &[("type", rt.string("comparison"))]),
+                    ),
+                ],
+            ),
+            descriptor(
+                &rt,
+                &[
+                    ("binding", rt.number(1.0)),
+                    ("visibility", rt.number(2.0)),
+                    (
+                        "texture",
+                        descriptor(
+                            &rt,
+                            &[
+                                ("sampleType", rt.string("uint")),
+                                ("viewDimension", rt.string("3d")),
+                                ("multisampled", rt.bool(true)),
+                            ],
+                        ),
+                    ),
+                ],
+            ),
+            descriptor(
+                &rt,
+                &[
+                    ("binding", rt.number(2.0)),
+                    ("visibility", rt.number(4.0)),
+                    (
+                        "storageTexture",
+                        descriptor(
+                            &rt,
+                            &[
+                                ("access", rt.string("read-write")),
+                                ("format", rt.string("rgba8unorm")),
+                                ("viewDimension", rt.string("2d-array")),
+                            ],
+                        ),
+                    ),
+                ],
+            ),
+        ]);
+        let desc = descriptor(&rt, &[("entries", entries)]);
+        let arena = Arena::new();
+        let converted = convert_bind_group_layout_descriptor::<Engine>(cx, desc, &arena)
+            .expect("supported nested layout bindings");
+        let native = unsafe { std::slice::from_raw_parts(converted.entries, converted.entryCount) };
+
+        assert_eq!(
+            native[0].sampler.type_,
+            crate::WGPUSamplerBindingType_WGPUSamplerBindingType_Comparison
+        );
+        assert_eq!(
+            native[1].texture.sampleType,
+            crate::WGPUTextureSampleType_WGPUTextureSampleType_Uint
+        );
+        assert_eq!(
+            native[1].texture.viewDimension,
+            crate::WGPUTextureViewDimension_WGPUTextureViewDimension_3D
+        );
+        assert_eq!(native[1].texture.multisampled, 1);
+        assert_eq!(
+            native[2].storageTexture.access,
+            crate::WGPUStorageTextureAccess_WGPUStorageTextureAccess_ReadWrite
+        );
+        assert_eq!(
+            native[2].storageTexture.format,
+            crate::WGPUTextureFormat_WGPUTextureFormat_RGBA8Unorm
+        );
+        assert_eq!(
+            native[2].storageTexture.viewDimension,
+            crate::WGPUTextureViewDimension_WGPUTextureViewDimension_2DArray
+        );
     }
 
     #[test]
-    fn texture_layout_binding_is_rejected_early() {
-        assert_unsupported_layout_binding("texture");
-    }
-
-    #[test]
-    fn storage_texture_layout_binding_is_rejected_early() {
-        assert_unsupported_layout_binding("storageTexture");
+    fn new_layout_binding_enums_reject_unknown_values() {
+        let rt = runtime();
+        let cx = rt.context();
+        let cases = [
+            (
+                convert_sampler_binding_layout::<Engine>(
+                    cx,
+                    descriptor(&rt, &[("type", rt.string("bad"))]),
+                )
+                .expect_err("sampler type"),
+                "TypeError: GPUSamplerBindingType",
+            ),
+            (
+                convert_texture_binding_layout::<Engine>(
+                    cx,
+                    descriptor(&rt, &[("sampleType", rt.string("bad"))]),
+                )
+                .expect_err("sample type"),
+                "TypeError: GPUTextureSampleType",
+            ),
+            (
+                convert_texture_binding_layout::<Engine>(
+                    cx,
+                    descriptor(&rt, &[("viewDimension", rt.string("bad"))]),
+                )
+                .expect_err("texture view dimension"),
+                "TypeError: GPUTextureViewDimension",
+            ),
+            (
+                convert_storage_texture_binding_layout::<Engine>(
+                    cx,
+                    descriptor(
+                        &rt,
+                        &[
+                            ("access", rt.string("bad")),
+                            ("format", rt.string("rgba8unorm")),
+                        ],
+                    ),
+                )
+                .expect_err("storage access"),
+                "TypeError: GPUStorageTextureAccess",
+            ),
+            (
+                convert_storage_texture_binding_layout::<Engine>(
+                    cx,
+                    descriptor(&rt, &[("format", rt.string("bad"))]),
+                )
+                .expect_err("storage format"),
+                "TypeError: GPUTextureFormat",
+            ),
+            (
+                convert_storage_texture_binding_layout::<Engine>(
+                    cx,
+                    descriptor(
+                        &rt,
+                        &[
+                            ("format", rt.string("rgba8unorm")),
+                            ("viewDimension", rt.string("bad")),
+                        ],
+                    ),
+                )
+                .expect_err("storage view dimension"),
+                "TypeError: GPUTextureViewDimension",
+            ),
+        ];
+        for (actual, expected) in cases {
+            assert_eq!(actual, expected);
+        }
     }
 
     #[test]
@@ -3618,6 +3761,46 @@ mod tests {
     }
 
     #[test]
+    fn bind_group_entries_accept_sampler_and_texture_view_wrappers() {
+        let rt = runtime();
+        let cx = rt.context();
+        let sampler_handle = fake_handle(81);
+        let view_handle = fake_handle(82);
+        let sampler = Engine::new_instance(
+            cx,
+            crate::GPU_SAMPLER_CLASS,
+            Box::new(SamplerPayload {
+                sampler: sampler_handle,
+                label: Mutex::new(String::new()),
+            }),
+        )
+        .expect("sampler");
+        let view = Engine::new_instance(
+            cx,
+            crate::GPU_TEXTURE_VIEW_CLASS,
+            Box::new(TextureViewPayload {
+                texture_view: view_handle,
+                texture: fake_handle(83),
+            }),
+        )
+        .expect("texture view");
+
+        let sampler_entry = descriptor(&rt, &[("binding", rt.number(0.0)), ("resource", sampler)]);
+        let view_entry = descriptor(&rt, &[("binding", rt.number(1.0)), ("resource", view)]);
+        let sampler_native =
+            convert_bind_group_entry::<Engine>(cx, sampler_entry).expect("sampler resource");
+        let view_native =
+            convert_bind_group_entry::<Engine>(cx, view_entry).expect("texture view resource");
+
+        assert_eq!(sampler_native.sampler, sampler_handle);
+        assert!(sampler_native.buffer.is_null());
+        assert!(sampler_native.textureView.is_null());
+        assert_eq!(view_native.textureView, view_handle);
+        assert!(view_native.buffer.is_null());
+        assert!(view_native.sampler.is_null());
+    }
+
+    #[test]
     fn unsupported_bind_group_resource_kind_throws_a_named_type_error() {
         reset_gpu();
         let rt = runtime();
@@ -3658,6 +3841,30 @@ mod tests {
             convert_bind_group_descriptor::<Engine>(cx, direct_desc, &arena)
                 .err()
                 .expect("direct buffer resource must be rejected"),
+            "TypeError: resource must be a GPUBufferBinding"
+        );
+
+        let texture = Engine::new_instance(
+            cx,
+            crate::GPU_TEXTURE_CLASS,
+            Box::new(TexturePayload {
+                texture: fake_handle(78),
+                destroyed: AtomicBool::new(false),
+            }),
+        )
+        .expect("texture");
+        let texture_entry = descriptor(&rt, &[("binding", rt.number(0.0)), ("resource", texture)]);
+        let texture_desc = descriptor(
+            &rt,
+            &[
+                ("layout", layout),
+                ("entries", rt.set_like(&[texture_entry])),
+            ],
+        );
+        assert_eq!(
+            convert_bind_group_descriptor::<Engine>(cx, texture_desc, &arena)
+                .err()
+                .expect("direct texture resource must be rejected"),
             "TypeError: resource must be a GPUBufferBinding"
         );
     }
@@ -3705,17 +3912,35 @@ mod tests {
         assert!(rt.calls.get() >= 4);
     }
 
-    /// This asserts we call `AddRef` once per stored buffer. It does not prove
+    /// This asserts we call `AddRef` once per stored resource. It does not prove
     /// the backend needs it. The C ABI has no refcount introspection, so this
     /// is the strongest available check.
     #[test]
-    fn b8_bind_group_addrefs_each_stored_buffer() {
+    fn b8_bind_group_balances_buffer_sampler_and_texture_view_retention() {
         reset_gpu();
         let rt = runtime();
         let cx = rt.context();
         let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
         let buffer_desc = descriptor(&rt, &[("size", rt.number(16.0)), ("usage", rt.number(8.0))]);
         let buffer = device_create_buffer::<Engine>(cx, device, &[buffer_desc]).expect("buffer");
+        let sampler = Engine::new_instance(
+            cx,
+            crate::GPU_SAMPLER_CLASS,
+            Box::new(SamplerPayload {
+                sampler: fake_handle(78),
+                label: Mutex::new(String::new()),
+            }),
+        )
+        .expect("sampler");
+        let texture_view = Engine::new_instance(
+            cx,
+            crate::GPU_TEXTURE_VIEW_CLASS,
+            Box::new(TextureViewPayload {
+                texture_view: fake_handle(79),
+                texture: fake_handle(80),
+            }),
+        )
+        .expect("texture view");
         let layout = Engine::new_instance(
             cx,
             crate::GPU_BIND_GROUP_LAYOUT_CLASS,
@@ -3724,9 +3949,17 @@ mod tests {
             }),
         )
         .expect("layout");
-        let resource = descriptor(&rt, &[("buffer", buffer)]);
-        let entry = descriptor(&rt, &[("binding", rt.number(0.0)), ("resource", resource)]);
-        let entries = rt.set_like(&[entry]);
+        let buffer_resource = descriptor(&rt, &[("buffer", buffer)]);
+        let buffer_entry = descriptor(
+            &rt,
+            &[("binding", rt.number(0.0)), ("resource", buffer_resource)],
+        );
+        let sampler_entry = descriptor(&rt, &[("binding", rt.number(1.0)), ("resource", sampler)]);
+        let view_entry = descriptor(
+            &rt,
+            &[("binding", rt.number(2.0)), ("resource", texture_view)],
+        );
+        let entries = rt.set_like(&[buffer_entry, sampler_entry, view_entry]);
         let desc = descriptor(&rt, &[("layout", layout), ("entries", entries)]);
 
         let bind_group =
@@ -3735,6 +3968,8 @@ mod tests {
         GPU_STATE.with(|state| {
             let state = state.borrow();
             assert_eq!(state.buffer_add_refs, 1);
+            assert_eq!(state.sampler_add_refs, 1);
+            assert_eq!(state.texture_view_add_refs, 1);
             assert_eq!(state.bind_group_layout_add_refs, 1);
         });
         let payload = Engine::payload(cx, bind_group, crate::GPU_BIND_GROUP_CLASS)
@@ -3745,6 +3980,8 @@ mod tests {
                 bind_group: payload.bind_group,
                 layout: payload.layout,
                 buffers: payload.buffers.clone(),
+                samplers: payload.samplers.clone(),
+                texture_views: payload.texture_views.clone(),
             }),
             &rt.env,
         );
@@ -3752,6 +3989,8 @@ mod tests {
         GPU_STATE.with(|state| {
             let state = state.borrow();
             assert_eq!(state.buffer_releases, 1);
+            assert_eq!(state.sampler_releases, 1);
+            assert_eq!(state.texture_view_releases, 1);
             assert_eq!(state.bind_group_layout_releases, 1);
         });
     }

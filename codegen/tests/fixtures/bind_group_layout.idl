@@ -33,7 +33,47 @@ dictionary GPUBufferBindingLayout {
 };
 typedef [EnforceRange] unsigned long long GPUSize64;
 
-dictionary GPUSamplerBindingLayout {};
-dictionary GPUTextureBindingLayout {};
-dictionary GPUStorageTextureBindingLayout {};
+enum GPUSamplerBindingType {
+    "filtering",
+    "non-filtering",
+    "comparison",
+};
+dictionary GPUSamplerBindingLayout {
+    GPUSamplerBindingType type = "filtering";
+};
+
+enum GPUTextureSampleType {
+    "float",
+    "unfilterable-float",
+    "depth",
+    "sint",
+    "uint",
+};
+enum GPUTextureViewDimension {
+    "1d",
+    "2d",
+    "2d-array",
+    "cube",
+    "cube-array",
+    "3d",
+};
+dictionary GPUTextureBindingLayout {
+    GPUTextureSampleType sampleType = "float";
+    GPUTextureViewDimension viewDimension = "2d";
+    boolean multisampled = false;
+};
+
+enum GPUStorageTextureAccess {
+    "write-only",
+    "read-only",
+    "read-write",
+};
+enum GPUTextureFormat {
+    "rgba8unorm",
+};
+dictionary GPUStorageTextureBindingLayout {
+    GPUStorageTextureAccess access = "write-only";
+    required GPUTextureFormat format;
+    GPUTextureViewDimension viewDimension = "2d";
+};
 dictionary GPUExternalTextureBindingLayout {};

@@ -590,6 +590,17 @@ fn derive_dictionary_handles(
                 .iter()
                 .find(|entry| entry.member == member.member)
         }) {
+            for interface in &flatten.handle_arms {
+                let object = object_name(interface);
+                derive_type_handles(
+                    model,
+                    interface,
+                    &format!("{path}.{}", snake_case(object)),
+                    in_sequence,
+                    visiting,
+                    found,
+                )?;
+            }
             derive_type_handles(model, &flatten.arm, &path, in_sequence, visiting, found)?;
             continue;
         }
@@ -611,6 +622,17 @@ fn derive_dictionary_handles(
                 .iter()
                 .find(|entry| entry.member == member.name)
         }) {
+            for interface in &flatten.handle_arms {
+                let object = object_name(interface);
+                derive_type_handles(
+                    model,
+                    interface,
+                    &format!("{path}.{}", snake_case(object)),
+                    in_sequence,
+                    visiting,
+                    found,
+                )?;
+            }
             derive_type_handles(model, &flatten.arm, &path, in_sequence, visiting, found)?;
             continue;
         }

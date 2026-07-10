@@ -3421,6 +3421,8 @@ struct ConvertedBindGroupDescriptor {
     native: WGPUBindGroupDescriptor,
     layout: WGPUBindGroupLayout,
     buffers: Vec<WGPUBuffer>,
+    samplers: Vec<WGPUSampler>,
+    texture_views: Vec<WGPUTextureView>,
 }
 
 struct ConvertedComputePipelineDescriptor {

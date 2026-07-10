@@ -2893,7 +2893,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_bind_group_layout_kinds_throw_named_type_errors() {
+    fn bind_group_layout_and_resource_arms_follow_the_shared_script() {
         let setup = native_setup();
         let runtime = Runtime::new().expect("quickjs runtime");
         let wrapped = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
@@ -2902,88 +2902,8 @@ mod tests {
             .expect("set device");
         eval_drop(
             &runtime,
-            r#"
-                for (const kind of ['sampler', 'texture', 'storageTexture', 'externalTexture']) {
-                    const entry = { binding: 0, visibility: 1 };
-                    entry[kind] = {};
-                    let error;
-                    try {
-                        device.createBindGroupLayout({ entries: [entry] });
-                    } catch (caught) {
-                        error = caught;
-                    }
-                    if (!(error instanceof TypeError)) {
-                        throw new Error(kind + ' binding did not throw TypeError');
-                    }
-                    if (error.message !== kind + ' bindings are not supported yet') {
-                        throw new Error(kind + ' binding error was not named: ' + error.message);
-                    }
-                }
-            "#,
-            "unsupported-bind-group-layout-kinds.js",
-        );
-        runtime.clear_global("device").expect("clear device");
-        runtime.run_gc();
-        let _ = runtime.drain_releases().expect("drain");
-    }
-
-    #[test]
-    fn unsupported_bind_group_resource_kind_throws_a_named_type_error() {
-        let setup = native_setup();
-        let runtime = Runtime::new().expect("quickjs runtime");
-        let wrapped = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
-        runtime
-            .set_global_value("device", wrapped)
-            .expect("set device");
-        eval_drop(
-            &runtime,
-            r#"
-                const resourceLayout = device.createBindGroupLayout({ entries: [] });
-                const directResourceBuffer = device.createBuffer({ size: 4, usage: 8 });
-                let missingBindingError;
-                try {
-                    device.createBindGroup({
-                        layout: resourceLayout,
-                        entries: [{ resource: { buffer: directResourceBuffer } }]
-                    });
-                } catch (caught) {
-                    missingBindingError = caught;
-                }
-                if (!(missingBindingError instanceof TypeError) ||
-                    missingBindingError.message !== 'binding') {
-                    throw new Error('absent binding error was not named: ' + missingBindingError);
-                }
-                let resourceError;
-                try {
-                    device.createBindGroup({
-                        layout: resourceLayout,
-                        entries: [{ binding: 0, resource: { sampler: {} } }]
-                    });
-                } catch (caught) {
-                    resourceError = caught;
-                }
-                if (!(resourceError instanceof TypeError)) {
-                    throw new Error('unsupported resource did not throw TypeError');
-                }
-                if (resourceError.message !== 'resource must be a GPUBufferBinding') {
-                    throw new Error('unsupported resource error was not named: ' + resourceError.message);
-                }
-                let directResourceError;
-                try {
-                    device.createBindGroup({
-                        layout: resourceLayout,
-                        entries: [{ binding: 0, resource: directResourceBuffer }]
-                    });
-                } catch (caught) {
-                    directResourceError = caught;
-                }
-                if (!(directResourceError instanceof TypeError) ||
-                    directResourceError.message !== 'resource must be a GPUBufferBinding') {
-                    throw new Error('direct buffer resource did not require GPUBufferBinding');
-                }
-                directResourceBuffer.destroy();
-            "#,
-            "unsupported-bind-group-resource.js",
+            include_str!("../../../tests/bind-group-resources.js"),
+            "tests/bind-group-resources.js",
         );
         runtime.clear_global("device").expect("clear device");
         runtime.run_gc();
@@ -3765,7 +3685,7 @@ mod tests {
     }
 
     #[test]
-    fn bind_group_outlives_buffer_js_wrappers() {
+    fn bind_group_outlives_buffer_sampler_and_texture_view_js_wrappers() {
         let setup = native_setup();
         let runtime = Runtime::new().expect("quickjs runtime");
         let wrapped = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
@@ -3779,7 +3699,11 @@ mod tests {
                     code: '@group(0) @binding(0) var<storage, read_write> data: array<u32>; @compute @workgroup_size(1) fn main() { data[0] = data[0] + 1u; }'
                 });
                 var lifetimeBgl = device.createBindGroupLayout({
-                    entries: [{ binding: 0, visibility: 4, buffer: { type: 'storage' } }]
+                    entries: [
+                        { binding: 0, visibility: 4, buffer: { type: 'storage' } },
+                        { binding: 1, visibility: 4, sampler: { type: 'filtering' } },
+                        { binding: 2, visibility: 4, texture: { sampleType: 'float', viewDimension: '2d' } }
+                    ]
                 });
                 var lifetimePipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [lifetimeBgl] });
                 var lifetimePipeline = device.createComputePipeline({
@@ -3787,11 +3711,20 @@ mod tests {
                     compute: { module: lifetimeShader }
                 });
                 var lifetimeBuffer = device.createBuffer({ size: 4, usage: 140 });
+                var lifetimeSampler = device.createSampler();
+                var lifetimeTexture = device.createTexture({
+                    size: [1], format: 'rgba8unorm', usage: 4
+                });
+                var lifetimeView = lifetimeTexture.createView();
                 var lifetimeBindGroup = device.createBindGroup({
                     layout: lifetimeBgl,
-                    entries: [{ binding: 0, resource: { buffer: lifetimeBuffer } }]
+                    entries: [
+                        { binding: 0, resource: { buffer: lifetimeBuffer } },
+                        { binding: 1, resource: lifetimeSampler },
+                        { binding: 2, resource: lifetimeView }
+                    ]
                 });
-                lifetimeBuffer = null;
+                lifetimeBuffer = lifetimeSampler = lifetimeTexture = lifetimeView = null;
             "#,
             "bind-group-lifetime-setup.js",
         );

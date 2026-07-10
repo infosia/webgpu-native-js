@@ -6,6 +6,42 @@ enums:
       - name: uniform
       - name: storage
       - name: read_only_storage
+  - name: sampler_binding_type
+    entries:
+      - name: binding_not_used
+      - name: undefined
+      - name: filtering
+      - name: non_filtering
+      - name: comparison
+  - name: texture_sample_type
+    entries:
+      - name: binding_not_used
+      - name: undefined
+      - name: float
+      - name: unfilterable_float
+      - name: depth
+      - name: sint
+      - name: uint
+  - name: texture_view_dimension
+    entries:
+      - name: undefined
+      - name: 1d
+      - name: 2d
+      - name: 2d_array
+      - name: cube
+      - name: cube_array
+      - name: 3d
+  - name: storage_texture_access
+    entries:
+      - name: binding_not_used
+      - name: undefined
+      - name: write_only
+      - name: read_only
+      - name: read_write
+  - name: texture_format
+    entries:
+      - name: undefined
+      - name: rgba8_unorm
 bitflags:
   - name: shader_stage
     entries: []
@@ -53,13 +89,28 @@ structs:
         default: 0
   - name: sampler_binding_layout
     type: extensible
-    members: []
+    members:
+      - name: type
+        type: enum.sampler_binding_type
   - name: texture_binding_layout
     type: extensible
-    members: []
+    members:
+      - name: sample_type
+        type: enum.texture_sample_type
+      - name: view_dimension
+        type: enum.texture_view_dimension
+      - name: multisampled
+        type: bool
+        default: false
   - name: storage_texture_binding_layout
     type: extensible
-    members: []
+    members:
+      - name: access
+        type: enum.storage_texture_access
+      - name: format
+        type: enum.texture_format
+      - name: view_dimension
+        type: enum.texture_view_dimension
 objects:
   - name: device
     methods:

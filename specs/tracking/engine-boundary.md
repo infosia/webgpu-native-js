@@ -1298,3 +1298,11 @@ derivation). The GPUTextureFormat join: 101 IDL formats all joined, C-only
 `undefined` sentinel policied — the "stress test" enum was a non-event, which
 is the machinery working. Parity 62 → 77 lines, byte-identical. Adapter diff:
 zero. Suites: core 112, quickjs 54, JSC 23+1, codegen 40.
+
+**Block 09 slice 2 landed: the bind-group resource arms complete (T4).** The
+slice-2b "not supported yet" rejections for sampler/texture/storageTexture
+convert to positive tests (externalTexture keeps its rejection, tested); the
+resource union gains ClassSpec-driven sampler/view arms (no hard-coded names,
+R24); derived retention grows to {layout, buffers[], samplers[], views[]} —
+quoted before/after, matching expectation. Parity 77 → 80. Adapter production
+diff zero (test-only, net −67 via a shared script).

@@ -6,26 +6,45 @@ pub(super) fn convert_bind_group_entry<E: JsEngine + 'static>(
     // DR-M3: required dictionary members reject undefined.
     let binding_value = required_member::<E>(cx, value, "binding")?;
     let resource_value = required_member::<E>(cx, value, "resource")?;
+    // C2/R24: wrapper-union arms are selected by generated ClassSpec identity.
+    let sampler_resource = E::payload(cx, resource_value, GPU_SAMPLER_CLASS)
+        .and_then(|payload| payload.downcast_ref::<SamplerPayload>())
+        .map(|payload| payload.sampler);
+    // C2/R24: wrapper-union arms are selected by generated ClassSpec identity.
+    let texture_view_resource = E::payload(cx, resource_value, GPU_TEXTURE_VIEW_CLASS)
+        .and_then(|payload| payload.downcast_ref::<TextureViewPayload>())
+        .map(|payload| payload.texture_view);
     // B8: flattened handle conversion extracts only the native handle.
-    let buffer_value = E::get_property(cx, resource_value, "buffer")?;
-    let buffer = if E::is_undefined(cx, buffer_value) {
-        return Err(E::type_error(cx, "resource must be a GPUBufferBinding"));
+    let buffer = if sampler_resource.is_some() || texture_view_resource.is_some() {
+        ptr::null_mut()
     } else {
+        let buffer_value = E::get_property(cx, resource_value, "buffer")?;
+        if E::is_undefined(cx, buffer_value) {
+            return Err(E::type_error(cx, "resource must be a GPUBufferBinding"));
+        }
         buffer_handle::<E>(cx, buffer_value)?
     };
-    let offset_value = E::get_property(cx, resource_value, "offset")?;
     // R8: flattened `[EnforceRange]` members keep their WebIDL width.
-    let offset = if E::is_undefined(cx, offset_value) {
+    let offset = if sampler_resource.is_some() || texture_view_resource.is_some() {
         0
     } else {
-        enforce_u64::<E>(cx, offset_value, "offset")?
+        let offset_value = E::get_property(cx, resource_value, "offset")?;
+        if E::is_undefined(cx, offset_value) {
+            0
+        } else {
+            enforce_u64::<E>(cx, offset_value, "offset")?
+        }
     };
-    let size_value = E::get_property(cx, resource_value, "size")?;
     // R8: flattened `[EnforceRange]` members keep their WebIDL width.
-    let size = if E::is_undefined(cx, size_value) {
+    let size = if sampler_resource.is_some() || texture_view_resource.is_some() {
         WGPU_WHOLE_SIZE as u64
     } else {
-        enforce_u64::<E>(cx, size_value, "size")?
+        let size_value = E::get_property(cx, resource_value, "size")?;
+        if E::is_undefined(cx, size_value) {
+            WGPU_WHOLE_SIZE as u64
+        } else {
+            enforce_u64::<E>(cx, size_value, "size")?
+        }
     };
     Ok(WGPUBindGroupEntry {
         nextInChain: ptr::null_mut(),
@@ -34,8 +53,8 @@ pub(super) fn convert_bind_group_entry<E: JsEngine + 'static>(
         buffer,
         offset,
         size,
-        sampler: ptr::null_mut(),
-        textureView: ptr::null_mut(),
+        sampler: sampler_resource.unwrap_or(ptr::null_mut()),
+        textureView: texture_view_resource.unwrap_or(ptr::null_mut()),
     })
 }
 

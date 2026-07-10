@@ -12,8 +12,17 @@ members = []
 dictionary = "GPUBufferBindingLayout"
 
 [[descriptor]]
+dictionary = "GPUSamplerBindingLayout"
+
+[[descriptor]]
+dictionary = "GPUTextureBindingLayout"
+
+[[descriptor]]
+dictionary = "GPUStorageTextureBindingLayout"
+
+[[descriptor]]
 dictionary = "GPUBindGroupLayoutEntry"
-unsupported = ["sampler", "texture", "storageTexture", "externalTexture"]
+unsupported = ["externalTexture"]
 zero = ["binding_array_size"]
 
 [[descriptor]]

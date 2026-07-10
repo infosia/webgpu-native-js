@@ -275,7 +275,7 @@ fn generated_lifecycle_covers_every_selected_class_and_retention_set() {
     }
 
     assert!(emitted.contains(
-        "pub struct BindGroupPayload {\n    pub(super) bind_group: WGPUBindGroup,\n    pub(super) layout: WGPUBindGroupLayout,\n    pub(super) buffers: Vec<WGPUBuffer>,\n}"
+        "pub struct BindGroupPayload {\n    pub(super) bind_group: WGPUBindGroup,\n    pub(super) layout: WGPUBindGroupLayout,\n    pub(super) buffers: Vec<WGPUBuffer>,\n    pub(super) samplers: Vec<WGPUSampler>,\n    pub(super) texture_views: Vec<WGPUTextureView>,\n}"
     ));
     assert!(emitted.contains(
         "pub struct ComputePipelinePayload {\n    pub(super) pipeline: WGPUComputePipeline,\n    pub(super) module: WGPUShaderModule,\n    pub(super) layout: WGPUPipelineLayout,\n}"
@@ -615,17 +615,14 @@ fn texture_format_join_covers_every_pinned_value_and_reports_only_the_sentinel()
 #[test]
 fn unsupported_member_policy_is_checked_in_both_directions() {
     let (idl, yaml, policy) = fixture("bind_group_layout");
-    let missing = policy.replace(
-        "[\"sampler\", \"texture\", \"storageTexture\", \"externalTexture\"]",
-        "[\"sampler\", \"texture\", \"storageTexture\"]",
-    );
+    let missing = policy.replace("unsupported = [\"externalTexture\"]", "unsupported = []");
     let error =
         generate_conversions_with_policy(&idl, &yaml, &missing).expect_err("missing policy");
     assert!(matches!(error, CodegenError::Policy(message) if message.contains("externalTexture")));
 
     let dead = policy.replace(
-        "\"externalTexture\"]",
-        "\"externalTexture\", \"notAMember\"]",
+        "unsupported = [\"externalTexture\"]",
+        "unsupported = [\"externalTexture\", \"notAMember\"]",
     );
     let error = generate_conversions_with_policy(&idl, &yaml, &dead).expect_err("dead policy");
     assert!(matches!(error, CodegenError::Policy(message) if message.contains("notAMember")));
