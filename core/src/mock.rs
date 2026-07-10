@@ -9,9 +9,10 @@ use std::sync::Arc;
 
 use crate::{
     Arena, ClassId, ClassSpec, Deferred, Environment, GpuDispatch, JsEngine, MappedRangeStrategy,
-    ReleaseQueue, Result, WGPUAdapter, WGPUBuffer, WGPUBufferDescriptor, WGPUBufferMapCallbackInfo,
-    WGPUDevice, WGPUMapAsyncStatus, WGPUMapMode, WGPURequestAdapterCallbackInfo,
-    WGPURequestDeviceCallbackInfo, WGPUStringView, WGPUStringViewExt,
+    ReleaseQueue, Result, WGPUAdapter, WGPUAdapterInfo, WGPUBuffer, WGPUBufferDescriptor,
+    WGPUBufferMapCallbackInfo, WGPUDevice, WGPULimits, WGPUMapAsyncStatus, WGPUMapMode,
+    WGPURequestAdapterCallbackInfo, WGPURequestDeviceCallbackInfo, WGPUStatus, WGPUStringView,
+    WGPUStringViewExt, WGPUSupportedFeatures,
 };
 use crate::{
     WGPUBindGroup, WGPUBindGroupDescriptor, WGPUBindGroupLayout, WGPUBindGroupLayoutDescriptor,
@@ -60,10 +61,13 @@ pub struct Runtime {
     property_errors: RefCell<BTreeMap<(Value, String), String>>,
     property_value_errors: RefCell<BTreeMap<(Value, Value), String>>,
     call_errors: RefCell<BTreeMap<Value, String>>,
+    construct_errors: RefCell<BTreeMap<Value, String>>,
     property_value_calls: Cell<usize>,
     calls: Cell<usize>,
+    constructs: Cell<usize>,
     call_args: RefCell<Vec<Value>>,
     call_history: RefCell<Vec<Vec<Value>>>,
+    construct_history: RefCell<Vec<Vec<Value>>>,
     coercion_unmap: Cell<Option<Value>>,
     settle_calls: Cell<usize>,
     settlement_batch_sizes: RefCell<Vec<usize>>,
@@ -78,17 +82,26 @@ impl Runtime {
     pub fn new(gpu: GpuDispatch) -> Self {
         let symbol_iterator = Value(1);
         let symbol = Value(2);
-        let global = Value(3);
+        let array_constructor = Value(3);
+        let set_constructor = Value(4);
+        let boolean = Value(5);
+        let global = Value(6);
         let mut symbol_properties = BTreeMap::new();
         symbol_properties.insert("iterator".to_owned(), symbol_iterator);
         let mut global_properties = BTreeMap::new();
         global_properties.insert("Symbol".to_owned(), symbol);
+        global_properties.insert("Array".to_owned(), array_constructor);
+        global_properties.insert("Set".to_owned(), set_constructor);
+        global_properties.insert("Boolean".to_owned(), boolean);
         Self {
             env: Environment::new(gpu, Arc::new(ReleaseQueue::new())),
             values: RefCell::new(vec![
                 MockValue::Undefined,
                 MockValue::SymbolIterator,
                 MockValue::Object(symbol_properties),
+                MockValue::Constructor(MockConstructor::Array),
+                MockValue::Constructor(MockConstructor::Set),
+                MockValue::Callable(MockCallable::Boolean),
                 MockValue::Object(global_properties),
             ]),
             global,
@@ -102,10 +115,13 @@ impl Runtime {
             property_errors: RefCell::new(BTreeMap::new()),
             property_value_errors: RefCell::new(BTreeMap::new()),
             call_errors: RefCell::new(BTreeMap::new()),
+            construct_errors: RefCell::new(BTreeMap::new()),
             property_value_calls: Cell::new(0),
             calls: Cell::new(0),
+            constructs: Cell::new(0),
             call_args: RefCell::new(Vec::new()),
             call_history: RefCell::new(Vec::new()),
+            construct_history: RefCell::new(Vec::new()),
             coercion_unmap: Cell::new(None),
             settle_calls: Cell::new(0),
             settlement_batch_sizes: RefCell::new(Vec::new()),
@@ -165,6 +181,12 @@ impl Runtime {
         self.call_errors
             .borrow_mut()
             .insert(self.canonical(callable), error.to_owned());
+    }
+
+    fn set_construct_error(&self, constructor: Value, error: &str) {
+        self.construct_errors
+            .borrow_mut()
+            .insert(self.canonical(constructor), error.to_owned());
     }
 
     fn reenter_unmap_on_next_coercion(&self, buffer: Value) {
@@ -435,6 +457,7 @@ enum MockValue {
         throw_on_next: Option<usize>,
     },
     Callable(MockCallable),
+    Constructor(MockConstructor),
     Promise {
         settled: bool,
         result: Option<std::result::Result<Value, Value>>,
@@ -464,6 +487,13 @@ enum MockCallable {
     Iterator,
     Next,
     Handler,
+    Boolean,
+}
+
+#[derive(Clone, Copy)]
+enum MockConstructor {
+    Array,
+    Set,
 }
 
 /// Mock engine marker type parameterized by mapped-range behavior.
@@ -557,7 +587,7 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
             .map(|value| cx.runtime.canonical(*value))
             .collect::<Vec<_>>();
         *cx.runtime.call_args.borrow_mut() = args.clone();
-        cx.runtime.call_history.borrow_mut().push(args);
+        cx.runtime.call_history.borrow_mut().push(args.clone());
         let f = cx.runtime.canonical(f);
         if let Some(error) = cx.runtime.call_errors.borrow().get(&f).cloned() {
             return Err(error);
@@ -604,7 +634,53 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
                 cx.runtime.object(&[("done", done), ("value", value)])
             }
             MockValue::Callable(MockCallable::Handler) => cx.runtime.undefined(),
+            MockValue::Callable(MockCallable::Boolean) => cx.runtime.bool(
+                args.first()
+                    .is_some_and(|value| match cx.runtime.get(*value) {
+                        MockValue::Undefined | MockValue::Null => false,
+                        MockValue::Bool(value) => value,
+                        MockValue::Number(value) => value != 0.0 && !value.is_nan(),
+                        MockValue::String(value) => !value.is_empty(),
+                        _ => true,
+                    }),
+            ),
             _ => return Err("TypeError: value is not callable".to_owned()),
+        };
+        Ok(cx.runtime.tracked_alias(cx.scope, result))
+    }
+
+    fn construct(
+        cx: Self::Context<'_>,
+        ctor: Self::Value,
+        args: &[Self::Value],
+    ) -> Result<Self::Value, Self::Error> {
+        cx.runtime.constructs.set(cx.runtime.constructs.get() + 1);
+        let args = args
+            .iter()
+            .map(|value| cx.runtime.canonical(*value))
+            .collect::<Vec<_>>();
+        cx.runtime.construct_history.borrow_mut().push(args.clone());
+        let ctor = cx.runtime.canonical(ctor);
+        if let Some(error) = cx.runtime.construct_errors.borrow().get(&ctor).cloned() {
+            return Err(error);
+        }
+        let result = match cx.runtime.get(ctor) {
+            MockValue::Constructor(MockConstructor::Array) => cx.runtime.iterable(&args, None),
+            MockValue::Constructor(MockConstructor::Set) => {
+                let values = match args.first().map(|value| cx.runtime.get(*value)) {
+                    Some(MockValue::Iterable { values, .. }) => values,
+                    None | Some(MockValue::Undefined) => Vec::new(),
+                    _ => return Err("TypeError: Set argument is not iterable".to_owned()),
+                };
+                let mut unique = Vec::new();
+                for value in values {
+                    if !unique.contains(&value) {
+                        unique.push(value);
+                    }
+                }
+                cx.runtime.iterable(&unique, None)
+            }
+            _ => return Err("TypeError: value is not a constructor".to_owned()),
         };
         Ok(cx.runtime.tracked_alias(cx.scope, result))
     }
@@ -624,6 +700,7 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
                 | MockValue::Iterable { .. }
                 | MockValue::Iterator { .. }
                 | MockValue::Callable(_)
+                | MockValue::Constructor(_)
                 | MockValue::Promise { .. }
                 | MockValue::Resolver { .. }
                 | MockValue::ArrayBuffer { .. }
@@ -656,6 +733,7 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
             | MockValue::Iterable { .. }
             | MockValue::Iterator { .. }
             | MockValue::Callable(_)
+            | MockValue::Constructor(_)
             | MockValue::Promise { .. }
             | MockValue::Resolver { .. }
             | MockValue::ArrayBuffer { .. }
@@ -677,6 +755,7 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
             | MockValue::Iterable { .. }
             | MockValue::Iterator { .. }
             | MockValue::Callable(_)
+            | MockValue::Constructor(_)
             | MockValue::Promise { .. }
             | MockValue::Resolver { .. }
             | MockValue::ArrayBuffer { .. }
@@ -702,6 +781,7 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
             | MockValue::Iterable { .. }
             | MockValue::Iterator { .. }
             | MockValue::Callable(_)
+            | MockValue::Constructor(_)
             | MockValue::Promise { .. }
             | MockValue::Resolver { .. }
             | MockValue::ArrayBuffer { .. }
@@ -1000,7 +1080,12 @@ struct MockGpuState {
     pipeline_layout_releases: usize,
     bind_group_releases: usize,
     compute_pipeline_releases: usize,
+    compute_pipeline_add_refs: usize,
     render_pipeline_releases: usize,
+    render_pipeline_add_refs: usize,
+    supported_features_free_members: usize,
+    adapter_info_free_members: usize,
+    limits_fail: bool,
     command_encoder_releases: usize,
     command_buffer_releases: usize,
     compute_pass_encoder_releases: usize,
@@ -1249,6 +1334,129 @@ unsafe fn device_get_queue(_device: WGPUDevice) -> WGPUQueue {
         state.borrow_mut().device_get_queue_calls += 1;
         fake_handle(1001)
     })
+}
+
+static MOCK_FEATURES: [crate::WGPUFeatureName; 3] = [
+    crate::WGPUFeatureName_WGPUFeatureName_TimestampQuery,
+    crate::WGPUFeatureName_WGPUFeatureName_DepthClipControl,
+    crate::WGPUFeatureName_WGPUFeatureName_SubgroupSizeControl,
+];
+
+unsafe fn adapter_get_features(_adapter: WGPUAdapter, features: *mut WGPUSupportedFeatures) {
+    // SAFETY: the mock dispatcher forwards the caller's out-pointer unchanged.
+    unsafe { write_mock_features(features) };
+}
+
+unsafe fn device_get_features(_device: WGPUDevice, features: *mut WGPUSupportedFeatures) {
+    // SAFETY: the mock dispatcher forwards the caller's out-pointer unchanged.
+    unsafe { write_mock_features(features) };
+}
+
+unsafe fn write_mock_features(features: *mut WGPUSupportedFeatures) {
+    // SAFETY: callers provide either null or a live writable out-struct.
+    if let Some(features) = unsafe { features.as_mut() } {
+        features.featureCount = MOCK_FEATURES.len();
+        features.features = MOCK_FEATURES.as_ptr();
+    }
+}
+
+unsafe fn supported_features_free_members(_features: WGPUSupportedFeatures) {
+    GPU_STATE.with(|state| state.borrow_mut().supported_features_free_members += 1);
+}
+
+unsafe fn adapter_get_limits(_adapter: WGPUAdapter, limits: *mut WGPULimits) -> WGPUStatus {
+    // SAFETY: the mock dispatcher forwards the caller's out-pointer unchanged.
+    unsafe { write_mock_limits(limits) }
+}
+
+unsafe fn device_get_limits(_device: WGPUDevice, limits: *mut WGPULimits) -> WGPUStatus {
+    // SAFETY: the mock dispatcher forwards the caller's out-pointer unchanged.
+    unsafe { write_mock_limits(limits) }
+}
+
+unsafe fn write_mock_limits(limits: *mut WGPULimits) -> WGPUStatus {
+    if GPU_STATE.with(|state| state.borrow().limits_fail) {
+        return crate::WGPUStatus_WGPUStatus_Error;
+    }
+    // SAFETY: callers provide either null or a live writable out-struct.
+    let Some(limits) = (unsafe { limits.as_mut() }) else {
+        return crate::WGPUStatus_WGPUStatus_Error;
+    };
+    limits.maxTextureDimension1D = 1;
+    limits.maxTextureDimension2D = 2;
+    limits.maxTextureDimension3D = 3;
+    limits.maxTextureArrayLayers = 4;
+    limits.maxBindGroups = 5;
+    limits.maxBindGroupsPlusVertexBuffers = 6;
+    limits.maxImmediateSize = 7;
+    limits.maxBindingsPerBindGroup = 8;
+    limits.maxDynamicUniformBuffersPerPipelineLayout = 9;
+    limits.maxDynamicStorageBuffersPerPipelineLayout = 10;
+    limits.maxSampledTexturesPerShaderStage = 11;
+    limits.maxSamplersPerShaderStage = 12;
+    limits.maxStorageBuffersPerShaderStage = 13;
+    limits.maxStorageTexturesPerShaderStage = 14;
+    limits.maxUniformBuffersPerShaderStage = 15;
+    limits.maxUniformBufferBindingSize = 16;
+    limits.maxStorageBufferBindingSize = 17;
+    limits.minUniformBufferOffsetAlignment = 256;
+    limits.minStorageBufferOffsetAlignment = 19;
+    limits.maxVertexBuffers = 20;
+    limits.maxBufferSize = 21;
+    limits.maxVertexAttributes = 22;
+    limits.maxVertexBufferArrayStride = 23;
+    limits.maxInterStageShaderVariables = 24;
+    limits.maxColorAttachments = 25;
+    limits.maxColorAttachmentBytesPerSample = 26;
+    limits.maxComputeWorkgroupStorageSize = 27;
+    limits.maxComputeInvocationsPerWorkgroup = 28;
+    limits.maxComputeWorkgroupSizeX = 29;
+    limits.maxComputeWorkgroupSizeY = 30;
+    limits.maxComputeWorkgroupSizeZ = 31;
+    limits.maxComputeWorkgroupsPerDimension = 32;
+    if !limits.nextInChain.is_null() {
+        let compatibility = limits
+            .nextInChain
+            .cast::<crate::WGPUCompatibilityModeLimits>();
+        // SAFETY: the core initialized this known sType chain with the
+        // compatibility struct as its first field.
+        unsafe {
+            (*compatibility).maxStorageBuffersInVertexStage = 33;
+            (*compatibility).maxStorageTexturesInVertexStage = 34;
+            (*compatibility).maxStorageBuffersInFragmentStage = 35;
+            (*compatibility).maxStorageTexturesInFragmentStage = 36;
+        }
+    }
+    crate::WGPUStatus_WGPUStatus_Success
+}
+
+unsafe fn adapter_get_info(_adapter: WGPUAdapter, info: *mut WGPUAdapterInfo) -> WGPUStatus {
+    // SAFETY: the mock dispatcher forwards the caller's out-pointer unchanged.
+    unsafe { write_mock_adapter_info(info) }
+}
+
+unsafe fn device_get_adapter_info(_device: WGPUDevice, info: *mut WGPUAdapterInfo) -> WGPUStatus {
+    // SAFETY: the mock dispatcher forwards the caller's out-pointer unchanged.
+    unsafe { write_mock_adapter_info(info) }
+}
+
+unsafe fn write_mock_adapter_info(info: *mut WGPUAdapterInfo) -> WGPUStatus {
+    // SAFETY: callers provide either null or a live writable out-struct.
+    let Some(info) = (unsafe { info.as_mut() }) else {
+        return crate::WGPUStatus_WGPUStatus_Error;
+    };
+    info.vendor = WGPUStringView::from_bytes(b"mock-vendor");
+    info.architecture = WGPUStringView::from_bytes(b"mock-architecture");
+    info.device = WGPUStringView::from_bytes(b"mock-device");
+    info.description = WGPUStringView::from_bytes(b"mock-description");
+    info.adapterType = crate::WGPUAdapterType_WGPUAdapterType_CPU;
+    info.subgroupMinSize = 4;
+    info.subgroupMaxSize = 32;
+    crate::WGPUStatus_WGPUStatus_Success
+}
+
+unsafe fn adapter_info_free_members(_info: WGPUAdapterInfo) {
+    GPU_STATE.with(|state| state.borrow_mut().adapter_info_free_members += 1);
 }
 
 unsafe fn device_push_error_scope(_device: WGPUDevice, filter: WGPUErrorFilter) {
@@ -1798,13 +2006,39 @@ unsafe fn bind_group_add_ref(_bind_group: WGPUBindGroup) {}
 unsafe fn bind_group_release(_bind_group: WGPUBindGroup) {
     GPU_STATE.with(|state| state.borrow_mut().bind_group_releases += 1);
 }
-unsafe fn compute_pipeline_add_ref(_pipeline: WGPUComputePipeline) {}
+unsafe fn compute_pipeline_add_ref(_pipeline: WGPUComputePipeline) {
+    GPU_STATE.with(|state| state.borrow_mut().compute_pipeline_add_refs += 1);
+}
 unsafe fn compute_pipeline_release(_pipeline: WGPUComputePipeline) {
     GPU_STATE.with(|state| state.borrow_mut().compute_pipeline_releases += 1);
 }
-unsafe fn render_pipeline_add_ref(_pipeline: WGPURenderPipeline) {}
+unsafe fn render_pipeline_add_ref(_pipeline: WGPURenderPipeline) {
+    GPU_STATE.with(|state| state.borrow_mut().render_pipeline_add_refs += 1);
+}
 unsafe fn render_pipeline_release(_pipeline: WGPURenderPipeline) {
     GPU_STATE.with(|state| state.borrow_mut().render_pipeline_releases += 1);
+}
+
+unsafe fn compute_pipeline_get_bind_group_layout(
+    _pipeline: WGPUComputePipeline,
+    group_index: u32,
+) -> WGPUBindGroupLayout {
+    if group_index == u32::MAX {
+        ptr::null_mut()
+    } else {
+        fake_handle(10_000 + group_index as usize)
+    }
+}
+
+unsafe fn render_pipeline_get_bind_group_layout(
+    _pipeline: WGPURenderPipeline,
+    group_index: u32,
+) -> WGPUBindGroupLayout {
+    if group_index == u32::MAX {
+        ptr::null_mut()
+    } else {
+        fake_handle(11_000 + group_index as usize)
+    }
 }
 unsafe fn command_encoder_release(_encoder: WGPUCommandEncoder) {
     GPU_STATE.with(|state| state.borrow_mut().command_encoder_releases += 1);
@@ -2266,6 +2500,28 @@ mod tests {
             );
         });
         assert_eq!(rt.calls.get(), 2);
+    }
+
+    #[test]
+    fn i1_construct_records_arguments_and_propagates_failure() {
+        let rt = runtime();
+        rt.with_scope(|cx| {
+            let global = Engine::global(cx);
+            let array = Engine::get_property(cx, global, "Array").expect("Array");
+            let one = rt.string("one");
+            let two = rt.string("two");
+            let value = Engine::construct(cx, array, &[one, two]).expect("construct Array");
+            assert!(matches!(rt.get(value), MockValue::Iterable { .. }));
+            assert_eq!(rt.constructs.get(), 1);
+            assert_eq!(rt.construct_history.borrow().as_slice(), &[vec![one, two]]);
+
+            rt.set_construct_error(array, "constructor failed");
+            assert_eq!(
+                Engine::construct(cx, array, &[]).expect_err("construct must fail"),
+                "constructor failed"
+            );
+            assert_eq!(rt.constructs.get(), 2);
+        });
     }
 
     fn release_device_held_values(rt: &Runtime, cx: Context<'_>, device: Value) {
@@ -2773,6 +3029,7 @@ mod tests {
             crate::GPU_BIND_GROUP_LAYOUT_CLASS,
             Box::new(BindGroupLayoutPayload {
                 layout: fake_handle(41),
+                parent_pipeline: None,
             }),
         )
         .expect("bind group layout");
@@ -3369,6 +3626,7 @@ mod tests {
             crate::GPU_BIND_GROUP_LAYOUT_CLASS,
             Box::new(BindGroupLayoutPayload {
                 layout: fake_handle(41),
+                parent_pipeline: None,
             }),
         )
         .expect("first layout");
@@ -3377,6 +3635,7 @@ mod tests {
             crate::GPU_BIND_GROUP_LAYOUT_CLASS,
             Box::new(BindGroupLayoutPayload {
                 layout: fake_handle(42),
+                parent_pipeline: None,
             }),
         )
         .expect("second layout");
@@ -3407,6 +3666,7 @@ mod tests {
             crate::GPU_BIND_GROUP_LAYOUT_CLASS,
             Box::new(BindGroupLayoutPayload {
                 layout: first_handle,
+                parent_pipeline: None,
             }),
         )
         .expect("first layout");
@@ -3415,6 +3675,7 @@ mod tests {
             crate::GPU_BIND_GROUP_LAYOUT_CLASS,
             Box::new(BindGroupLayoutPayload {
                 layout: second_handle,
+                parent_pipeline: None,
             }),
         )
         .expect("second layout");
@@ -3963,6 +4224,7 @@ mod tests {
             crate::GPU_BIND_GROUP_LAYOUT_CLASS,
             Box::new(BindGroupLayoutPayload {
                 layout: fake_handle(77),
+                parent_pipeline: None,
             }),
         )
         .expect("layout");
@@ -4002,6 +4264,7 @@ mod tests {
             crate::GPU_BIND_GROUP_LAYOUT_CLASS,
             Box::new(BindGroupLayoutPayload {
                 layout: fake_handle(77),
+                parent_pipeline: None,
             }),
         )
         .expect("layout");
@@ -4030,6 +4293,7 @@ mod tests {
             crate::GPU_BIND_GROUP_LAYOUT_CLASS,
             Box::new(BindGroupLayoutPayload {
                 layout: fake_handle(77),
+                parent_pipeline: None,
             }),
         )
         .expect("layout");
@@ -4072,6 +4336,7 @@ mod tests {
             crate::GPU_BIND_GROUP_LAYOUT_CLASS,
             Box::new(BindGroupLayoutPayload {
                 layout: fake_handle(77),
+                parent_pipeline: None,
             }),
         )
         .expect("layout");
@@ -4136,6 +4401,7 @@ mod tests {
             crate::GPU_BIND_GROUP_LAYOUT_CLASS,
             Box::new(BindGroupLayoutPayload {
                 layout: fake_handle(77),
+                parent_pipeline: None,
             }),
         )
         .expect("layout");
@@ -4212,6 +4478,7 @@ mod tests {
                 crate::GPU_BIND_GROUP_LAYOUT_CLASS,
                 Box::new(BindGroupLayoutPayload {
                     layout: fake_handle(77),
+                    parent_pipeline: None,
                 }),
             )
             .expect("layout");
@@ -4272,6 +4539,7 @@ mod tests {
             crate::GPU_BIND_GROUP_LAYOUT_CLASS,
             Box::new(BindGroupLayoutPayload {
                 layout: fake_handle(77),
+                parent_pipeline: None,
             }),
         )
         .expect("layout");
@@ -6117,9 +6385,7 @@ mod tests {
         let adapter = Engine::new_instance(
             cx,
             crate::GPU_ADAPTER_CLASS,
-            Box::new(AdapterPayload {
-                adapter: fake_handle(700),
-            }),
+            Box::new(AdapterPayload::<Engine>::new(fake_handle(700))),
         )
         .expect("adapter");
         let promise = adapter_request_device::<Engine>(cx, adapter, &[]).expect("requestDevice");
@@ -6348,9 +6614,7 @@ mod tests {
         let adapter = Engine::new_instance(
             cx,
             crate::GPU_ADAPTER_CLASS,
-            Box::new(AdapterPayload {
-                adapter: fake_handle(1_233),
-            }),
+            Box::new(AdapterPayload::<Engine>::new(fake_handle(1_233))),
         )
         .expect("adapter");
         rt.fail_new_instance.set(Some(crate::GPU_DEVICE_CLASS));
@@ -7195,5 +7459,181 @@ mod tests {
             }
         });
         release_device_held_values(&rt, cx, device);
+    }
+
+    #[test]
+    fn i2_i5_introspection_caches_copies_and_balances_free_members() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let events = DeviceEventState::<Engine>::new(Arc::clone(rt.env.settlements()));
+        let device = Engine::new_instance(
+            cx,
+            crate::GPU_DEVICE_CLASS,
+            Box::new(DevicePayload::<Engine>::new(fake_device(), events)),
+        )
+        .expect("device");
+        let adapter = Engine::new_instance(
+            cx,
+            crate::GPU_ADAPTER_CLASS,
+            Box::new(AdapterPayload::<Engine>::new(fake_handle(700))),
+        )
+        .expect("adapter");
+
+        let device_features = crate::device_features_get::<Engine>(cx, device).expect("features");
+        let repeated = crate::device_features_get::<Engine>(cx, device).expect("cached features");
+        assert_eq!(rt.canonical(device_features), rt.canonical(repeated));
+        let MockValue::Iterable { values, .. } = rt.get(device_features) else {
+            panic!("features must be Set-like");
+        };
+        let names = values
+            .into_iter()
+            .map(|value| match rt.get(value) {
+                MockValue::String(value) => value,
+                _ => panic!("feature must be a string"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["depth-clip-control", "timestamp-query"]);
+
+        let device_limits = crate::device_limits_get::<Engine>(cx, device).expect("limits");
+        assert_eq!(
+            rt.canonical(device_limits),
+            rt.canonical(crate::device_limits_get::<Engine>(cx, device).expect("cached limits"))
+        );
+        let limit_spec = crate::supported_limits_class::<Engine>();
+        assert_eq!(limit_spec.properties.len(), 36);
+        for property in limit_spec.properties {
+            let value =
+                property.get.expect("limit getter")(cx, device_limits).expect(property.name);
+            assert!(
+                matches!(rt.get(value), MockValue::Number(_)),
+                "{}",
+                property.name
+            );
+        }
+        let alignment =
+            crate::limit_min_uniform_buffer_offset_alignment::<Engine>(cx, device_limits)
+                .expect("alignment");
+        assert!(matches!(rt.get(alignment), MockValue::Number(256.0)));
+
+        let device_info =
+            crate::device_adapter_info_get::<Engine>(cx, device).expect("adapterInfo");
+        assert_eq!(
+            rt.canonical(device_info),
+            rt.canonical(
+                crate::device_adapter_info_get::<Engine>(cx, device).expect("cached info")
+            )
+        );
+        let vendor = crate::adapter_info_vendor::<Engine>(cx, device_info).expect("vendor");
+        assert!(matches!(rt.get(vendor), MockValue::String(value) if value == "mock-vendor"));
+        let fallback =
+            crate::adapter_info_is_fallback::<Engine>(cx, device_info).expect("fallback");
+        assert!(matches!(rt.get(fallback), MockValue::Bool(true)));
+
+        let adapter_features =
+            crate::adapter_features_get::<Engine>(cx, adapter).expect("adapter features");
+        assert_eq!(
+            rt.canonical(adapter_features),
+            rt.canonical(
+                crate::adapter_features_get::<Engine>(cx, adapter)
+                    .expect("cached adapter features")
+            )
+        );
+        let adapter_limits =
+            crate::adapter_limits_get::<Engine>(cx, adapter).expect("adapter limits");
+        assert_eq!(
+            rt.canonical(adapter_limits),
+            rt.canonical(
+                crate::adapter_limits_get::<Engine>(cx, adapter).expect("cached adapter limits")
+            )
+        );
+        let adapter_info = crate::adapter_info_get::<Engine>(cx, adapter).expect("adapter info");
+        assert_eq!(
+            rt.canonical(adapter_info),
+            rt.canonical(
+                crate::adapter_info_get::<Engine>(cx, adapter).expect("cached adapter info")
+            )
+        );
+
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.supported_features_free_members, 2);
+            assert_eq!(state.adapter_info_free_members, 2);
+        });
+        let adapter_payload =
+            Engine::payload(cx, adapter, crate::GPU_ADAPTER_CLASS).expect("adapter payload");
+        crate::release_payload_values::<Engine>(adapter_payload, &mut |value| {
+            Engine::release_value(cx, value)
+        });
+        release_device_held_values(&rt, cx, device);
+    }
+
+    #[test]
+    fn i3_limits_failure_is_operation_error() {
+        reset_gpu();
+        GPU_STATE.with(|state| state.borrow_mut().limits_fail = true);
+        let rt = runtime();
+        let cx = rt.context();
+        let events = DeviceEventState::<Engine>::new(Arc::clone(rt.env.settlements()));
+        let device = Engine::new_instance(
+            cx,
+            crate::GPU_DEVICE_CLASS,
+            Box::new(DevicePayload::<Engine>::new(fake_device(), events)),
+        )
+        .expect("device");
+        assert_eq!(
+            crate::device_limits_get::<Engine>(cx, device).expect_err("limits must fail"),
+            "OperationError: native limits query failed"
+        );
+    }
+
+    #[test]
+    fn i6_pipeline_layout_is_new_and_releases_with_parent_retention() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let pipeline_handle = fake_handle(900);
+        let pipeline = Engine::new_instance(
+            cx,
+            crate::GPU_COMPUTE_PIPELINE_CLASS,
+            Box::new(ComputePipelinePayload {
+                pipeline: pipeline_handle,
+                module: fake_handle(901),
+                layout: ptr::null_mut(),
+            }),
+        )
+        .expect("pipeline");
+        let index = rt.number(0.0);
+        let first = crate::compute_pipeline_get_bind_group_layout::<Engine>(cx, pipeline, &[index])
+            .expect("first layout");
+        let second =
+            crate::compute_pipeline_get_bind_group_layout::<Engine>(cx, pipeline, &[index])
+                .expect("second layout");
+        assert_ne!(rt.canonical(first), rt.canonical(second));
+        for value in [first, second] {
+            let payload = Engine::payload(cx, value, crate::GPU_BIND_GROUP_LAYOUT_CLASS)
+                .and_then(|payload| payload.downcast_ref::<BindGroupLayoutPayload>())
+                .expect("layout payload");
+            crate::finalize_bind_group_layout(
+                Box::new(BindGroupLayoutPayload {
+                    layout: payload.layout,
+                    parent_pipeline: payload.parent_pipeline,
+                }),
+                &rt.env,
+            );
+        }
+        assert_eq!(rt.queue().drain().expect("drain"), 2);
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.compute_pipeline_add_refs, 2);
+            assert_eq!(state.bind_group_layout_releases, 2);
+            assert_eq!(state.compute_pipeline_releases, 2);
+        });
+        let invalid = rt.number(u32::MAX as f64);
+        assert_eq!(
+            crate::compute_pipeline_get_bind_group_layout::<Engine>(cx, pipeline, &[invalid])
+                .expect_err("null layout must fail"),
+            "OperationError: getBindGroupLayout returned null"
+        );
     }
 }

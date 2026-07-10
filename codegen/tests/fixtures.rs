@@ -200,7 +200,7 @@ fn generated_dispatch_macro_matches_focused_shape_fixture() {
     let expected =
         fs::read_to_string(fixtures().join("dispatch_surface.rs")).expect("dispatch snapshot");
     assert_eq!(dispatch_macro_surface(&emitted), expected);
-    assert_eq!(expected.matches(", unsafe fn(").count(), 86);
+    assert_eq!(expected.matches(", unsafe fn(").count(), 96);
 }
 
 #[test]
@@ -278,7 +278,12 @@ fn generated_lifecycle_covers_every_selected_class_and_retention_set() {
     assert!(emitted.contains(
         "MethodSpec { name: \"createRenderPipeline\", length: 1, call: device_create_render_pipeline::<E> }"
     ));
-    assert!(!emitted.contains("getBindGroupLayout"));
+    assert!(emitted.contains(
+        "MethodSpec { name: \"getBindGroupLayout\", length: 1, call: compute_pipeline_get_bind_group_layout::<E> }"
+    ));
+    assert!(emitted.contains(
+        "MethodSpec { name: \"getBindGroupLayout\", length: 1, call: render_pipeline_get_bind_group_layout::<E> }"
+    ));
 
     assert!(emitted.contains(
         "pub struct BindGroupPayload {\n    pub(super) bind_group: WGPUBindGroup,\n    pub(super) layout: WGPUBindGroupLayout,\n    pub(super) buffers: Vec<WGPUBuffer>,\n    pub(super) samplers: Vec<WGPUSampler>,\n    pub(super) texture_views: Vec<WGPUTextureView>,\n}"
@@ -387,7 +392,6 @@ fn new_descriptor_policy_reasons_are_surfaced_in_the_report() {
         "recorded deferral: block 03 section 7",
         "out of scope until query sets",
         "WebIDL names the reusable programmable stage",
-        "T5 defers getBindGroupLayout because its returned wrapper must retain a pipeline-derived native layout handle",
     ] {
         assert!(report.contains(reason), "missing policy reason: {reason}");
     }

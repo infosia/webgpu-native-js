@@ -1,6 +1,11 @@
 buffer:null,round-trip;method:true
 identity:queue:true
 identity:lost:true
+features:core-features-and-limits
+limits:minUniformBufferOffsetAlignment:256
+identity:features:true
+identity:limits:true
+identity:adapterInfo:true
 typeof:device.createBuffer:function
 identity:cross-instance-prototype:true
 identity:cross-instance-method:true
@@ -24,6 +29,7 @@ texture:extent-primitive:TypeError:GPUExtent3D must be an object
 bindGroup:resources:buffer,sampler,texture-view:ok
 bindGroup:sampler-type-rejection:TypeError:GPUSamplerBindingType
 renderPipeline:create:ok
+getBindGroupLayout:create/release:ok
 renderPipeline:topology-rejection:TypeError:GPUPrimitiveTopology
 renderPipeline:nullable-holes:ok
 coerce:size-0:ok
@@ -65,6 +71,9 @@ sequence string:TypeError:GPUCommandBuffer is required
 sequence array-like:TypeError:commands is not iterable
 sequence iterator-throw:Error:mid-iteration next failed
 lostReason:destroyed
+identity:adapter.features:true
+identity:adapter.limits:true
+identity:adapter.info:true
 tick:settle1,settle2,then1,then2
 mapping:detach:0,0
 mapping:post-unmap:OperationError:buffer is not mapped

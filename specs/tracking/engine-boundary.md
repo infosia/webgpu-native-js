@@ -1343,3 +1343,27 @@ installed on this macOS host, but `cargo check --target x86_64-pc-windows-msvc`
 fails in ffi's build script — bindgen cannot resolve a Windows libc sysroot
 (`math.h` not found) from macOS. Per block 03's own wording: no Windows run is
 implied; a real Windows verification needs the Windows dev machine.
+
+**Windows verification COMPLETE (2026-07-11, run by the owner's Windows-side
+session).** The full suite passes on Windows/MSVC after `63e1592` (MSVC C11
+flag spelling; a bindgen wrapper restoring the ui64-suffixed sentinel macros;
+the earlier rpath/import-lib/gitattributes fixes). Both dev platforms now run
+the binding.
+
+**Block 10 landed (2026-07-11): introspection + the pipeline-derived layout.**
+`construct` is the block's only trait addition (I1). `features` is a real,
+sorted JS `Set` ([SameObject]-cached; mutability recorded as the I2 deviation;
+C-only `subgroup_size_control` skipped through the join). `limits` introduced
+the value-backed wrapper (hand-written by reasoned choice — a one-off
+copied-struct lifecycle didn't justify generalizing the creator/release
+generator), all 36 attributes + the compatibility chain. `adapterInfo` copies
+its seven strings and frees immediately; FreeMembers pairings counter-asserted
+(exactly 2+2, cache re-reads add zero). `getBindGroupLayout` is [NewObject]
+per the pin, adopts the ReturnedWithOwnership handle with NO extra AddRef (the
+device.queue lesson paying rent), and retains its pipeline per B8 because the
+header guarantees nothing about independence. `isFallbackAdapter` derives from
+`adapterType == CPU` (no direct C field — recorded). Parity 94 → 103,
+byte-identical on yawgpu AND Dawn (gated run) — device-scoped features/limits
+are backend-stable by construction (default-requested devices report core
+features and spec-default limits). Suites: core 129, quickjs 54, JSC 25+1,
+workspace 270.

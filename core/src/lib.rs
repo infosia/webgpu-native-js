@@ -19,6 +19,15 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 pub use webgpu_native_js_ffi::native::*;
 
+/// Native pipeline parent retained by a pipeline-derived bind-group layout.
+#[derive(Clone, Copy)]
+pub enum PipelineParent {
+    /// Compute-pipeline parent.
+    Compute(WGPUComputePipeline),
+    /// Render-pipeline parent.
+    Render(WGPURenderPipeline),
+}
+
 #[macro_use]
 mod generated {
     use super::*;
@@ -54,6 +63,8 @@ const GPU_TEXTURE_CLASS: ClassId = ClassId(20);
 const GPU_TEXTURE_VIEW_CLASS: ClassId = ClassId(21);
 const GPU_RENDER_PIPELINE_CLASS: ClassId = ClassId(22);
 const GPU_RENDER_PASS_ENCODER_CLASS: ClassId = ClassId(23);
+const GPU_SUPPORTED_LIMITS_CLASS: ClassId = ClassId(24);
+const GPU_ADAPTER_INFO_CLASS: ClassId = ClassId(25);
 const WEBIDL_U32_MAX: u64 = u32::MAX as u64;
 const WGPU_DEPTH_CLEAR_VALUE_UNDEFINED: f32 = f32::NAN;
 
@@ -341,6 +352,12 @@ pub trait JsEngine: Sized {
         this: Self::Value,
         args: &[Self::Value],
     ) -> Result<Self::Value, Self::Error>;
+    /// Calls a JavaScript constructor with the provided arguments.
+    fn construct(
+        cx: Self::Context<'_>,
+        ctor: Self::Value,
+        args: &[Self::Value],
+    ) -> Result<Self::Value, Self::Error>;
     /// Returns true for JavaScript `undefined`.
     fn is_undefined(cx: Self::Context<'_>, value: Self::Value) -> bool;
     /// Returns true for JavaScript `null`.
@@ -598,8 +615,11 @@ impl<E: JsEngine + 'static> SettlementRequest<E> {
                 ref mut native,
             } => {
                 let adapter = native.take_adapter();
-                let value =
-                    E::new_instance(cx, GPU_ADAPTER_CLASS, Box::new(AdapterPayload { adapter }));
+                let value = E::new_instance(
+                    cx,
+                    GPU_ADAPTER_CLASS,
+                    Box::new(AdapterPayload::<E>::new(adapter)),
+                );
                 SettlementOutcome::Deferred(match value {
                     Ok(value) => (deferred, Ok(value)),
                     Err(error) => {
@@ -1018,6 +1038,9 @@ pub unsafe fn tick<E: JsEngine + 'static>(
 pub struct DevicePayload<E: JsEngine + 'static> {
     device: WGPUDevice,
     queue: HeldValue<E>,
+    features: HeldValue<E>,
+    limits: HeldValue<E>,
+    adapter_info: HeldValue<E>,
     events: Arc<DeviceEventState<E>>,
 }
 
@@ -1026,6 +1049,9 @@ impl<E: JsEngine + 'static> DevicePayload<E> {
         Self {
             device,
             queue: HeldValue::empty(),
+            features: HeldValue::empty(),
+            limits: HeldValue::empty(),
+            adapter_info: HeldValue::empty(),
             events,
         }
     }
@@ -1042,6 +1068,18 @@ impl<E: JsEngine + 'static> DevicePayload<E> {
 
     fn cache_queue(&self, value: E::Value) {
         self.queue.set(value);
+    }
+
+    fn cached_features(&self) -> Option<E::Value> {
+        self.features.get()
+    }
+
+    fn cached_limits(&self) -> Option<E::Value> {
+        self.limits.get()
+    }
+
+    fn cached_adapter_info(&self) -> Option<E::Value> {
+        self.adapter_info.get()
     }
 }
 
@@ -1312,8 +1350,16 @@ pub fn trace_payload_values<E: JsEngine + 'static>(
         buffer.trace_mapped_range_values(&mut *visit);
     }
     if let Some(device) = payload.downcast_ref::<DevicePayload<E>>() {
-        if let Some(queue) = device.cached_queue() {
-            visit(queue);
+        for value in [
+            device.cached_queue(),
+            device.cached_features(),
+            device.cached_limits(),
+            device.cached_adapter_info(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            visit(value);
         }
         if let Some(js) = device
             .events
@@ -1330,6 +1376,18 @@ pub fn trace_payload_values<E: JsEngine + 'static>(
             }
         }
     }
+    if let Some(adapter) = payload.downcast_ref::<AdapterPayload<E>>() {
+        for value in [
+            adapter.features.get(),
+            adapter.limits.get(),
+            adapter.info.get(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            visit(value);
+        }
+    }
 }
 
 /// Removes every engine value retained by a core wrapper payload.
@@ -1341,10 +1399,26 @@ pub fn release_payload_values<E: JsEngine + 'static>(
         buffer.release_mapped_range_values(&mut *release);
     }
     if let Some(device) = payload.downcast_ref::<DevicePayload<E>>() {
-        if let Some(queue) = device.queue.take() {
-            release(queue);
+        let held = [
+            device.queue.take(),
+            device.features.take(),
+            device.limits.take(),
+            device.adapter_info.take(),
+        ];
+        for value in held.into_iter().flatten() {
+            release(value);
         }
         for value in device.events.take_engine_values() {
+            release(value);
+        }
+    }
+    if let Some(adapter) = payload.downcast_ref::<AdapterPayload<E>>() {
+        let held = [
+            adapter.features.take(),
+            adapter.limits.take(),
+            adapter.info.take(),
+        ];
+        for value in held.into_iter().flatten() {
             release(value);
         }
     }
@@ -1453,8 +1527,22 @@ pub struct GpuPayload {
 unsafe impl Send for GpuPayload {}
 
 /// Payload stored by a `GPUAdapter` wrapper.
-pub struct AdapterPayload {
+pub struct AdapterPayload<E: JsEngine> {
     adapter: WGPUAdapter,
+    features: HeldValue<E>,
+    limits: HeldValue<E>,
+    info: HeldValue<E>,
+}
+
+impl<E: JsEngine> AdapterPayload<E> {
+    fn new(adapter: WGPUAdapter) -> Self {
+        Self {
+            adapter,
+            features: HeldValue::empty(),
+            limits: HeldValue::empty(),
+            info: HeldValue::empty(),
+        }
+    }
 }
 
 // SAFETY: `AdapterPayload` stores a `WGPUAdapter`. If a finalizer runs off the
@@ -1462,7 +1550,250 @@ pub struct AdapterPayload {
 // `wgpuAdapterRelease` is called later by release-queue drain on the creating
 // `tick()` thread.
 // SAFETY: The `WGPUAdapter` is only enqueued off-thread and released during `tick()` drain.
-unsafe impl Send for AdapterPayload {}
+unsafe impl<E: JsEngine> Send for AdapterPayload<E> {}
+
+struct SupportedLimitsPayload {
+    limits: WGPULimits,
+    compatibility: WGPUCompatibilityModeLimits,
+}
+
+// SAFETY: the copied structs contain no live pointers after query completion.
+unsafe impl Send for SupportedLimitsPayload {}
+
+struct AdapterInfoPayload {
+    vendor: String,
+    architecture: String,
+    device: String,
+    description: String,
+    subgroup_min_size: u32,
+    subgroup_max_size: u32,
+    is_fallback_adapter: bool,
+}
+
+// SAFETY: the payload contains only owned strings and scalar values.
+unsafe impl Send for AdapterInfoPayload {}
+
+enum FeatureSource {
+    Adapter(WGPUAdapter),
+    Device(WGPUDevice),
+}
+
+enum LimitsSource {
+    Adapter(WGPUAdapter),
+    Device(WGPUDevice),
+}
+
+enum AdapterInfoSource {
+    Adapter(WGPUAdapter),
+    Device(WGPUDevice),
+}
+
+fn new_feature_set<E: JsEngine>(
+    cx: E::Context<'_>,
+    source: FeatureSource,
+) -> Result<E::Value, E::Error> {
+    // I2 recorded deviation: JavaScript has no readonly Set constructor, so
+    // trusted scripts receive a mutable Set with conformant read behavior.
+    let gpu = E::environment(cx).gpu();
+    let mut supported = WGPUSupportedFeatures {
+        featureCount: 0,
+        features: ptr::null(),
+    };
+    // SAFETY: the selected handle belongs to this dispatch table and `supported`
+    // is a live writable out-struct for the duration of the call.
+    unsafe {
+        match source {
+            FeatureSource::Adapter(adapter) => {
+                (gpu.adapter_get_features)(adapter, ptr::from_mut(&mut supported));
+            }
+            FeatureSource::Device(device) => {
+                (gpu.device_get_features)(device, ptr::from_mut(&mut supported));
+            }
+        }
+    }
+    let copied = if supported.featureCount == 0 {
+        Ok(Vec::new())
+    } else if supported.features.is_null() {
+        Err(E::operation_error(
+            cx,
+            "feature query returned a null feature list",
+        ))
+    } else {
+        // SAFETY: the query returned `featureCount` caller-owned elements, and
+        // they remain live until the immediately following FreeMembers call.
+        let features =
+            unsafe { std::slice::from_raw_parts(supported.features, supported.featureCount) };
+        let mut names = features
+            .iter()
+            .filter_map(|feature| feature_name_to_str(*feature))
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        Ok(names)
+    };
+    // SAFETY: `supported` is exactly the caller-owned result returned above and
+    // has not previously been freed.
+    unsafe { (gpu.supported_features_free_members)(supported) };
+    let names = copied?;
+
+    let values = names
+        .into_iter()
+        .map(|name| E::string(cx, name))
+        .collect::<Result<Vec<_>, _>>()?;
+    let global = E::global(cx);
+    let array_ctor = E::get_property(cx, global, "Array")?;
+    let array = E::construct(cx, array_ctor, &values)?;
+    let set_ctor = E::get_property(cx, global, "Set")?;
+    E::construct(cx, set_ctor, &[array])
+}
+
+fn initial_limits() -> (WGPULimits, WGPUCompatibilityModeLimits) {
+    let u32_undefined = WGPU_LIMIT_U32_UNDEFINED;
+    let compatibility = WGPUCompatibilityModeLimits {
+        chain: WGPUChainedStruct {
+            next: ptr::null_mut(),
+            sType: WGPUSType_WGPUSType_CompatibilityModeLimits,
+        },
+        maxStorageBuffersInVertexStage: u32_undefined,
+        maxStorageTexturesInVertexStage: u32_undefined,
+        maxStorageBuffersInFragmentStage: u32_undefined,
+        maxStorageTexturesInFragmentStage: u32_undefined,
+    };
+    let limits = WGPULimits {
+        nextInChain: ptr::null_mut(),
+        maxTextureDimension1D: u32_undefined,
+        maxTextureDimension2D: u32_undefined,
+        maxTextureDimension3D: u32_undefined,
+        maxTextureArrayLayers: u32_undefined,
+        maxBindGroups: u32_undefined,
+        maxBindGroupsPlusVertexBuffers: u32_undefined,
+        maxBindingsPerBindGroup: u32_undefined,
+        maxDynamicUniformBuffersPerPipelineLayout: u32_undefined,
+        maxDynamicStorageBuffersPerPipelineLayout: u32_undefined,
+        maxSampledTexturesPerShaderStage: u32_undefined,
+        maxSamplersPerShaderStage: u32_undefined,
+        maxStorageBuffersPerShaderStage: u32_undefined,
+        maxStorageTexturesPerShaderStage: u32_undefined,
+        maxUniformBuffersPerShaderStage: u32_undefined,
+        maxUniformBufferBindingSize: u64::MAX,
+        maxStorageBufferBindingSize: u64::MAX,
+        minUniformBufferOffsetAlignment: u32_undefined,
+        minStorageBufferOffsetAlignment: u32_undefined,
+        maxVertexBuffers: u32_undefined,
+        maxBufferSize: u64::MAX,
+        maxVertexAttributes: u32_undefined,
+        maxVertexBufferArrayStride: u32_undefined,
+        maxInterStageShaderVariables: u32_undefined,
+        maxColorAttachments: u32_undefined,
+        maxColorAttachmentBytesPerSample: u32_undefined,
+        maxComputeWorkgroupStorageSize: u32_undefined,
+        maxComputeInvocationsPerWorkgroup: u32_undefined,
+        maxComputeWorkgroupSizeX: u32_undefined,
+        maxComputeWorkgroupSizeY: u32_undefined,
+        maxComputeWorkgroupSizeZ: u32_undefined,
+        maxComputeWorkgroupsPerDimension: u32_undefined,
+        maxImmediateSize: u32_undefined,
+    };
+    (limits, compatibility)
+}
+
+fn new_supported_limits<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    source: LimitsSource,
+) -> Result<E::Value, E::Error> {
+    let (mut limits, mut compatibility) = initial_limits();
+    limits.nextInChain = ptr::from_mut(&mut compatibility.chain);
+    let gpu = E::environment(cx).gpu();
+    // SAFETY: the selected handle belongs to this dispatch table; `limits` and
+    // its compatibility chain remain live and writable through the call.
+    let status = unsafe {
+        match source {
+            LimitsSource::Adapter(adapter) => {
+                (gpu.adapter_get_limits)(adapter, ptr::from_mut(&mut limits))
+            }
+            LimitsSource::Device(device) => {
+                (gpu.device_get_limits)(device, ptr::from_mut(&mut limits))
+            }
+        }
+    };
+    if status != WGPUStatus_WGPUStatus_Success {
+        return Err(E::operation_error(cx, "native limits query failed"));
+    }
+    limits.nextInChain = ptr::null_mut();
+    compatibility.chain.next = ptr::null_mut();
+    let _ = E::register_class(cx, supported_limits_class::<E>())?;
+    E::new_instance(
+        cx,
+        GPU_SUPPORTED_LIMITS_CLASS,
+        Box::new(SupportedLimitsPayload {
+            limits,
+            compatibility,
+        }),
+    )
+}
+
+fn output_string_to_owned(view: WGPUStringView) -> String {
+    if view.data.is_null() || view.length == wgpu_strlen() {
+        return String::new();
+    }
+    // SAFETY: a successful adapter-info query returns `length` readable bytes
+    // that remain live until AdapterInfoFreeMembers below.
+    let bytes = unsafe { std::slice::from_raw_parts(view.data.cast::<u8>(), view.length) };
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+fn new_adapter_info<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    source: AdapterInfoSource,
+) -> Result<E::Value, E::Error> {
+    let empty = WGPUStringView {
+        data: ptr::null(),
+        length: wgpu_strlen(),
+    };
+    let mut info = WGPUAdapterInfo {
+        nextInChain: ptr::null_mut(),
+        vendor: empty,
+        architecture: empty,
+        device: empty,
+        description: empty,
+        backendType: WGPUBackendType_WGPUBackendType_Undefined,
+        adapterType: 0,
+        vendorID: 0,
+        deviceID: 0,
+        subgroupMinSize: 0,
+        subgroupMaxSize: 0,
+    };
+    let gpu = E::environment(cx).gpu();
+    // SAFETY: the selected handle belongs to this dispatch table and `info` is
+    // a live writable out-struct through the call.
+    let status = unsafe {
+        match source {
+            AdapterInfoSource::Adapter(adapter) => {
+                (gpu.adapter_get_info)(adapter, ptr::from_mut(&mut info))
+            }
+            AdapterInfoSource::Device(device) => {
+                (gpu.device_get_adapter_info)(device, ptr::from_mut(&mut info))
+            }
+        }
+    };
+    let payload = (status == WGPUStatus_WGPUStatus_Success).then(|| AdapterInfoPayload {
+        vendor: output_string_to_owned(info.vendor),
+        architecture: output_string_to_owned(info.architecture),
+        device: output_string_to_owned(info.device),
+        description: output_string_to_owned(info.description),
+        subgroup_min_size: info.subgroupMinSize,
+        subgroup_max_size: info.subgroupMaxSize,
+        // The C pin has no isFallbackAdapter field. Its closest stable signal is
+        // the CPU adapter classification used for fallback/no-op adapters.
+        is_fallback_adapter: info.adapterType == WGPUAdapterType_WGPUAdapterType_CPU,
+    });
+    // SAFETY: `info` is exactly the caller-owned result returned above and has
+    // not previously been freed; all exposed strings were copied first.
+    unsafe { (gpu.adapter_info_free_members)(info) };
+    let payload =
+        payload.ok_or_else(|| E::operation_error(cx, "native adapter-info query failed"))?;
+    let _ = E::register_class(cx, adapter_info_class::<E>())?;
+    E::new_instance(cx, GPU_ADAPTER_INFO_CLASS, Box::new(payload))
+}
 
 /// Payload stored by a `GPUQueue` wrapper.
 pub struct QueuePayload {
@@ -2245,7 +2576,7 @@ pub fn adapter_request_device<E: JsEngine + 'static>(
     _args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
     let Some(payload) = E::payload(cx, this, GPU_ADAPTER_CLASS)
-        .and_then(|payload| payload.downcast_ref::<AdapterPayload>())
+        .and_then(|payload| payload.downcast_ref::<AdapterPayload<E>>())
     else {
         return Err(E::type_error(
             cx,
@@ -2534,6 +2865,715 @@ pub fn device_queue_get<E: JsEngine + 'static>(
             Err(error)
         }
     }
+}
+
+/// Implements the cached `GPUAdapter.features` getter.
+pub fn adapter_features_get<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+) -> Result<E::Value, E::Error> {
+    let payload = E::payload(cx, this, GPU_ADAPTER_CLASS)
+        .and_then(|payload| payload.downcast_ref::<AdapterPayload<E>>())
+        .ok_or_else(|| E::type_error(cx, "GPUAdapter.features called on an incompatible object"))?;
+    if let Some(value) = payload.features.get() {
+        return Ok(E::return_held_value(cx, value));
+    }
+    let value = new_feature_set::<E>(cx, FeatureSource::Adapter(payload.adapter))?;
+    payload.features.set(E::duplicate_value(cx, value));
+    Ok(value)
+}
+
+/// Implements the cached `GPUDevice.features` getter.
+pub fn device_features_get<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+) -> Result<E::Value, E::Error> {
+    let payload = device_wrapper_payload::<E>(cx, this)?;
+    if let Some(value) = payload.features.get() {
+        return Ok(E::return_held_value(cx, value));
+    }
+    let value = new_feature_set::<E>(cx, FeatureSource::Device(payload.device))?;
+    payload.features.set(E::duplicate_value(cx, value));
+    Ok(value)
+}
+
+/// Implements the cached `GPUAdapter.limits` getter.
+pub fn adapter_limits_get<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+) -> Result<E::Value, E::Error> {
+    let payload = E::payload(cx, this, GPU_ADAPTER_CLASS)
+        .and_then(|payload| payload.downcast_ref::<AdapterPayload<E>>())
+        .ok_or_else(|| E::type_error(cx, "GPUAdapter.limits called on an incompatible object"))?;
+    if let Some(value) = payload.limits.get() {
+        return Ok(E::return_held_value(cx, value));
+    }
+    let value = new_supported_limits::<E>(cx, LimitsSource::Adapter(payload.adapter))?;
+    payload.limits.set(E::duplicate_value(cx, value));
+    Ok(value)
+}
+
+/// Implements the cached `GPUDevice.limits` getter.
+pub fn device_limits_get<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+) -> Result<E::Value, E::Error> {
+    let payload = device_wrapper_payload::<E>(cx, this)?;
+    if let Some(value) = payload.limits.get() {
+        return Ok(E::return_held_value(cx, value));
+    }
+    let value = new_supported_limits::<E>(cx, LimitsSource::Device(payload.device))?;
+    payload.limits.set(E::duplicate_value(cx, value));
+    Ok(value)
+}
+
+/// Implements the cached `GPUAdapter.info` getter.
+pub fn adapter_info_get<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+) -> Result<E::Value, E::Error> {
+    let payload = E::payload(cx, this, GPU_ADAPTER_CLASS)
+        .and_then(|payload| payload.downcast_ref::<AdapterPayload<E>>())
+        .ok_or_else(|| E::type_error(cx, "GPUAdapter.info called on an incompatible object"))?;
+    if let Some(value) = payload.info.get() {
+        return Ok(E::return_held_value(cx, value));
+    }
+    let value = new_adapter_info::<E>(cx, AdapterInfoSource::Adapter(payload.adapter))?;
+    payload.info.set(E::duplicate_value(cx, value));
+    Ok(value)
+}
+
+/// Implements the cached `GPUDevice.adapterInfo` getter.
+pub fn device_adapter_info_get<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+) -> Result<E::Value, E::Error> {
+    let payload = device_wrapper_payload::<E>(cx, this)?;
+    if let Some(value) = payload.adapter_info.get() {
+        return Ok(E::return_held_value(cx, value));
+    }
+    let value = new_adapter_info::<E>(cx, AdapterInfoSource::Device(payload.device))?;
+    payload.adapter_info.set(E::duplicate_value(cx, value));
+    Ok(value)
+}
+
+/// Implements `GPUComputePipeline.getBindGroupLayout`.
+pub fn compute_pipeline_get_bind_group_layout<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let payload = E::payload(cx, this, GPU_COMPUTE_PIPELINE_CLASS)
+        .and_then(|payload| payload.downcast_ref::<ComputePipelinePayload>())
+        .ok_or_else(|| {
+            E::type_error(
+                cx,
+                "GPUComputePipeline.getBindGroupLayout called on an incompatible object",
+            )
+        })?;
+    let index = args
+        .first()
+        .copied()
+        .ok_or_else(|| E::type_error(cx, "index"))?;
+    let index = enforce_u32::<E>(cx, index, "index")?;
+    new_derived_bind_group_layout::<E>(cx, PipelineParent::Compute(payload.pipeline), index)
+}
+
+/// Implements `GPURenderPipeline.getBindGroupLayout`.
+pub fn render_pipeline_get_bind_group_layout<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let payload = E::payload(cx, this, GPU_RENDER_PIPELINE_CLASS)
+        .and_then(|payload| payload.downcast_ref::<RenderPipelinePayload>())
+        .ok_or_else(|| {
+            E::type_error(
+                cx,
+                "GPURenderPipeline.getBindGroupLayout called on an incompatible object",
+            )
+        })?;
+    let index = args
+        .first()
+        .copied()
+        .ok_or_else(|| E::type_error(cx, "index"))?;
+    let index = enforce_u32::<E>(cx, index, "index")?;
+    new_derived_bind_group_layout::<E>(cx, PipelineParent::Render(payload.render_pipeline), index)
+}
+
+fn new_derived_bind_group_layout<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    parent: PipelineParent,
+    index: u32,
+) -> Result<E::Value, E::Error> {
+    let gpu = E::environment(cx).gpu();
+    // SAFETY: the parent handle is live and belongs to this dispatch table.
+    let layout = unsafe {
+        match parent {
+            PipelineParent::Compute(pipeline) => {
+                (gpu.compute_pipeline_get_bind_group_layout)(pipeline, index)
+            }
+            PipelineParent::Render(pipeline) => {
+                (gpu.render_pipeline_get_bind_group_layout)(pipeline, index)
+            }
+        }
+    };
+    if layout.is_null() {
+        return Err(E::operation_error(cx, "getBindGroupLayout returned null"));
+    }
+    if let Err(error) = E::register_class(cx, bind_group_layout_class::<E>()) {
+        // SAFETY: `layout` is the non-null owned result returned above.
+        unsafe { (gpu.bind_group_layout_release)(layout) };
+        return Err(error);
+    }
+    // SAFETY: the parent handle is live; this reference is balanced by the
+    // derived layout finalizer or the allocation-failure cleanup below.
+    unsafe {
+        match parent {
+            PipelineParent::Compute(pipeline) => (gpu.compute_pipeline_add_ref)(pipeline),
+            PipelineParent::Render(pipeline) => (gpu.render_pipeline_add_ref)(pipeline),
+        }
+    }
+    match E::new_instance(
+        cx,
+        GPU_BIND_GROUP_LAYOUT_CLASS,
+        Box::new(BindGroupLayoutPayload {
+            layout,
+            parent_pipeline: Some(parent),
+        }),
+    ) {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            // SAFETY: both owned references were acquired above and have not
+            // been released yet.
+            unsafe {
+                (gpu.bind_group_layout_release)(layout);
+                match parent {
+                    PipelineParent::Compute(pipeline) => (gpu.compute_pipeline_release)(pipeline),
+                    PipelineParent::Render(pipeline) => (gpu.render_pipeline_release)(pipeline),
+                }
+            }
+            Err(error)
+        }
+    }
+}
+
+fn supported_limit_value<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    read: impl FnOnce(&SupportedLimitsPayload) -> u64,
+) -> Result<E::Value, E::Error> {
+    let payload = E::payload(cx, this, GPU_SUPPORTED_LIMITS_CLASS)
+        .and_then(|payload| payload.downcast_ref::<SupportedLimitsPayload>())
+        .ok_or_else(|| {
+            E::type_error(
+                cx,
+                "GPUSupportedLimits getter called on an incompatible object",
+            )
+        })?;
+    let value = read(payload);
+    if value > 9_007_199_254_740_991 {
+        return Err(E::operation_error(
+            cx,
+            "WebGPU limit exceeds JavaScript's exact integer range",
+        ));
+    }
+    E::number(cx, value as f64)
+}
+
+macro_rules! supported_limit_getters {
+    ($(($function:ident, $field:ident, $source:ident)),+ $(,)?) => {$ (
+        fn $function<E: JsEngine + 'static>(
+            cx: E::Context<'_>,
+            this: E::Value,
+        ) -> Result<E::Value, E::Error> {
+            supported_limit_value::<E>(cx, this, |payload| payload.$source.$field as u64)
+        }
+    )+};
+}
+
+supported_limit_getters!(
+    (
+        limit_max_texture_dimension_1d,
+        maxTextureDimension1D,
+        limits
+    ),
+    (
+        limit_max_texture_dimension_2d,
+        maxTextureDimension2D,
+        limits
+    ),
+    (
+        limit_max_texture_dimension_3d,
+        maxTextureDimension3D,
+        limits
+    ),
+    (
+        limit_max_texture_array_layers,
+        maxTextureArrayLayers,
+        limits
+    ),
+    (limit_max_bind_groups, maxBindGroups, limits),
+    (
+        limit_max_bind_groups_plus_vertex_buffers,
+        maxBindGroupsPlusVertexBuffers,
+        limits
+    ),
+    (limit_max_immediate_size, maxImmediateSize, limits),
+    (
+        limit_max_bindings_per_bind_group,
+        maxBindingsPerBindGroup,
+        limits
+    ),
+    (
+        limit_max_dynamic_uniform_buffers_per_pipeline_layout,
+        maxDynamicUniformBuffersPerPipelineLayout,
+        limits
+    ),
+    (
+        limit_max_dynamic_storage_buffers_per_pipeline_layout,
+        maxDynamicStorageBuffersPerPipelineLayout,
+        limits
+    ),
+    (
+        limit_max_sampled_textures_per_shader_stage,
+        maxSampledTexturesPerShaderStage,
+        limits
+    ),
+    (
+        limit_max_samplers_per_shader_stage,
+        maxSamplersPerShaderStage,
+        limits
+    ),
+    (
+        limit_max_storage_buffers_per_shader_stage,
+        maxStorageBuffersPerShaderStage,
+        limits
+    ),
+    (
+        limit_max_storage_buffers_in_vertex_stage,
+        maxStorageBuffersInVertexStage,
+        compatibility
+    ),
+    (
+        limit_max_storage_buffers_in_fragment_stage,
+        maxStorageBuffersInFragmentStage,
+        compatibility
+    ),
+    (
+        limit_max_storage_textures_per_shader_stage,
+        maxStorageTexturesPerShaderStage,
+        limits
+    ),
+    (
+        limit_max_storage_textures_in_vertex_stage,
+        maxStorageTexturesInVertexStage,
+        compatibility
+    ),
+    (
+        limit_max_storage_textures_in_fragment_stage,
+        maxStorageTexturesInFragmentStage,
+        compatibility
+    ),
+    (
+        limit_max_uniform_buffers_per_shader_stage,
+        maxUniformBuffersPerShaderStage,
+        limits
+    ),
+    (
+        limit_max_uniform_buffer_binding_size,
+        maxUniformBufferBindingSize,
+        limits
+    ),
+    (
+        limit_max_storage_buffer_binding_size,
+        maxStorageBufferBindingSize,
+        limits
+    ),
+    (
+        limit_min_uniform_buffer_offset_alignment,
+        minUniformBufferOffsetAlignment,
+        limits
+    ),
+    (
+        limit_min_storage_buffer_offset_alignment,
+        minStorageBufferOffsetAlignment,
+        limits
+    ),
+    (limit_max_vertex_buffers, maxVertexBuffers, limits),
+    (limit_max_buffer_size, maxBufferSize, limits),
+    (limit_max_vertex_attributes, maxVertexAttributes, limits),
+    (
+        limit_max_vertex_buffer_array_stride,
+        maxVertexBufferArrayStride,
+        limits
+    ),
+    (
+        limit_max_inter_stage_shader_variables,
+        maxInterStageShaderVariables,
+        limits
+    ),
+    (limit_max_color_attachments, maxColorAttachments, limits),
+    (
+        limit_max_color_attachment_bytes_per_sample,
+        maxColorAttachmentBytesPerSample,
+        limits
+    ),
+    (
+        limit_max_compute_workgroup_storage_size,
+        maxComputeWorkgroupStorageSize,
+        limits
+    ),
+    (
+        limit_max_compute_invocations_per_workgroup,
+        maxComputeInvocationsPerWorkgroup,
+        limits
+    ),
+    (
+        limit_max_compute_workgroup_size_x,
+        maxComputeWorkgroupSizeX,
+        limits
+    ),
+    (
+        limit_max_compute_workgroup_size_y,
+        maxComputeWorkgroupSizeY,
+        limits
+    ),
+    (
+        limit_max_compute_workgroup_size_z,
+        maxComputeWorkgroupSizeZ,
+        limits
+    ),
+    (
+        limit_max_compute_workgroups_per_dimension,
+        maxComputeWorkgroupsPerDimension,
+        limits
+    ),
+);
+
+fn adapter_info_string_get<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    read: impl FnOnce(&AdapterInfoPayload) -> &str,
+) -> Result<E::Value, E::Error> {
+    let payload = E::payload(cx, this, GPU_ADAPTER_INFO_CLASS)
+        .and_then(|payload| payload.downcast_ref::<AdapterInfoPayload>())
+        .ok_or_else(|| {
+            E::type_error(cx, "GPUAdapterInfo getter called on an incompatible object")
+        })?;
+    E::string(cx, read(payload))
+}
+
+fn adapter_info_vendor<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+) -> Result<E::Value, E::Error> {
+    adapter_info_string_get::<E>(cx, this, |p| &p.vendor)
+}
+fn adapter_info_architecture<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+) -> Result<E::Value, E::Error> {
+    adapter_info_string_get::<E>(cx, this, |p| &p.architecture)
+}
+fn adapter_info_device<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+) -> Result<E::Value, E::Error> {
+    adapter_info_string_get::<E>(cx, this, |p| &p.device)
+}
+fn adapter_info_description<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+) -> Result<E::Value, E::Error> {
+    adapter_info_string_get::<E>(cx, this, |p| &p.description)
+}
+
+fn adapter_info_subgroup_min_size<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+) -> Result<E::Value, E::Error> {
+    let payload = E::payload(cx, this, GPU_ADAPTER_INFO_CLASS)
+        .and_then(|p| p.downcast_ref::<AdapterInfoPayload>())
+        .ok_or_else(|| {
+            E::type_error(
+                cx,
+                "GPUAdapterInfo.subgroupMinSize called on an incompatible object",
+            )
+        })?;
+    E::number(cx, payload.subgroup_min_size as f64)
+}
+fn adapter_info_subgroup_max_size<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+) -> Result<E::Value, E::Error> {
+    let payload = E::payload(cx, this, GPU_ADAPTER_INFO_CLASS)
+        .and_then(|p| p.downcast_ref::<AdapterInfoPayload>())
+        .ok_or_else(|| {
+            E::type_error(
+                cx,
+                "GPUAdapterInfo.subgroupMaxSize called on an incompatible object",
+            )
+        })?;
+    E::number(cx, payload.subgroup_max_size as f64)
+}
+fn adapter_info_is_fallback<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+) -> Result<E::Value, E::Error> {
+    let payload = E::payload(cx, this, GPU_ADAPTER_INFO_CLASS)
+        .and_then(|p| p.downcast_ref::<AdapterInfoPayload>())
+        .ok_or_else(|| {
+            E::type_error(
+                cx,
+                "GPUAdapterInfo.isFallbackAdapter called on an incompatible object",
+            )
+        })?;
+    let scalar = E::number(cx, f64::from(payload.is_fallback_adapter))?;
+    let global = E::global(cx);
+    let boolean = E::get_property(cx, global, "Boolean")?;
+    E::call(cx, boolean, E::undefined(cx), &[scalar])
+}
+
+fn finalize_value_payload(_payload: Box<dyn Any + Send>, _env: &Environment) {}
+
+fn supported_limits_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
+    class_spec_once::<E, _>(GPU_SUPPORTED_LIMITS_CLASS, || ClassSpec {
+        name: "GPUSupportedLimits",
+        id: GPU_SUPPORTED_LIMITS_CLASS,
+        constructor: None,
+        properties: Box::leak(Box::new([
+            PropertySpec {
+                name: "maxTextureDimension1D",
+                get: Some(limit_max_texture_dimension_1d::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "maxTextureDimension2D",
+                get: Some(limit_max_texture_dimension_2d::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "maxTextureDimension3D",
+                get: Some(limit_max_texture_dimension_3d::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "maxTextureArrayLayers",
+                get: Some(limit_max_texture_array_layers::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "maxBindGroups",
+                get: Some(limit_max_bind_groups::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "maxBindGroupsPlusVertexBuffers",
+                get: Some(limit_max_bind_groups_plus_vertex_buffers::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "maxImmediateSize",
+                get: Some(limit_max_immediate_size::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "maxBindingsPerBindGroup",
+                get: Some(limit_max_bindings_per_bind_group::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "maxDynamicUniformBuffersPerPipelineLayout",
+                get: Some(limit_max_dynamic_uniform_buffers_per_pipeline_layout::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "maxDynamicStorageBuffersPerPipelineLayout",
+                get: Some(limit_max_dynamic_storage_buffers_per_pipeline_layout::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "maxSampledTexturesPerShaderStage",
+                get: Some(limit_max_sampled_textures_per_shader_stage::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "maxSamplersPerShaderStage",
+                get: Some(limit_max_samplers_per_shader_stage::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "maxStorageBuffersPerShaderStage",
+                get: Some(limit_max_storage_buffers_per_shader_stage::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "maxStorageBuffersInVertexStage",
+                get: Some(limit_max_storage_buffers_in_vertex_stage::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "maxStorageBuffersInFragmentStage",
+                get: Some(limit_max_storage_buffers_in_fragment_stage::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "maxStorageTexturesPerShaderStage",
+                get: Some(limit_max_storage_textures_per_shader_stage::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "maxStorageTexturesInVertexStage",
+                get: Some(limit_max_storage_textures_in_vertex_stage::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "maxStorageTexturesInFragmentStage",
+                get: Some(limit_max_storage_textures_in_fragment_stage::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "maxUniformBuffersPerShaderStage",
+                get: Some(limit_max_uniform_buffers_per_shader_stage::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "maxUniformBufferBindingSize",
+                get: Some(limit_max_uniform_buffer_binding_size::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "maxStorageBufferBindingSize",
+                get: Some(limit_max_storage_buffer_binding_size::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "minUniformBufferOffsetAlignment",
+                get: Some(limit_min_uniform_buffer_offset_alignment::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "minStorageBufferOffsetAlignment",
+                get: Some(limit_min_storage_buffer_offset_alignment::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "maxVertexBuffers",
+                get: Some(limit_max_vertex_buffers::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "maxBufferSize",
+                get: Some(limit_max_buffer_size::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "maxVertexAttributes",
+                get: Some(limit_max_vertex_attributes::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "maxVertexBufferArrayStride",
+                get: Some(limit_max_vertex_buffer_array_stride::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "maxInterStageShaderVariables",
+                get: Some(limit_max_inter_stage_shader_variables::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "maxColorAttachments",
+                get: Some(limit_max_color_attachments::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "maxColorAttachmentBytesPerSample",
+                get: Some(limit_max_color_attachment_bytes_per_sample::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "maxComputeWorkgroupStorageSize",
+                get: Some(limit_max_compute_workgroup_storage_size::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "maxComputeInvocationsPerWorkgroup",
+                get: Some(limit_max_compute_invocations_per_workgroup::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "maxComputeWorkgroupSizeX",
+                get: Some(limit_max_compute_workgroup_size_x::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "maxComputeWorkgroupSizeY",
+                get: Some(limit_max_compute_workgroup_size_y::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "maxComputeWorkgroupSizeZ",
+                get: Some(limit_max_compute_workgroup_size_z::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "maxComputeWorkgroupsPerDimension",
+                get: Some(limit_max_compute_workgroups_per_dimension::<E>),
+                set: None,
+            },
+        ])),
+        methods: &[],
+        finalizer: finalize_value_payload,
+    })
+}
+
+fn adapter_info_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
+    class_spec_once::<E, _>(GPU_ADAPTER_INFO_CLASS, || ClassSpec {
+        name: "GPUAdapterInfo",
+        id: GPU_ADAPTER_INFO_CLASS,
+        constructor: None,
+        properties: Box::leak(Box::new([
+            PropertySpec {
+                name: "vendor",
+                get: Some(adapter_info_vendor::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "architecture",
+                get: Some(adapter_info_architecture::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "device",
+                get: Some(adapter_info_device::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "description",
+                get: Some(adapter_info_description::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "subgroupMinSize",
+                get: Some(adapter_info_subgroup_min_size::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "subgroupMaxSize",
+                get: Some(adapter_info_subgroup_max_size::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "isFallbackAdapter",
+                get: Some(adapter_info_is_fallback::<E>),
+                set: None,
+            },
+        ])),
+        methods: &[],
+        finalizer: finalize_value_payload,
+    })
 }
 
 /// Implements `GPUQueue.writeBuffer`.
@@ -3533,8 +4573,8 @@ pub fn finalize_device<E: JsEngine + 'static>(payload: Box<dyn Any + Send>, env:
 }
 
 /// Finalizes a `GPUAdapter` payload by enqueuing its release.
-pub fn finalize_adapter(payload: Box<dyn Any + Send>, env: &Environment) {
-    let Ok(payload) = payload.downcast::<AdapterPayload>() else {
+pub fn finalize_adapter<E: JsEngine + 'static>(payload: Box<dyn Any + Send>, env: &Environment) {
+    let Ok(payload) = payload.downcast::<AdapterPayload<E>>() else {
         return;
     };
     let _ = env.queue().enqueue(ReleaseRequest::Adapter {
@@ -4061,6 +5101,15 @@ fn device_handle<E: JsEngine + 'static>(
     E::payload(cx, value, GPU_DEVICE_CLASS)
         .and_then(|payload| payload.downcast_ref::<DevicePayload<E>>())
         .map(|payload| payload.device)
+        .ok_or_else(|| E::type_error(cx, "GPUDevice method called on an incompatible object"))
+}
+
+fn device_wrapper_payload<'a, E: JsEngine + 'static>(
+    cx: E::Context<'a>,
+    value: E::Value,
+) -> Result<&'a DevicePayload<E>, E::Error> {
+    E::payload(cx, value, GPU_DEVICE_CLASS)
+        .and_then(|payload| payload.downcast_ref::<DevicePayload<E>>())
         .ok_or_else(|| E::type_error(cx, "GPUDevice method called on an incompatible object"))
 }
 

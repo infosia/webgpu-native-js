@@ -23,6 +23,10 @@
 
 schema_version = 1
 
+# Introspection needs the C-to-WebIDL direction; descriptor enums otherwise
+# generate only the WebIDL-to-C conversion direction.
+reverse_enum = ["GPUFeatureName"]
+
 # G13: selected interface members and Release families are derived from the
 # joined subset. These lists account only for the non-obvious boundary: core-
 # cached members, native references retained by wrappers/descriptors, transient
@@ -56,11 +60,19 @@ no_add_ref = [
   { interface = "GPUCommandBuffer", reason = "the finished command buffer is adopted and consumed by submit" },
 ]
 extra_symbols = [
+  { symbol = "wgpuAdapterGetFeatures", reason = "GPUAdapter introspection is an extra-class surface outside the joined dispatch subset" },
+  { symbol = "wgpuAdapterGetInfo", reason = "GPUAdapter introspection is an extra-class surface outside the joined dispatch subset" },
+  { symbol = "wgpuAdapterGetLimits", reason = "GPUAdapter introspection is an extra-class surface outside the joined dispatch subset" },
+  { symbol = "wgpuAdapterInfoFreeMembers", reason = "adapter-info output strings require immediate caller-side cleanup" },
+  { symbol = "wgpuDeviceGetAdapterInfo", reason = "device adapter-info introspection uses an output struct rather than a WebIDL operation" },
+  { symbol = "wgpuDeviceGetFeatures", reason = "device feature introspection uses an output struct rather than a WebIDL operation" },
+  { symbol = "wgpuDeviceGetLimits", reason = "device limits introspection uses an output struct rather than a WebIDL operation" },
   { symbol = "wgpuInstanceProcessEvents", reason = "the settlement tick operates above the selected interface subset" },
   { symbol = "wgpuInstanceRequestAdapter", reason = "GPU bootstrap precedes the selected interface subset" },
   { symbol = "wgpuAdapterRequestDevice", reason = "GPU bootstrap precedes the selected interface subset" },
   { symbol = "wgpuAdapterRelease", reason = "the bootstrap adapter is outside the selected interface subset" },
   { symbol = "wgpuBufferGetConstMappedRange", reason = "getMappedRange selects the const C alternative for read mappings" },
+  { symbol = "wgpuSupportedFeaturesFreeMembers", reason = "feature-list output storage requires immediate caller-side cleanup" },
 ]
 
 [[enum_value_skip]]
@@ -76,6 +88,9 @@ reason = "WebIDL names the reusable programmable stage while the C ABI names its
 [[subset]]
 interface = "GPUDevice"
 members = [
+  "features",
+  "limits",
+  "adapterInfo",
   "createBuffer",
   "createTexture",
   "createSampler",
@@ -141,11 +156,11 @@ members = []
 
 [[subset]]
 interface = "GPUComputePipeline"
-members = []
+members = ["getBindGroupLayout"]
 
 [[subset]]
 interface = "GPURenderPipeline"
-members = []
+members = ["getBindGroupLayout"]
 
 [[subset]]
 interface = "GPUCommandEncoder"
@@ -200,6 +215,18 @@ standard_interfaces = [
   "GPUCommandEncoder",
 ]
 extra_class_interfaces = ["GPU", "GPUAdapter"]
+
+[[lifecycle.methods]]
+interface = "GPUComputePipeline"
+member = "getBindGroupLayout"
+path = "compute_pipeline_get_bind_group_layout"
+reason = "pipeline-derived native layout adopts ReturnedWithOwnership and retains its pipeline parent"
+
+[[lifecycle.methods]]
+interface = "GPURenderPipeline"
+member = "getBindGroupLayout"
+path = "render_pipeline_get_bind_group_layout"
+reason = "pipeline-derived native layout adopts ReturnedWithOwnership and retains its pipeline parent"
 
 [[lifecycle.methods]]
 interface = "GPU"
@@ -374,6 +401,36 @@ member = "end"
 path = "render_pass_end"
 
 [[lifecycle.properties]]
+interface = "GPUAdapter"
+member = "features"
+get = "adapter_features_get"
+
+[[lifecycle.properties]]
+interface = "GPUAdapter"
+member = "limits"
+get = "adapter_limits_get"
+
+[[lifecycle.properties]]
+interface = "GPUAdapter"
+member = "info"
+get = "adapter_info_get"
+
+[[lifecycle.properties]]
+interface = "GPUDevice"
+member = "features"
+get = "device_features_get"
+
+[[lifecycle.properties]]
+interface = "GPUDevice"
+member = "limits"
+get = "device_limits_get"
+
+[[lifecycle.properties]]
+interface = "GPUDevice"
+member = "adapterInfo"
+get = "device_adapter_info_get"
+
+[[lifecycle.properties]]
 interface = "GPUDevice"
 member = "queue"
 get = "device_queue_get"
@@ -409,11 +466,6 @@ get = "buffer_usage_get"
 interface = "GPUDevice"
 member = "destroy"
 reason = "preserved quirk: GPUDevice.destroy is selected for dispatch accounting but was not exposed by the shipped class table"
-
-[[lifecycle.omitted_methods]]
-interface = "GPURenderPipeline"
-member = "getBindGroupLayout"
-reason = "T5 defers getBindGroupLayout because its returned wrapper must retain a pipeline-derived native layout handle, which is a non-creator lifecycle shape"
 
 [[lifecycle.quirks]]
 interface = "GPUCommandEncoder"

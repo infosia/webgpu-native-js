@@ -54,7 +54,40 @@ pub fn emit_conversions(report: &JoinReport, policy: &str) -> Result<String, Cod
         }
         output.push_str(&enum_conversions);
     }
+    let feature_reverse = emit_reverse_enums(report, &policy.reverse_enum);
+    if !feature_reverse.is_empty() {
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        output.push_str(&feature_reverse);
+    }
     Ok(output)
+}
+
+fn emit_reverse_enums(report: &JoinReport, selected: &[String]) -> String {
+    let mut output = String::new();
+    for name in selected {
+        let Some(pair) = enum_pair(report, name) else {
+            continue;
+        };
+        let Some(c_type) = pair.c_name.as_deref() else {
+            continue;
+        };
+        let function = format!("{}_to_str", snake_case(name.trim_start_matches("GPU")));
+        let _ = writeln!(
+            output,
+            "#[allow(non_upper_case_globals)]\npub(super) fn {function}(value: {c_type}) -> Option<&'static str> {{"
+        );
+        output.push_str("    match value {\n");
+        for value in &pair.enum_values {
+            if let (Some(idl_value), Some(c_value)) = (&value.idl_value, &value.c_value) {
+                let constant = enum_constant(c_type, c_value);
+                let _ = writeln!(output, "        {constant} => Some(\"{idl_value}\"),");
+            }
+        }
+        output.push_str("        _ => None,\n    }\n}\n");
+    }
+    output
 }
 
 fn emit_operation_enum_conversions(report: &JoinReport) -> Result<String, CodegenError> {

@@ -1,6 +1,20 @@
 /// Function-pointer dispatch for the WebGPU C ABI calls used by this slice.
 #[derive(Clone, Copy)]
 pub struct GpuDispatch {
+    /// `wgpuAdapterGetFeatures`.
+    pub adapter_get_features: unsafe fn(WGPUAdapter, *mut WGPUSupportedFeatures),
+    /// `wgpuAdapterGetInfo`.
+    pub adapter_get_info: unsafe fn(WGPUAdapter, *mut WGPUAdapterInfo) -> WGPUStatus,
+    /// `wgpuAdapterGetLimits`.
+    pub adapter_get_limits: unsafe fn(WGPUAdapter, *mut WGPULimits) -> WGPUStatus,
+    /// `wgpuAdapterInfoFreeMembers`.
+    pub adapter_info_free_members: unsafe fn(WGPUAdapterInfo),
+    /// `wgpuDeviceGetAdapterInfo`.
+    pub device_get_adapter_info: unsafe fn(WGPUDevice, *mut WGPUAdapterInfo) -> WGPUStatus,
+    /// `wgpuDeviceGetFeatures`.
+    pub device_get_features: unsafe fn(WGPUDevice, *mut WGPUSupportedFeatures),
+    /// `wgpuDeviceGetLimits`.
+    pub device_get_limits: unsafe fn(WGPUDevice, *mut WGPULimits) -> WGPUStatus,
     /// `wgpuInstanceProcessEvents`.
     pub instance_process_events: unsafe fn(WGPUInstance),
     /// `wgpuInstanceRequestAdapter`.
@@ -11,6 +25,8 @@ pub struct GpuDispatch {
     pub adapter_release: unsafe fn(WGPUAdapter),
     /// `wgpuBufferGetConstMappedRange`.
     pub buffer_get_const_mapped_range: unsafe fn(WGPUBuffer, usize, usize) -> *const ::std::ffi::c_void,
+    /// `wgpuSupportedFeaturesFreeMembers`.
+    pub supported_features_free_members: unsafe fn(WGPUSupportedFeatures),
     /// `wgpuDeviceAddRef`.
     pub device_add_ref: unsafe fn(WGPUDevice),
     /// `wgpuDeviceRelease`.
@@ -121,10 +137,14 @@ pub struct GpuDispatch {
     pub compute_pipeline_add_ref: unsafe fn(WGPUComputePipeline),
     /// `wgpuComputePipelineRelease`.
     pub compute_pipeline_release: unsafe fn(WGPUComputePipeline),
+    /// `wgpuComputePipelineGetBindGroupLayout`.
+    pub compute_pipeline_get_bind_group_layout: unsafe fn(WGPUComputePipeline, u32) -> WGPUBindGroupLayout,
     /// `wgpuRenderPipelineAddRef`.
     pub render_pipeline_add_ref: unsafe fn(WGPURenderPipeline),
     /// `wgpuRenderPipelineRelease`.
     pub render_pipeline_release: unsafe fn(WGPURenderPipeline),
+    /// `wgpuRenderPipelineGetBindGroupLayout`.
+    pub render_pipeline_get_bind_group_layout: unsafe fn(WGPURenderPipeline, u32) -> WGPUBindGroupLayout,
     /// `wgpuCommandEncoderRelease`.
     pub command_encoder_release: unsafe fn(WGPUCommandEncoder),
     /// `wgpuCommandEncoderBeginComputePass`.
@@ -181,11 +201,19 @@ macro_rules! for_each_gpu_dispatch_entry {
     ($macro:ident $(, $context:ident)?) => {
         $macro! {
             $($context;)?
+            (adapter_get_features, wgpuAdapterGetFeatures, unsafe fn(adapter: $crate::WGPUAdapter, features: *mut $crate::WGPUSupportedFeatures)),
+            (adapter_get_info, wgpuAdapterGetInfo, unsafe fn(adapter: $crate::WGPUAdapter, info: *mut $crate::WGPUAdapterInfo) -> $crate::WGPUStatus),
+            (adapter_get_limits, wgpuAdapterGetLimits, unsafe fn(adapter: $crate::WGPUAdapter, limits: *mut $crate::WGPULimits) -> $crate::WGPUStatus),
+            (adapter_info_free_members, wgpuAdapterInfoFreeMembers, unsafe fn(adapter_info: $crate::WGPUAdapterInfo)),
+            (device_get_adapter_info, wgpuDeviceGetAdapterInfo, unsafe fn(device: $crate::WGPUDevice, adapter_info: *mut $crate::WGPUAdapterInfo) -> $crate::WGPUStatus),
+            (device_get_features, wgpuDeviceGetFeatures, unsafe fn(device: $crate::WGPUDevice, features: *mut $crate::WGPUSupportedFeatures)),
+            (device_get_limits, wgpuDeviceGetLimits, unsafe fn(device: $crate::WGPUDevice, limits: *mut $crate::WGPULimits) -> $crate::WGPUStatus),
             (instance_process_events, wgpuInstanceProcessEvents, unsafe fn(instance: $crate::WGPUInstance)),
             (instance_request_adapter, wgpuInstanceRequestAdapter, unsafe fn(instance: $crate::WGPUInstance, options: *const $crate::WGPURequestAdapterOptions, callback_info: $crate::WGPURequestAdapterCallbackInfo) -> $crate::WGPUFuture),
             (adapter_request_device, wgpuAdapterRequestDevice, unsafe fn(adapter: $crate::WGPUAdapter, descriptor: *const $crate::WGPUDeviceDescriptor, callback_info: $crate::WGPURequestDeviceCallbackInfo) -> $crate::WGPUFuture),
             (adapter_release, wgpuAdapterRelease, unsafe fn(adapter: $crate::WGPUAdapter)),
             (buffer_get_const_mapped_range, wgpuBufferGetConstMappedRange, unsafe fn(buffer: $crate::WGPUBuffer, offset: usize, size: usize) -> *const ::std::ffi::c_void),
+            (supported_features_free_members, wgpuSupportedFeaturesFreeMembers, unsafe fn(supported_features: $crate::WGPUSupportedFeatures)),
             (device_add_ref, wgpuDeviceAddRef, unsafe fn(device: $crate::WGPUDevice)),
             (device_release, wgpuDeviceRelease, unsafe fn(device: $crate::WGPUDevice)),
             (device_create_buffer, wgpuDeviceCreateBuffer, unsafe fn(device: $crate::WGPUDevice, descriptor: *const $crate::WGPUBufferDescriptor) -> $crate::WGPUBuffer),
@@ -241,8 +269,10 @@ macro_rules! for_each_gpu_dispatch_entry {
             (bind_group_release, wgpuBindGroupRelease, unsafe fn(bind_group: $crate::WGPUBindGroup)),
             (compute_pipeline_add_ref, wgpuComputePipelineAddRef, unsafe fn(compute_pipeline: $crate::WGPUComputePipeline)),
             (compute_pipeline_release, wgpuComputePipelineRelease, unsafe fn(compute_pipeline: $crate::WGPUComputePipeline)),
+            (compute_pipeline_get_bind_group_layout, wgpuComputePipelineGetBindGroupLayout, unsafe fn(compute_pipeline: $crate::WGPUComputePipeline, group_index: u32) -> $crate::WGPUBindGroupLayout),
             (render_pipeline_add_ref, wgpuRenderPipelineAddRef, unsafe fn(render_pipeline: $crate::WGPURenderPipeline)),
             (render_pipeline_release, wgpuRenderPipelineRelease, unsafe fn(render_pipeline: $crate::WGPURenderPipeline)),
+            (render_pipeline_get_bind_group_layout, wgpuRenderPipelineGetBindGroupLayout, unsafe fn(render_pipeline: $crate::WGPURenderPipeline, group_index: u32) -> $crate::WGPUBindGroupLayout),
             (command_encoder_release, wgpuCommandEncoderRelease, unsafe fn(command_encoder: $crate::WGPUCommandEncoder)),
             (command_encoder_begin_compute_pass, wgpuCommandEncoderBeginComputePass, unsafe fn(command_encoder: $crate::WGPUCommandEncoder, descriptor: *const $crate::WGPUComputePassDescriptor) -> $crate::WGPUComputePassEncoder),
             (command_encoder_begin_render_pass, wgpuCommandEncoderBeginRenderPass, unsafe fn(command_encoder: $crate::WGPUCommandEncoder, descriptor: *const $crate::WGPURenderPassDescriptor) -> $crate::WGPURenderPassEncoder),
@@ -3025,6 +3055,35 @@ pub(super) fn convert_gpu_index_format<E: JsEngine>(cx: E::Context<'_>, value: E
     }
 }
 
+#[allow(non_upper_case_globals)]
+pub(super) fn feature_name_to_str(value: WGPUFeatureName) -> Option<&'static str> {
+    match value {
+        WGPUFeatureName_WGPUFeatureName_CoreFeaturesAndLimits => Some("core-features-and-limits"),
+        WGPUFeatureName_WGPUFeatureName_DepthClipControl => Some("depth-clip-control"),
+        WGPUFeatureName_WGPUFeatureName_Depth32FloatStencil8 => Some("depth32float-stencil8"),
+        WGPUFeatureName_WGPUFeatureName_TextureCompressionBC => Some("texture-compression-bc"),
+        WGPUFeatureName_WGPUFeatureName_TextureCompressionBCSliced3D => Some("texture-compression-bc-sliced-3d"),
+        WGPUFeatureName_WGPUFeatureName_TextureCompressionETC2 => Some("texture-compression-etc2"),
+        WGPUFeatureName_WGPUFeatureName_TextureCompressionASTC => Some("texture-compression-astc"),
+        WGPUFeatureName_WGPUFeatureName_TextureCompressionASTCSliced3D => Some("texture-compression-astc-sliced-3d"),
+        WGPUFeatureName_WGPUFeatureName_TimestampQuery => Some("timestamp-query"),
+        WGPUFeatureName_WGPUFeatureName_IndirectFirstInstance => Some("indirect-first-instance"),
+        WGPUFeatureName_WGPUFeatureName_ShaderF16 => Some("shader-f16"),
+        WGPUFeatureName_WGPUFeatureName_RG11B10UfloatRenderable => Some("rg11b10ufloat-renderable"),
+        WGPUFeatureName_WGPUFeatureName_BGRA8UnormStorage => Some("bgra8unorm-storage"),
+        WGPUFeatureName_WGPUFeatureName_Float32Filterable => Some("float32-filterable"),
+        WGPUFeatureName_WGPUFeatureName_Float32Blendable => Some("float32-blendable"),
+        WGPUFeatureName_WGPUFeatureName_ClipDistances => Some("clip-distances"),
+        WGPUFeatureName_WGPUFeatureName_DualSourceBlending => Some("dual-source-blending"),
+        WGPUFeatureName_WGPUFeatureName_Subgroups => Some("subgroups"),
+        WGPUFeatureName_WGPUFeatureName_TextureFormatsTier1 => Some("texture-formats-tier1"),
+        WGPUFeatureName_WGPUFeatureName_TextureFormatsTier2 => Some("texture-formats-tier2"),
+        WGPUFeatureName_WGPUFeatureName_PrimitiveIndex => Some("primitive-index"),
+        WGPUFeatureName_WGPUFeatureName_TextureComponentSwizzle => Some("texture-component-swizzle"),
+        _ => None,
+    }
+}
+
 /// Payload stored by a `GPUShaderModule` wrapper.
 pub struct ShaderModulePayload {
     pub(super) module: WGPUShaderModule,
@@ -3071,6 +3130,7 @@ unsafe impl Send for TextureViewPayload {}
 /// Payload stored by a `GPUBindGroupLayout` wrapper.
 pub struct BindGroupLayoutPayload {
     pub(super) layout: WGPUBindGroupLayout,
+    pub(super) parent_pipeline: Option<PipelineParent>,
 }
 
 // SAFETY: `BindGroupLayoutPayload` stores WGPU handle values. Finalization only moves those values
@@ -3194,6 +3254,8 @@ pub enum ReleaseRequest {
     BindGroupLayout {
         /// Created native handle.
         layout: WGPUBindGroupLayout,
+        /// Pipeline retained by a derived layout.
+        parent_pipeline: Option<PipelineParent>,
         /// Dispatch table used on the drain thread.
         gpu: GpuDispatch,
     },
@@ -3289,8 +3351,12 @@ impl ReleaseRequest {
                 (gpu.texture_view_release)(texture_view);
                 (gpu.texture_release)(texture);
             },
-            Self::BindGroupLayout { layout, gpu } => unsafe {
+            Self::BindGroupLayout { layout, parent_pipeline, gpu } => unsafe {
                 (gpu.bind_group_layout_release)(layout);
+                if let Some(parent) = parent_pipeline { match parent {
+                    PipelineParent::Compute(pipeline) => (gpu.compute_pipeline_release)(pipeline),
+                    PipelineParent::Render(pipeline) => (gpu.render_pipeline_release)(pipeline),
+                }}
             },
             Self::PipelineLayout { layout, gpu } => unsafe {
                 (gpu.pipeline_layout_release)(layout);
@@ -3707,6 +3773,7 @@ pub fn device_create_bind_group_layout<E: JsEngine + 'static>(
     }
     match E::new_instance(cx, GPU_BIND_GROUP_LAYOUT_CLASS, Box::new(BindGroupLayoutPayload {
         layout,
+        parent_pipeline: None,
     })) {
         Ok(value) => Ok(value),
         Err(error) => {
@@ -3723,6 +3790,7 @@ pub fn finalize_bind_group_layout(payload: Box<dyn Any + Send>, env: &Environmen
     let Ok(payload) = payload.downcast::<BindGroupLayoutPayload>() else { return; };
     let _ = env.queue().enqueue(ReleaseRequest::BindGroupLayout {
         layout: payload.layout,
+        parent_pipeline: payload.parent_pipeline,
         gpu: env.gpu(),
     });
 }
@@ -4021,11 +4089,15 @@ pub(super) fn adapter_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
         name: "GPUAdapter",
         id: GPU_ADAPTER_CLASS,
         constructor: None,
-        properties: &[],
+        properties: Box::leak(Box::new([
+            PropertySpec { name: "features", get: Some(adapter_features_get::<E>), set: None },
+            PropertySpec { name: "limits", get: Some(adapter_limits_get::<E>), set: None },
+            PropertySpec { name: "info", get: Some(adapter_info_get::<E>), set: None },
+        ])),
         methods: Box::leak(Box::new([
             MethodSpec { name: "requestDevice", length: 0, call: adapter_request_device::<E> },
         ])),
-        finalizer: finalize_adapter,
+        finalizer: finalize_adapter::<E>,
     })
 }
 
@@ -4035,6 +4107,9 @@ pub(super) fn device_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
         id: GPU_DEVICE_CLASS,
         constructor: None,
         properties: Box::leak(Box::new([
+            PropertySpec { name: "features", get: Some(device_features_get::<E>), set: None },
+            PropertySpec { name: "limits", get: Some(device_limits_get::<E>), set: None },
+            PropertySpec { name: "adapterInfo", get: Some(device_adapter_info_get::<E>), set: None },
             PropertySpec { name: "queue", get: Some(device_queue_get::<E>), set: None },
             PropertySpec { name: "lost", get: Some(device_lost_get::<E>), set: None },
             PropertySpec { name: "onuncapturederror", get: Some(device_on_uncaptured_error_get::<E>), set: Some(device_on_uncaptured_error_set::<E>) },
@@ -4190,7 +4265,9 @@ pub(super) fn compute_pipeline_class<E: JsEngine + 'static>() -> &'static ClassS
         id: GPU_COMPUTE_PIPELINE_CLASS,
         constructor: None,
         properties: &[],
-        methods: &[],
+        methods: Box::leak(Box::new([
+            MethodSpec { name: "getBindGroupLayout", length: 1, call: compute_pipeline_get_bind_group_layout::<E> },
+        ])),
         finalizer: finalize_compute_pipeline,
     })
 }
@@ -4201,7 +4278,9 @@ pub(super) fn render_pipeline_class<E: JsEngine + 'static>() -> &'static ClassSp
         id: GPU_RENDER_PIPELINE_CLASS,
         constructor: None,
         properties: &[],
-        methods: &[],
+        methods: Box::leak(Box::new([
+            MethodSpec { name: "getBindGroupLayout", length: 1, call: render_pipeline_get_bind_group_layout::<E> },
+        ])),
         finalizer: finalize_render_pipeline,
     })
 }

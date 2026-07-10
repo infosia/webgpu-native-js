@@ -401,6 +401,8 @@ pub(crate) struct Policy {
     pub(crate) enum_value_skip: Vec<EnumValueSkipPolicy>,
     pub(crate) dispatch: Option<DispatchPolicy>,
     pub(crate) lifecycle: Option<LifecyclePolicy>,
+    #[serde(default)]
+    pub(crate) reverse_enum: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -714,13 +716,15 @@ struct YamlEnumEntry {
 
 #[derive(Debug, Deserialize)]
 struct YamlStruct {
-    name: String,
+    pub(crate) name: String,
     #[serde(rename = "type")]
     kind: String,
     #[serde(default)]
     extends: Vec<String>,
     #[serde(default)]
     members: Vec<YamlValue>,
+    #[serde(default)]
+    pub(crate) free_members: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1281,6 +1285,7 @@ fn build_report(
         idl_type_roots.insert(entry.typedef.clone());
         idl_type_roots.insert(entry.dictionary.clone());
     }
+    idl_type_roots.extend(policy.reverse_enum.iter().cloned());
     for entry in &policy.subset {
         let effective = index.effective_members(&entry.interface);
         let object = object_map

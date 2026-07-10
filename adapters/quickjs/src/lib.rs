@@ -720,6 +720,24 @@ impl core::JsEngine for Engine {
         }
     }
 
+    fn construct(
+        cx: Self::Context<'_>,
+        ctor: Self::Value,
+        args: &[Self::Value],
+    ) -> core::Result<Self::Value, Self::Error> {
+        let argc = c_int::try_from(args.len())
+            .map_err(|_| Self::type_error(cx, "too many constructor arguments"))?;
+        // SAFETY: the constructor and arguments belong to this live context.
+        let value =
+            unsafe { qjs::JS_CallConstructor(cx.ctx, ctor, argc, args.as_ptr().cast_mut()) };
+        if unsafe { qjs::JS_IsException(value) } {
+            Err(take_exception_value(cx))
+        } else {
+            cx.scope.track(value);
+            Ok(value)
+        }
+    }
+
     fn is_undefined(_cx: Self::Context<'_>, value: Self::Value) -> bool {
         unsafe { qjs::JS_IsUndefined(value) }
     }
@@ -2089,6 +2107,38 @@ mod tests {
             qjs::JS_FreeValue(runtime.raw_context(), function);
             qjs::JS_FreeValue(runtime.raw_context(), receiver);
         }
+    }
+
+    #[test]
+    fn i1_construct_tracks_success_and_owned_error() {
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let constructor = runtime
+            .eval(
+                "(class Box { constructor(value) { if (value < 0) throw new Error('construct boom'); this.value = value; } })",
+                "construct-primitive.js",
+            )
+            .expect("constructor");
+        {
+            let scope = super::Scope::new(runtime.raw_context());
+            let cx = Context {
+                ctx: runtime.raw_context(),
+                scope: &scope,
+            };
+            let value = engine_ok(Engine::number(cx, 42.0), "value");
+            let object = engine_ok(Engine::construct(cx, constructor, &[value]), "construct");
+            let stored = engine_ok(Engine::get_property(cx, object, "value"), "stored value");
+            assert_eq!(engine_ok(Engine::to_f64(cx, stored), "stored number"), 42.0);
+            let negative = engine_ok(Engine::number(cx, -1.0), "negative");
+            let error = engine_err(
+                Engine::construct(cx, constructor, &[negative]),
+                "must throw",
+            );
+            let arena = core::Arena::new();
+            assert!(
+                engine_ok(Engine::to_str(cx, error, &arena), "error").contains("construct boom")
+            );
+        }
+        unsafe { qjs::JS_FreeValue(runtime.raw_context(), constructor) };
     }
 
     impl AdapterRequestState {

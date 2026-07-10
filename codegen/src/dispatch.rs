@@ -8,12 +8,20 @@ use crate::{
     JoinReport, Policy, YamlFunction, YamlRoot, YamlValue,
 };
 
-const REQUIRED_EXTRA_SYMBOLS: [&str; 5] = [
+const REQUIRED_EXTRA_SYMBOLS: [&str; 13] = [
+    "wgpuAdapterGetFeatures",
+    "wgpuAdapterGetInfo",
+    "wgpuAdapterGetLimits",
+    "wgpuAdapterInfoFreeMembers",
+    "wgpuDeviceGetAdapterInfo",
+    "wgpuDeviceGetFeatures",
+    "wgpuDeviceGetLimits",
     "wgpuInstanceProcessEvents",
     "wgpuInstanceRequestAdapter",
     "wgpuAdapterRequestDevice",
     "wgpuAdapterRelease",
     "wgpuBufferGetConstMappedRange",
+    "wgpuSupportedFeaturesFreeMembers",
 ];
 
 const REQUIRED_SKIPPED_MEMBERS: [(&str, &str); 3] = [
@@ -80,6 +88,23 @@ fn dispatch_registry(yaml: &YamlRoot) -> Result<BTreeMap<String, DispatchEntry>,
     let mut entries = BTreeMap::new();
     for function in &yaml.functions {
         insert_entry(&mut entries, function_entry(None, function))?;
+    }
+    for structure in yaml
+        .structs
+        .iter()
+        .filter(|structure| structure.free_members)
+    {
+        let type_name = c_type_name(&structure.name);
+        let symbol = format!("wgpu{}FreeMembers", pascal_case(&structure.name));
+        insert_entry(
+            &mut entries,
+            DispatchEntry {
+                field: field_name(&symbol),
+                symbol,
+                args: vec![(snake_case(&structure.name), RustType::plain(type_name))],
+                result: None,
+            },
+        )?;
     }
     for object in &yaml.objects {
         for function in &object.methods {

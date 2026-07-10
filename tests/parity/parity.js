@@ -429,12 +429,15 @@
             code: "@vertex fn main() -> @builtin(position) vec4f { return vec4f(0); } " +
                 "@fragment fn fragment_main() {}"
         });
-        device.createRenderPipeline({
+        var introspectionPipeline = device.createRenderPipeline({
             layout: "auto",
             vertex: { module: module, entryPoint: "main" },
             fragment: { module: module, entryPoint: "fragment_main", targets: [] }
         });
         log("renderPipeline:create:ok");
+        var derivedLayout = introspectionPipeline.getBindGroupLayout(0);
+        log("getBindGroupLayout:create/release:ok");
+        derivedLayout = null;
 
         var enumError = caught(function () {
             device.createRenderPipeline({
@@ -796,6 +799,12 @@
         log("buffer:" + nullLabel + "," + labelBuffer.label + ";method:" + stableMethod);
         log("identity:queue:" + (device.queue === device.queue));
         log("identity:lost:" + (device.lost === device.lost));
+        log("features:" + Array.from(device.features).sort().join(","));
+        log("limits:minUniformBufferOffsetAlignment:" +
+            device.limits.minUniformBufferOffsetAlignment);
+        log("identity:features:" + (device.features === device.features));
+        log("identity:limits:" + (device.limits === device.limits));
+        log("identity:adapterInfo:" + (device.adapterInfo === device.adapterInfo));
         log("typeof:device.createBuffer:" + typeof device.createBuffer);
         var prototypeBuffer = device.createBuffer({ size: 4, usage: 8 });
         log("identity:cross-instance-prototype:" +
@@ -834,6 +843,12 @@
         }).catch(fail);
 
         gpu.requestAdapter().then(function (firstAdapter) {
+            log("identity:adapter.features:" +
+                (firstAdapter.features === firstAdapter.features));
+            log("identity:adapter.limits:" +
+                (firstAdapter.limits === firstAdapter.limits));
+            log("identity:adapter.info:" +
+                (firstAdapter.info === firstAdapter.info));
             var order = [];
             var settleIndex = 0;
             var thenCount = 0;

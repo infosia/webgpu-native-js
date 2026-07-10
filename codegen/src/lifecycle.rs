@@ -103,6 +103,11 @@ fn validate_lifecycle(
             .iter()
             .flat_map(|owner| owner.members.iter())
             .filter(|member| {
+                if lifecycle.methods.iter().any(|mapping| {
+                    mapping.interface == member.owner && mapping.member == member.member
+                }) {
+                    return false;
+                }
                 member.idl.iter().any(|overload| {
                     overload
                         .values
@@ -200,7 +205,8 @@ fn validate_lifecycle(
                         overload.values.first().is_some_and(|value| {
                             standards.contains(value.type_name.trim_end_matches('?'))
                         })
-                    });
+                    }) && !methods
+                        .contains(&(subset.interface.as_str(), selected.as_str()));
                     let key = (subset.interface.as_str(), selected.as_str());
                     if usize::from(generated)
                         + usize::from(methods.contains(&key))
@@ -771,6 +777,9 @@ fn emit_payloads(output: &mut String, standards: &[StandardInterface<'_>]) {
                 };
                 let _ = writeln!(output, "    pub(super) {}: {type_name},", retained.field);
             }
+            if interface == "GPUBindGroupLayout" {
+                output.push_str("    pub(super) parent_pipeline: Option<PipelineParent>,\n");
+            }
             if standard.destroyable {
                 output.push_str("    pub(super) destroyed: AtomicBool,\n");
             }
@@ -819,6 +828,9 @@ fn emit_release_request(output: &mut String, standards: &[StandardInterface<'_>]
                 retained.field
             );
         }
+        if interface == "GPUBindGroupLayout" {
+            output.push_str("        /// Pipeline retained by a derived layout.\n        parent_pipeline: Option<PipelineParent>,\n");
+        }
         output.push_str("        /// Dispatch table used on the drain thread.\n        gpu: GpuDispatch,\n    },\n");
     }
     output.push_str(NONSTANDARD_RELEASE_VARIANTS_SUFFIX);
@@ -837,6 +849,9 @@ fn emit_release_request(output: &mut String, standards: &[StandardInterface<'_>]
         );
         for retained in &standard.retained {
             let _ = write!(output, " {},", retained.field);
+        }
+        if standard.interface.idl_name.as_deref() == Some("GPUBindGroupLayout") {
+            output.push_str(" parent_pipeline,");
         }
         output.push_str(" gpu } => unsafe {\n");
         let _ = writeln!(
@@ -864,6 +879,14 @@ fn emit_release_request(output: &mut String, standards: &[StandardInterface<'_>]
                     retained.dispatch, retained.field
                 );
             }
+        }
+        if standard.interface.idl_name.as_deref() == Some("GPUBindGroupLayout") {
+            output.push_str(
+                "                if let Some(parent) = parent_pipeline { match parent {\n",
+            );
+            output.push_str("                    PipelineParent::Compute(pipeline) => (gpu.compute_pipeline_release)(pipeline),\n");
+            output.push_str("                    PipelineParent::Render(pipeline) => (gpu.render_pipeline_release)(pipeline),\n");
+            output.push_str("                }}\n");
         }
         output.push_str("            },\n");
     }
@@ -1031,6 +1054,9 @@ fn emit_create(output: &mut String, standard: &StandardInterface<'_>) -> Result<
                     retained.field, retained.source
                 );
             }
+        }
+        if standard.interface.idl_name.as_deref() == Some("GPUBindGroupLayout") {
+            output.push_str("        parent_pipeline: None,\n");
         }
         if standard.destroyable {
             output.push_str("        destroyed: AtomicBool::new(false),\n");
@@ -1236,6 +1262,9 @@ fn emit_finalizer(output: &mut String, standard: &StandardInterface<'_>) {
                 retained.field, retained.field
             );
         }
+        if interface == "GPUBindGroupLayout" {
+            output.push_str("        parent_pipeline: payload.parent_pipeline,\n");
+        }
         output.push_str("        gpu: env.gpu(),\n    });\n");
     }
     output.push_str("}\n\n");
@@ -1403,14 +1432,16 @@ fn emit_one_class(
                 .methods
                 .iter()
                 .find(|mapping| mapping.interface == interface && mapping.member == member.member);
-            let path = if created.is_some() {
+            let path = if let Some(mapping) = mapping {
+                mapping.path.clone()
+            } else if created.is_some() {
                 format!(
                     "{}_{}",
                     snake_case(object_name(interface)),
                     snake_case(&member.member)
                 )
             } else {
-                mapping.expect("validated method mapping").path.clone()
+                unreachable!("validated method has a generated or mapped body")
             };
             let length = mapping
                 .and_then(|mapping| mapping.length)
@@ -1467,7 +1498,9 @@ fn emit_one_class(
     }
     let finalizer = match interface {
         "GPU" => "|_payload, _env| {}".to_owned(),
-        "GPUDevice" | "GPUBuffer" => format!("finalize_{}::<E>", snake_case(object)),
+        "GPUAdapter" | "GPUDevice" | "GPUBuffer" => {
+            format!("finalize_{}::<E>", snake_case(object))
+        }
         _ => format!("finalize_{}", snake_case(object)),
     };
     let _ = writeln!(output, "        finalizer: {finalizer},");

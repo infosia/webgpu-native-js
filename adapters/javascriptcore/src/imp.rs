@@ -1198,6 +1198,37 @@ impl core::JsEngine for Engine {
         }
     }
 
+    fn construct(
+        cx: Self::Context<'_>,
+        ctor: Self::Value,
+        args: &[Self::Value],
+    ) -> core::Result<Self::Value, Self::Error> {
+        let constructor = value_to_object(cx, ctor)?;
+        let mut exception = ptr::null();
+        // SAFETY: the constructor and arguments belong to this live context.
+        let value = unsafe {
+            JSObjectCallAsConstructor(
+                cx.ctx,
+                constructor,
+                args.len(),
+                args.as_ptr(),
+                &mut exception,
+            )
+        };
+        if exception.is_null() && !value.is_null() {
+            let value = value.cast_const();
+            cx.scope.track(value);
+            Ok(value)
+        } else if !exception.is_null() {
+            Err(exception)
+        } else {
+            Err(Self::operation_error(
+                cx,
+                "JSObjectCallAsConstructor failed",
+            ))
+        }
+    }
+
     fn is_undefined(cx: Self::Context<'_>, value: Self::Value) -> bool {
         // SAFETY: value belongs to cx.
         unsafe { JSValueIsUndefined(cx.ctx, value) }
@@ -3158,6 +3189,26 @@ mod tests {
         println!(
             "trampoline cost: {TICKS} ticks x {SETTLEMENTS_PER_TICK} settlements: batched={batched_elapsed:?}, direct={direct_elapsed:?}"
         );
+    }
+
+    #[test]
+    fn i1_construct_tracks_success_and_exception() {
+        let runtime = Runtime::new().expect("JSC runtime");
+        let constructor = runtime
+            .eval(
+                "(class Box { constructor(value) { if (value < 0) throw new Error('construct boom'); this.value = value; } })",
+                "construct-primitive.js",
+            )
+            .expect("constructor");
+        super::with_scope(runtime.raw_context(), |cx| {
+            let value = Engine::number(cx, 42.0).expect("value");
+            let object = Engine::construct(cx, constructor, &[value]).expect("construct");
+            let stored = Engine::get_property(cx, object, "value").expect("stored value");
+            assert_eq!(Engine::to_f64(cx, stored).expect("stored number"), 42.0);
+            let negative = Engine::number(cx, -1.0).expect("negative");
+            let error = Engine::construct(cx, constructor, &[negative]).expect_err("must throw");
+            assert!(super::value_to_string(runtime.raw_context(), error).contains("construct boom"));
+        });
     }
 
     #[test]
