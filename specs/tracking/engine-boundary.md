@@ -1230,3 +1230,12 @@ land. Also pinned: yawgpu's nested-scope filter routing is deterministic
 (validation crosses an inner oom scope to the outer validation scope,
 identically on both engines); the P6 one-byte corruption proof re-demonstrated
 (both adapters exit 101).
+
+**Owner decisions (2026-07-10, JSC direction):** JSC will be enabled on iOS
+regardless, so the in-process-JIT measurement is DEFERRED (perf claims stay
+unwritten until measured; nothing currently depends on them). The **F9
+deployment floor** (hard-linked `JSValueIsBigInt` → macOS 15 / iOS 18) is
+queued to be fixed via **weak linking** — dyld resolves a weak import to NULL
+instead of aborting at load, and the adapter branches to a BigInt-detection
+fallback at runtime — **after** the parity suite has grown enough (block 08 is
+the priority).
