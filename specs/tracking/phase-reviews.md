@@ -887,3 +887,84 @@ cross-cutting observation deserves preserving verbatim: **the adapter script
 suites detected none of the ten emitter mutations — conversion correctness
 lives entirely in core mock asserts plus codegen snapshots. "Both adapters
 pass" validates plumbing, never conversion values.**
+
+---
+
+## Phase 6 Phase Review — 2026-07-10 ("Clean Review Then Fix")
+
+Three no-context lenses over the phase (`df57689^..f994e90`): **soundness**
+(the mode-less any-thread callback path read hardest), **compliance** (S1–S10
+quote-level, tautology verdicts per new test), **deletion experiments** (9+2
+run; 7 red where S9 predicts, 2 survivors).
+
+### CRITICAL, both fixed
+
+1. **PR6-C1 — the creation-time device callbacks held a dangling, unowned
+   pointer.** `userdata1 = Arc::as_ptr(&events)` with no strong count, while
+   webgpu.h guarantees the lost callback eventually fires and the host's
+   instance outlives the runtime: teardown (or the prepare-failure path) frees
+   the state, the host's next `ProcessEvents` dereferences it. The SAFETY
+   comments argued about what the callback does, never whether its state was
+   alive. Fixed with an owned strong (`Arc::into_raw`) shared by both
+   callbacks, reclaimed in the lost callback — whose terminal-ness is not an
+   assumption but the header's own words, quoted in the code: *"The uncaptured
+   error callback is guaranteed not to fire after the device becomes lost…
+   an appropriate time for the application to free userdata."* Teardown
+   empties every engine-value slot on every path, so the outliving shell is
+   Send-safe plain data. Late-callback and prepare-failure regressions added.
+2. **PR6-C2 — a handler that unregisters itself freed the executing closure**
+   (QuickJS refcounting; the ordinary "handle once" pattern). Fixed:
+   duplicate under the lock, call unlocked, release after; script test where
+   the handler nulls itself and keeps running.
+
+### MAJOR, all fixed
+
+- Engine-value release under the DeviceEventJs mutex (teardown deadlock with
+  self-capturing handlers — the R25/R27 class again): take out, unlock,
+  release; bounded teardown test.
+- Append-only `DeviceEventRegistry` (leak per device + address-reuse
+  mis-settlement): pruned at wrapper-finalize ∧ lost-settlement; address-reuse
+  regression with a forced same-address second device.
+- The settle-at-most-once test was a tautology of the mock's first-wins
+  promise (deletion F1) — and the real failure mode under QuickJS is a
+  SIGSEGV that names no test (F4), making the mock the only legible reporter.
+  The mock now counts settle attempts; guard-neutralized red seen
+  (`Some(2) != Some(1)`), restored green.
+- Zero delivery-under-contention coverage (deletion F2: try_lock-and-drop
+  passed everything; the "cross-thread" tests were spawn-join-then-tick).
+  Now: eight concurrent producer threads against a ticking consumer, every
+  record delivered exactly once; the forwarders' blocking contract documented.
+- Two record-keeping failures of the planner (compliance M1/M2): S8's
+  DOMException deviation and the bare-GPUError event shape were never put in
+  `codegen-deltas.md`, and the standing B15 note still demanded the opposite
+  of S5's shipped design. Both records written; B15 formally narrowed.
+
+### MINOR (selected)
+Throwing handler no longer drops the rest of the batch nor skips tick steps
+3–4; forwarders reject unmapped error types early; the R18-barred usize
+smuggling in tests replaced with a SAFETY-commented typed wrapper; QuickJS
+constructor-path proto leaks closed; the backend-specific message substring
+in a shared script replaced with name+non-empty; **new_target subclassing
+fixed for real on both engines** (`class Mine extends GPUValidationError`
+now yields correct prototypes — no recorded degradation needed); non-callable
+handler assignments coerce to null (Web semantics, recorded);
+`Unknown→GPUInternalError` fold tested and recorded; pop's callback mode now
+asserted. Deletion-lens F5 (single-package test invocations link only via the
+JSC adapter's feature coupling) noted; the documented gate commands carry the
+feature explicitly, accepted.
+
+### Gate — PASSED. Phase 6 (block 07) is COMPLETE.
+
+Final gates by the planner: core 104 (env unset), quickjs 52, JSC 20+1,
+codegen 37, workspace green, both clippys `-D warnings`, fmt clean, parity
+byte-identical with the phase's two new lines. Exit criteria: all five met
+(criterion 5's sequencing deviation was recorded when it happened; this
+review is the one review it promised).
+
+### Reflection worth keeping
+
+PR6-C1 is the third time this project has shipped a SAFETY comment that
+answered the wrong question. The pattern: comments argue *what the code does*
+("only enqueues, never dereferences") when the obligation is *what must be
+true when it runs* ("the state it enqueues into is alive"). A SAFETY comment
+for a callback should start with its lifetime story, not its behavior.

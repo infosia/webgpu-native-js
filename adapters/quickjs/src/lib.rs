@@ -66,6 +66,7 @@ pub struct DeviceEventForwarder {
 
 impl DeviceEventForwarder {
     /// Enqueues an adopted device's uncaptured error without touching QuickJS.
+    /// Blocks during concurrent registry mutation so the event is not dropped.
     pub fn forward_uncaptured_error(
         &self,
         device: ffi_wgpu::WGPUDevice,
@@ -77,6 +78,7 @@ impl DeviceEventForwarder {
     }
 
     /// Enqueues adopted-device loss without touching QuickJS.
+    /// Blocks during concurrent registry mutation so the event is not dropped.
     pub fn forward_device_lost(
         &self,
         device: ffi_wgpu::WGPUDevice,
@@ -154,7 +156,8 @@ impl Runtime {
         }
     }
 
-    /// Enqueues an uncaptured error for an adopted device.
+    /// Enqueues an uncaptured error for an adopted device, blocking during a
+    /// concurrent registry mutation so the event is not dropped.
     pub fn forward_uncaptured_error(
         &self,
         device: ffi_wgpu::WGPUDevice,
@@ -165,7 +168,8 @@ impl Runtime {
             .forward_uncaptured_error(device, type_, message)
     }
 
-    /// Enqueues loss for an adopted device.
+    /// Enqueues loss for an adopted device, blocking during a concurrent
+    /// registry mutation so the event is not dropped.
     pub fn forward_device_lost(
         &self,
         device: ffi_wgpu::WGPUDevice,
@@ -677,6 +681,10 @@ impl core::JsEngine for Engine {
         unsafe { qjs::JS_IsNull(value) }
     }
 
+    fn is_callable(cx: Self::Context<'_>, value: Self::Value) -> bool {
+        unsafe { qjs::JS_IsFunction(cx.ctx, value) }
+    }
+
     fn to_f64(cx: Self::Context<'_>, value: Self::Value) -> core::Result<f64, Self::Error> {
         let mut out = 0.0;
         if unsafe { qjs::JS_ToFloat64(cx.ctx, &mut out, value) } < 0 {
@@ -740,55 +748,66 @@ impl core::JsEngine for Engine {
         if unsafe { qjs::JS_IsException(proto) } {
             return Err(take_exception_value(cx));
         }
-        if let Some(parent) = spec
-            .constructor
-            .as_ref()
-            .and_then(|constructor| constructor.parent)
-        {
-            let parent_id = state
-                .classes
-                .lock()
-                .map_err(|_| Self::operation_error(cx, "class registry is poisoned"))?
-                .get(&parent)
-                .map(|entry| entry.quickjs_id)
-                .ok_or_else(|| Self::operation_error(cx, "parent class is not registered"))?;
-            let parent_proto = unsafe { qjs::JS_GetClassProto(cx.ctx, parent_id) };
-            if unsafe { qjs::JS_IsException(parent_proto) } {
-                return Err(take_exception_value(cx));
+        let setup = (|| {
+            if let Some(parent) = spec
+                .constructor
+                .as_ref()
+                .and_then(|constructor| constructor.parent)
+            {
+                let parent_id = state
+                    .classes
+                    .lock()
+                    .map_err(|_| Self::operation_error(cx, "class registry is poisoned"))?
+                    .get(&parent)
+                    .map(|entry| entry.quickjs_id)
+                    .ok_or_else(|| Self::operation_error(cx, "parent class is not registered"))?;
+                let parent_proto = unsafe { qjs::JS_GetClassProto(cx.ctx, parent_id) };
+                if unsafe { qjs::JS_IsException(parent_proto) } {
+                    return Err(take_exception_value(cx));
+                }
+                let rc = unsafe { qjs::JS_SetPrototype(cx.ctx, proto, parent_proto) };
+                unsafe { qjs::JS_FreeValue(cx.ctx, parent_proto) };
+                if rc < 0 {
+                    return Err(take_exception_value(cx));
+                }
             }
-            let rc = unsafe { qjs::JS_SetPrototype(cx.ctx, proto, parent_proto) };
-            unsafe { qjs::JS_FreeValue(cx.ctx, parent_proto) };
-            if rc < 0 {
-                return Err(take_exception_value(cx));
+            install_methods(cx, state, proto, spec)?;
+            install_properties(cx, state, proto, spec)?;
+            if let Some(constructor) = &spec.constructor {
+                let magic = allocate_magic(cx, state, spec.id, CallbackKind::Constructor, 0)?;
+                let function = qjs::JSCFunctionType {
+                    constructor_magic: Some(qjs_constructor),
+                };
+                let constructor_value = unsafe {
+                    qjs::JS_NewCFunction2(
+                        cx.ctx,
+                        function.generic,
+                        class_name.as_ptr(),
+                        i32::from(constructor.length),
+                        qjs::JSCFunctionEnum_JS_CFUNC_constructor_magic,
+                        magic,
+                    )
+                };
+                if unsafe { qjs::JS_IsException(constructor_value) } {
+                    return Err(take_exception_value(cx));
+                }
+                if unsafe { qjs::JS_SetConstructor(cx.ctx, constructor_value, proto) } < 0 {
+                    unsafe { qjs::JS_FreeValue(cx.ctx, constructor_value) };
+                    return Err(take_exception_value(cx));
+                }
+                Ok(Some(constructor_value))
+            } else {
+                Ok(None)
             }
-        }
-        install_methods(cx, state, proto, spec)?;
-        install_properties(cx, state, proto, spec)?;
-        let constructor = if let Some(constructor) = &spec.constructor {
-            let magic = allocate_magic(cx, state, spec.id, CallbackKind::Constructor, 0)?;
-            let function = qjs::JSCFunctionType {
-                constructor_magic: Some(qjs_constructor),
-            };
-            let constructor_value = unsafe {
-                qjs::JS_NewCFunction2(
-                    cx.ctx,
-                    function.generic,
-                    class_name.as_ptr(),
-                    i32::from(constructor.length),
-                    qjs::JSCFunctionEnum_JS_CFUNC_constructor_magic,
-                    magic,
-                )
-            };
-            if unsafe { qjs::JS_IsException(constructor_value) } {
-                return Err(take_exception_value(cx));
+        })();
+        let constructor = match setup {
+            Ok(constructor) => constructor,
+            Err(error) => {
+                // proto has not yet been transferred to the class and owns all
+                // successfully installed method/property values on every arm.
+                unsafe { qjs::JS_FreeValue(cx.ctx, proto) };
+                return Err(error);
             }
-            if unsafe { qjs::JS_SetConstructor(cx.ctx, constructor_value, proto) } < 0 {
-                unsafe { qjs::JS_FreeValue(cx.ctx, constructor_value) };
-                return Err(take_exception_value(cx));
-            }
-            Some(constructor_value)
-        } else {
-            None
         };
         unsafe {
             qjs::JS_SetClassProto(cx.ctx, quickjs_id, proto);
@@ -1413,7 +1432,7 @@ unsafe extern "C" fn qjs_setter(
 
 unsafe extern "C" fn qjs_constructor(
     ctx: *mut qjs::JSContext,
-    _new_target: qjs::JSValue,
+    new_target: qjs::JSValue,
     argc: c_int,
     argv: *mut qjs::JSValue,
     magic_value: c_int,
@@ -1438,7 +1457,17 @@ unsafe extern "C" fn qjs_constructor(
             // SAFETY: QuickJS provides argc live arguments for this callback.
             unsafe { std::slice::from_raw_parts(argv, argc as usize) }
         };
-        constructor(cx, args)
+        let value = constructor(cx, args)?;
+        let prototype = unsafe { qjs::JS_GetPropertyStr(ctx, new_target, c"prototype".as_ptr()) };
+        if unsafe { qjs::JS_IsException(prototype) } {
+            return Err(take_exception_value(cx));
+        }
+        let rc = unsafe { qjs::JS_SetPrototype(ctx, value, prototype) };
+        unsafe { qjs::JS_FreeValue(ctx, prototype) };
+        if rc < 0 {
+            return Err(take_exception_value(cx));
+        }
+        Ok(value)
     })
 }
 
@@ -1625,6 +1654,8 @@ mod tests {
     use std::ptr;
     use std::rc::Rc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc;
+    use std::time::Duration;
 
     use super::{c_int, core, ffi_wgpu as wgpu, qjs, CallbackKind, Context, Engine, Runtime};
     use webgpu_native_js_core::JsEngine;
@@ -1633,6 +1664,23 @@ mod tests {
     static COUNTED_SAMPLER_RELEASES: AtomicUsize = AtomicUsize::new(0);
     thread_local! {
         static RECORDED_ENTRY_POINTS: RefCell<Vec<Option<Vec<u8>>>> = const { RefCell::new(Vec::new()) };
+    }
+
+    struct SendPtr<T>(*mut T);
+
+    // SAFETY: these tests move native pointers only as opaque keys for the
+    // enqueue-only event forwarder. The receiving thread never dereferences the
+    // pointer and never calls webgpu.h with it.
+    unsafe impl<T> Send for SendPtr<T> {}
+
+    impl<T> SendPtr<T> {
+        fn new(ptr: *mut T) -> Self {
+            Self(ptr)
+        }
+
+        fn get(self) -> *mut T {
+            self.0
+        }
     }
 
     struct AdapterRequestState {
@@ -2379,9 +2427,9 @@ mod tests {
             "device-events.js",
         );
         let forwarder = runtime.device_event_forwarder();
-        let device_bits = setup.device as usize;
+        let device = SendPtr::new(setup.device);
         std::thread::spawn(move || {
-            let device = device_bits as wgpu::WGPUDevice;
+            let device = device.get();
             forwarder
                 .forward_uncaptured_error(
                     device,
@@ -2405,6 +2453,128 @@ mod tests {
             "if (!uncapturedEventPassed || !deviceLostPassed) throw new Error('device event callback did not run');",
             "device-events-check.js",
         );
+    }
+
+    #[test]
+    fn uncaptured_handler_can_unregister_itself_and_keeps_running() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let device = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("device", device)
+            .expect("set device");
+        eval_drop(
+            &runtime,
+            r#"
+                var selfRemovingCalls = 0;
+                var selfRemovingWork = 0;
+                device.onuncapturederror = function () {
+                    selfRemovingCalls++;
+                    device.onuncapturederror = null;
+                    var values = [];
+                    for (var i = 0; i < 128; i++) values.push(i * i);
+                    selfRemovingWork = values.reduce(function (a, b) { return a + b; }, 0);
+                };
+            "#,
+            "uncaptured-self-remove.js",
+        );
+        let forwarder = runtime.device_event_forwarder();
+        forwarder
+            .forward_uncaptured_error(
+                setup.device,
+                wgpu::WGPUErrorType_WGPUErrorType_Validation,
+                "first",
+            )
+            .expect("first forward");
+        unsafe { runtime.tick(setup.instance) }.expect("first tick");
+        forwarder
+            .forward_uncaptured_error(
+                setup.device,
+                wgpu::WGPUErrorType_WGPUErrorType_Validation,
+                "second",
+            )
+            .expect("second forward");
+        unsafe { runtime.tick(setup.instance) }.expect("second tick");
+        eval_drop(
+            &runtime,
+            r#"
+                if (selfRemovingCalls !== 1) throw new Error('handler dispatched twice');
+                if (selfRemovingWork !== 690880) throw new Error('handler stopped after removal');
+                device.onuncapturederror = 42;
+                if (device.onuncapturederror !== null) throw new Error('non-callable was not null');
+            "#,
+            "uncaptured-self-remove-check.js",
+        );
+    }
+
+    #[test]
+    fn throwing_uncaptured_handler_does_not_skip_the_next_queued_event() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let device = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("device", device)
+            .expect("set device");
+        eval_drop(
+            &runtime,
+            r#"
+                var throwingHandlerCalls = 0;
+                device.onuncapturederror = function () {
+                    throwingHandlerCalls++;
+                    if (throwingHandlerCalls === 1) throw new Error('first event throw');
+                };
+            "#,
+            "uncaptured-throw-all.js",
+        );
+        let forwarder = runtime.device_event_forwarder();
+        for message in ["first", "second"] {
+            forwarder
+                .forward_uncaptured_error(
+                    setup.device,
+                    wgpu::WGPUErrorType_WGPUErrorType_Validation,
+                    message,
+                )
+                .expect("forward");
+        }
+        let error = unsafe { runtime.tick(setup.instance) }.expect_err("tick must report throw");
+        assert!(format!("{error:?}").contains("first event throw"));
+        eval_drop(
+            &runtime,
+            "if (throwingHandlerCalls !== 2) throw new Error('second event was skipped');",
+            "uncaptured-throw-all-check.js",
+        );
+    }
+
+    #[test]
+    fn runtime_drop_with_handler_capturing_its_device_does_not_deadlock() {
+        let (done_tx, done_rx) = mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let setup = native_setup();
+            let runtime = Runtime::new().expect("quickjs runtime");
+            let device = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+            runtime
+                .set_global_value("device", device)
+                .expect("set device");
+            eval_drop(
+                &runtime,
+                r#"
+                    (function (capturedDevice) {
+                        capturedDevice.onuncapturederror = function () {
+                            return capturedDevice;
+                        };
+                    })(device);
+                    device = null;
+                "#,
+                "self-referential-device-handler.js",
+            );
+            runtime.run_gc();
+            drop(runtime);
+            done_tx.send(()).expect("signal completion");
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("Runtime::drop deadlocked on the DeviceEventJs mutex");
+        thread.join().expect("teardown thread");
     }
 
     #[test]

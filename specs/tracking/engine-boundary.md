@@ -1208,3 +1208,13 @@ Operational note: this slice hit the codex 30-minute ceiling again; the
 timed-out session had in fact FINISHED the work, and the resume session's job
 was pure audit + gates. The ceiling loses reports, not work — check the tree
 before assuming loss.
+
+**B15 narrowed (2026-07-10, Phase 6 / block 07 → S5) — superseding the older
+passage above that said "when error scopes land, all nine must stop throwing".**
+That sentence over-reached: error scopes have landed, and validation-failure
+routing is the BACKEND's job (it routes into its own scope stack); the
+binding's `createXxx` null-handle throws remain, narrowed to exactly the
+catastrophic/misuse class (R13/B16). Nothing in the binding needed to stop
+throwing, because a conformant backend does not return null for scope-routable
+validation errors. The recorded deviation is now only: "a null handle from
+createXxx is a synchronous exception", which is by design, permanently.

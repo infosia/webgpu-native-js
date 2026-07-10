@@ -153,6 +153,8 @@ unsafe extern "C" {
     fn JSValueIsUndefined(ctx: JSContextRef, value: JSValueRef) -> bool;
     /// Tests whether a value is JavaScript `null`.
     fn JSValueIsNull(ctx: JSContextRef, value: JSValueRef) -> bool;
+    /// Tests whether a value is a JavaScript object.
+    fn JSValueIsObject(ctx: JSContextRef, value: JSValueRef) -> bool;
     /// Tests whether a value is a JavaScript BigInt.
     ///
     /// This symbol is `API_AVAILABLE(macos(15.0), ios(18.0))`; hard-linking it
@@ -206,6 +208,8 @@ unsafe extern "C" {
         class: JSClassRef,
         call_as_constructor: Option<CallAsConstructorCallback>,
     ) -> JSObjectRef;
+    /// Tests whether an object is callable as a function.
+    fn JSObjectIsFunction(ctx: JSContextRef, object: JSObjectRef) -> bool;
     /// Creates a JavaScript array from argument values.
     fn JSObjectMakeArray(
         ctx: JSContextRef,
@@ -672,6 +676,7 @@ pub struct DeviceEventForwarder {
 
 impl DeviceEventForwarder {
     /// Enqueues an adopted device's uncaptured error without touching JSC.
+    /// Blocks during concurrent registry mutation so the event is not dropped.
     pub fn forward_uncaptured_error(
         &self,
         device: ffi_wgpu::WGPUDevice,
@@ -683,6 +688,7 @@ impl DeviceEventForwarder {
     }
 
     /// Enqueues adopted-device loss without touching JSC.
+    /// Blocks during concurrent registry mutation so the event is not dropped.
     pub fn forward_device_lost(
         &self,
         device: ffi_wgpu::WGPUDevice,
@@ -769,7 +775,8 @@ impl Runtime {
         }
     }
 
-    /// Enqueues an uncaptured error for an adopted device.
+    /// Enqueues an uncaptured error for an adopted device, blocking during a
+    /// concurrent registry mutation so the event is not dropped.
     pub fn forward_uncaptured_error(
         &self,
         device: ffi_wgpu::WGPUDevice,
@@ -780,7 +787,8 @@ impl Runtime {
             .forward_uncaptured_error(device, type_, message)
     }
 
-    /// Enqueues loss for an adopted device.
+    /// Enqueues loss for an adopted device, blocking during a concurrent
+    /// registry mutation so the event is not dropped.
     pub fn forward_device_lost(
         &self,
         device: ffi_wgpu::WGPUDevice,
@@ -1069,6 +1077,11 @@ impl core::JsEngine for Engine {
     fn is_null(cx: Self::Context<'_>, value: Self::Value) -> bool {
         // SAFETY: value belongs to cx.
         unsafe { JSValueIsNull(cx.ctx, value) }
+    }
+
+    fn is_callable(cx: Self::Context<'_>, value: Self::Value) -> bool {
+        // SAFETY: the object predicate guards the JSValueRef-to-JSObjectRef cast.
+        unsafe { JSValueIsObject(cx.ctx, value) && JSObjectIsFunction(cx.ctx, value.cast_mut()) }
     }
 
     fn to_f64(cx: Self::Context<'_>, value: Self::Value) -> core::Result<f64, Self::Error> {
@@ -2007,6 +2020,24 @@ unsafe extern "C" fn wrapper_construct(
                 "constructor returned no object",
             ));
         }
+        let prototype_name = JsString::new("prototype")
+            .map_err(|_| Engine::operation_error(cx, "prototype string failed"))?;
+        let mut prototype_exception = ptr::null();
+        // SAFETY: the constructor argument is the active new-target constructor
+        // for this call, and both it and the returned object belong to ctx.
+        let prototype = unsafe {
+            JSObjectGetProperty(
+                ctx,
+                constructor,
+                prototype_name.as_raw(),
+                &mut prototype_exception,
+            )
+        };
+        if !prototype_exception.is_null() {
+            return Err(prototype_exception);
+        }
+        // SAFETY: prototype is the live constructor.prototype value from ctx.
+        unsafe { JSObjectSetPrototype(ctx, object, prototype) };
         Ok((value, object))
     })) {
         Ok(Ok((value, object))) => {
@@ -2161,6 +2192,23 @@ mod tests {
         instance: wgpu::WGPUInstance,
         adapter: wgpu::WGPUAdapter,
         device: wgpu::WGPUDevice,
+    }
+
+    struct SendPtr<T>(*mut T);
+
+    // SAFETY: these tests move native pointers only as opaque keys for the
+    // enqueue-only event forwarder. The receiving thread never dereferences the
+    // pointer and never calls webgpu.h with it.
+    unsafe impl<T> Send for SendPtr<T> {}
+
+    impl<T> SendPtr<T> {
+        fn new(ptr: *mut T) -> Self {
+            Self(ptr)
+        }
+
+        fn get(self) -> *mut T {
+            self.0
+        }
     }
 
     impl Drop for NativeSetup {
@@ -2946,9 +2994,9 @@ mod tests {
             "device-events.js",
         );
         let forwarder = runtime.device_event_forwarder();
-        let device_bits = setup.device as usize;
+        let device = SendPtr::new(setup.device);
         std::thread::spawn(move || {
-            let device = device_bits as wgpu::WGPUDevice;
+            let device = device.get();
             forwarder
                 .forward_uncaptured_error(
                     device,

@@ -48,7 +48,8 @@ the JS instance on the JS thread, exactly like adapters/devices.
 script-constructible per the pinned IDL (`constructor(DOMString message)`),
 and `instanceof` works. They are the first script-constructible classes in the
 binding — the ClassSpec gains a constructor slot (additive; the generator does
-not learn constructors this phase, recorded in §4).
+not learn constructors this phase — recorded in `specs/tracking/codegen-deltas.md`,
+Phase 6 additions).
 
 **S4 — A9 retires: every async rejection reason is an error object, never a
 bare string.** `mapAsync`, `requestAdapter`, `requestDevice`,

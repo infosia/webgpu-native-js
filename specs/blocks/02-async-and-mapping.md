@@ -195,7 +195,10 @@ failing yields `WGPUMapAsyncStatus_Error` / `_Aborted` / `_CallbackCancelled`.
 Map each to a rejection; do not collapse them. `_CallbackCancelled` is not an
 error the script caused.
 
-*(Deferral, recorded 2026-07-10. The reason today is a message **string**, not a
+*(Deferral, recorded 2026-07-10 — **CLOSED the same day by Phase 6 / block 07 →
+S4**: every async rejection reason is now an error object with `name` and
+`message`. The paragraph below stands as the historical record of the interim
+state.)* *(Original text: The reason today is a message **string**, not a
 `GPUError`-shaped object. The error taxonomy — `GPUError` subclasses, `name`,
 error-scope routing — is Phase 6's subject, and a half-shaped object built now
 would be rebuilt then. Two parts are **not** deferred: the three statuses stay

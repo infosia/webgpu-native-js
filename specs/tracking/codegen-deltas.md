@@ -14,7 +14,8 @@ generator's report; this file is the committed, reviewable index.
 | `GPUShaderModuleDescriptor.compilationHints` | reject-if-present | recorded deferral (block 03 §7) |
 | `GPUProgrammableStage.constants` | reject-if-present | pipeline constants deferred (block 03 §7); silent drop retired by the Phase 4 review |
 | `GPUComputePassDescriptor.timestampWrites` | reject-if-present | query sets out of scope |
-| `GPUDevice.importExternalTexture`, `.lost`, `.onuncapturederror`; `GPUQueue.copyExternalImageToTexture` | not in subset | Phase 6 / out of scope; join-report mismatch entries |
+| `GPUDevice.importExternalTexture`; `GPUQueue.copyExternalImageToTexture` | not in subset | external-texture surface out of scope; join-report mismatch entries |
+| `GPUDevice.lost`, `.onuncapturederror` | ~~not in subset~~ **shipped in Phase 6 (P6b)** | see the Phase 6 additions below |
 | `GPUAutoLayoutMode.auto` (as an enum value) | enum_value_skip | the C ABI represents auto layout as a null pipeline-layout handle |
 
 ## C-only surface (expected non-findings per G1)
@@ -45,3 +46,23 @@ enum sentinels `Undefined` / `BindingNotUsed` (emitted only for absent optionals
 - **Interface-level (method) mismatches are report-only** while methods are
   hand-written; they gate nothing. Revisit when method emission lands.
   (Compliance m6.)
+
+## Phase 6 additions (2026-07-10)
+
+- **No DOMException hierarchy (block 07 → S8).** WebGPU rejections are spec'd
+  as DOMExceptions (`OperationError`, `AbortError`); this binding rejects with
+  plain error objects carrying `name`/`message`. Cited at each rejection
+  construction site.
+- **`onuncapturederror` receives the bare `GPUError`, not a
+  `GPUUncapturedErrorEvent`.** The IDL defines an `Event` subclass with an
+  `.error` attribute and full EventTarget semantics; this binding has no
+  EventTarget and calls the handler with the error object directly. Revisit if
+  event plumbing ever lands.
+- **`WGPUErrorType_Unknown` folds into `GPUInternalError`.** The IDL has no
+  fourth error class, so a fold is forced; Internal is the closest semantic.
+  Direct test pins it.
+- **Non-callable `onuncapturederror` assignments coerce to `null`** (Web
+  EventHandler semantics), tested.
+- **Constructor emission is not in the generator** (block 07 → S3): the
+  `ConstructorSpec` slot is hand-wired for the four error classes; the
+  generator learns constructors when a second constructible family appears.

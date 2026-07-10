@@ -13,6 +13,7 @@ use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::ptr;
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Weak;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -169,20 +170,12 @@ impl Environment {
             .flatten()
             .filter_map(|events| Arc::clone(events).downcast::<DeviceEventState<E>>().ok())
             .collect::<Vec<_>>();
-        for state in states {
-            let state = state
-                .js
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let Some(state) = state.as_ref() else {
-                continue;
-            };
-            if let Some(handler) = state.handler.take() {
-                E::release_value(cx, handler);
-            }
-            if let Some(promise) = state.lost_promise.take() {
-                E::release_value(cx, promise);
-            }
+        let values = states
+            .into_iter()
+            .flat_map(|state| state.take_engine_values())
+            .collect::<Vec<_>>();
+        for value in values {
+            E::release_value(cx, value);
         }
     }
 
@@ -191,6 +184,7 @@ impl Environment {
         device: WGPUDevice,
         events: Arc<DeviceEventState<E>>,
     ) {
+        events.set_registration(device, Arc::downgrade(&self.device_events));
         self.device_events
             .states
             .lock()
@@ -218,12 +212,22 @@ impl DeviceEventForwarder {
     }
 
     /// Enqueues an uncaptured error for every wrapper of an adopted device.
+    ///
+    /// The registry mutex is deliberately blocking: producers wait for a
+    /// concurrent registration or prune instead of dropping an event.
     pub fn forward_uncaptured_error<E: JsEngine + 'static>(
         &self,
         device: WGPUDevice,
         type_: WGPUErrorType,
         message: impl Into<String>,
     ) -> std::result::Result<(), QueueError> {
+        if type_ != WGPUErrorType_WGPUErrorType_Validation
+            && type_ != WGPUErrorType_WGPUErrorType_OutOfMemory
+            && type_ != WGPUErrorType_WGPUErrorType_Internal
+            && type_ != WGPUErrorType_WGPUErrorType_Unknown
+        {
+            return Err(QueueError::InvalidUncapturedErrorType(type_));
+        }
         let states = self.device_events::<E>(device);
         if states.is_empty() {
             return Err(QueueError::UnknownDevice);
@@ -236,6 +240,9 @@ impl DeviceEventForwarder {
     }
 
     /// Enqueues device loss for every wrapper of an adopted device.
+    ///
+    /// The registry mutex is deliberately blocking: producers wait for a
+    /// concurrent registration or prune instead of dropping an event.
     pub fn forward_device_lost<E: JsEngine + 'static>(
         &self,
         device: WGPUDevice,
@@ -328,6 +335,8 @@ pub trait JsEngine: Sized {
     fn is_undefined(cx: Self::Context<'_>, value: Self::Value) -> bool;
     /// Returns true for JavaScript `null`.
     fn is_null(cx: Self::Context<'_>, value: Self::Value) -> bool;
+    /// Returns true when a JavaScript value is callable.
+    fn is_callable(cx: Self::Context<'_>, value: Self::Value) -> bool;
     /// Converts with JavaScript `ToNumber`.
     fn to_f64(cx: Self::Context<'_>, value: Self::Value) -> Result<f64, Self::Error>;
     /// Converts with JavaScript `ToBoolean`.
@@ -597,6 +606,7 @@ impl<E: JsEngine + 'static> SettlementRequest<E> {
             } => {
                 let device = native.take_device();
                 if let Err(error) = events.initialize(cx) {
+                    events.release_after_failed_wrap(cx);
                     let _ = native.queue.enqueue(ReleaseRequest::Device {
                         device,
                         gpu: native.gpu,
@@ -685,6 +695,7 @@ impl<E: JsEngine + 'static> SettlementRequest<E> {
                 reason,
                 message,
             } => {
+                state.mark_lost_settled();
                 let mut state = state
                     .js
                     .lock()
@@ -770,12 +781,19 @@ impl SettlementQueue {
             E::settle_deferreds(cx, requests).map_err(TickError::Engine)?;
         }
         // A30 step 2b: event-handler dispatch follows the single batched promise
-        // settlement frame and precedes step 3's microtask drain. This keeps the
-        // one-JS-frame settlement property while surfacing handler throws through
-        // the same TickError::Engine path as a throwing microtask.
+        // settlement frame and precedes step 3's microtask drain. Dispatch every
+        // queued event even if a handler throws, retaining the first error for
+        // `tick()` to return only after A30 steps 3 and 4 have also run.
+        let mut first_error = None;
         for (state, type_, message) in uncaptured {
-            dispatch_uncaptured_error::<E>(cx, &state, type_, message)
-                .map_err(TickError::Engine)?;
+            if let Err(error) = dispatch_uncaptured_error::<E>(cx, &state, type_, message) {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(TickError::Engine(error));
         }
         Ok(count)
     }
@@ -945,6 +963,8 @@ pub enum QueueError {
     UnexpectedSettlementType,
     /// No wrapper is registered for an adopted native device.
     UnknownDevice,
+    /// An uncaptured-error type has no script-visible GPUError mapping.
+    InvalidUncapturedErrorType(WGPUErrorType),
 }
 
 /// Failure from the engine-neutral four-step tick skeleton.
@@ -973,9 +993,13 @@ pub unsafe fn tick<E: JsEngine + 'static>(
 ) -> std::result::Result<usize, TickError<E::Error>> {
     let env = E::environment(cx);
     unsafe { (env.gpu().instance_process_events)(instance) };
-    env.settlements().drain::<E>(cx)?;
-    E::drain_microtasks(cx).map_err(TickError::Engine)?;
-    env.queue().drain().map_err(TickError::Queue)
+    let settlements = env.settlements().drain::<E>(cx);
+    let microtasks = E::drain_microtasks(cx).map_err(TickError::Engine);
+    let releases = env.queue().drain().map_err(TickError::Queue);
+    match (settlements, microtasks, releases) {
+        (Err(error), _, _) | (Ok(_), Err(error), _) | (Ok(_), Ok(()), Err(error)) => Err(error),
+        (Ok(_), Ok(()), Ok(drained)) => Ok(drained),
+    }
 }
 
 /// Payload stored by a `GPUDevice` wrapper.
@@ -1016,9 +1040,17 @@ struct DeviceEventJs<E: JsEngine + 'static> {
     lost_registration: Option<E::DeferredRegistration>,
 }
 
+struct DeviceEventRegistration {
+    device: usize,
+    registry: Weak<DeviceEventRegistry>,
+}
+
 struct DeviceEventState<E: JsEngine + 'static> {
     settlements: Arc<SettlementQueue>,
     self_weak: OnceLock<Weak<Self>>,
+    registration: OnceLock<DeviceEventRegistration>,
+    wrapper_finalized: AtomicBool,
+    lost_settled: AtomicBool,
     js: Mutex<Option<Box<DeviceEventJs<E>>>>,
 }
 
@@ -1027,10 +1059,76 @@ impl<E: JsEngine + 'static> DeviceEventState<E> {
         let state = Arc::new(Self {
             settlements,
             self_weak: OnceLock::new(),
+            registration: OnceLock::new(),
+            wrapper_finalized: AtomicBool::new(false),
+            lost_settled: AtomicBool::new(false),
             js: Mutex::new(None),
         });
         let _ = state.self_weak.set(Arc::downgrade(&state));
         state
+    }
+
+    fn set_registration(&self, device: WGPUDevice, registry: Weak<DeviceEventRegistry>) {
+        let _ = self.registration.set(DeviceEventRegistration {
+            device: device as usize,
+            registry,
+        });
+    }
+
+    fn mark_wrapper_finalized(&self) {
+        self.wrapper_finalized.store(true, Ordering::Release);
+        self.prune_registration_if_complete();
+    }
+
+    fn mark_lost_settled(&self) {
+        self.lost_settled.store(true, Ordering::Release);
+        self.prune_registration_if_complete();
+    }
+
+    fn prune_registration_if_complete(&self) {
+        if !self.wrapper_finalized.load(Ordering::Acquire)
+            || !self.lost_settled.load(Ordering::Acquire)
+        {
+            return;
+        }
+        let Some(registration) = self.registration.get() else {
+            return;
+        };
+        let Some(registry) = registration.registry.upgrade() else {
+            return;
+        };
+        let mut states = registry
+            .states
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut remove_key = false;
+        if let Some(device_states) = states.get_mut(&registration.device) {
+            device_states.retain(|candidate| {
+                Arc::clone(candidate)
+                    .downcast::<Self>()
+                    .map_or(true, |candidate| {
+                        !std::ptr::eq(Arc::as_ptr(&candidate), self)
+                    })
+            });
+            remove_key = device_states.is_empty();
+        }
+        if remove_key {
+            states.remove(&registration.device);
+        }
+    }
+
+    fn take_engine_values(&self) -> Vec<E::Value> {
+        let state = self
+            .js
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(state) = state.as_ref() else {
+            return Vec::new();
+        };
+        [state.handler.take(), state.lost_promise.take()]
+            .into_iter()
+            .flatten()
+            .collect()
     }
 
     fn initialize(&self, cx: E::Context<'_>) -> Result<(), E::Error> {
@@ -1104,15 +1202,17 @@ impl<E: JsEngine + 'static> DeviceEventState<E> {
     }
 }
 
-// SAFETY: engine values and the lost deferred are opaque tokens protected by
-// the existing HeldValue/deferred-registration machinery. Arbitrary-thread C
-// callbacks only upgrade `self_weak`, lock the settlement queue, and enqueue C
-// scalars plus an owned copied message String; they never inspect an engine
-// token or call an engine or webgpu.h function. All token access and settlement
-// happen later on the designated JavaScript `tick()` thread.
+// SAFETY: after engine teardown, every engine-value slot is emptied by
+// `release_device_event_values`, and every outstanding deferred slot is emptied
+// by the adapter registration machinery. What can remain callback-owned is
+// Send-safe Rust data: atomics, weak/strong Arcs, mutexes, native scalar enums,
+// and owned Strings in the settlement queue. Arbitrary-thread callbacks only
+// enqueue those Rust-owned records; they never inspect an engine token or call
+// an engine or webgpu.h function. Before teardown, engine-token access and
+// settlement happen only on the designated JavaScript `tick()` thread.
 unsafe impl<E: JsEngine + 'static> Send for DeviceEventState<E> {}
-// SAFETY: the same argument as Send applies; all shared fields are synchronized,
-// and callbacks use only the pure-Rust enqueue path described above.
+// SAFETY: the same lifetime and teardown argument as Send applies; every shared
+// field is synchronized, and callbacks use only the pure-Rust enqueue path.
 unsafe impl<E: JsEngine + 'static> Sync for DeviceEventState<E> {}
 
 // SAFETY: `DevicePayload` stores an adopted `WGPUDevice`, cached engine values,
@@ -1232,19 +1332,8 @@ pub fn release_payload_values<E: JsEngine + 'static>(
         if let Some(queue) = device.queue.take() {
             release(queue);
         }
-        if let Some(js) = device
-            .events
-            .js
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-        {
-            if let Some(handler) = js.handler.take() {
-                release(handler);
-            }
-            if let Some(promise) = js.lost_promise.take() {
-                release(promise);
-            }
+        for value in device.events.take_engine_values() {
+            release(value);
         }
     }
 }
@@ -1546,6 +1635,7 @@ pub unsafe fn wrap_device<E: JsEngine + 'static>(
     let _ = register_device_lost_info_class::<E>(cx)?;
     let events = DeviceEventState::new(Arc::clone(env.settlements()));
     if let Err(error) = events.initialize(cx) {
+        events.release_after_failed_wrap(cx);
         let _ = env.queue().enqueue(ReleaseRequest::Device {
             device,
             gpu: env.gpu(),
@@ -1859,21 +1949,33 @@ pub fn device_on_uncaptured_error_set<E: JsEngine + 'static>(
                 "GPUDevice.onuncapturederror called on an incompatible object",
             )
         })?;
-    let state = payload
-        .events
-        .js
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let Some(state) = state.as_ref() else {
-        return Err(E::operation_error(
-            cx,
-            "GPUDevice event state is unavailable",
-        ));
+    let replacement =
+        if E::is_null(cx, value) || E::is_undefined(cx, value) || !E::is_callable(cx, value) {
+            None
+        } else {
+            Some(E::duplicate_value(cx, value))
+        };
+    let old = {
+        let state = payload
+            .events
+            .js
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(state) = state.as_ref() else {
+            if let Some(replacement) = replacement {
+                E::release_value(cx, replacement);
+            }
+            return Err(E::operation_error(
+                cx,
+                "GPUDevice event state is unavailable",
+            ));
+        };
+        let old = state.handler.take();
+        if let Some(replacement) = replacement {
+            state.handler.set(replacement);
+        }
+        old
     };
-    let old = state.handler.take();
-    if !E::is_null(cx, value) && !E::is_undefined(cx, value) {
-        state.handler.set(E::duplicate_value(cx, value));
-    }
     if let Some(old) = old {
         E::release_value(cx, old);
     }
@@ -1886,18 +1988,26 @@ fn dispatch_uncaptured_error<E: JsEngine + 'static>(
     type_: WGPUErrorType,
     message: String,
 ) -> Result<(), E::Error> {
-    let handler = state
-        .js
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .as_ref()
-        .and_then(|state| state.handler.get());
+    let handler = {
+        let state = state
+            .js
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state
+            .as_ref()
+            .and_then(|state| state.handler.get())
+            .map(|handler| E::duplicate_value(cx, handler))
+    };
     let Some(handler) = handler else {
         return Ok(());
     };
-    let error = new_gpu_error::<E>(cx, type_, message)?;
-    let _ = E::call(cx, handler, E::global(cx), &[error])?;
-    Ok(())
+    let result = (|| {
+        let error = new_gpu_error::<E>(cx, type_, message)?;
+        let _ = E::call(cx, handler, E::global(cx), &[error])?;
+        Ok(())
+    })();
+    E::release_value(cx, handler);
+    result
 }
 
 /// Implements `GPUDevice.pushErrorScope`.
@@ -2115,7 +2225,12 @@ pub fn adapter_request_device<E: JsEngine + 'static>(
         userdata1: Box::into_raw(request).cast(),
         userdata2: ptr::null_mut(),
     };
-    let event_userdata = Arc::as_ptr(&events).cast_mut().cast::<c_void>();
+    // One callback-owned strong reference is shared by both callback infos.
+    // webgpu.h guarantees uncaptured-error callbacks stop before device loss,
+    // so the terminal device-lost callback can reclaim this reference.
+    let event_userdata = Arc::into_raw(Arc::clone(&events))
+        .cast_mut()
+        .cast::<c_void>();
     let descriptor = WGPUDeviceDescriptor {
         nextInChain: ptr::null_mut(),
         label: WGPUStringView::from_bytes(b""),
@@ -2926,6 +3041,7 @@ pub fn finalize_device<E: JsEngine + 'static>(payload: Box<dyn Any + Send>, env:
     let Ok(payload) = payload.downcast::<DevicePayload<E>>() else {
         return;
     };
+    payload.events.mark_wrapper_finalized();
     let _ = env.queue().enqueue(ReleaseRequest::Device {
         device: payload.device,
         gpu: env.gpu(),
@@ -3205,9 +3321,14 @@ unsafe extern "C" fn uncaptured_error_callback<E: JsEngine + 'static>(
     _userdata2: *mut c_void,
 ) {
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let Some(state) = (unsafe { userdata1.cast::<DeviceEventState<E>>().as_ref() }) else {
+        let Some(raw) = NonNull::new(userdata1.cast::<DeviceEventState<E>>()) else {
             return;
         };
+        // SAFETY: userdata1 comes from Arc::into_raw in adapter_request_device.
+        // Its strong reference remains owned by the shared callback userdata
+        // until device_lost_callback reclaims it. The pinned webgpu.h docs
+        // guarantee uncaptured-error callbacks do not fire after device loss.
+        let state = unsafe { &*raw.as_ptr() };
         // The view is callback-borrowed, so copy it before returning. From this
         // point onward the record is fully Rust-owned and Send.
         let message = unsafe { callback_string(message) };
@@ -3223,11 +3344,20 @@ unsafe extern "C" fn device_lost_callback<E: JsEngine + 'static>(
     _userdata2: *mut c_void,
 ) {
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let Some(state) = (unsafe { userdata1.cast::<DeviceEventState<E>>().as_ref() }) else {
+        let Some(raw) = NonNull::new(userdata1.cast::<DeviceEventState<E>>()) else {
             return;
         };
+        // SAFETY: userdata1 remains backed by the one strong Arc reference
+        // created in adapter_request_device. DeviceLost is a future event and
+        // this is its terminal callback (including CallbackCancelled).
+        let state = unsafe { &*raw.as_ptr() };
         let message = unsafe { callback_string(message) };
         let _ = state.enqueue_lost(reason, message);
+        // SAFETY: the terminal callback has finished using the shared userdata,
+        // and webgpu.h guarantees no later uncaptured-error callback can fire.
+        // This reconstructs and immediately drops exactly the Arc::into_raw
+        // strong reference created in adapter_request_device.
+        unsafe { drop(Arc::from_raw(raw.as_ptr())) };
     }));
 }
 

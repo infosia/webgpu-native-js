@@ -15,4 +15,13 @@
     try { new GPUError("not allowed"); }
     catch (error) { baseRejected = error instanceof TypeError; }
     if (!baseRejected) throw new Error("GPUError constructor was accepted");
+
+    class DerivedValidationError extends GPUValidationError {}
+    const derived = new DerivedValidationError("derived message");
+    if (!(derived instanceof DerivedValidationError)) throw new Error("derived instanceof failed");
+    if (!(derived instanceof GPUValidationError)) throw new Error("derived base instanceof failed");
+    if (Object.getPrototypeOf(derived) !== DerivedValidationError.prototype) {
+        throw new Error("new-target prototype was not applied");
+    }
+    if (derived.message !== "derived message") throw new Error("derived message failed");
 })();
