@@ -167,7 +167,18 @@
         var second = mapped.getMappedRange(8, 4);
         mapped.unmap();
         log("mapping:detach:" + first.byteLength + "," + second.byteLength);
+        var postUnmapError = caught(function () {
+            mapped.getMappedRange();
+        });
+        log(errorLine("mapping:post-unmap", postUnmapError));
         mapped.destroy();
+
+        var destroyed = device.createBuffer({ size: 4, usage: 1 });
+        destroyed.destroy();
+        var destroyedMapError = caught(function () {
+            destroyed.mapAsync(1, 0, 4);
+        });
+        log(errorLine("reject:mapAsync", destroyedMapError));
 
         return runMappedAtCreationRoundTrip().then(runOffsetWindowRoundTrip);
     }
@@ -211,6 +222,11 @@
         }
         device.queue.submit(commands());
         log("sequence generator:ok");
+
+        var stringError = caught(function () {
+            device.queue.submit("ab");
+        });
+        log(errorLine("sequence string", stringError));
 
         var arrayLikeEncoder = device.createCommandEncoder();
         var arrayLikeCommand = arrayLikeEncoder.finish();
@@ -338,6 +354,7 @@
             createAndDestroyBuffer(4, 4294967296);
         });
         log("coerce:usage-2^32:" + usageError.name);
+        log("typeerror-name:" + usageError.name);
 
         var sizeBigintError = caught(function () {
             createAndDestroyBuffer(BigInt(8), 8);
@@ -352,6 +369,22 @@
         var numberLabel = device.createBuffer({ size: 4, usage: 8, label: 42 });
         log("label:number:" + numberLabel.label);
         numberLabel.destroy();
+
+        var negativeZeroLabel = device.createBuffer({
+            size: 4,
+            usage: 8,
+            label: -0
+        });
+        log("label:-0:" + negativeZeroLabel.label);
+        negativeZeroLabel.destroy();
+
+        var exponentialLabel = device.createBuffer({
+            size: 4,
+            usage: 8,
+            label: 1e21
+        });
+        log("label:1e21:" + exponentialLabel.label);
+        exponentialLabel.destroy();
 
         var objectLabel = device.createBuffer({
             size: 4,
@@ -386,6 +419,12 @@
         log("buffer:" + nullLabel + "," + labelBuffer.label + ";method:" + stableMethod);
         log("identity:queue:" + (device.queue === device.queue));
         log("identity:lost:" + (device.lost === device.lost));
+        log("typeof:device.createBuffer:" + typeof device.createBuffer);
+        var prototypeBuffer = device.createBuffer({ size: 4, usage: 8 });
+        log("identity:cross-instance-prototype:" +
+            (Object.getPrototypeOf(labelBuffer) ===
+                Object.getPrototypeOf(prototypeBuffer)));
+        prototypeBuffer.destroy();
 
         var paritySampler = device.createSampler({
             label: "parity-sampler",

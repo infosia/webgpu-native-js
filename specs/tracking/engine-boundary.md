@@ -1239,3 +1239,16 @@ queued to be fixed via **weak linking** — dyld resolves a weak import to NULL
 instead of aborting at load, and the adapter branches to a BigInt-detection
 fallback at runtime — **after** the parity suite has grown enough (block 08 is
 the priority).
+
+**Block 08 part 2 landed (2026-07-10): 60 lines; the sync error-name contract;
+two more divergences confirmed verbatim.** `operation_error` now carries
+`name: "OperationError"` on both engines (the native class leaked before:
+InternalError vs Error); TypeError agreement pinned. Confirmed and triaged FIX
+for part 3: (1) cross-instance method identity — QuickJS `true` (prototype
+methods, WebIDL-correct), JSC `false` (the per-wrapper cache; prototypes
+already shared) → JSC moves to per-class method objects; (2) lone-surrogate
+USVString — QuickJS emits U+FFFD×3 (lossy WTF-8 bytes), JSC TRUNCATES at the
+surrogate (data loss); the USVString answer is a single U+FFFD → JSC converts
+via UTF-16 lossy, QuickJS gains a WTF-8 ill-sequence collapser. Landed safe
+lines meanwhile: typeof function, shared prototypes, string-as-sequence
+rejection identity, -0 → "0", 1e21 → "1e+21".

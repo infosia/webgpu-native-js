@@ -902,7 +902,8 @@ impl core::JsEngine for Engine {
 
     fn operation_error(cx: Self::Context<'_>, message: &str) -> Self::Error {
         let _ = throw_message(cx.ctx, message, false);
-        take_exception_value(cx)
+        let error = take_exception_value(cx);
+        set_error_name(cx, error, "OperationError")
     }
 
     fn async_error_value(cx: Self::Context<'_>, name: &str, message: &str) -> Self::Value {
@@ -1572,6 +1573,18 @@ fn throw_message(ctx: *mut qjs::JSContext, message: &str, type_error: bool) -> q
         Ok(message) if type_error => unsafe { qjs::JS_ThrowTypeError(ctx, message.as_ptr()) },
         Ok(message) => unsafe { qjs::JS_ThrowInternalError(ctx, message.as_ptr()) },
         Err(_) => unsafe { qjs::JS_ThrowInternalError(ctx, fallback.as_ptr()) },
+    }
+}
+
+fn set_error_name(cx: Context<'_>, error: qjs::JSValue, name: &str) -> qjs::JSValue {
+    let name = unsafe { qjs::JS_NewStringLen(cx.ctx, name.as_ptr().cast(), name.len()) };
+    if unsafe { qjs::JS_IsException(name) } {
+        return take_exception_value(cx);
+    }
+    if unsafe { qjs::JS_SetPropertyStr(cx.ctx, error, c"name".as_ptr(), name) } < 0 {
+        take_exception_value(cx)
+    } else {
+        error
     }
 }
 
@@ -2895,13 +2908,15 @@ mod tests {
             r#"
                 var unmapped = device.createBuffer({ size: 8, usage: 2 });
                 var unmappedThrew = false;
-                try { unmapped.getMappedRange(); } catch (e) { unmappedThrew = true; }
+                try { unmapped.getMappedRange(); }
+                catch (e) { unmappedThrew = e.name === 'OperationError'; }
                 if (!unmappedThrew) throw new Error('unmapped getMappedRange did not throw');
 
                 var destroyed = device.createBuffer({ size: 8, usage: 2, mappedAtCreation: true });
                 destroyed.destroy();
                 var destroyedThrew = false;
-                try { destroyed.getMappedRange(); } catch (e) { destroyedThrew = true; }
+                try { destroyed.getMappedRange(); }
+                catch (e) { destroyedThrew = e.name === 'OperationError'; }
                 if (!destroyedThrew) throw new Error('destroyed getMappedRange did not throw');
                 unmapped = destroyed = null;
             "#,

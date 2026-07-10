@@ -1394,46 +1394,14 @@ impl core::JsEngine for Engine {
     }
 
     fn operation_error(cx: Self::Context<'_>, message: &str) -> Self::Error {
-        make_error(cx, message, false)
+        let error = make_error(cx, message, false);
+        set_error_name(cx, error, "OperationError")
     }
 
     fn async_error_value(cx: Self::Context<'_>, name: &str, message: &str) -> Self::Value {
         let error = make_error(cx, message, false);
         cx.scope.track(error);
-        let mut exception = ptr::null();
-        // SAFETY: error belongs to cx and make_error returns an object unless
-        // allocation failed, in which case the conversion reports an exception.
-        let object = unsafe { JSValueToObject(cx.ctx, error, &mut exception) };
-        if !exception.is_null() || object.is_null() {
-            return if exception.is_null() {
-                error
-            } else {
-                exception
-            };
-        }
-        let Ok(property) = JsString::new("name") else {
-            return error;
-        };
-        let Ok(name) = JsString::new(name) else {
-            return error;
-        };
-        // SAFETY: cx, object, and both strings are live for this property set.
-        let value = unsafe { JSValueMakeString(cx.ctx, name.as_raw()) };
-        unsafe {
-            JSObjectSetProperty(
-                cx.ctx,
-                object,
-                property.as_raw(),
-                value,
-                PROPERTY_NONE,
-                &mut exception,
-            )
-        };
-        if exception.is_null() {
-            error
-        } else {
-            exception
-        }
+        set_error_name(cx, error, name)
     }
 
     fn error_value_from_error(_cx: Self::Context<'_>, error: Self::Error) -> Self::Value {
@@ -1823,6 +1791,43 @@ fn make_error(cx: Context<'_>, message: &str, type_error: bool) -> JSValueRef {
         Engine::undefined(cx)
     } else {
         error.cast_const()
+    }
+}
+
+fn set_error_name(cx: Context<'_>, error: JSValueRef, name: &str) -> JSValueRef {
+    let mut exception = ptr::null();
+    // SAFETY: error belongs to cx and make_error returns an object unless
+    // allocation failed, in which case the conversion reports an exception.
+    let object = unsafe { JSValueToObject(cx.ctx, error, &mut exception) };
+    if !exception.is_null() || object.is_null() {
+        return if exception.is_null() {
+            error
+        } else {
+            exception
+        };
+    }
+    let Ok(property) = JsString::new("name") else {
+        return error;
+    };
+    let Ok(name) = JsString::new(name) else {
+        return error;
+    };
+    // SAFETY: cx, object, and both strings are live for this property set.
+    let value = unsafe { JSValueMakeString(cx.ctx, name.as_raw()) };
+    unsafe {
+        JSObjectSetProperty(
+            cx.ctx,
+            object,
+            property.as_raw(),
+            value,
+            PROPERTY_NONE,
+            &mut exception,
+        )
+    };
+    if exception.is_null() {
+        error
+    } else {
+        exception
     }
 }
 
