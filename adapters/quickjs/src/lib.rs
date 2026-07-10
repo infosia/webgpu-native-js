@@ -139,7 +139,12 @@ impl Runtime {
     }
 
     /// Wraps a WebGPU instance as a JavaScript `GPU`.
-    pub fn wrap_gpu(&self, instance: ffi_wgpu::WGPUInstance) -> Result<qjs::JSValue> {
+    ///
+    /// # Safety
+    ///
+    /// `instance` must be a live non-null handle from this runtime's backend
+    /// and must remain live while the returned wrapper can be used.
+    pub unsafe fn wrap_gpu(&self, instance: ffi_wgpu::WGPUInstance) -> Result<qjs::JSValue> {
         let scope = Scope::new(self.raw_context());
         let value = core::wrap_gpu::<Engine>(
             Context {
@@ -785,9 +790,12 @@ impl core::JsEngine for Engine {
         Ok((promise, core::Deferred::new(resolving[0], resolving[1])))
     }
 
-    fn settle_deferreds(cx: Self::Context<'_>, settlements: Vec<core::DeferredSettlement<Self>>) {
+    fn settle_deferreds(
+        cx: Self::Context<'_>,
+        settlements: Vec<core::DeferredSettlement<Self>>,
+    ) -> core::Result<(), Self::Error> {
         if settlements.is_empty() {
-            return;
+            return Ok(());
         }
         let state = state_from_context(cx.ctx);
         let Some(trampoline) = state.settle_trampoline() else {
@@ -800,7 +808,10 @@ impl core::JsEngine for Engine {
                     qjs::JS_FreeValue(cx.ctx, deferred.reject());
                 }
             }
-            return;
+            return Err(Self::operation_error(
+                cx,
+                "settlement trampoline is unavailable",
+            ));
         };
         let fns = unsafe { qjs::JS_NewArray(cx.ctx) };
         let values = unsafe { qjs::JS_NewArray(cx.ctx) };
@@ -818,11 +829,11 @@ impl core::JsEngine for Engine {
                     qjs::JS_FreeValue(cx.ctx, deferred.reject());
                 }
             }
-            clear_pending_exception(cx.ctx);
-            return;
+            return Err(take_exception_value(cx));
         }
         cx.scope.track(fns);
         cx.scope.track(values);
+        let mut property_failed = false;
         for (index, (deferred, result)) in settlements.into_iter().enumerate() {
             let (func, value) = match result {
                 Ok(value) => {
@@ -836,16 +847,22 @@ impl core::JsEngine for Engine {
             };
             cx.scope.escape(value);
             let index = u32::try_from(index).unwrap_or(u32::MAX);
-            unsafe {
-                qjs::JS_SetPropertyUint32(cx.ctx, fns, index, func);
-                qjs::JS_SetPropertyUint32(cx.ctx, values, index, value);
-            }
+            let function_rc = unsafe { qjs::JS_SetPropertyUint32(cx.ctx, fns, index, func) };
+            let value_rc = unsafe { qjs::JS_SetPropertyUint32(cx.ctx, values, index, value) };
+            property_failed |= function_rc < 0 || value_rc < 0;
+        }
+        if property_failed {
+            return Err(take_exception_value(cx));
         }
         let this = qjs_value_with_tag(qjs::JS_TAG_UNDEFINED as i64);
         let mut argv = [fns, values];
         let call = unsafe { qjs::JS_Call(cx.ctx, trampoline, this, 2, argv.as_mut_ptr()) };
+        if unsafe { qjs::JS_IsException(call) } {
+            unsafe { qjs::JS_FreeValue(cx.ctx, call) };
+            return Err(take_exception_value(cx));
+        }
         unsafe { qjs::JS_FreeValue(cx.ctx, call) };
-        clear_pending_exception(cx.ctx);
+        Ok(())
     }
 
     fn drain_microtasks(cx: Self::Context<'_>) -> core::Result<(), Self::Error> {
@@ -1900,7 +1917,7 @@ mod tests {
         let setup = native_setup();
         let runtime = Runtime::new().expect("quickjs runtime");
         let device = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
-        let gpu = runtime.wrap_gpu(setup.instance).expect("wrap gpu");
+        let gpu = unsafe { runtime.wrap_gpu(setup.instance) }.expect("wrap gpu");
         runtime
             .set_global_value("device", device)
             .expect("set device");
@@ -1941,6 +1958,70 @@ mod tests {
         let global = Engine::global(cx);
         assert!(!unsafe { qjs::JS_IsUndefined(global) });
         assert_eq!(scope.values.borrow().len(), 1);
+    }
+
+    #[test]
+    fn j18_j1_direct_resolver_defers_then_until_quickjs_pending_job() {
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let (promise, deferred) = super::with_scope(runtime.raw_context(), |cx| {
+            let (promise, deferred) = Engine::new_promise(cx).unwrap_or_else(|_| panic!("promise"));
+            cx.scope.escape(promise);
+            (promise, deferred)
+        });
+        runtime
+            .set_global_value("j18Promise", promise)
+            .expect("set promise");
+        eval_drop(
+            &runtime,
+            "var j18Ran = false; j18Promise.then(function () { j18Ran = true; });",
+            "j18-j1-quickjs-setup.js",
+        );
+
+        let undefined = super::qjs_value_with_tag(qjs::JS_TAG_UNDEFINED as i64);
+        let mut arguments = [undefined];
+        // J18/J1 counterfactual: bypass settlement machinery and call the
+        // resolver directly. QuickJS leaves the continuation pending, unlike
+        // JSC F2; J1 exists so binding settlement hides this divergence.
+        let result = unsafe {
+            qjs::JS_Call(
+                runtime.raw_context(),
+                deferred.resolve(),
+                undefined,
+                1,
+                arguments.as_mut_ptr(),
+            )
+        };
+        assert!(
+            !unsafe { qjs::JS_IsException(result) },
+            "direct resolver call threw"
+        );
+        unsafe { qjs::JS_FreeValue(runtime.raw_context(), result) };
+
+        let before_job = global_value(&runtime, "j18Ran");
+        assert_eq!(
+            unsafe { qjs::JS_ToBool(runtime.raw_context(), before_job) },
+            0,
+            "QuickJS continuation must still be pending after resolver returns"
+        );
+        unsafe { qjs::JS_FreeValue(runtime.raw_context(), before_job) };
+
+        let mut job_context = ptr::null_mut();
+        let jobs = unsafe {
+            qjs::JS_ExecutePendingJob(qjs::JS_GetRuntime(runtime.raw_context()), &mut job_context)
+        };
+        assert_eq!(jobs, 1, "the promise continuation must be one pending job");
+        let after_job = global_value(&runtime, "j18Ran");
+        assert_ne!(
+            unsafe { qjs::JS_ToBool(runtime.raw_context(), after_job) },
+            0,
+            "QuickJS continuation must run after JS_ExecutePendingJob"
+        );
+        unsafe {
+            qjs::JS_FreeValue(runtime.raw_context(), after_job);
+            qjs::JS_FreeValue(runtime.raw_context(), deferred.resolve());
+            qjs::JS_FreeValue(runtime.raw_context(), deferred.reject());
+        }
+        runtime.clear_global("j18Promise").expect("clear promise");
     }
 
     #[test]
@@ -2298,7 +2379,8 @@ mod tests {
             let (promise, deferred) = Engine::new_promise(cx).unwrap_or_else(|_| panic!("promise"));
             let error = Engine::type_error(cx, "async owned error");
             let reason = Engine::error_value_from_error(cx, error);
-            Engine::settle_deferreds(cx, vec![(deferred, Err(reason))]);
+            Engine::settle_deferreds(cx, vec![(deferred, Err(reason))])
+                .unwrap_or_else(|_| panic!("settle rejection"));
             cx.scope.escape(promise);
             promise
         });
@@ -2332,7 +2414,8 @@ mod tests {
         super::with_scope(runtime.raw_context(), |cx| {
             let (_, deferred) = Engine::new_promise(cx).unwrap_or_else(|_| panic!("promise"));
             let error = Engine::type_error(cx, "cold fallback");
-            Engine::settle_deferreds(cx, vec![(deferred, Err(error))]);
+            Engine::settle_deferreds(cx, vec![(deferred, Err(error))])
+                .expect_err("missing trampoline must fail");
         });
         state.set_settle_trampoline(trampoline);
     }
@@ -3265,7 +3348,7 @@ mod tests {
     fn request_adapter_request_device_promises_are_end_to_end() {
         let setup = native_setup();
         let runtime = Runtime::new().expect("quickjs runtime");
-        let gpu = runtime.wrap_gpu(setup.instance).expect("wrap gpu");
+        let gpu = unsafe { runtime.wrap_gpu(setup.instance) }.expect("wrap gpu");
         runtime.set_global_value("gpu", gpu).expect("set gpu");
         eval_drop(
             &runtime,
@@ -3289,7 +3372,7 @@ mod tests {
     fn two_adapter_settlements_observe_one_tick_settle_before_then_order() {
         let setup = native_setup();
         let runtime = Runtime::new().expect("quickjs runtime");
-        let gpu = runtime.wrap_gpu(setup.instance).expect("wrap gpu");
+        let gpu = unsafe { runtime.wrap_gpu(setup.instance) }.expect("wrap gpu");
         runtime.set_global_value("gpu", gpu).expect("set gpu");
         eval_drop(
             &runtime,
@@ -3349,7 +3432,7 @@ mod tests {
     fn two_concurrent_request_adapter_promises_settle_independently() {
         let setup = native_setup();
         let runtime = Runtime::new().expect("quickjs runtime");
-        let gpu = runtime.wrap_gpu(setup.instance).expect("wrap gpu");
+        let gpu = unsafe { runtime.wrap_gpu(setup.instance) }.expect("wrap gpu");
         runtime.set_global_value("gpu", gpu).expect("set gpu");
         eval_drop(
             &runtime,

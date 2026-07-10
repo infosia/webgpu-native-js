@@ -39,10 +39,15 @@ interfaces.
 | **F7** | **`Symbol.iterator` is reachable without `eval`.** Two string property reads (`globalThis.Symbol`, then `.iterator`) yield a symbol `JSValueRef`; `JSObjectGetPropertyForKey` accepts it. A `Set` has it; an array-like does not. Full iteration works from pure C. | Program: iterated `new Set([10,20])` to completion; `JSObjectHasPropertyForKey` returned 1 for the `Set` and 0 for `{length:2,0:1,1:2}`. |
 | **F8** | **LGPL-2.1.** Dynamically link the system framework. macOS and iOS only; Android and Windows are unsupported (`CLAUDE.md` → Engine support tiers). | `engine-boundary.md` → Q2a. |
 
-**Unverified premise:** JSC finalizers may run on **any thread**. This is widely
-held and it is why `CLAUDE.md` invariant 4 exists — but F5 means it **cannot be
-provoked**, so the project has never observed it. Treat it as unverified and design
-as if true. Do not write it down as a fact.
+**The any-thread-finalizer premise is a documented contract, not folklore.**
+*(Upgraded 2026-07-10 by the Phase Review, which found the F1 header sweep had
+missed it.)* `JSObjectRef.h` states outright: *"An object may be finalized on
+any thread."* F5 still means it **cannot be provoked** — the project has never
+observed an off-main-thread finalizer — but the design obligation now rests on
+the header's own words, not on an assumption. Invariant 4 and J21 are load-bearing
+against a documented behaviour.
+
+| **F9** | **`JSValueIsBigInt` is `API_AVAILABLE(macos(15.0), ios(18.0))` and the adapter hard-links it**, so macOS 15 / iOS 18 is the JSC adapter's deployment floor (older systems dyld-abort at load). Measured before accepting: `JSValueToNumber` on a BigInt does **not** raise a TypeError through the exception out-param, so the symbol cannot be dropped without losing the WebIDL BigInt rejection the parity script pins. | Deletion experiment during the Phase 3 review MINOR tier. |
 
 ---
 
@@ -110,12 +115,18 @@ addition".
 **J4 — `duplicate_value` is `JSValueProtect`; `release_value` is
 `JSValueUnprotect`.** They must balance, and the mock already asserts it (R23).
 
-**J5 — `trace_payload` is a no-op under JSC, and stays in the trait.** JSC has no
-`gc_mark` (F4); protection keeps a value alive outright. QuickJS needs the hook.
+**J5 — payload tracing is a no-op under JSC.** JSC has no `gc_mark` (F4);
+protection keeps a value alive outright. QuickJS needs the hook.
 **This resolves block 02 → A27's deferred question in favour of keeping
-`trace_payload`**, and against `associate_value`: the payloads that hold engine
-values (mapped ranges) form no cycle back to their wrapper, so protection is
-sufficient and no association primitive is needed.
+the tracing mechanism**, and against `associate_value`: the payloads that hold
+engine values (mapped ranges) form no cycle back to their wrapper, so protection
+is sufficient and no association primitive is needed.
+
+*(Wording corrected 2026-07-10: after the design review's DR-m6 reshaping, the
+mechanism is `core::trace_payload_values` — a blind core helper the QuickJS
+adapter calls from its `gc_mark` — not a `JsEngine` trait method named
+`trace_payload`. Under JSC the "no-op" is the absence of any hook wiring, which
+is the correct amount of code.)*
 
 State that in `engine-boundary.md`. A27 said "Phase 3 decides, when JavaScriptCore
 has a vote." It has voted.
@@ -301,13 +312,22 @@ still pass if the feature were a no-op?*
 7. Full workspace gate green; clippy clean; Phase Review clean of CRITICAL and
    MAJOR.
 
-## 6. Open questions this block will answer
+## 6. Open questions this block will answer — ANSWERED (2026-07-10)
 
-- **Can a JSC finalizer be observed on a non-main thread at all?** F5 says the
-  public API cannot provoke one. If it truly cannot, the "any thread" premise stays
-  permanently unverified, and every design that rests on it should say so.
-- **Does the handle scope have anything to do under JSC?** If it is empty in every
-  case, is `Scope` still the right shape, or does `Context<'a>` want a different
-  associated type per engine?
-- **What does the trampoline cost?** One JS call per `tick()` versus N. Measure
-  before assuming it is free.
+- ~~**Can a JSC finalizer be observed on a non-main thread at all?**~~ Not
+  provokable (F5 held throughout the phase), but no longer merely a premise:
+  `JSObjectRef.h` documents "An object may be finalized on any thread" (§2
+  upgrade). The designs resting on it rest on the header's contract.
+- ~~**Does the handle scope have anything to do under JSC?**~~ **Yes — it is
+  the root set, and treating it as an empty formality was the phase's worst
+  bug.** JSC's collector scans only the machine stack; a `JSValueRef` held in
+  a Rust `Vec` is invisible to it. The first `Scope` was a pure recorder, and
+  the Phase Review found settlement values GC-collectable mid-drain (PR3-C1,
+  a use-after-free). `Scope::track` is now `JSValueProtect`; drop unprotects
+  what did not escape. A23's "the scope is not `Option`" aged well; J7's "it
+  has nothing to free" did not — it has nothing to *free*, and everything to
+  *root*.
+- ~~**What does the trampoline cost?**~~ Measured (ignored test, 200 ticks ×
+  8 settlements): batched trampoline 16.50 ms vs per-deferred direct calls
+  15.70 ms — about 4 µs per tick, the price of one extra JS call. The parity
+  property costs nothing worth discussing.

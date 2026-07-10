@@ -730,3 +730,79 @@ have direct core tests.
 Verified fixed: **DR-M6..M10, DR-m5..m8**. The two production handoffs from the
 2026-07-10 design review are complete; Phase 3 itself remains open for the JSC
 adapter.
+
+---
+
+## Phase 3 Phase Review — 2026-07-10 ("Clean Review Then Fix")
+
+Three no-context lenses over the phase's cumulative diff (`5a591db..a262de1`):
+**soundness** (full line-by-line read of the 2,586-line JSC adapter + the Phase 3
+core diff, FFI signatures spot-checked against the macOS SDK headers),
+**rule compliance** (J1–J21 audited individually, exit criteria verdicts),
+**deletion experiments** (10 run in an isolated worktree, 9 caught).
+
+### Findings — accepted and fixed
+
+| ID | Sev | Finding | Fix evidence |
+|---|---|---|---|
+| PR3-C1 | CRITICAL | The JSC `Scope` was a pure recorder — it rooted nothing. JSC's collector scans only the machine stack (the SDK says to `JSValueProtect` anything heap-held), so settlement values built into heap `Vec`s during `SettlementQueue::drain` were GC-collectable mid-drain: `requestAdapter(); requestAdapter();` under heap pressure resolves a promise with a dead `JSValueRef` and double-releases the native handle. Root cause: core's "track in the scope" pattern is rooted under QuickJS because that scope owns refcounts; JSC's did not. | `Scope::track` = `JSValueProtect` via the ledger; `escape` unprotects while the value is stack-live; drop unprotects the rest. Counter unit tests. Answers block 04 §6's scope question: the scope is the root set. |
+| PR3-C2 | CRITICAL | `E::payload` cast `JSObjectGetPrivate(this)` to `ObjectPayload` unchecked. JSC's sloppy `toThis` turns undefined `this` into the **global object** (whose private data is `State`), so `const f = device.createBuffer; f();` reinterprets `State` as `ObjectPayload` — UB from one line of honest JS. | `JSValueIsObjectOfClass` against the registered class before the cast; wrong class → TypeError. Script tests: `f()`, `f.call(f)`, `f.call(otherClassWrapper)` all throw, none crash. |
+| PR3-M1 | MAJOR | J16's named recheck was not done: `TracedValues`' SAFETY comment still said "a future engine with any-thread finalizers must replace this storage" — JSC is that engine (documented: "An object may be finalized on any thread") and mapped ranges shipped. The actual argument (the buffer-state Mutex is the happens-before edge) was undocumented; `HeldValue` had no argument at all. | `TracedValues` comment rewritten naming the load-bearing lock sites; `HeldValue` moved to a real `Mutex`. |
+| PR3-M2 | MAJOR | The JSC protect-ledger test was the **sixth shipped tautology**: `begin_teardown` unconditionally mops up and counts every remaining ledger entry, so protect==unprotect is an identity of the bookkeeping. | Teardown's forced unprotects counted separately; a clean teardown asserts that count is **zero**. Seen red by deleting the method-cache release (`left: 1, right: 0`), restored green. |
+| PR3-M3 | MAJOR | J18's J1 demonstration was never performed, and J2/J11's red records were incomplete — exit criterion 6 unmet. | J1: direct-resolver tests in BOTH adapters pin the divergence (JSC: `.then()` already ran when the call returns, F2; QuickJS: not until `JS_ExecutePendingJob`). J2's JSC-side red: deletion experiment E1 (below). J11's red: the conformance tests assert the inverse of the deleted deviation tests, recorded here. |
+| PR3-M4 | MAJOR | `wrapper_finalize`'s deferred-unprotect path was unfalsifiable (deletion experiment E7: removing it left 13/13 green) — every reachable finalizer runs at context teardown when the ledger is already drained, and the dedicated queue test drove a `#[cfg(test)]`-only helper. | Direct unit test invokes the production `wrapper_finalize` before teardown on a real wrapper; asserts the queue fills and the next drain empties it. Seen red by deleting the production loops, restored green. |
+| PR3-m1..m9 | MINOR | `JSValueIsBigInt` deployment floor (macOS 15 / iOS 18 — measured: `JSValueToNumber` on BigInt does NOT throw, so the symbol stays; floor documented as F9); `settle_deferreds` allocation/exception failures silently left promises unsettled (now surface through `TickError`); mapping SAFETY comments assumed untampered built-ins silently (clause added); `wrap_gpu` was a safe fn storing a later-dereferenced raw instance (now `unsafe fn`, both adapters); `detach_all_ranges` error path dropped remaining ranges undetached and leaked their values (now processes all, returns first error; direct core test); the `jsc` feature hardwired `backend-yawgpu` (backend moved to dev-dependencies); mock drop-guard double-panicked during failing tests, SIGABRTing the suite (guarded with `thread::panicking()`); J15 panic test annotated about its unattributed-abort failure mode; trampoline cost measured (≈4 µs/tick — recorded in block 04 §6). | All landed in the MINOR-tier handoff; gates re-run. |
+
+### Deletion-experiment log (10 experiments, isolated worktree)
+
+E1 trampoline unbatched → **RED** on the JSC ordering test AND the parity script
+(`tick:settle1,then1,settle2,then2`) — **the phase's central claim is genuinely
+falsifiable, on the engine that can fail it**. E2 A32 revert → RED in core (the
+hardened mock) and in JSC parity. E3 mock overlap rejection removed → RED
+(self-test). E3b combo → only the self-test red: A32's headless guard is a
+two-link chain (self-test → mock oracle → core); the only direct engine-level
+guard is the opt-in macOS-only JSC parity test — noted, accepted. E4 skip
+`transfer()` → RED (core's A12 verification fires under real JSC). E5 pin the
+script's buffer in `arraybuffer_copy` → RED (named unit test). E6 drop method
+cache → RED (identity + parity). E7 finalizer defer loops → **GREEN** (PR3-M4,
+fixed). E8 A28 enqueue restored → RED (dead-queue test). E9 remove
+`catch_unwind` → hard abort (unattributed but red). E10 corrupt expected.txt by
+one byte → RED on BOTH adapters.
+
+### Dropped / recorded without code change
+
+- E9's unattributed abort: inherent to panics crossing `extern "C"`; annotated.
+- E3b transitive-guard chain: accepted with the record above.
+- Compliance MINOR-7 == soundness m6 (feature coupling): fixed in the MINOR tier.
+
+### Gate — PASSED. Phase 3 is COMPLETE.
+
+All CRITICAL and MAJOR findings closed; MINORs closed (none deferred). Final
+gates re-run directly by the planner, not taken on the agent's word:
+
+```
+cargo test -p webgpu-native-js-core                       61 passed  (also green with .cargo/config.toml removed — env var truly unset)
+cargo test -p javascriptcore-adapter --features jsc       17 passed, 1 ignored (the trampoline measurement)
+cargo test -p quickjs-adapter --features ffi/backend-yawgpu   41 passed
+cargo test --workspace --features ffi/backend-yawgpu      all binaries 0 failed
+cargo clippy (workspace + jsc adapter) -- -D warnings     EXIT=0 both
+cargo fmt --all -- --check                                EXIT=0
+tests/parity/parity.js                                    byte-identical on both engines
+```
+
+The JSC exit gate fired five times during the phase (Q7–Q9), each stop landing a
+core defect before codegen could multiply it — including one (A32) that had been
+broken against every conformant backend since Phase 2 and was visible only to
+the engine that actually uses the copy arm. The boundary bet held: the adapter
+itself required zero core logic changes; every core change during the phase maps
+to a recorded firing or review finding.
+
+### Reflection worth keeping
+
+PR3-C1's shape deserves a rule of thumb: **a generic contract implemented as a
+no-op is a claim, and the claim is about the engine, not the code.** The JSC
+scope compiled, passed every test, and rooted nothing — because under the Tier 1
+engine the same trait obligation happens to be discharged by refcounting.
+Everywhere a `JsEngine` method can be "trivially" implemented, ask what the
+trait's *caller* is relying on the method to guarantee, and write the test
+against the guarantee, not the implementation.

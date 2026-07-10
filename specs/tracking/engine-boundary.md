@@ -1025,3 +1025,12 @@ deferred-unprotect queue). J18's pinning red demo violates J9 in marked test
 code and shows core's A12 verification firing. Bytes-pointer audit: staging,
 transfer product, slice product — all private; the one script-visible use is
 the marked demo.
+
+**Phase 3 COMPLETE (2026-07-10).** Phase Review: 2 CRITICAL / 4 MAJOR / 9 MINOR,
+all closed — full record in `phase-reviews.md` → "Phase 3 Phase Review". The
+block's three open questions are answered in block 04 §6: the JSC scope is the
+**root set** (PR3-C1 — a no-op scope was the phase's worst bug), the any-thread
+finalizer premise is the header's own documented contract, and the settlement
+trampoline costs ≈4 µs/tick. The boundary bet held end to end: zero core logic
+changes for the adapter itself; five exit-gate firings, five core defects landed
+before codegen.

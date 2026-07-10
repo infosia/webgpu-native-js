@@ -153,7 +153,12 @@ unsafe extern "C" {
     /// Tests whether a value is JavaScript `null`.
     fn JSValueIsNull(ctx: JSContextRef, value: JSValueRef) -> bool;
     /// Tests whether a value is a JavaScript BigInt.
+    ///
+    /// This symbol is `API_AVAILABLE(macos(15.0), ios(18.0))`; hard-linking it
+    /// imposes those OS versions as the JavaScriptCore adapter deployment floor.
     fn JSValueIsBigInt(ctx: JSContextRef, value: JSValueRef) -> bool;
+    /// Tests whether an object was created with a specific class.
+    fn JSValueIsObjectOfClass(ctx: JSContextRef, value: JSValueRef, js_class: JSClassRef) -> bool;
     /// Converts a value with JavaScript `ToBoolean`.
     fn JSValueToBoolean(ctx: JSContextRef, value: JSValueRef) -> bool;
     /// Converts a value with JavaScript `ToNumber`.
@@ -352,6 +357,7 @@ struct FinalizerState {
     tearing_down: AtomicBool,
     protect_count: AtomicUsize,
     unprotect_count: AtomicUsize,
+    teardown_mop_up_unprotect_count: AtomicUsize,
 }
 
 impl FinalizerState {
@@ -363,10 +369,14 @@ impl FinalizerState {
             tearing_down: AtomicBool::new(false),
             protect_count: AtomicUsize::new(0),
             unprotect_count: AtomicUsize::new(0),
+            teardown_mop_up_unprotect_count: AtomicUsize::new(0),
         }
     }
 
     fn protect(&self, ctx: JSContextRef, value: JSValueRef) {
+        if ctx.is_null() || value.is_null() {
+            return;
+        }
         // SAFETY: called only on the live context's engine thread.
         unsafe { JSValueProtect(ctx, value) };
         self.protect_count.fetch_add(1, Ordering::Relaxed);
@@ -376,6 +386,9 @@ impl FinalizerState {
     }
 
     fn unprotect(&self, ctx: JSContextRef, value: JSValueRef) {
+        if ctx.is_null() || value.is_null() {
+            return;
+        }
         let removed = self.protected.lock().ok().and_then(|mut protected| {
             let index = protected
                 .iter()
@@ -390,7 +403,7 @@ impl FinalizerState {
     }
 
     fn defer_unprotect(&self, value: JSValueRef) {
-        if self.tearing_down.load(Ordering::Acquire) {
+        if value.is_null() || self.tearing_down.load(Ordering::Acquire) {
             return;
         }
         if let Ok(mut deferred) = self.deferred_unprotects.lock() {
@@ -423,6 +436,8 @@ impl FinalizerState {
             // SAFETY: teardown runs on the engine thread before context release.
             unsafe { JSValueUnprotect(ctx, value.0) };
             self.unprotect_count.fetch_add(1, Ordering::Relaxed);
+            self.teardown_mop_up_unprotect_count
+                .fetch_add(1, Ordering::Relaxed);
         }
     }
 }
@@ -571,34 +586,61 @@ pub struct Context<'a> {
 
 /// Per-call value scope.
 ///
-/// JavaScriptCore values are garbage-collected, so dropping this recorder does
-/// not release them. The non-optional scope remains part of `Context` to keep
-/// the engine boundary's value-ownership obligation explicit (J7/R22).
+/// JavaScriptCore's collector discovers conservative roots on the machine stack,
+/// but values retained in Rust heap allocations are invisible to it. This scope
+/// is therefore the per-call root set: tracking protects a value, escaping
+/// removes that protection while the returned value is still a stack root, and
+/// dropping the scope unprotects every remaining value (J4/J7/R22).
+///
+/// Scope traffic uses `FinalizerState`'s protection ledger rather than a second
+/// accounting path. Scopes always drop on the JavaScript/tick thread before
+/// teardown, so their direct unprotects are legal and clean teardown can prove
+/// that no scope protection was left for forced mop-up.
 pub struct Scope {
+    ctx: JSContextRef,
+    finalizer: Arc<FinalizerState>,
     values: RefCell<Vec<JSValueRef>>,
 }
 
 impl Scope {
-    fn new() -> Self {
+    fn new(ctx: JSContextRef) -> Self {
         Self {
+            ctx,
+            finalizer: Arc::clone(&state_from_context(ctx).finalizer),
             values: RefCell::new(Vec::new()),
         }
     }
 
     fn track(&self, value: JSValueRef) {
+        if self.ctx.is_null() || value.is_null() {
+            return;
+        }
+        self.finalizer.protect(self.ctx, value);
         self.values.borrow_mut().push(value);
     }
 
     fn escape(&self, value: JSValueRef) {
         let mut values = self.values.borrow_mut();
         if let Some(index) = values.iter().position(|candidate| *candidate == value) {
-            values.swap_remove(index);
+            let value = values.swap_remove(index);
+            // The callback return value is still present on this C/Rust stack,
+            // which JSC scans conservatively. Remove the explicit protection
+            // now so scope drop skips it without leaking a protection.
+            self.finalizer.unprotect(self.ctx, value);
+        }
+    }
+}
+
+impl Drop for Scope {
+    fn drop(&mut self) {
+        for value in self.values.get_mut().drain(..) {
+            self.finalizer.unprotect(self.ctx, value);
         }
     }
 }
 
 fn with_scope<R>(ctx: JSContextRef, f: impl FnOnce(Context<'_>) -> R) -> R {
-    let scope = Scope::new();
+    let scope = Scope::new(ctx);
     f(Context { ctx, scope: &scope })
 }
 
@@ -692,7 +734,12 @@ impl Runtime {
     }
 
     /// Wraps a WebGPU instance as a JavaScript `GPU` object.
-    pub fn wrap_gpu(&self, instance: ffi_wgpu::WGPUInstance) -> Result<JSValueRef> {
+    ///
+    /// # Safety
+    ///
+    /// `instance` must be a live non-null handle from this runtime's backend
+    /// and must remain live while the returned wrapper can be used.
+    pub unsafe fn wrap_gpu(&self, instance: ffi_wgpu::WGPUInstance) -> Result<JSValueRef> {
         let value = with_scope(self.raw_context(), |cx| {
             core::wrap_gpu::<Engine>(cx, instance)
         })
@@ -1071,10 +1118,22 @@ impl core::JsEngine for Engine {
     }
 
     fn payload<'a>(
-        _cx: Self::Context<'a>,
+        cx: Self::Context<'a>,
         obj: Self::Value,
         class: core::ClassId,
     ) -> Option<&'a (dyn Any + Send)> {
+        let js_class = state_from_context(cx.ctx)
+            .classes
+            .lock()
+            .ok()
+            .and_then(|classes| classes.get(&class).map(|entry| entry.class))?;
+        // SAFETY: `obj` belongs to `cx` and `js_class` is retained by the
+        // adapter registry. Private data is read only after JSC proves this is
+        // an instance of the requested wrapper class; the global object and
+        // method objects therefore cannot be type-confused with ObjectPayload.
+        if obj.is_null() || !unsafe { JSValueIsObjectOfClass(cx.ctx, obj, js_class) } {
+            return None;
+        }
         let raw = unsafe { JSObjectGetPrivate(obj.cast_mut()) }.cast::<ObjectPayload>();
         let holder = unsafe { raw.as_ref() }?;
         (holder.spec.id == class).then_some(holder.payload.as_ref())
@@ -1147,9 +1206,12 @@ impl core::JsEngine for Engine {
         ))
     }
 
-    fn settle_deferreds(cx: Self::Context<'_>, settlements: Vec<core::DeferredSettlement<Self>>) {
+    fn settle_deferreds(
+        cx: Self::Context<'_>,
+        settlements: Vec<core::DeferredSettlement<Self>>,
+    ) -> core::Result<(), Self::Error> {
         if settlements.is_empty() {
-            return;
+            return Ok(());
         }
         let state = state_from_context(cx.ctx);
         let Some(trampoline) = state.trampoline() else {
@@ -1157,7 +1219,10 @@ impl core::JsEngine for Engine {
                 state.finalizer.unprotect(cx.ctx, deferred.resolve());
                 state.finalizer.unprotect(cx.ctx, deferred.reject());
             }
-            return;
+            return Err(Self::operation_error(
+                cx,
+                "settlement trampoline is unavailable",
+            ));
         };
         let mut functions = Vec::with_capacity(settlements.len());
         let mut values = Vec::with_capacity(settlements.len());
@@ -1172,22 +1237,37 @@ impl core::JsEngine for Engine {
             values.push(value);
             selected.push(function);
         }
-        let mut exception = ptr::null();
-        // SAFETY: vector elements are live values in cx.
-        let function_array = unsafe {
-            JSObjectMakeArray(cx.ctx, functions.len(), functions.as_ptr(), &mut exception)
-        };
-        let value_array = if exception.is_null() {
+        let result = (|| {
+            let mut exception = ptr::null();
             // SAFETY: vector elements are live values in cx.
-            unsafe { JSObjectMakeArray(cx.ctx, values.len(), values.as_ptr(), &mut exception) }
-        } else {
-            ptr::null_mut()
-        };
-        if exception.is_null() && !function_array.is_null() && !value_array.is_null() {
+            let function_array = unsafe {
+                JSObjectMakeArray(cx.ctx, functions.len(), functions.as_ptr(), &mut exception)
+            };
+            if !exception.is_null() {
+                return Err(exception);
+            }
+            if function_array.is_null() {
+                return Err(Self::operation_error(
+                    cx,
+                    "settlement function-array allocation failed",
+                ));
+            }
+            // SAFETY: vector elements are live values in cx.
+            let value_array =
+                unsafe { JSObjectMakeArray(cx.ctx, values.len(), values.as_ptr(), &mut exception) };
+            if !exception.is_null() {
+                return Err(exception);
+            }
+            if value_array.is_null() {
+                return Err(Self::operation_error(
+                    cx,
+                    "settlement value-array allocation failed",
+                ));
+            }
             let arguments = [function_array.cast_const(), value_array.cast_const()];
             // SAFETY: this is the single JavaScript entry for the entire batch,
             // producing one JSC microtask checkpoint on return (J2/F3).
-            let _ = unsafe {
+            let value = unsafe {
                 JSObjectCallAsFunction(
                     cx.ctx,
                     trampoline.cast_mut(),
@@ -1197,10 +1277,21 @@ impl core::JsEngine for Engine {
                     &mut exception,
                 )
             };
-        }
+            if !exception.is_null() {
+                Err(exception)
+            } else if value.is_null() {
+                Err(Self::operation_error(
+                    cx,
+                    "settlement trampoline call failed",
+                ))
+            } else {
+                Ok(())
+            }
+        })();
         for function in selected {
             state.finalizer.unprotect(cx.ctx, function);
         }
+        result
     }
 
     fn drain_microtasks(_cx: Self::Context<'_>) -> core::Result<(), Self::Error> {
@@ -1234,6 +1325,9 @@ impl core::JsEngine for Engine {
             // SAFETY: staging is a private, engine-owned ArrayBuffer that has
             // never reached script. Pinning this staging remnant is permitted
             // by J8/J9; only its unpinned transfer product is returned.
+            // This assumes untampered built-ins (trusted scripts, CLAUDE.md
+            // invariant 8); a tampered `slice`/`transfer` could hand back a
+            // script-visible buffer.
             let staging_ptr =
                 unsafe { JSObjectGetArrayBufferBytesPtr(cx.ctx, staging_object, &mut exception) };
             if !exception.is_null() {
@@ -1269,6 +1363,9 @@ impl core::JsEngine for Engine {
                 let mut exception = ptr::null();
                 // SAFETY: product is the private ArrayBuffer returned by
                 // transfer(); script can only see the now-detached `value`.
+                // This assumes untampered built-ins (trusted scripts, CLAUDE.md
+                // invariant 8); a tampered `slice`/`transfer` could hand back a
+                // script-visible buffer.
                 let product_ptr = unsafe {
                     JSObjectGetArrayBufferBytesPtr(cx.ctx, product_object, &mut exception)
                 };
@@ -1320,6 +1417,8 @@ impl core::JsEngine for Engine {
         let mut exception = ptr::null();
         // SAFETY: product is the private ArrayBuffer returned by slice(); the
         // script-reachable input `value` has never had its pointer requested.
+        // This assumes untampered built-ins (trusted scripts, CLAUDE.md invariant
+        // 8); a tampered `slice`/`transfer` could hand back a script-visible buffer.
         let product_ptr =
             unsafe { JSObjectGetArrayBufferBytesPtr(cx.ctx, product_object, &mut exception) };
         if !exception.is_null() {
@@ -1381,6 +1480,8 @@ fn make_engine_arraybuffer(cx: Context<'_>, len: usize) -> core::Result<JSValueR
     let mut exception = ptr::null();
     // SAFETY: ArrayBuffer is the live built-in constructor from this context;
     // the numeric length argument belongs to the same call scope.
+    // This assumes untampered built-ins (trusted scripts, CLAUDE.md invariant 8);
+    // a tampered `slice`/`transfer` could hand back a script-visible buffer.
     let object = unsafe {
         JSObjectCallAsConstructor(
             cx.ctx,
@@ -1467,7 +1568,7 @@ unsafe extern "C" fn wrapper_get_property(
     property_name: JSStringRef,
     exception: *mut JSValueRef,
 ) -> JSValueRef {
-    let scope = Scope::new();
+    let scope = Scope::new(ctx);
     let cx = Context { ctx, scope: &scope };
     match catch_unwind(AssertUnwindSafe(|| {
         let name = js_string_to_rust(property_name);
@@ -1532,7 +1633,7 @@ unsafe extern "C" fn wrapper_set_property(
     value: JSValueRef,
     exception: *mut JSValueRef,
 ) -> bool {
-    let scope = Scope::new();
+    let scope = Scope::new(ctx);
     let cx = Context { ctx, scope: &scope };
     match catch_unwind(AssertUnwindSafe(|| {
         let name = js_string_to_rust(property_name);
@@ -1577,7 +1678,7 @@ unsafe extern "C" fn method_call(
     arguments: *const JSValueRef,
     exception: *mut JSValueRef,
 ) -> JSValueRef {
-    let scope = Scope::new();
+    let scope = Scope::new(ctx);
     let cx = Context { ctx, scope: &scope };
     match catch_unwind(AssertUnwindSafe(|| {
         let raw = unsafe { JSObjectGetPrivate(function) }.cast::<MethodTarget>();
@@ -2211,7 +2312,7 @@ mod tests {
         let setup = native_setup();
         let runtime = Runtime::new().expect("JSC runtime");
         let device = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
-        let gpu = runtime.wrap_gpu(setup.instance).expect("wrap gpu");
+        let gpu = unsafe { runtime.wrap_gpu(setup.instance) }.expect("wrap gpu");
         runtime
             .set_global_value("device", device)
             .expect("set device");
@@ -2239,16 +2340,53 @@ mod tests {
     }
 
     #[test]
-    fn scope_is_non_optional_and_records_values() {
+    fn scope_protects_on_track_unprotects_on_drop_and_escape_skips_drop_release() {
         let runtime = Runtime::new().expect("JSC runtime");
-        let scope = Scope::new();
-        let cx = Context {
-            ctx: runtime.raw_context(),
-            scope: &scope,
-        };
-        let global = Engine::global(cx);
-        assert!(!Engine::is_undefined(cx, global));
-        assert_eq!(scope.values.borrow().as_slice(), &[global]);
+        let counters = Arc::clone(&runtime.state.finalizer);
+        let protect_start = counters.protect_count.load(Ordering::Relaxed);
+        let unprotect_start = counters.unprotect_count.load(Ordering::Relaxed);
+        {
+            let scope = Scope::new(runtime.raw_context());
+            let cx = Context {
+                ctx: runtime.raw_context(),
+                scope: &scope,
+            };
+            let global = Engine::global(cx);
+            assert!(!Engine::is_undefined(cx, global));
+            assert_eq!(scope.values.borrow().as_slice(), &[global]);
+            assert_eq!(
+                counters.protect_count.load(Ordering::Relaxed),
+                protect_start + 1
+            );
+            assert_eq!(
+                counters.unprotect_count.load(Ordering::Relaxed),
+                unprotect_start
+            );
+        }
+        assert_eq!(
+            counters.unprotect_count.load(Ordering::Relaxed),
+            unprotect_start + 1
+        );
+
+        let unprotect_before_escape = counters.unprotect_count.load(Ordering::Relaxed);
+        let unprotect_after_escape;
+        {
+            let scope = Scope::new(runtime.raw_context());
+            let cx = Context {
+                ctx: runtime.raw_context(),
+                scope: &scope,
+            };
+            let global = Engine::global(cx);
+            scope.escape(global);
+            assert!(scope.values.borrow().is_empty());
+            unprotect_after_escape = counters.unprotect_count.load(Ordering::Relaxed);
+            assert_eq!(unprotect_after_escape, unprotect_before_escape + 1);
+        }
+        assert_eq!(
+            counters.unprotect_count.load(Ordering::Relaxed),
+            unprotect_after_escape,
+            "scope drop must skip the protection already removed by escape"
+        );
     }
 
     #[test]
@@ -2304,6 +2442,37 @@ mod tests {
     }
 
     #[test]
+    fn detached_device_method_rejects_every_incompatible_receiver_with_type_error() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("JSC runtime");
+        let device = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("device", device)
+            .expect("set device");
+        eval(
+            &runtime,
+            r#"
+                var f = device.createBuffer;
+                var otherWrapperOfDifferentClass = device.queue;
+                function mustThrowTypeError(call, label) {
+                    var caught = false;
+                    try { call(); }
+                    catch (error) { caught = error instanceof TypeError; }
+                    if (!caught) throw new Error(label + ' did not throw TypeError');
+                }
+                mustThrowTypeError(function () { f(); }, 'detached call');
+                mustThrowTypeError(function () { f.call(f); }, 'method receiver');
+                mustThrowTypeError(
+                    function () { f.call(otherWrapperOfDifferentClass); },
+                    'different wrapper receiver'
+                );
+            "#,
+            "payload-class-identity.js",
+        );
+        runtime.clear_global("device").expect("clear device");
+    }
+
+    #[test]
     fn protections_balance_at_teardown_without_forcing_gc() {
         let setup = native_setup();
         let runtime = Runtime::new().expect("JSC runtime");
@@ -2312,22 +2481,83 @@ mod tests {
         runtime
             .set_global_value("device", device)
             .expect("set device");
-        eval(
-            &runtime,
-            r#"
+        runtime
+            .eval_unprotected(
+                r#"
                 if (device.createBuffer !== device.createBuffer) {
                     throw new Error('method identity was not stable');
                 }
                 void device.queue;
-                void device.createBuffer({size: 4, usage: 8});
             "#,
-            "protection-balance.js",
-        );
+                "protection-balance.js",
+            )
+            .expect("method identity and payload cache");
+        runtime.clear_global("device").expect("clear device");
+        // F5 means ordinary JSC collection cannot make this a clean teardown.
+        // Invoke the real owner finalizer directly, then prevent context release
+        // from finalizing the already-consumed ObjectPayload a second time.
+        unsafe { super::wrapper_finalize(device.cast_mut()) };
+        assert!(unsafe { super::JSObjectSetPrivate(device.cast_mut(), ptr::null_mut()) });
+        let _ = runtime.drain_releases().expect("owner release drain");
         drop(runtime);
+        assert_eq!(
+            counters
+                .teardown_mop_up_unprotect_count
+                .load(Ordering::Relaxed),
+            0,
+            "clean teardown must not force-unprotect an owner's value"
+        );
         assert_eq!(
             counters.protect_count.load(Ordering::Relaxed),
             counters.unprotect_count.load(Ordering::Relaxed)
         );
+    }
+
+    #[test]
+    fn real_wrapper_finalize_defers_cached_method_and_payload_unprotects_until_tick() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("JSC runtime");
+        let device = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("device", device)
+            .expect("set device");
+        runtime
+            .eval_unprotected(
+                "void device.createBuffer; void device.queue;",
+                "real-wrapper-finalize-setup.js",
+            )
+            .expect("cache method and payload value");
+        runtime.clear_global("device").expect("clear device");
+        assert!(runtime
+            .state
+            .finalizer
+            .deferred_unprotects
+            .lock()
+            .expect("deferred queue")
+            .is_empty());
+
+        unsafe { super::wrapper_finalize(device.cast_mut()) };
+        assert!(unsafe { super::JSObjectSetPrivate(device.cast_mut(), ptr::null_mut()) });
+        assert!(
+            runtime
+                .state
+                .finalizer
+                .deferred_unprotects
+                .lock()
+                .expect("deferred queue")
+                .len()
+                >= 2,
+            "the production finalizer must defer both cached method and payload value"
+        );
+
+        unsafe { runtime.tick(setup.instance) }.expect("tick drains deferred unprotects");
+        assert!(runtime
+            .state
+            .finalizer
+            .deferred_unprotects
+            .lock()
+            .expect("deferred queue")
+            .is_empty());
     }
 
     fn deliberately_pin_script_visible_arraybuffer(runtime: &Runtime, name: &str) {
@@ -2415,7 +2645,7 @@ mod tests {
     fn two_settlements_share_one_frame_and_exact_order() {
         let setup = native_setup();
         let runtime = Runtime::new().expect("JSC runtime");
-        let gpu = runtime.wrap_gpu(setup.instance).expect("wrap gpu");
+        let gpu = unsafe { runtime.wrap_gpu(setup.instance) }.expect("wrap gpu");
         runtime.set_global_value("gpu", gpu).expect("set gpu");
         eval(
             &runtime,
@@ -2448,6 +2678,189 @@ mod tests {
             "#,
             "settle-order-check.js",
         );
+    }
+
+    #[test]
+    fn tick_surfaces_settlement_trampoline_exception_without_leaking_resolvers() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("JSC runtime");
+        let old_trampoline = runtime
+            .state
+            .take_trampoline()
+            .expect("installed trampoline");
+        runtime
+            .state
+            .finalizer
+            .unprotect(runtime.raw_context(), old_trampoline);
+        let throwing_trampoline = runtime
+            .eval_unprotected(
+                "(function() { throw new Error('settlement trampoline boom'); })",
+                "throwing-settle-trampoline.js",
+            )
+            .expect("throwing trampoline");
+        runtime
+            .state
+            .finalizer
+            .protect(runtime.raw_context(), throwing_trampoline);
+        runtime.state.set_trampoline(throwing_trampoline);
+
+        let deferred = super::with_scope(runtime.raw_context(), |cx| {
+            Engine::new_promise(cx).expect("promise").1
+        });
+        let resolve = deferred.resolve();
+        let reject = deferred.reject();
+        let direct_error = super::with_scope(runtime.raw_context(), |cx| {
+            Engine::settle_deferreds(cx, vec![(deferred, Ok(Engine::undefined(cx)))])
+        });
+        assert!(direct_error.is_err(), "throwing trampoline must fail");
+        let protected = runtime
+            .state
+            .finalizer
+            .protected
+            .lock()
+            .expect("protection ledger");
+        assert!(
+            protected
+                .iter()
+                .all(|value| value.0 != resolve && value.0 != reject),
+            "both deferred resolver protections must be released on failure"
+        );
+        drop(protected);
+
+        let gpu = unsafe { runtime.wrap_gpu(setup.instance) }.expect("wrap gpu");
+        runtime.set_global_value("gpu", gpu).expect("set gpu");
+        eval(
+            &runtime,
+            "void gpu.requestAdapter();",
+            "throwing-settle-request.js",
+        );
+
+        let error = unsafe { runtime.tick(setup.instance) }
+            .expect_err("trampoline exception must escape tick");
+
+        assert!(
+            format!("{error:?}").contains("settlement trampoline boom"),
+            "unexpected tick error: {error:?}"
+        );
+    }
+
+    #[test]
+    #[ignore = "manual trampoline cost measurement"]
+    fn measure_batched_trampoline_against_direct_settlement_calls() {
+        const TICKS: usize = 200;
+        const SETTLEMENTS_PER_TICK: usize = 8;
+
+        fn deferreds(runtime: &Runtime) -> Vec<core::Deferred<Engine>> {
+            (0..TICKS * SETTLEMENTS_PER_TICK)
+                .map(|_| {
+                    super::with_scope(runtime.raw_context(), |cx| {
+                        Engine::new_promise(cx).expect("promise").1
+                    })
+                })
+                .collect()
+        }
+
+        let runtime = Runtime::new().expect("JSC runtime");
+        let batched = deferreds(&runtime);
+        let direct = deferreds(&runtime);
+
+        let batched_start = std::time::Instant::now();
+        for batch in batched.chunks(SETTLEMENTS_PER_TICK) {
+            super::with_scope(runtime.raw_context(), |cx| {
+                let settlements = batch
+                    .iter()
+                    .map(|deferred| {
+                        (
+                            core::Deferred::new(deferred.resolve(), deferred.reject()),
+                            Ok(Engine::undefined(cx)),
+                        )
+                    })
+                    .collect();
+                Engine::settle_deferreds(cx, settlements).expect("batched settlement");
+            });
+        }
+        let batched_elapsed = batched_start.elapsed();
+
+        let direct_start = std::time::Instant::now();
+        for deferred in direct {
+            let argument = unsafe { super::JSValueMakeUndefined(runtime.raw_context()) };
+            let mut exception = ptr::null();
+            let result = unsafe {
+                super::JSObjectCallAsFunction(
+                    runtime.raw_context(),
+                    deferred.resolve().cast_mut(),
+                    ptr::null_mut(),
+                    1,
+                    &argument,
+                    &mut exception,
+                )
+            };
+            runtime
+                .state
+                .finalizer
+                .unprotect(runtime.raw_context(), deferred.resolve());
+            runtime
+                .state
+                .finalizer
+                .unprotect(runtime.raw_context(), deferred.reject());
+            assert!(exception.is_null(), "direct resolver call threw");
+            assert!(!result.is_null(), "direct resolver call returned null");
+        }
+        let direct_elapsed = direct_start.elapsed();
+
+        println!(
+            "trampoline cost: {TICKS} ticks x {SETTLEMENTS_PER_TICK} settlements: batched={batched_elapsed:?}, direct={direct_elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn j18_j1_direct_resolver_runs_then_before_jsc_call_returns() {
+        let runtime = Runtime::new().expect("JSC runtime");
+        let (promise, deferred) = super::with_scope(runtime.raw_context(), |cx| {
+            let (promise, deferred) = Engine::new_promise(cx).expect("promise");
+            cx.scope.escape(promise);
+            (promise, deferred)
+        });
+        runtime
+            .set_global_value("j18Promise", promise)
+            .expect("set promise");
+        runtime
+            .eval_unprotected(
+                "var j18Ran = false; j18Promise.then(function () { j18Ran = true; });",
+                "j18-j1-jsc-setup.js",
+            )
+            .expect("install continuation");
+
+        let argument = unsafe { super::JSValueMakeUndefined(runtime.raw_context()) };
+        let mut exception = ptr::null();
+        // J18/J1 counterfactual: bypass settlement machinery and call the
+        // resolver directly. JSC's F2 checkpoint runs the continuation before
+        // this C call returns, which is the divergence J1 exists to neutralize.
+        let result = unsafe {
+            super::JSObjectCallAsFunction(
+                runtime.raw_context(),
+                deferred.resolve().cast_mut(),
+                ptr::null_mut(),
+                1,
+                &argument,
+                &mut exception,
+            )
+        };
+        assert!(exception.is_null(), "direct resolver call threw");
+        assert!(!result.is_null(), "direct resolver call returned null");
+        assert!(
+            global_bool(&runtime, "j18Ran"),
+            "JSC continuation must already have run when resolver call returns"
+        );
+        runtime
+            .state
+            .finalizer
+            .unprotect(runtime.raw_context(), deferred.resolve());
+        runtime
+            .state
+            .finalizer
+            .unprotect(runtime.raw_context(), deferred.reject());
+        runtime.clear_global("j18Promise").expect("clear promise");
     }
 
     #[test]
@@ -2499,7 +2912,7 @@ mod tests {
     fn promise_continuation_can_reenter_device_method() {
         let setup = native_setup();
         let runtime = Runtime::new().expect("JSC runtime");
-        let gpu = runtime.wrap_gpu(setup.instance).expect("wrap gpu");
+        let gpu = unsafe { runtime.wrap_gpu(setup.instance) }.expect("wrap gpu");
         let device = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
         runtime.set_global_value("gpu", gpu).expect("set gpu");
         runtime
@@ -2546,6 +2959,8 @@ mod tests {
 
     #[test]
     fn panic_in_method_callback_is_a_js_exception() {
+        // If the callback unwind guard is deleted, the failure mode is an
+        // unattributed process abort, inherent to a panic crossing `extern "C"`.
         let runtime = Runtime::new().expect("JSC runtime");
         let instance = super::with_scope(runtime.raw_context(), |cx| {
             Engine::register_class(cx, panic_spec()).expect("register class");
@@ -2571,7 +2986,7 @@ mod tests {
         let setup = native_setup();
         {
             let runtime = Runtime::new().expect("JSC runtime");
-            let gpu = runtime.wrap_gpu(setup.instance).expect("wrap gpu");
+            let gpu = unsafe { runtime.wrap_gpu(setup.instance) }.expect("wrap gpu");
             runtime.set_global_value("gpu", gpu).expect("set gpu");
             eval(
                 &runtime,

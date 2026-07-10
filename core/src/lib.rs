@@ -354,7 +354,10 @@ pub trait JsEngine: Sized {
     /// Creates a promise and its owned deferred resolving functions.
     fn new_promise(cx: Self::Context<'_>) -> Result<(Self::Value, Deferred<Self>), Self::Error>;
     /// Settles a batch of deferred promises inside one JavaScript frame.
-    fn settle_deferreds(cx: Self::Context<'_>, settlements: Vec<DeferredSettlement<Self>>);
+    fn settle_deferreds(
+        cx: Self::Context<'_>,
+        settlements: Vec<DeferredSettlement<Self>>,
+    ) -> Result<(), Self::Error>;
     /// Drains engine microtasks scheduled by promise settlement.
     fn drain_microtasks(cx: Self::Context<'_>) -> Result<(), Self::Error>;
     /// Creates a script-visible ArrayBuffer over external memory.
@@ -599,14 +602,14 @@ impl SettlementQueue {
     pub fn drain<E: JsEngine + 'static>(
         &self,
         cx: E::Context<'_>,
-    ) -> std::result::Result<usize, QueueError> {
+    ) -> std::result::Result<usize, TickError<E::Error>> {
         let mut requests = Vec::new();
         loop {
             let request = {
                 let mut queued = self
                     .requests
                     .lock()
-                    .map_err(|_| QueueError::Poisoned("settlement queue"))?;
+                    .map_err(|_| TickError::Queue(QueueError::Poisoned("settlement queue")))?;
                 queued.pop_front()
             };
             let Some(request) = request else {
@@ -614,12 +617,12 @@ impl SettlementQueue {
             };
             let request = request
                 .downcast::<SettlementRequest<E>>()
-                .map_err(|_| QueueError::UnexpectedSettlementType)?;
+                .map_err(|_| TickError::Queue(QueueError::UnexpectedSettlementType))?;
             requests.push(request.settle(cx));
         }
         let count = requests.len();
         if !requests.is_empty() {
-            E::settle_deferreds(cx, requests);
+            E::settle_deferreds(cx, requests).map_err(TickError::Engine)?;
         }
         Ok(count)
     }
@@ -956,12 +959,12 @@ pub enum QueueError {
 }
 
 /// Failure from the engine-neutral four-step tick skeleton.
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum TickError<E> {
     /// Promise settlement or release queue failure.
     Queue(QueueError),
-    /// Engine microtask drain failure.
+    /// Engine promise-settlement or microtask-drain failure.
     Engine(E),
 }
 
@@ -981,7 +984,7 @@ pub unsafe fn tick<E: JsEngine + 'static>(
 ) -> std::result::Result<usize, TickError<E::Error>> {
     let env = E::environment(cx);
     unsafe { (env.gpu().instance_process_events)(instance) };
-    env.settlements().drain::<E>(cx).map_err(TickError::Queue)?;
+    env.settlements().drain::<E>(cx)?;
     E::drain_microtasks(cx).map_err(TickError::Engine)?;
     env.queue().drain().map_err(TickError::Queue)
 }
@@ -1024,37 +1027,43 @@ impl<E: JsEngine> DevicePayload<E> {
 unsafe impl<E: JsEngine> Send for DevicePayload<E> {}
 
 struct HeldValue<E: JsEngine> {
-    value: std::cell::UnsafeCell<Option<E::Value>>,
+    value: Mutex<Option<E::Value>>,
 }
 
 impl<E: JsEngine> HeldValue<E> {
     fn empty() -> Self {
         Self {
-            value: std::cell::UnsafeCell::new(None),
+            value: Mutex::new(None),
         }
     }
 
     fn get(&self) -> Option<E::Value> {
-        // SAFETY: wrapper access and GC tracing are confined to the engine
-        // thread and cannot run concurrently with a property getter.
-        unsafe { *self.value.get() }
+        *self
+            .value
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn set(&self, value: E::Value) {
-        // SAFETY: the queue cache is initialized at most once by the engine
-        // thread; GC tracing can only observe it between JS entry points.
-        unsafe { *self.value.get() = Some(value) };
+        *self
+            .value
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(value);
     }
 
     fn take(&self) -> Option<E::Value> {
-        // SAFETY: payload value release runs after the wrapper is unreachable,
-        // with no concurrent getter or trace operation.
-        unsafe { &mut *self.value.get() }.take()
+        self.value
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
     }
 }
 
-// SAFETY: the held engine value is never dereferenced off the engine thread;
-// finalizers only pass it to the adapter-provided value-release operation.
+// SAFETY: `set`/`get` on the engine thread and `take` from a potentially
+// arbitrary finalizer thread all acquire `value`, so the mutex release/acquire
+// operations establish the required happens-before edges for the slot itself.
+// The finalizer only copies the opaque engine value into the adapter-provided
+// release closure; it never dereferences it or calls a context-taking engine API.
 unsafe impl<E: JsEngine> Send for HeldValue<E> {}
 
 /// Payload stored by a `GPUBuffer` wrapper.
@@ -1149,20 +1158,20 @@ impl<E: JsEngine> TracedValues<E> {
     }
 }
 
-// SAFETY: `TracedValues` stores JS mapped-range values, not WGPU handles. The
-// vector is mutated by buffer methods and read by engine GC tracing on the engine
-// thread; it is present in `BufferPayload` only so a finalizer can move the
-// payload, clear the vector, and release the held JS values without concurrent
-// access from WebGPU callbacks.
-// SAFETY: Contains JS mapped-range values only; no WGPU handles are dereferenced off-thread.
+// SAFETY: `push` runs only from `buffer_get_mapped_range` while
+// `with_buffer_payload_state` holds `BufferPayload::state`. Engine-thread clears
+// run under that same lock in `detach_all_ranges`, and an arbitrary-thread
+// finalizer clears only through `BufferPayload::release_mapped_range_values`,
+// which acquires the same mutex first. That mutex is the happens-before edge
+// between the last mutation and finalizer access. The moved elements are opaque
+// engine values passed to the adapter release closure, never dereferenced here.
 unsafe impl<E: JsEngine> Send for TracedValues<E> {}
-// SAFETY: `TracedValues` uses interior mutability for GC tracing. This is sound
-// for QuickJS because tracing and finalizers run on the engine thread and cannot
-// race JS entry points. A future engine with any-thread tracing/finalizers must
-// replace this storage or add synchronization before enabling mapped ranges.
-// Shared references are used only to visit or clear JS values, not to dereference
-// native handles.
-// SAFETY: Shared access is engine GC/finalizer bookkeeping and does not use WGPU handles.
+// SAFETY: QuickJS is the only adapter whose `trace_payload_values` calls `visit`;
+// its `gc_mark` runs on the engine thread and cannot race a JS entry point.
+// JavaScriptCore tracing is a no-op. Mutation versus a potentially any-thread
+// finalizer is separately ordered by the `BufferPayload::state` mutex described
+// above: `with_buffer_payload_state` holds it for `push`/engine clears, and
+// `release_mapped_range_values` holds it for finalizer clear/release.
 unsafe impl<E: JsEngine> Sync for TracedValues<E> {}
 
 /// Mutable state of a `GPUBuffer` wrapper.
@@ -3623,6 +3632,7 @@ fn detach_all_ranges<E: JsEngine>(
     flush: bool,
 ) -> Result<(), E::Error> {
     let ranges = std::mem::take(&mut state.ranges);
+    let mut first_error = None;
     for range in ranges {
         let mut copy_back = Vec::new();
         let should_copy_back = flush
@@ -3634,16 +3644,17 @@ fn detach_all_ranges<E: JsEngine>(
         } else {
             None
         };
-        if let Err(error) = E::detach_arraybuffer(cx, range.value, out) {
-            E::release_value(cx, range.value);
-            return Err(error);
-        }
+        let detach_result = E::detach_arraybuffer(cx, range.value, out);
         let detached = E::arraybuffer_len(cx, range.value) == Some(0);
-        if !detached {
-            E::release_value(cx, range.value);
-            return Err(E::operation_error(cx, "mapped range detach failed"));
-        }
-        if should_copy_back {
+        if let Err(error) = detach_result {
+            if first_error.is_none() {
+                first_error = Some(error);
+            }
+        } else if !detached {
+            if first_error.is_none() {
+                first_error = Some(E::operation_error(cx, "mapped range detach failed"));
+            }
+        } else if should_copy_back {
             // SAFETY: `native_ptr` was returned for `size` bytes when this JS
             // range was created and remains valid until native unmap/destroy,
             // both of which run only after `detach_all_ranges` returns.
@@ -3655,7 +3666,7 @@ fn detach_all_ranges<E: JsEngine>(
         E::release_value(cx, range.value);
     }
     payload.traced_values.clear();
-    Ok(())
+    first_error.map_or(Ok(()), Err)
 }
 
 fn mapped_range_ptr<E: JsEngine>(

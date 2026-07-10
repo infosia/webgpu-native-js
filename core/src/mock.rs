@@ -49,6 +49,7 @@ pub struct Runtime {
     reclaimed_values: Cell<usize>,
     reclaimed_handles: RefCell<Vec<Value>>,
     detach_noop: Cell<bool>,
+    detach_noop_value: Cell<Option<Value>>,
     duplicated_values: RefCell<BTreeMap<Value, usize>>,
     property_errors: RefCell<BTreeMap<(Value, String), String>>,
     property_value_errors: RefCell<BTreeMap<(Value, Value), String>>,
@@ -86,6 +87,7 @@ impl Runtime {
             reclaimed_values: Cell::new(0),
             reclaimed_handles: RefCell::new(Vec::new()),
             detach_noop: Cell::new(false),
+            detach_noop_value: Cell::new(None),
             duplicated_values: RefCell::new(BTreeMap::new()),
             property_errors: RefCell::new(BTreeMap::new()),
             property_value_errors: RefCell::new(BTreeMap::new()),
@@ -263,6 +265,11 @@ impl Runtime {
         self.detach_noop.set(value);
     }
 
+    /// Makes detach silently no-op for one selected ArrayBuffer.
+    pub fn set_detach_noop_for(&self, value: Value) {
+        self.detach_noop_value.set(Some(self.canonical(value)));
+    }
+
     /// Reads a copy of an ArrayBuffer's bytes while it is attached.
     #[must_use]
     pub fn read_arraybuffer(&self, value: Value) -> Option<Vec<u8>> {
@@ -344,11 +351,13 @@ impl Runtime {
 
 impl Drop for Runtime {
     fn drop(&mut self) {
-        let duplicated = self.duplicated_values.borrow();
-        assert!(
-            duplicated.is_empty(),
-            "mock duplicated values were not released: {duplicated:?}"
-        );
+        if !std::thread::panicking() {
+            let duplicated = self.duplicated_values.borrow();
+            assert!(
+                duplicated.is_empty(),
+                "mock duplicated values were not released: {duplicated:?}"
+            );
+        }
     }
 }
 
@@ -731,7 +740,10 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
         Ok((promise, Deferred::new(resolve, reject)))
     }
 
-    fn settle_deferreds(cx: Self::Context<'_>, settlements: Vec<crate::DeferredSettlement<Self>>) {
+    fn settle_deferreds(
+        cx: Self::Context<'_>,
+        settlements: Vec<crate::DeferredSettlement<Self>>,
+    ) -> Result<(), Self::Error> {
         cx.runtime
             .settle_calls
             .set(cx.runtime.settle_calls.get() + 1);
@@ -766,6 +778,7 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
                 }
             });
         }
+        Ok(())
     }
 
     fn drain_microtasks(_cx: Self::Context<'_>) -> Result<(), Self::Error> {
@@ -802,7 +815,9 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
         value: Self::Value,
         out: Option<&mut [u8]>,
     ) -> Result<(), Self::Error> {
-        if cx.runtime.detach_noop.get() {
+        if cx.runtime.detach_noop.get()
+            || cx.runtime.detach_noop_value.get() == Some(cx.runtime.canonical(value))
+        {
             return Ok(());
         }
         cx.runtime
@@ -2551,7 +2566,9 @@ mod tests {
             .expect("enqueue device");
         assert_eq!(
             rt.env.settlements().drain::<Engine>(cx),
-            Err(QueueError::UnexpectedSettlementType)
+            Err(crate::TickError::Queue(
+                QueueError::UnexpectedSettlementType
+            ))
         );
         assert_eq!(rt.queue().drain(), Ok(1));
         GPU_STATE.with(|state| {
@@ -2986,6 +3003,54 @@ mod tests {
     }
 
     #[test]
+    fn detach_failure_still_processes_and_releases_every_mapped_range() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<MockEngine<true>>(cx, fake_device()) }.expect("device");
+        let desc = descriptor(
+            &rt,
+            &[
+                ("size", rt.number(12.0)),
+                ("usage", rt.number(2.0)),
+                ("mappedAtCreation", rt.bool(true)),
+            ],
+        );
+        let buffer = device_create_buffer::<MockEngine<true>>(cx, device, &[desc]).expect("buffer");
+        let first = buffer_get_mapped_range::<MockEngine<true>>(
+            cx,
+            buffer,
+            &[rt.number(0.0), rt.number(4.0)],
+        )
+        .expect("first range");
+        let middle = buffer_get_mapped_range::<MockEngine<true>>(
+            cx,
+            buffer,
+            &[rt.number(4.0), rt.number(4.0)],
+        )
+        .expect("middle range");
+        let last = buffer_get_mapped_range::<MockEngine<true>>(
+            cx,
+            buffer,
+            &[rt.number(8.0), rt.number(4.0)],
+        )
+        .expect("last range");
+        rt.set_detach_noop_for(middle);
+
+        let error = buffer_unmap::<MockEngine<true>>(cx, buffer, &[])
+            .expect_err("middle detach verification must fail");
+
+        assert_eq!(error, "OperationError: mapped range detach failed");
+        assert_eq!(MockEngine::<true>::arraybuffer_len(cx, first), Some(0));
+        assert_eq!(MockEngine::<true>::arraybuffer_len(cx, middle), Some(4));
+        assert_eq!(MockEngine::<true>::arraybuffer_len(cx, last), Some(0));
+        assert!(
+            rt.duplicated_values.borrow().is_empty(),
+            "every mapped-range value must be released even after an earlier failure"
+        );
+    }
+
+    #[test]
     #[should_panic(expected = "mock duplicated values were not released")]
     fn r19_mock_catches_tracked_range_dropped_without_release() {
         reset_gpu();
@@ -3134,11 +3199,12 @@ mod tests {
         let resolve = deferred.resolve();
         let reject = deferred.reject();
         let first = rt.number(1.0);
-        Engine::settle_deferreds(cx, vec![(deferred, Ok(first))]);
+        Engine::settle_deferreds(cx, vec![(deferred, Ok(first))]).expect("first settlement");
         Engine::settle_deferreds(
             cx,
             vec![(Deferred::new(resolve, reject), Err(rt.string("late")))],
-        );
+        )
+        .expect("late settlement call");
 
         assert_eq!(rt.promise_result(promise), Some(Ok(first)));
     }
