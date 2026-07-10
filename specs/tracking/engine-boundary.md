@@ -1337,3 +1337,9 @@ survivors. Standing limitation recorded: JSC's F5 makes finalizer-driven
 lifetime bugs structurally untestable under the iOS production engine —
 lifetime coverage lives in core mocks and QuickJS; keep that in mind whenever
 a retention bug class appears. Parity: 95 lines.
+
+**Windows check attempted honestly (2026-07-11):** the MSVC Rust target is
+installed on this macOS host, but `cargo check --target x86_64-pc-windows-msvc`
+fails in ffi's build script — bindgen cannot resolve a Windows libc sysroot
+(`math.h` not found) from macOS. Per block 03's own wording: no Windows run is
+implied; a real Windows verification needs the Windows dev machine.
