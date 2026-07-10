@@ -52,6 +52,7 @@ add_ref = [
 no_add_ref = [
   { interface = "GPUCommandEncoder", reason = "the single-use encoder is adopted and never retained" },
   { interface = "GPUComputePassEncoder", reason = "the pass encoder is single-use and never retained" },
+  { interface = "GPURenderPassEncoder", reason = "the pass encoder is single-use and never retained" },
   { interface = "GPUCommandBuffer", reason = "the finished command buffer is adopted and consumed by submit" },
 ]
 extra_symbols = [
@@ -116,7 +117,7 @@ members = []
 
 [[subset]]
 interface = "GPUQueue"
-members = ["writeBuffer", "submit", "onSubmittedWorkDone"]
+members = ["writeBuffer", "writeTexture", "submit", "onSubmittedWorkDone"]
 
 [[subset]]
 interface = "GPUShaderModule"
@@ -148,11 +149,33 @@ members = []
 
 [[subset]]
 interface = "GPUCommandEncoder"
-members = ["beginComputePass", "copyBufferToBuffer", "finish"]
+members = [
+  "beginComputePass",
+  "beginRenderPass",
+  "copyBufferToBuffer",
+  "copyBufferToTexture",
+  "copyTextureToBuffer",
+  "copyTextureToTexture",
+  "finish",
+]
 
 [[subset]]
 interface = "GPUComputePassEncoder"
 members = ["setPipeline", "setBindGroup", "dispatchWorkgroups", "end"]
+
+[[subset]]
+interface = "GPURenderPassEncoder"
+members = [
+  "setPipeline",
+  "setVertexBuffer",
+  "setIndexBuffer",
+  "setBindGroup",
+  "draw",
+  "drawIndexed",
+  "setViewport",
+  "setScissorRect",
+  "end",
+]
 
 [[subset]]
 interface = "GPUCommandBuffer"
@@ -235,6 +258,11 @@ path = "queue_write_buffer"
 
 [[lifecycle.methods]]
 interface = "GPUQueue"
+member = "writeTexture"
+path = "queue_write_texture"
+
+[[lifecycle.methods]]
+interface = "GPUQueue"
 member = "submit"
 path = "queue_submit"
 
@@ -254,6 +282,26 @@ reason = "preserved quirk: the shipped class table reports the legacy five-argum
 interface = "GPUCommandEncoder"
 member = "beginComputePass"
 path = "command_encoder_begin_compute_pass"
+
+[[lifecycle.methods]]
+interface = "GPUCommandEncoder"
+member = "beginRenderPass"
+path = "command_encoder_begin_render_pass"
+
+[[lifecycle.methods]]
+interface = "GPUCommandEncoder"
+member = "copyBufferToTexture"
+path = "command_encoder_copy_buffer_to_texture"
+
+[[lifecycle.methods]]
+interface = "GPUCommandEncoder"
+member = "copyTextureToBuffer"
+path = "command_encoder_copy_texture_to_buffer"
+
+[[lifecycle.methods]]
+interface = "GPUCommandEncoder"
+member = "copyTextureToTexture"
+path = "command_encoder_copy_texture_to_texture"
 
 [[lifecycle.methods]]
 interface = "GPUCommandEncoder"
@@ -279,6 +327,51 @@ path = "compute_pass_dispatch_workgroups"
 interface = "GPUComputePassEncoder"
 member = "end"
 path = "compute_pass_end"
+
+[[lifecycle.methods]]
+interface = "GPURenderPassEncoder"
+member = "setPipeline"
+path = "render_pass_set_pipeline"
+
+[[lifecycle.methods]]
+interface = "GPURenderPassEncoder"
+member = "setVertexBuffer"
+path = "render_pass_set_vertex_buffer"
+
+[[lifecycle.methods]]
+interface = "GPURenderPassEncoder"
+member = "setIndexBuffer"
+path = "render_pass_set_index_buffer"
+
+[[lifecycle.methods]]
+interface = "GPURenderPassEncoder"
+member = "setBindGroup"
+path = "render_pass_set_bind_group"
+
+[[lifecycle.methods]]
+interface = "GPURenderPassEncoder"
+member = "draw"
+path = "render_pass_draw"
+
+[[lifecycle.methods]]
+interface = "GPURenderPassEncoder"
+member = "drawIndexed"
+path = "render_pass_draw_indexed"
+
+[[lifecycle.methods]]
+interface = "GPURenderPassEncoder"
+member = "setViewport"
+path = "render_pass_set_viewport"
+
+[[lifecycle.methods]]
+interface = "GPURenderPassEncoder"
+member = "setScissorRect"
+path = "render_pass_set_scissor_rect"
+
+[[lifecycle.methods]]
+interface = "GPURenderPassEncoder"
+member = "end"
+path = "render_pass_end"
 
 [[lifecycle.properties]]
 interface = "GPUDevice"
@@ -342,6 +435,11 @@ idl = "GPUOrigin3DDict"
 c = "WGPUOrigin3D"
 reason = "the WebIDL dictionary suffix is absent from the C standalone struct"
 
+[[name_map]]
+idl = "GPUColorDict"
+c = "WGPUColor"
+reason = "the WebIDL dictionary suffix is absent from the C standalone struct"
+
 [[dict_or_sequence_union]]
 typedef = "GPUExtent3D"
 dictionary = "GPUExtent3DDict"
@@ -353,6 +451,12 @@ typedef = "GPUOrigin3D"
 dictionary = "GPUOrigin3DDict"
 min_length = 1
 max_length = 3
+
+[[dict_or_sequence_union]]
+typedef = "GPUColor"
+dictionary = "GPUColorDict"
+min_length = 4
+max_length = 4
 
 [[descriptor]]
 dictionary = "GPUBufferDescriptor"
@@ -367,6 +471,87 @@ dictionary = "GPUExtent3DDict"
 
 [[descriptor]]
 dictionary = "GPUOrigin3DDict"
+
+[[descriptor]]
+dictionary = "GPUColorDict"
+
+[[descriptor]]
+dictionary = "GPURenderPassColorAttachment"
+
+[[descriptor.handles]]
+member = "view"
+helper = "texture_view_handle"
+
+[[descriptor.handles]]
+member = "resolveTarget"
+helper = "texture_view_handle"
+
+[[descriptor.absent_constants]]
+member = "depthSlice"
+value = "WGPU_DEPTH_SLICE_UNDEFINED"
+
+[[descriptor]]
+dictionary = "GPURenderPassDepthStencilAttachment"
+
+[[descriptor.handles]]
+member = "view"
+helper = "texture_view_handle"
+
+[[descriptor.absent_constants]]
+member = "depthClearValue"
+value = "WGPU_DEPTH_CLEAR_VALUE_UNDEFINED"
+
+[[descriptor]]
+dictionary = "GPURenderPassDescriptor"
+
+[[descriptor.strings]]
+member = "label"
+nullable = false
+
+[[descriptor.skips]]
+member = "occlusionQuerySet"
+reason = "query sets are outside the block 09 render-pass slice"
+reject_if_present = true
+
+[[descriptor.skips]]
+member = "timestampWrites"
+reason = "query sets are outside the block 09 render-pass slice"
+reject_if_present = true
+
+[[descriptor.skips]]
+member = "maxDrawCount"
+reason = "the pinned C ABI exposes maxDrawCount only through an optional extension chain"
+reject_if_present = true
+
+[[descriptor]]
+dictionary = "GPUTexelCopyBufferLayout"
+
+[[descriptor.absent_constants]]
+member = "bytesPerRow"
+value = "WGPU_COPY_STRIDE_UNDEFINED"
+
+[[descriptor.absent_constants]]
+member = "rowsPerImage"
+value = "WGPU_COPY_STRIDE_UNDEFINED"
+
+[[descriptor]]
+dictionary = "GPUTexelCopyBufferInfo"
+
+[[descriptor.handles]]
+member = "buffer"
+helper = "buffer_handle"
+
+[[descriptor.embedded]]
+member = "layout"
+dictionary = "GPUTexelCopyBufferLayout"
+
+[[descriptor]]
+dictionary = "GPUTexelCopyTextureInfo"
+sentinel_defaults = ["aspect"]
+
+[[descriptor.handles]]
+member = "texture"
+helper = "texture_handle"
 
 [[descriptor]]
 dictionary = "GPUTextureDescriptor"

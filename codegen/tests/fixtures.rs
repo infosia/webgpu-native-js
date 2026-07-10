@@ -167,7 +167,7 @@ fn full_pinned_inputs_parse_and_subset_join_offline() {
     let report = join_inputs(&idl, &yaml).expect("full pinned join");
     assert_eq!(report.parser.remaining_bytes, 0);
     assert_eq!(report.parser.definitions, 209);
-    assert_eq!(report.interfaces.len(), 15);
+    assert_eq!(report.interfaces.len(), 16);
     assert!(report.parser.saw_enforce_range);
     assert!(report.parser.saw_same_object);
     assert!(report.parser.saw_exposed);
@@ -200,7 +200,7 @@ fn generated_dispatch_macro_matches_focused_shape_fixture() {
     let expected =
         fs::read_to_string(fixtures().join("dispatch_surface.rs")).expect("dispatch snapshot");
     assert_eq!(dispatch_macro_surface(&emitted), expected);
-    assert_eq!(expected.matches(", unsafe fn(").count(), 71);
+    assert_eq!(expected.matches(", unsafe fn(").count(), 86);
 }
 
 #[test]
@@ -262,6 +262,7 @@ fn generated_lifecycle_covers_every_selected_class_and_retention_set() {
         "render_pipeline_class",
         "command_encoder_class",
         "compute_pass_encoder_class",
+        "render_pass_encoder_class",
         "command_buffer_class",
     ];
     assert_eq!(
@@ -515,7 +516,9 @@ fn dict_or_sequence_union_policy_rejects_wrong_alias_and_lengths() {
     );
     let error = generate_conversions_with_policy(&wrong_alias, &yaml, &policy)
         .expect_err("wrong union element must fail");
-    assert!(error.to_string().contains("unsupported typedef shape"));
+    assert!(error
+        .to_string()
+        .contains("fields disagree with its numeric sequence element"));
 
     let wrong_length = policy.replace("min_length = 1", "min_length = 0");
     let error = generate_conversions_with_policy(&idl, &yaml, &wrong_length)

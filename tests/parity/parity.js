@@ -464,6 +464,143 @@
         });
     }
 
+    function runRenderPassAndCopyValidation() {
+        // Noop validates these command streams but executes neither draws nor
+        // texture copies, so every line below is validation-only evidence.
+        var module = device.createShaderModule({
+            code: "@vertex fn main(@builtin(vertex_index) i: u32) -> " +
+                "@builtin(position) vec4f { var p = array(vec2f(-1,-1), " +
+                "vec2f(3,-1), vec2f(-1,3)); return vec4f(p[i],0,1); } " +
+                "@fragment fn fragment_main() -> @location(0) vec4f { " +
+                "return vec4f(1,0,0,1); }"
+        });
+        var pipeline = device.createRenderPipeline({
+            layout: "auto",
+            vertex: { module: module, entryPoint: "main" },
+            fragment: {
+                module: module,
+                entryPoint: "fragment_main",
+                targets: [{ format: "rgba8unorm" }]
+            }
+        });
+        var sourceTexture = device.createTexture({
+            size: [4, 4], format: "rgba8unorm", usage: 19
+        });
+        var destinationTexture = device.createTexture({
+            size: [4, 4], format: "rgba8unorm", usage: 19
+        });
+        var view = sourceTexture.createView();
+
+        var missingLoad = caught(function () {
+            device.createCommandEncoder().beginRenderPass({
+                colorAttachments: [{ view: view, storeOp: "store" }]
+            });
+        });
+        log("renderPass:loadOp-missing:" + missingLoad.name);
+
+        var wrongColor = caught(function () {
+            device.createCommandEncoder().beginRenderPass({
+                colorAttachments: [{
+                    view: view,
+                    clearValue: [0, 0, 1],
+                    loadOp: "clear",
+                    storeOp: "store"
+                }]
+            });
+        });
+        log("renderPass:clearValue-wrong-length:" + wrongColor.name);
+
+        var stateEncoder = device.createCommandEncoder();
+        var statePass = stateEncoder.beginRenderPass({
+            colorAttachments: [{
+                view: view,
+                loadOp: "load",
+                storeOp: "store"
+            }]
+        });
+        statePass.end();
+        var doubleEnd = caught(function () { statePass.end(); });
+        log("renderPass:double-end:" + doubleEnd.name);
+
+        var missingTexture = caught(function () {
+            device.createCommandEncoder().copyTextureToTexture(
+                {}, { texture: destinationTexture }, [1, 1]
+            );
+        });
+        log("copy:missing-texture:" + missingTexture.name);
+
+        device.pushErrorScope("validation");
+        var encoder = device.createCommandEncoder();
+        var pass = encoder.beginRenderPass({
+            colorAttachments: [{
+                view: view,
+                clearValue: [0.25, 0.5, 0.75, 1],
+                loadOp: "clear",
+                storeOp: "store"
+            }]
+        });
+        pass.setPipeline(pipeline);
+        pass.setViewport(0, 0, 4, 4, 0, 1);
+        pass.draw(3);
+        pass.end();
+        device.queue.submit([encoder.finish()]);
+        return device.popErrorScope().then(function (error) {
+            if (error !== null) {
+                throw new Error("render pass validation failed: " + error.message);
+            }
+            log("renderPass:chain-ok");
+
+            device.pushErrorScope("validation");
+            [
+                [0.25, 0.5, 0.75, 1],
+                { r: 0.25, g: 0.5, b: 0.75, a: 1 }
+            ].forEach(function (clearValue) {
+                var equivalentEncoder = device.createCommandEncoder();
+                var equivalentPass = equivalentEncoder.beginRenderPass({
+                    colorAttachments: [{
+                        view: view,
+                        clearValue: clearValue,
+                        loadOp: "clear",
+                        storeOp: "store"
+                    }]
+                });
+                equivalentPass.end();
+                device.queue.submit([equivalentEncoder.finish()]);
+            });
+            return device.popErrorScope();
+        }).then(function (error) {
+            if (error !== null) {
+                throw new Error("clearValue equivalence validation failed: " + error.message);
+            }
+            log("renderPass:clearValue-dict-sequence:no-validation-error");
+
+            var buffer = device.createBuffer({ size: 1024, usage: 12 });
+            var bufferInfo = {
+                buffer: buffer, bytesPerRow: 256, rowsPerImage: 4
+            };
+            var sourceInfo = { texture: sourceTexture };
+            var destinationInfo = { texture: destinationTexture };
+            device.pushErrorScope("validation");
+            var copyEncoder = device.createCommandEncoder();
+            copyEncoder.copyBufferToTexture(bufferInfo, sourceInfo, [4, 4]);
+            copyEncoder.copyTextureToBuffer(sourceInfo, bufferInfo, [4, 4]);
+            copyEncoder.copyTextureToTexture(sourceInfo, destinationInfo, [4, 4]);
+            device.queue.submit([copyEncoder.finish()]);
+            device.queue.writeTexture(
+                destinationInfo,
+                new Uint8Array(1024),
+                { bytesPerRow: 256, rowsPerImage: 4 },
+                [4, 4]
+            );
+            return device.popErrorScope();
+        }).then(function (error) {
+            if (error !== null) {
+                throw new Error("copy validation failed: " + error.message);
+            }
+            log("copy:texture-validation:no-validation-error");
+        });
+    }
+
     function runRequiredMembers() {
         var entriesError = caught(function () {
             device.createBindGroupLayout({});
@@ -595,6 +732,7 @@
         return runTextureRetention()
             .then(runBindGroupRetention)
             .then(runRenderPipelineValidation)
+            .then(runRenderPassAndCopyValidation)
             .then(runErrorScopes)
             .then(runOrdering)
             .then(function () {

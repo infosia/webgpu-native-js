@@ -160,11 +160,13 @@ Filled so far (headless-tested end-to-end under both engines):
 - `GPUTexture`: `createTexture`, `createView`, `destroy`, and readonly
   dimensions/counts/dimension/format/usage; `GPUTextureView` creation retains
   its parent texture
-- `GPUQueue`: `writeBuffer`, `submit`, `onSubmittedWorkDone` (`device.queue`
+- `GPUQueue`: `writeBuffer`, `writeTexture`, `submit`, `onSubmittedWorkDone` (`device.queue`
   is `[SameObject]`)
 - `createShaderModule` (WGSL), `createBindGroupLayout`, `createPipelineLayout`,
   `createBindGroup`, `createComputePipeline`, `createCommandEncoder`
-- `GPUCommandEncoder`: `beginComputePass`, `copyBufferToBuffer`, `finish`;
+- `GPUCommandEncoder`: compute/render passes, buffer and texture copy recording,
+  and `finish`; render pass: pipeline/buffer/bind-group state, viewport/scissor,
+  draw/drawIndexed, and `end`;
   compute pass: `setPipeline`, `setBindGroup`, `dispatchWorkgroups`, `end`;
   single-use command buffers
 

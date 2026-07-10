@@ -89,6 +89,8 @@ pub struct GpuDispatch {
     pub queue_release: unsafe fn(WGPUQueue),
     /// `wgpuQueueWriteBuffer`.
     pub queue_write_buffer: unsafe fn(WGPUQueue, WGPUBuffer, u64, *const ::std::ffi::c_void, usize),
+    /// `wgpuQueueWriteTexture`.
+    pub queue_write_texture: unsafe fn(WGPUQueue, *const WGPUTexelCopyTextureInfo, *const ::std::ffi::c_void, usize, *const WGPUTexelCopyBufferLayout, *const WGPUExtent3D),
     /// `wgpuQueueSubmit`.
     pub queue_submit: unsafe fn(WGPUQueue, usize, *const WGPUCommandBuffer),
     /// `wgpuQueueOnSubmittedWorkDone`.
@@ -127,8 +129,16 @@ pub struct GpuDispatch {
     pub command_encoder_release: unsafe fn(WGPUCommandEncoder),
     /// `wgpuCommandEncoderBeginComputePass`.
     pub command_encoder_begin_compute_pass: unsafe fn(WGPUCommandEncoder, *const WGPUComputePassDescriptor) -> WGPUComputePassEncoder,
+    /// `wgpuCommandEncoderBeginRenderPass`.
+    pub command_encoder_begin_render_pass: unsafe fn(WGPUCommandEncoder, *const WGPURenderPassDescriptor) -> WGPURenderPassEncoder,
     /// `wgpuCommandEncoderCopyBufferToBuffer`.
     pub command_encoder_copy_buffer_to_buffer: unsafe fn(WGPUCommandEncoder, WGPUBuffer, u64, WGPUBuffer, u64, u64),
+    /// `wgpuCommandEncoderCopyBufferToTexture`.
+    pub command_encoder_copy_buffer_to_texture: unsafe fn(WGPUCommandEncoder, *const WGPUTexelCopyBufferInfo, *const WGPUTexelCopyTextureInfo, *const WGPUExtent3D),
+    /// `wgpuCommandEncoderCopyTextureToBuffer`.
+    pub command_encoder_copy_texture_to_buffer: unsafe fn(WGPUCommandEncoder, *const WGPUTexelCopyTextureInfo, *const WGPUTexelCopyBufferInfo, *const WGPUExtent3D),
+    /// `wgpuCommandEncoderCopyTextureToTexture`.
+    pub command_encoder_copy_texture_to_texture: unsafe fn(WGPUCommandEncoder, *const WGPUTexelCopyTextureInfo, *const WGPUTexelCopyTextureInfo, *const WGPUExtent3D),
     /// `wgpuCommandEncoderFinish`.
     pub command_encoder_finish: unsafe fn(WGPUCommandEncoder, *const WGPUCommandBufferDescriptor) -> WGPUCommandBuffer,
     /// `wgpuComputePassEncoderRelease`.
@@ -141,6 +151,26 @@ pub struct GpuDispatch {
     pub compute_pass_encoder_dispatch_workgroups: unsafe fn(WGPUComputePassEncoder, u32, u32, u32),
     /// `wgpuComputePassEncoderEnd`.
     pub compute_pass_encoder_end: unsafe fn(WGPUComputePassEncoder),
+    /// `wgpuRenderPassEncoderRelease`.
+    pub render_pass_encoder_release: unsafe fn(WGPURenderPassEncoder),
+    /// `wgpuRenderPassEncoderSetPipeline`.
+    pub render_pass_encoder_set_pipeline: unsafe fn(WGPURenderPassEncoder, WGPURenderPipeline),
+    /// `wgpuRenderPassEncoderSetVertexBuffer`.
+    pub render_pass_encoder_set_vertex_buffer: unsafe fn(WGPURenderPassEncoder, u32, WGPUBuffer, u64, u64),
+    /// `wgpuRenderPassEncoderSetIndexBuffer`.
+    pub render_pass_encoder_set_index_buffer: unsafe fn(WGPURenderPassEncoder, WGPUBuffer, WGPUIndexFormat, u64, u64),
+    /// `wgpuRenderPassEncoderSetBindGroup`.
+    pub render_pass_encoder_set_bind_group: unsafe fn(WGPURenderPassEncoder, u32, WGPUBindGroup, usize, *const u32),
+    /// `wgpuRenderPassEncoderDraw`.
+    pub render_pass_encoder_draw: unsafe fn(WGPURenderPassEncoder, u32, u32, u32, u32),
+    /// `wgpuRenderPassEncoderDrawIndexed`.
+    pub render_pass_encoder_draw_indexed: unsafe fn(WGPURenderPassEncoder, u32, u32, u32, i32, u32),
+    /// `wgpuRenderPassEncoderSetViewport`.
+    pub render_pass_encoder_set_viewport: unsafe fn(WGPURenderPassEncoder, f32, f32, f32, f32, f32, f32),
+    /// `wgpuRenderPassEncoderSetScissorRect`.
+    pub render_pass_encoder_set_scissor_rect: unsafe fn(WGPURenderPassEncoder, u32, u32, u32, u32),
+    /// `wgpuRenderPassEncoderEnd`.
+    pub render_pass_encoder_end: unsafe fn(WGPURenderPassEncoder),
     /// `wgpuCommandBufferRelease`.
     pub command_buffer_release: unsafe fn(WGPUCommandBuffer),
 }
@@ -195,6 +225,7 @@ macro_rules! for_each_gpu_dispatch_entry {
             (queue_add_ref, wgpuQueueAddRef, unsafe fn(queue: $crate::WGPUQueue)),
             (queue_release, wgpuQueueRelease, unsafe fn(queue: $crate::WGPUQueue)),
             (queue_write_buffer, wgpuQueueWriteBuffer, unsafe fn(queue: $crate::WGPUQueue, buffer: $crate::WGPUBuffer, buffer_offset: u64, data: *const ::std::ffi::c_void, size: usize)),
+            (queue_write_texture, wgpuQueueWriteTexture, unsafe fn(queue: $crate::WGPUQueue, destination: *const $crate::WGPUTexelCopyTextureInfo, data: *const ::std::ffi::c_void, data_size: usize, data_layout: *const $crate::WGPUTexelCopyBufferLayout, write_size: *const $crate::WGPUExtent3D)),
             (queue_submit, wgpuQueueSubmit, unsafe fn(queue: $crate::WGPUQueue, commands_count: usize, commands: *const $crate::WGPUCommandBuffer)),
             (queue_on_submitted_work_done, wgpuQueueOnSubmittedWorkDone, unsafe fn(queue: $crate::WGPUQueue, callback_info: $crate::WGPUQueueWorkDoneCallbackInfo) -> $crate::WGPUFuture),
             (shader_module_add_ref, wgpuShaderModuleAddRef, unsafe fn(shader_module: $crate::WGPUShaderModule)),
@@ -214,13 +245,27 @@ macro_rules! for_each_gpu_dispatch_entry {
             (render_pipeline_release, wgpuRenderPipelineRelease, unsafe fn(render_pipeline: $crate::WGPURenderPipeline)),
             (command_encoder_release, wgpuCommandEncoderRelease, unsafe fn(command_encoder: $crate::WGPUCommandEncoder)),
             (command_encoder_begin_compute_pass, wgpuCommandEncoderBeginComputePass, unsafe fn(command_encoder: $crate::WGPUCommandEncoder, descriptor: *const $crate::WGPUComputePassDescriptor) -> $crate::WGPUComputePassEncoder),
+            (command_encoder_begin_render_pass, wgpuCommandEncoderBeginRenderPass, unsafe fn(command_encoder: $crate::WGPUCommandEncoder, descriptor: *const $crate::WGPURenderPassDescriptor) -> $crate::WGPURenderPassEncoder),
             (command_encoder_copy_buffer_to_buffer, wgpuCommandEncoderCopyBufferToBuffer, unsafe fn(command_encoder: $crate::WGPUCommandEncoder, source: $crate::WGPUBuffer, source_offset: u64, destination: $crate::WGPUBuffer, destination_offset: u64, size: u64)),
+            (command_encoder_copy_buffer_to_texture, wgpuCommandEncoderCopyBufferToTexture, unsafe fn(command_encoder: $crate::WGPUCommandEncoder, source: *const $crate::WGPUTexelCopyBufferInfo, destination: *const $crate::WGPUTexelCopyTextureInfo, copy_size: *const $crate::WGPUExtent3D)),
+            (command_encoder_copy_texture_to_buffer, wgpuCommandEncoderCopyTextureToBuffer, unsafe fn(command_encoder: $crate::WGPUCommandEncoder, source: *const $crate::WGPUTexelCopyTextureInfo, destination: *const $crate::WGPUTexelCopyBufferInfo, copy_size: *const $crate::WGPUExtent3D)),
+            (command_encoder_copy_texture_to_texture, wgpuCommandEncoderCopyTextureToTexture, unsafe fn(command_encoder: $crate::WGPUCommandEncoder, source: *const $crate::WGPUTexelCopyTextureInfo, destination: *const $crate::WGPUTexelCopyTextureInfo, copy_size: *const $crate::WGPUExtent3D)),
             (command_encoder_finish, wgpuCommandEncoderFinish, unsafe fn(command_encoder: $crate::WGPUCommandEncoder, descriptor: *const $crate::WGPUCommandBufferDescriptor) -> $crate::WGPUCommandBuffer),
             (compute_pass_encoder_release, wgpuComputePassEncoderRelease, unsafe fn(compute_pass_encoder: $crate::WGPUComputePassEncoder)),
             (compute_pass_encoder_set_pipeline, wgpuComputePassEncoderSetPipeline, unsafe fn(compute_pass_encoder: $crate::WGPUComputePassEncoder, pipeline: $crate::WGPUComputePipeline)),
             (compute_pass_encoder_set_bind_group, wgpuComputePassEncoderSetBindGroup, unsafe fn(compute_pass_encoder: $crate::WGPUComputePassEncoder, group_index: u32, group: $crate::WGPUBindGroup, dynamic_offsets_count: usize, dynamic_offsets: *const u32)),
             (compute_pass_encoder_dispatch_workgroups, wgpuComputePassEncoderDispatchWorkgroups, unsafe fn(compute_pass_encoder: $crate::WGPUComputePassEncoder, workgroup_count_x: u32, workgroup_count_y: u32, workgroup_count_z: u32)),
             (compute_pass_encoder_end, wgpuComputePassEncoderEnd, unsafe fn(compute_pass_encoder: $crate::WGPUComputePassEncoder)),
+            (render_pass_encoder_release, wgpuRenderPassEncoderRelease, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder)),
+            (render_pass_encoder_set_pipeline, wgpuRenderPassEncoderSetPipeline, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder, pipeline: $crate::WGPURenderPipeline)),
+            (render_pass_encoder_set_vertex_buffer, wgpuRenderPassEncoderSetVertexBuffer, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder, slot: u32, buffer: $crate::WGPUBuffer, offset: u64, size: u64)),
+            (render_pass_encoder_set_index_buffer, wgpuRenderPassEncoderSetIndexBuffer, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder, buffer: $crate::WGPUBuffer, format: $crate::WGPUIndexFormat, offset: u64, size: u64)),
+            (render_pass_encoder_set_bind_group, wgpuRenderPassEncoderSetBindGroup, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder, group_index: u32, group: $crate::WGPUBindGroup, dynamic_offsets_count: usize, dynamic_offsets: *const u32)),
+            (render_pass_encoder_draw, wgpuRenderPassEncoderDraw, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder, vertex_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32)),
+            (render_pass_encoder_draw_indexed, wgpuRenderPassEncoderDrawIndexed, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder, index_count: u32, instance_count: u32, first_index: u32, base_vertex: i32, first_instance: u32)),
+            (render_pass_encoder_set_viewport, wgpuRenderPassEncoderSetViewport, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder, x: f32, y: f32, width: f32, height: f32, min_depth: f32, max_depth: f32)),
+            (render_pass_encoder_set_scissor_rect, wgpuRenderPassEncoderSetScissorRect, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder, x: u32, y: u32, width: u32, height: u32)),
+            (render_pass_encoder_end, wgpuRenderPassEncoderEnd, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder)),
             (command_buffer_release, wgpuCommandBufferRelease, unsafe fn(command_buffer: $crate::WGPUCommandBuffer)),
         }
     };
@@ -325,6 +370,335 @@ pub(super) fn convert_origin3d_dict<E: JsEngine>(
         } else {
             enforce_u32::<E>(cx, z_value, "z")?
         },
+    })
+}
+
+/// Converts a JavaScript `GPUColorDict` into `WGPUColor`.
+#[allow(dead_code)] // T1 emits union arms even before every typedef has an API consumer.
+pub(super) fn convert_color_dict<E: JsEngine>(
+    cx: E::Context<'_>,
+    value: E::Value,
+) -> Result<WGPUColor, E::Error> {
+    // DR-M3: required dictionary members reject undefined.
+    let r_value = required_member::<E>(cx, value, "r")?;
+    let g_value = required_member::<E>(cx, value, "g")?;
+    let b_value = required_member::<E>(cx, value, "b")?;
+    let a_value = required_member::<E>(cx, value, "a")?;
+    Ok(WGPUColor {
+        // WebIDL restricted `double` rejects non-finite values.
+        r: restricted_f64::<E>(cx, r_value, "r")?,
+        // WebIDL restricted `double` rejects non-finite values.
+        g: restricted_f64::<E>(cx, g_value, "g")?,
+        // WebIDL restricted `double` rejects non-finite values.
+        b: restricted_f64::<E>(cx, b_value, "b")?,
+        // WebIDL restricted `double` rejects non-finite values.
+        a: restricted_f64::<E>(cx, a_value, "a")?,
+    })
+}
+
+/// Converts a JavaScript `GPURenderPassColorAttachment` into `WGPURenderPassColorAttachment`.
+pub(super) fn convert_render_pass_color_attachment<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    value: E::Value,
+) -> Result<WGPURenderPassColorAttachment, E::Error> {
+    // DR-M3: required dictionary members reject undefined.
+    let view_value = required_member::<E>(cx, value, "view")?;
+    let depth_slice_value = dictionary_member::<E>(cx, value, "depthSlice")?;
+    let resolve_target_value = dictionary_member::<E>(cx, value, "resolveTarget")?;
+    let clear_value_value = dictionary_member::<E>(cx, value, "clearValue")?;
+    let load_op_value = required_member::<E>(cx, value, "loadOp")?;
+    let store_op_value = required_member::<E>(cx, value, "storeOp")?;
+    let view = texture_view_handle::<E>(cx, view_value)?;
+    let resolve_target = if E::is_undefined(cx, resolve_target_value) {
+        ptr::null_mut()
+    } else {
+        texture_view_handle::<E>(cx, resolve_target_value)?
+    };
+    let clear_value = if E::is_undefined(cx, clear_value_value) {
+        // The pinned C initializer uses the all-zero value for an absent numeric union.
+        unsafe { std::mem::zeroed() }
+    } else {
+        convert_gpu_color::<E>(cx, clear_value_value)?
+    };
+    // B6: string enums are joined to C values; absence uses the IDL default or C sentinel.
+    let load_op = {
+        let enum_arena = Arena::new();
+        match E::to_str(cx, load_op_value, &enum_arena)? {
+            "load" => WGPULoadOp_WGPULoadOp_Load,
+            "clear" => WGPULoadOp_WGPULoadOp_Clear,
+            _ => return Err(E::type_error(cx, "GPULoadOp")),
+        }
+    };
+    // B6: string enums are joined to C values; absence uses the IDL default or C sentinel.
+    let store_op = {
+        let enum_arena = Arena::new();
+        match E::to_str(cx, store_op_value, &enum_arena)? {
+            "store" => WGPUStoreOp_WGPUStoreOp_Store,
+            "discard" => WGPUStoreOp_WGPUStoreOp_Discard,
+            _ => return Err(E::type_error(cx, "GPUStoreOp")),
+        }
+    };
+    Ok(WGPURenderPassColorAttachment {
+        nextInChain: ptr::null_mut(),
+        view,
+        // R8: `[EnforceRange]` GPUIntegerCoordinate is checked at the 32-bit boundary.
+        depthSlice: if E::is_undefined(cx, depth_slice_value) {
+            WGPU_DEPTH_SLICE_UNDEFINED
+        } else {
+            enforce_u32::<E>(cx, depth_slice_value, "depthSlice")?
+        },
+        resolveTarget: resolve_target,
+        clearValue: clear_value,
+        loadOp: load_op,
+        storeOp: store_op,
+    })
+}
+
+/// Converts a JavaScript `GPURenderPassDepthStencilAttachment` into `WGPURenderPassDepthStencilAttachment`.
+pub(super) fn convert_render_pass_depth_stencil_attachment<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    value: E::Value,
+) -> Result<WGPURenderPassDepthStencilAttachment, E::Error> {
+    // DR-M3: required dictionary members reject undefined.
+    let view_value = required_member::<E>(cx, value, "view")?;
+    let depth_clear_value_value = dictionary_member::<E>(cx, value, "depthClearValue")?;
+    let depth_load_op_value = dictionary_member::<E>(cx, value, "depthLoadOp")?;
+    let depth_store_op_value = dictionary_member::<E>(cx, value, "depthStoreOp")?;
+    let depth_read_only_value = dictionary_member::<E>(cx, value, "depthReadOnly")?;
+    let stencil_clear_value_value = dictionary_member::<E>(cx, value, "stencilClearValue")?;
+    let stencil_load_op_value = dictionary_member::<E>(cx, value, "stencilLoadOp")?;
+    let stencil_store_op_value = dictionary_member::<E>(cx, value, "stencilStoreOp")?;
+    let stencil_read_only_value = dictionary_member::<E>(cx, value, "stencilReadOnly")?;
+    let view = texture_view_handle::<E>(cx, view_value)?;
+    // B6: string enums are joined to C values; absence uses the IDL default or C sentinel.
+    let depth_load_op = if E::is_undefined(cx, depth_load_op_value) {
+        WGPULoadOp_WGPULoadOp_Undefined
+    } else {
+        let enum_arena = Arena::new();
+        match E::to_str(cx, depth_load_op_value, &enum_arena)? {
+            "load" => WGPULoadOp_WGPULoadOp_Load,
+            "clear" => WGPULoadOp_WGPULoadOp_Clear,
+            _ => return Err(E::type_error(cx, "GPULoadOp")),
+        }
+    };
+    // B6: string enums are joined to C values; absence uses the IDL default or C sentinel.
+    let depth_store_op = if E::is_undefined(cx, depth_store_op_value) {
+        WGPUStoreOp_WGPUStoreOp_Undefined
+    } else {
+        let enum_arena = Arena::new();
+        match E::to_str(cx, depth_store_op_value, &enum_arena)? {
+            "store" => WGPUStoreOp_WGPUStoreOp_Store,
+            "discard" => WGPUStoreOp_WGPUStoreOp_Discard,
+            _ => return Err(E::type_error(cx, "GPUStoreOp")),
+        }
+    };
+    // B6: string enums are joined to C values; absence uses the IDL default or C sentinel.
+    let stencil_load_op = if E::is_undefined(cx, stencil_load_op_value) {
+        WGPULoadOp_WGPULoadOp_Undefined
+    } else {
+        let enum_arena = Arena::new();
+        match E::to_str(cx, stencil_load_op_value, &enum_arena)? {
+            "load" => WGPULoadOp_WGPULoadOp_Load,
+            "clear" => WGPULoadOp_WGPULoadOp_Clear,
+            _ => return Err(E::type_error(cx, "GPULoadOp")),
+        }
+    };
+    // B6: string enums are joined to C values; absence uses the IDL default or C sentinel.
+    let stencil_store_op = if E::is_undefined(cx, stencil_store_op_value) {
+        WGPUStoreOp_WGPUStoreOp_Undefined
+    } else {
+        let enum_arena = Arena::new();
+        match E::to_str(cx, stencil_store_op_value, &enum_arena)? {
+            "store" => WGPUStoreOp_WGPUStoreOp_Store,
+            "discard" => WGPUStoreOp_WGPUStoreOp_Discard,
+            _ => return Err(E::type_error(cx, "GPUStoreOp")),
+        }
+    };
+    Ok(WGPURenderPassDepthStencilAttachment {
+        nextInChain: ptr::null_mut(),
+        view,
+        // G11: restricted WebIDL `float` rejects non-finite values before f32 conversion.
+        depthClearValue: if E::is_undefined(cx, depth_clear_value_value) {
+            WGPU_DEPTH_CLEAR_VALUE_UNDEFINED
+        } else {
+            restricted_f32::<E>(cx, depth_clear_value_value, "depthClearValue")?
+        },
+        depthLoadOp: depth_load_op,
+        depthStoreOp: depth_store_op,
+        // R8: an optional boolean defaults to false and otherwise uses `ToBoolean`.
+        depthReadOnly: if E::is_undefined(cx, depth_read_only_value) {
+            0
+        } else {
+            u32::from(E::to_bool(cx, depth_read_only_value))
+        },
+        // R8: `[EnforceRange]` GPUStencilValue is checked at the 32-bit boundary.
+        stencilClearValue: if E::is_undefined(cx, stencil_clear_value_value) {
+            0
+        } else {
+            enforce_u32::<E>(cx, stencil_clear_value_value, "stencilClearValue")?
+        },
+        stencilLoadOp: stencil_load_op,
+        stencilStoreOp: stencil_store_op,
+        // R8: an optional boolean defaults to false and otherwise uses `ToBoolean`.
+        stencilReadOnly: if E::is_undefined(cx, stencil_read_only_value) {
+            0
+        } else {
+            u32::from(E::to_bool(cx, stencil_read_only_value))
+        },
+    })
+}
+
+/// Converts a JavaScript `GPURenderPassDescriptor` into `WGPURenderPassDescriptor`.
+pub(super) fn convert_render_pass_descriptor<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    value: E::Value,
+    arena: &Arena,
+) -> Result<WGPURenderPassDescriptor, E::Error> {
+    let label_value = dictionary_member::<E>(cx, value, "label")?;
+    // DR-M3: required dictionary members reject undefined.
+    let color_attachments_value = required_member::<E>(cx, value, "colorAttachments")?;
+    let depth_stencil_attachment_value = dictionary_member::<E>(cx, value, "depthStencilAttachment")?;
+    let occlusion_query_set_value = dictionary_member::<E>(cx, value, "occlusionQuerySet")?;
+    // Policy skip: reject present unsupported API instead of ignoring it.
+    if !E::is_undefined(cx, occlusion_query_set_value) {
+        return Err(E::type_error(cx, "occlusionQuerySet are not supported yet"));
+    }
+    let timestamp_writes_value = dictionary_member::<E>(cx, value, "timestampWrites")?;
+    // Policy skip: reject present unsupported API instead of ignoring it.
+    if !E::is_undefined(cx, timestamp_writes_value) {
+        return Err(E::type_error(cx, "timestampWrites are not supported yet"));
+    }
+    let max_draw_count_value = dictionary_member::<E>(cx, value, "maxDrawCount")?;
+    // Policy skip: reject present unsupported API instead of ignoring it.
+    if !E::is_undefined(cx, max_draw_count_value) {
+        return Err(E::type_error(cx, "maxDrawCount are not supported yet"));
+    }
+    // B4: non-nullable strings default only for undefined; null is stringified.
+    let label = if E::is_undefined(cx, label_value) {
+        ""
+    } else {
+        E::to_str(cx, label_value, arena)?
+    };
+    let color_attachments = {
+        let converted = convert_sequence::<E, _>(cx, color_attachments_value, "colorAttachments", |item| {
+            // T5: nullable sequence elements are C sentinel-filled struct holes.
+            if E::is_null(cx, item) {
+                // SAFETY: the pinned C ABI defines the all-zero element as the hole sentinel.
+                Ok(unsafe { std::mem::zeroed() })
+            } else {
+                convert_render_pass_color_attachment::<E>(cx, item)
+            }
+        })?;
+        arena.alloc_slice(converted)
+    };
+    // T5: an absent optional dictionary is a null pointer in the pinned C ABI.
+    let depth_stencil_attachment = if E::is_undefined(cx, depth_stencil_attachment_value) {
+        ptr::null()
+    } else {
+        let converted = convert_render_pass_depth_stencil_attachment::<E>(cx, depth_stencil_attachment_value)?;
+        arena.alloc_slice(vec![converted]).as_ptr()
+    };
+    Ok(WGPURenderPassDescriptor {
+        nextInChain: ptr::null_mut(),
+        label: WGPUStringView::from_bytes(label.as_bytes()),
+        colorAttachmentCount: color_attachments.len(),
+        colorAttachments: if color_attachments.is_empty() {
+            ptr::null()
+        } else {
+            color_attachments.as_ptr()
+        },
+        depthStencilAttachment: depth_stencil_attachment,
+        // Policy skip: query sets are outside the block 09 render-pass slice.
+        occlusionQuerySet: ptr::null_mut(),
+        // Policy skip: query sets are outside the block 09 render-pass slice.
+        timestampWrites: ptr::null(),
+    })
+}
+
+/// Converts a JavaScript `GPUTexelCopyBufferLayout` into `WGPUTexelCopyBufferLayout`.
+pub(super) fn convert_texel_copy_buffer_layout<E: JsEngine>(
+    cx: E::Context<'_>,
+    value: E::Value,
+) -> Result<WGPUTexelCopyBufferLayout, E::Error> {
+    let offset_value = dictionary_member::<E>(cx, value, "offset")?;
+    let bytes_per_row_value = dictionary_member::<E>(cx, value, "bytesPerRow")?;
+    let rows_per_image_value = dictionary_member::<E>(cx, value, "rowsPerImage")?;
+    Ok(WGPUTexelCopyBufferLayout {
+        // R8: `[EnforceRange]` GPUSize64 is checked at the 64-bit boundary.
+        offset: if E::is_undefined(cx, offset_value) {
+            0
+        } else {
+            enforce_u64::<E>(cx, offset_value, "offset")?
+        },
+        // R8: `[EnforceRange]` GPUSize32 is checked at the 32-bit boundary.
+        bytesPerRow: if E::is_undefined(cx, bytes_per_row_value) {
+            WGPU_COPY_STRIDE_UNDEFINED
+        } else {
+            enforce_u32::<E>(cx, bytes_per_row_value, "bytesPerRow")?
+        },
+        // R8: `[EnforceRange]` GPUSize32 is checked at the 32-bit boundary.
+        rowsPerImage: if E::is_undefined(cx, rows_per_image_value) {
+            WGPU_COPY_STRIDE_UNDEFINED
+        } else {
+            enforce_u32::<E>(cx, rows_per_image_value, "rowsPerImage")?
+        },
+    })
+}
+
+/// Converts a JavaScript `GPUTexelCopyBufferInfo` into `WGPUTexelCopyBufferInfo`.
+pub(super) fn convert_texel_copy_buffer_info<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    value: E::Value,
+) -> Result<WGPUTexelCopyBufferInfo, E::Error> {
+    // DR-M3: required dictionary members reject undefined.
+    let buffer_value = required_member::<E>(cx, value, "buffer")?;
+    let layout = convert_texel_copy_buffer_layout::<E>(cx, value)?;
+    let buffer = buffer_handle::<E>(cx, buffer_value)?;
+    Ok(WGPUTexelCopyBufferInfo {
+        buffer,
+        layout,
+    })
+}
+
+/// Converts a JavaScript `GPUTexelCopyTextureInfo` into `WGPUTexelCopyTextureInfo`.
+pub(super) fn convert_texel_copy_texture_info<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    value: E::Value,
+) -> Result<WGPUTexelCopyTextureInfo, E::Error> {
+    // DR-M3: required dictionary members reject undefined.
+    let texture_value = required_member::<E>(cx, value, "texture")?;
+    let mip_level_value = dictionary_member::<E>(cx, value, "mipLevel")?;
+    let origin_value = dictionary_member::<E>(cx, value, "origin")?;
+    let aspect_value = dictionary_member::<E>(cx, value, "aspect")?;
+    let texture = texture_handle::<E>(cx, texture_value)?;
+    let origin = if E::is_undefined(cx, origin_value) {
+        // The pinned C initializer uses the all-zero value for an absent numeric union.
+        unsafe { std::mem::zeroed() }
+    } else {
+        convert_gpu_origin3d::<E>(cx, origin_value)?
+    };
+    // B6: string enums are joined to C values; absence uses the IDL default or C sentinel.
+    let aspect = if E::is_undefined(cx, aspect_value) {
+        WGPUTextureAspect_WGPUTextureAspect_Undefined
+    } else {
+        let enum_arena = Arena::new();
+        match E::to_str(cx, aspect_value, &enum_arena)? {
+            "all" => WGPUTextureAspect_WGPUTextureAspect_All,
+            "stencil-only" => WGPUTextureAspect_WGPUTextureAspect_StencilOnly,
+            "depth-only" => WGPUTextureAspect_WGPUTextureAspect_DepthOnly,
+            _ => return Err(E::type_error(cx, "GPUTextureAspect")),
+        }
+    };
+    Ok(WGPUTexelCopyTextureInfo {
+        texture,
+        // R8: `[EnforceRange]` GPUIntegerCoordinate is checked at the 32-bit boundary.
+        mipLevel: if E::is_undefined(cx, mip_level_value) {
+            0
+        } else {
+            enforce_u32::<E>(cx, mip_level_value, "mipLevel")?
+        },
+        origin,
+        aspect,
     })
 }
 
@@ -2593,6 +2967,27 @@ pub(super) fn convert_gpu_origin3d<E: JsEngine>(cx: E::Context<'_>, value: E::Va
     })
 }
 
+/// Converts the dictionary-or-sequence `GPUColor` typedef into `WGPUColor`.
+#[allow(dead_code)] // T1 policy selects both typedefs; some land before their API consumer.
+pub(super) fn convert_gpu_color<E: JsEngine>(cx: E::Context<'_>, value: E::Value) -> Result<WGPUColor, E::Error> {
+    // T1: an iterable selects the sequence arm; otherwise dictionary conversion applies.
+    let Some(iterator_method) = sequence_iterator_method::<E>(cx, value)? else {
+        return convert_color_dict::<E>(cx, value);
+    };
+    let values = convert_sequence_from_method::<E, _>(cx, value, iterator_method, "GPUColor", |item| {
+        restricted_f64::<E>(cx, item, "color channel")
+    })?;
+    if values.len() < 4 || values.len() > 4 {
+        return Err(E::type_error(cx, "GPUColor sequence length must be 4..=4"));
+    }
+    Ok(WGPUColor {
+        r: values[0],
+        g: values[1],
+        b: values[2],
+        a: values[3],
+    })
+}
+
 pub(super) fn convert_gpu_error_filter<E: JsEngine>(cx: E::Context<'_>, value: E::Value) -> Result<WGPUErrorFilter, E::Error> {
     // B6: generated WebIDL string-enum conversion rejects unknown values.
     let arena = Arena::new();
@@ -2601,6 +2996,16 @@ pub(super) fn convert_gpu_error_filter<E: JsEngine>(cx: E::Context<'_>, value: E
         "out-of-memory" => Ok(WGPUErrorFilter_WGPUErrorFilter_OutOfMemory),
         "internal" => Ok(WGPUErrorFilter_WGPUErrorFilter_Internal),
         _ => Err(E::type_error(cx, "GPUErrorFilter")),
+    }
+}
+
+pub(super) fn convert_gpu_index_format<E: JsEngine>(cx: E::Context<'_>, value: E::Value) -> Result<WGPUIndexFormat, E::Error> {
+    // B6: generated WebIDL string-enum conversion rejects unknown values.
+    let arena = Arena::new();
+    match E::to_str(cx, value, &arena)? {
+        "uint16" => Ok(WGPUIndexFormat_WGPUIndexFormat_Uint16),
+        "uint32" => Ok(WGPUIndexFormat_WGPUIndexFormat_Uint32),
+        _ => Err(E::type_error(cx, "GPUIndexFormat")),
     }
 }
 
@@ -2837,6 +3242,10 @@ pub enum ReleaseRequest {
     ComputePassEncoder { /// Pass handle.
         pass: WGPUComputePassEncoder, /// Dispatch table.
         gpu: GpuDispatch },
+    /// Release a render-pass encoder.
+    RenderPassEncoder { /// Pass handle.
+        pass: WGPURenderPassEncoder, /// Dispatch table.
+        gpu: GpuDispatch },
 }
 
 // SAFETY: finalizers only move WGPU handle values into this queue; native
@@ -2893,6 +3302,7 @@ impl ReleaseRequest {
             },
             Self::CommandBuffer { command_buffer, gpu } => unsafe { (gpu.command_buffer_release)(command_buffer) },
             Self::ComputePassEncoder { pass, gpu } => unsafe { (gpu.compute_pass_encoder_release)(pass) },
+            Self::RenderPassEncoder { pass, gpu } => unsafe { (gpu.render_pass_encoder_release)(pass) },
         }
     }
 }
@@ -3693,6 +4103,7 @@ pub(super) fn queue_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
         properties: &[],
         methods: Box::leak(Box::new([
             MethodSpec { name: "writeBuffer", length: 3, call: queue_write_buffer::<E> },
+            MethodSpec { name: "writeTexture", length: 4, call: queue_write_texture::<E> },
             MethodSpec { name: "submit", length: 1, call: queue_submit::<E> },
             MethodSpec { name: "onSubmittedWorkDone", length: 0, call: queue_on_submitted_work_done::<E> },
         ])),
@@ -3788,6 +4199,10 @@ pub(super) fn command_encoder_class<E: JsEngine + 'static>() -> &'static ClassSp
         methods: Box::leak(Box::new([
             MethodSpec { name: "copyBufferToBuffer", length: 5, call: command_encoder_copy_buffer_to_buffer::<E> },
             MethodSpec { name: "beginComputePass", length: 0, call: command_encoder_begin_compute_pass::<E> },
+            MethodSpec { name: "beginRenderPass", length: 1, call: command_encoder_begin_render_pass::<E> },
+            MethodSpec { name: "copyBufferToTexture", length: 3, call: command_encoder_copy_buffer_to_texture::<E> },
+            MethodSpec { name: "copyTextureToBuffer", length: 3, call: command_encoder_copy_texture_to_buffer::<E> },
+            MethodSpec { name: "copyTextureToTexture", length: 3, call: command_encoder_copy_texture_to_texture::<E> },
             MethodSpec { name: "finish", length: 0, call: command_encoder_finish::<E> },
         ])),
         finalizer: finalize_command_encoder,
@@ -3807,6 +4222,27 @@ pub(super) fn compute_pass_encoder_class<E: JsEngine + 'static>() -> &'static Cl
             MethodSpec { name: "end", length: 0, call: compute_pass_end::<E> },
         ])),
         finalizer: finalize_compute_pass_encoder,
+    })
+}
+
+pub(super) fn render_pass_encoder_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
+    class_spec_once::<E, _>(GPU_RENDER_PASS_ENCODER_CLASS, || ClassSpec {
+        name: "GPURenderPassEncoder",
+        id: GPU_RENDER_PASS_ENCODER_CLASS,
+        constructor: None,
+        properties: &[],
+        methods: Box::leak(Box::new([
+            MethodSpec { name: "setPipeline", length: 1, call: render_pass_set_pipeline::<E> },
+            MethodSpec { name: "setVertexBuffer", length: 2, call: render_pass_set_vertex_buffer::<E> },
+            MethodSpec { name: "setIndexBuffer", length: 2, call: render_pass_set_index_buffer::<E> },
+            MethodSpec { name: "setBindGroup", length: 2, call: render_pass_set_bind_group::<E> },
+            MethodSpec { name: "draw", length: 1, call: render_pass_draw::<E> },
+            MethodSpec { name: "drawIndexed", length: 1, call: render_pass_draw_indexed::<E> },
+            MethodSpec { name: "setViewport", length: 6, call: render_pass_set_viewport::<E> },
+            MethodSpec { name: "setScissorRect", length: 4, call: render_pass_set_scissor_rect::<E> },
+            MethodSpec { name: "end", length: 0, call: render_pass_end::<E> },
+        ])),
+        finalizer: finalize_render_pass_encoder,
     })
 }
 

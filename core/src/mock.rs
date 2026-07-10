@@ -18,12 +18,14 @@ use crate::{
     WGPUCommandBuffer, WGPUCommandBufferDescriptor, WGPUCommandEncoder,
     WGPUCommandEncoderDescriptor, WGPUComputePassDescriptor, WGPUComputePassEncoder,
     WGPUComputePipeline, WGPUComputePipelineDescriptor, WGPUDeviceLostCallbackInfo,
-    WGPUErrorFilter, WGPUErrorType, WGPUFuture, WGPUPipelineLayout, WGPUPipelineLayoutDescriptor,
-    WGPUPopErrorScopeCallbackInfo, WGPUPopErrorScopeStatus, WGPUQueue,
-    WGPUQueueWorkDoneCallbackInfo, WGPURenderPipeline, WGPURenderPipelineDescriptor, WGPUSampler,
-    WGPUSamplerDescriptor, WGPUShaderModule, WGPUShaderModuleDescriptor, WGPUTexture,
-    WGPUTextureDescriptor, WGPUTextureDimension, WGPUTextureFormat, WGPUTextureUsage,
-    WGPUTextureView, WGPUTextureViewDescriptor, WGPUUncapturedErrorCallbackInfo,
+    WGPUErrorFilter, WGPUErrorType, WGPUExtent3D, WGPUFuture, WGPUIndexFormat, WGPUPipelineLayout,
+    WGPUPipelineLayoutDescriptor, WGPUPopErrorScopeCallbackInfo, WGPUPopErrorScopeStatus,
+    WGPUQueue, WGPUQueueWorkDoneCallbackInfo, WGPURenderPassDescriptor, WGPURenderPassEncoder,
+    WGPURenderPipeline, WGPURenderPipelineDescriptor, WGPUSampler, WGPUSamplerDescriptor,
+    WGPUShaderModule, WGPUShaderModuleDescriptor, WGPUTexelCopyBufferInfo,
+    WGPUTexelCopyBufferLayout, WGPUTexelCopyTextureInfo, WGPUTexture, WGPUTextureDescriptor,
+    WGPUTextureDimension, WGPUTextureFormat, WGPUTextureUsage, WGPUTextureView,
+    WGPUTextureViewDescriptor, WGPUUncapturedErrorCallbackInfo,
 };
 
 /// Mock JavaScript value handle.
@@ -1691,6 +1693,17 @@ unsafe fn queue_write_buffer(
     });
 }
 
+unsafe fn queue_write_texture(
+    _queue: WGPUQueue,
+    _destination: *const WGPUTexelCopyTextureInfo,
+    _data: *const std::ffi::c_void,
+    _data_size: usize,
+    _data_layout: *const WGPUTexelCopyBufferLayout,
+    _write_size: *const WGPUExtent3D,
+) {
+    // T7: yawgpu Noop does not execute texture writes; the mock records no texels either.
+}
+
 unsafe fn queue_submit(_queue: WGPUQueue, _count: usize, _commands: *const WGPUCommandBuffer) {}
 
 unsafe fn queue_on_submitted_work_done(
@@ -1799,6 +1812,37 @@ unsafe fn command_encoder_begin_compute_pass(
     fake_handle(8001)
 }
 
+unsafe fn command_encoder_begin_render_pass(
+    _encoder: WGPUCommandEncoder,
+    _descriptor: *const WGPURenderPassDescriptor,
+) -> WGPURenderPassEncoder {
+    fake_handle(8002)
+}
+
+unsafe fn command_encoder_copy_buffer_to_texture(
+    _encoder: WGPUCommandEncoder,
+    _source: *const WGPUTexelCopyBufferInfo,
+    _destination: *const WGPUTexelCopyTextureInfo,
+    _copy_size: *const WGPUExtent3D,
+) {
+}
+
+unsafe fn command_encoder_copy_texture_to_buffer(
+    _encoder: WGPUCommandEncoder,
+    _source: *const WGPUTexelCopyTextureInfo,
+    _destination: *const WGPUTexelCopyBufferInfo,
+    _copy_size: *const WGPUExtent3D,
+) {
+}
+
+unsafe fn command_encoder_copy_texture_to_texture(
+    _encoder: WGPUCommandEncoder,
+    _source: *const WGPUTexelCopyTextureInfo,
+    _destination: *const WGPUTexelCopyTextureInfo,
+    _copy_size: *const WGPUExtent3D,
+) {
+}
+
 unsafe fn command_encoder_finish(
     _encoder: WGPUCommandEncoder,
     _descriptor: *const WGPUCommandBufferDescriptor,
@@ -1829,6 +1873,72 @@ unsafe fn compute_pass_encoder_dispatch_workgroups(
 ) {
 }
 unsafe fn compute_pass_encoder_end(_pass: WGPUComputePassEncoder) {}
+unsafe fn render_pass_encoder_release(_pass: WGPURenderPassEncoder) {}
+unsafe fn render_pass_encoder_set_pipeline(
+    _pass: WGPURenderPassEncoder,
+    _pipeline: WGPURenderPipeline,
+) {
+}
+unsafe fn render_pass_encoder_set_vertex_buffer(
+    _pass: WGPURenderPassEncoder,
+    _slot: u32,
+    _buffer: WGPUBuffer,
+    _offset: u64,
+    _size: u64,
+) {
+}
+unsafe fn render_pass_encoder_set_index_buffer(
+    _pass: WGPURenderPassEncoder,
+    _buffer: WGPUBuffer,
+    _format: WGPUIndexFormat,
+    _offset: u64,
+    _size: u64,
+) {
+}
+unsafe fn render_pass_encoder_set_bind_group(
+    _pass: WGPURenderPassEncoder,
+    _index: u32,
+    _bind_group: WGPUBindGroup,
+    _offset_count: usize,
+    _offsets: *const u32,
+) {
+}
+unsafe fn render_pass_encoder_draw(
+    _pass: WGPURenderPassEncoder,
+    _vertex_count: u32,
+    _instance_count: u32,
+    _first_vertex: u32,
+    _first_instance: u32,
+) {
+}
+unsafe fn render_pass_encoder_draw_indexed(
+    _pass: WGPURenderPassEncoder,
+    _index_count: u32,
+    _instance_count: u32,
+    _first_index: u32,
+    _base_vertex: i32,
+    _first_instance: u32,
+) {
+}
+unsafe fn render_pass_encoder_set_viewport(
+    _pass: WGPURenderPassEncoder,
+    _x: f32,
+    _y: f32,
+    _width: f32,
+    _height: f32,
+    _min_depth: f32,
+    _max_depth: f32,
+) {
+}
+unsafe fn render_pass_encoder_set_scissor_rect(
+    _pass: WGPURenderPassEncoder,
+    _x: u32,
+    _y: u32,
+    _width: u32,
+    _height: u32,
+) {
+}
+unsafe fn render_pass_encoder_end(_pass: WGPURenderPassEncoder) {}
 
 fn read_view(view: WGPUStringView) -> Vec<u8> {
     if view.data.is_null() || view.length == crate::wgpu_strlen() {
@@ -1845,32 +1955,37 @@ mod tests {
         buffer_label_set, buffer_map_async, buffer_size_get, buffer_unmap, buffer_usage_get,
         command_encoder_finish, convert_bind_group_descriptor, convert_bind_group_entry,
         convert_bind_group_layout_descriptor, convert_blend_component,
-        convert_buffer_binding_layout, convert_buffer_descriptor, convert_color_target_state,
-        convert_command_buffer_descriptor, convert_command_encoder_descriptor,
-        convert_compute_pass_descriptor, convert_compute_pipeline_descriptor,
-        convert_depth_stencil_state, convert_gpu_extent3d, convert_gpu_origin3d,
-        convert_multisample_state, convert_pipeline_layout_descriptor, convert_primitive_state,
-        convert_render_pipeline_descriptor, convert_sampler_binding_layout,
-        convert_sampler_descriptor, convert_shader_module_descriptor, convert_stencil_face_state,
-        convert_storage_texture_binding_layout, convert_texture_binding_layout,
-        convert_texture_descriptor, convert_texture_view_descriptor, convert_vertex_attribute,
-        convert_vertex_buffer_layout, device_create_bind_group, device_create_buffer,
-        device_create_command_encoder, device_create_compute_pipeline,
-        device_create_render_pipeline, device_create_sampler, device_create_texture,
-        device_lost_get, device_lost_info_message_get, device_lost_info_reason_get,
-        device_on_uncaptured_error_get, device_on_uncaptured_error_set, device_pop_error_scope,
-        device_push_error_scope, device_queue_get, finalize_bind_group, finalize_buffer,
-        finalize_compute_pipeline, finalize_device, finalize_queue, finalize_render_pipeline,
-        finalize_sampler, finalize_texture, finalize_texture_view, queue_submit,
-        queue_work_done_callback, queue_write_buffer, request_adapter_callback,
-        request_device_callback, texture_depth_or_array_layers_get, texture_dimension_get,
-        texture_format_get, texture_height_get, texture_mip_level_count_get,
-        texture_sample_count_get, texture_usage_get, texture_width_get, wrap_device,
-        AdapterPayload, AdapterRequest, BindGroupLayoutPayload, BindGroupPayload, BufferPayload,
-        ComputePipelinePayload, DeviceEventState, DevicePayload, DeviceRequest, ErrorPayload,
-        JsEngine, PendingNative, PendingNativeHandle, PipelineLayoutPayload, QueueError,
-        QueuePayload, QueueWorkDoneRequest, RenderPipelinePayload, SamplerPayload,
-        SettlementRequest, ShaderModulePayload, TexturePayload, TextureViewPayload,
+        convert_buffer_binding_layout, convert_buffer_descriptor, convert_color_dict,
+        convert_color_target_state, convert_command_buffer_descriptor,
+        convert_command_encoder_descriptor, convert_compute_pass_descriptor,
+        convert_compute_pipeline_descriptor, convert_depth_stencil_state, convert_gpu_color,
+        convert_gpu_extent3d, convert_gpu_origin3d, convert_multisample_state,
+        convert_pipeline_layout_descriptor, convert_primitive_state,
+        convert_render_pass_color_attachment, convert_render_pass_depth_stencil_attachment,
+        convert_render_pass_descriptor, convert_render_pipeline_descriptor,
+        convert_sampler_binding_layout, convert_sampler_descriptor,
+        convert_shader_module_descriptor, convert_stencil_face_state,
+        convert_storage_texture_binding_layout, convert_texel_copy_buffer_info,
+        convert_texel_copy_buffer_layout, convert_texel_copy_texture_info,
+        convert_texture_binding_layout, convert_texture_descriptor,
+        convert_texture_view_descriptor, convert_vertex_attribute, convert_vertex_buffer_layout,
+        device_create_bind_group, device_create_buffer, device_create_command_encoder,
+        device_create_compute_pipeline, device_create_render_pipeline, device_create_sampler,
+        device_create_texture, device_lost_get, device_lost_info_message_get,
+        device_lost_info_reason_get, device_on_uncaptured_error_get,
+        device_on_uncaptured_error_set, device_pop_error_scope, device_push_error_scope,
+        device_queue_get, finalize_bind_group, finalize_buffer, finalize_compute_pipeline,
+        finalize_device, finalize_queue, finalize_render_pipeline, finalize_sampler,
+        finalize_texture, finalize_texture_view, queue_submit, queue_work_done_callback,
+        queue_write_buffer, queue_write_texture, request_adapter_callback, request_device_callback,
+        texture_depth_or_array_layers_get, texture_dimension_get, texture_format_get,
+        texture_height_get, texture_mip_level_count_get, texture_sample_count_get,
+        texture_usage_get, texture_width_get, wrap_device, AdapterPayload, AdapterRequest,
+        BindGroupLayoutPayload, BindGroupPayload, BufferPayload, ComputePipelinePayload,
+        DeviceEventState, DevicePayload, DeviceRequest, ErrorPayload, JsEngine, PendingNative,
+        PendingNativeHandle, PipelineLayoutPayload, QueueError, QueuePayload, QueueWorkDoneRequest,
+        RenderPipelinePayload, SamplerPayload, SettlementRequest, ShaderModulePayload,
+        TexturePayload, TextureViewPayload,
     };
     use std::sync::atomic::AtomicBool;
     use std::sync::{Mutex, Weak};
@@ -6188,5 +6303,476 @@ mod tests {
         let cx = rt.context();
         let device = unsafe { wrap_device::<Engine>(cx, fake_handle(999)) }.expect("device");
         let _ = device_lost_get::<Engine>(cx, device).expect("pending lost");
+    }
+
+    #[test]
+    fn t6_gpu_color_and_render_pass_descriptors_cover_both_union_arms_and_holes() {
+        let rt = runtime();
+        let cx = rt.context();
+        let view = Engine::new_instance(
+            cx,
+            crate::GPU_TEXTURE_VIEW_CLASS,
+            Box::new(TextureViewPayload {
+                texture_view: fake_handle(501),
+                texture: fake_handle(502),
+            }),
+        )
+        .expect("texture view");
+
+        let dict_color = descriptor(
+            &rt,
+            &[
+                ("r", rt.number(0.1)),
+                ("g", rt.number(0.2)),
+                ("b", rt.number(0.3)),
+                ("a", rt.number(0.4)),
+            ],
+        );
+        let sequence_color = rt.set_like(&[
+            rt.number(0.1),
+            rt.number(0.2),
+            rt.number(0.3),
+            rt.number(0.4),
+        ]);
+        let dict = convert_gpu_color::<Engine>(cx, dict_color).expect("dict color");
+        let sequence = convert_gpu_color::<Engine>(cx, sequence_color).expect("sequence color");
+        assert_eq!((dict.r, dict.g, dict.b, dict.a), (0.1, 0.2, 0.3, 0.4));
+        assert_eq!(
+            (sequence.r, sequence.g, sequence.b, sequence.a),
+            (dict.r, dict.g, dict.b, dict.a)
+        );
+        assert!(convert_gpu_color::<Engine>(
+            cx,
+            rt.set_like(&[rt.number(1.0), rt.number(2.0), rt.number(3.0)])
+        )
+        .is_err());
+        assert!(convert_color_dict::<Engine>(
+            cx,
+            descriptor(
+                &rt,
+                &[
+                    ("r", rt.number(0.0)),
+                    ("g", rt.number(0.0)),
+                    ("b", rt.number(0.0))
+                ]
+            )
+        )
+        .is_err());
+        assert!(convert_gpu_color::<Engine>(
+            cx,
+            rt.set_like(&[
+                rt.number(f64::INFINITY),
+                rt.number(0.0),
+                rt.number(0.0),
+                rt.number(1.0)
+            ])
+        )
+        .is_err());
+
+        let color_attachment = descriptor(
+            &rt,
+            &[
+                ("view", view),
+                ("depthSlice", rt.number(7.0)),
+                ("resolveTarget", view),
+                ("clearValue", dict_color),
+                ("loadOp", rt.string("clear")),
+                ("storeOp", rt.string("discard")),
+            ],
+        );
+        let color = convert_render_pass_color_attachment::<Engine>(cx, color_attachment)
+            .expect("color attachment");
+        assert!(color.nextInChain.is_null());
+        assert_eq!(color.view, fake_handle(501));
+        assert_eq!(color.depthSlice, 7);
+        assert_eq!(color.resolveTarget, fake_handle(501));
+        assert_eq!(color.loadOp, crate::WGPULoadOp_WGPULoadOp_Clear);
+        assert_eq!(color.storeOp, crate::WGPUStoreOp_WGPUStoreOp_Discard);
+        assert_eq!(
+            (
+                color.clearValue.r,
+                color.clearValue.g,
+                color.clearValue.b,
+                color.clearValue.a
+            ),
+            (0.1, 0.2, 0.3, 0.4)
+        );
+        assert!(convert_render_pass_color_attachment::<Engine>(
+            cx,
+            descriptor(&rt, &[("view", view), ("storeOp", rt.string("store"))])
+        )
+        .is_err());
+
+        let depth_attachment = descriptor(
+            &rt,
+            &[
+                ("view", view),
+                ("depthClearValue", rt.number(0.75)),
+                ("depthLoadOp", rt.string("clear")),
+                ("depthStoreOp", rt.string("store")),
+                ("depthReadOnly", rt.bool(true)),
+                ("stencilClearValue", rt.number(23.0)),
+                ("stencilLoadOp", rt.string("load")),
+                ("stencilStoreOp", rt.string("discard")),
+                ("stencilReadOnly", rt.bool(true)),
+            ],
+        );
+        let depth = convert_render_pass_depth_stencil_attachment::<Engine>(cx, depth_attachment)
+            .expect("depth attachment");
+        assert!(depth.nextInChain.is_null());
+        assert_eq!(depth.view, fake_handle(501));
+        assert_eq!(depth.depthLoadOp, crate::WGPULoadOp_WGPULoadOp_Clear);
+        assert_eq!(depth.depthStoreOp, crate::WGPUStoreOp_WGPUStoreOp_Store);
+        assert_eq!(depth.depthClearValue, 0.75);
+        assert_eq!(depth.depthReadOnly, 1);
+        assert_eq!(depth.stencilLoadOp, crate::WGPULoadOp_WGPULoadOp_Load);
+        assert_eq!(depth.stencilStoreOp, crate::WGPUStoreOp_WGPUStoreOp_Discard);
+        assert_eq!(depth.stencilClearValue, 23);
+        assert_eq!(depth.stencilReadOnly, 1);
+
+        let attachments = rt.set_like(&[color_attachment, rt.null()]);
+        let pass = descriptor(
+            &rt,
+            &[
+                ("label", rt.string("render-pass")),
+                ("colorAttachments", attachments),
+                ("depthStencilAttachment", depth_attachment),
+            ],
+        );
+        let arena = Arena::new();
+        let native = convert_render_pass_descriptor::<Engine>(cx, pass, &arena)
+            .expect("render pass descriptor");
+        assert!(native.nextInChain.is_null());
+        assert_eq!(read_view(native.label), b"render-pass");
+        assert_eq!(native.colorAttachmentCount, 2);
+        let colors = unsafe { std::slice::from_raw_parts(native.colorAttachments, 2) };
+        assert_eq!(colors[0].view, fake_handle(501));
+        assert!(colors[1].view.is_null());
+        assert!(colors[1].resolveTarget.is_null());
+        let native_depth = unsafe { native.depthStencilAttachment.as_ref() }.expect("depth");
+        assert_eq!(native_depth.view, fake_handle(501));
+    }
+
+    #[test]
+    fn t7_texel_copy_descriptors_assert_every_c_field_and_reject_bad_inputs() {
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let buffer = device_create_buffer::<Engine>(
+            cx,
+            device,
+            &[descriptor(
+                &rt,
+                &[("size", rt.number(1024.0)), ("usage", rt.number(12.0))],
+            )],
+        )
+        .expect("buffer");
+        let texture = Engine::new_instance(
+            cx,
+            crate::GPU_TEXTURE_CLASS,
+            Box::new(TexturePayload {
+                texture: fake_handle(601),
+                destroyed: AtomicBool::new(false),
+            }),
+        )
+        .expect("texture");
+
+        let layout_value = descriptor(
+            &rt,
+            &[
+                ("offset", rt.number(32.0)),
+                ("bytesPerRow", rt.number(256.0)),
+                ("rowsPerImage", rt.number(9.0)),
+            ],
+        );
+        let layout =
+            convert_texel_copy_buffer_layout::<Engine>(cx, layout_value).expect("copy layout");
+        assert_eq!(layout.offset, 32);
+        assert_eq!(layout.bytesPerRow, 256);
+        assert_eq!(layout.rowsPerImage, 9);
+        let absent = convert_texel_copy_buffer_layout::<Engine>(cx, descriptor(&rt, &[]))
+            .expect("default copy layout");
+        assert_eq!(absent.offset, 0);
+        assert_eq!(absent.bytesPerRow, crate::WGPU_COPY_STRIDE_UNDEFINED);
+        assert_eq!(absent.rowsPerImage, crate::WGPU_COPY_STRIDE_UNDEFINED);
+
+        let buffer_info_value = descriptor(
+            &rt,
+            &[
+                ("buffer", buffer),
+                ("offset", rt.number(32.0)),
+                ("bytesPerRow", rt.number(256.0)),
+                ("rowsPerImage", rt.number(9.0)),
+            ],
+        );
+        let buffer_info =
+            convert_texel_copy_buffer_info::<Engine>(cx, buffer_info_value).expect("buffer info");
+        assert_eq!(
+            buffer_info.buffer,
+            crate::buffer_handle::<Engine>(cx, buffer).expect("handle")
+        );
+        assert_eq!(buffer_info.layout.offset, 32);
+        assert_eq!(buffer_info.layout.bytesPerRow, 256);
+        assert_eq!(buffer_info.layout.rowsPerImage, 9);
+
+        let origin = descriptor(
+            &rt,
+            &[
+                ("x", rt.number(2.0)),
+                ("y", rt.number(3.0)),
+                ("z", rt.number(4.0)),
+            ],
+        );
+        let texture_info_value = descriptor(
+            &rt,
+            &[
+                ("texture", texture),
+                ("mipLevel", rt.number(5.0)),
+                ("origin", origin),
+                ("aspect", rt.string("depth-only")),
+            ],
+        );
+        let texture_info = convert_texel_copy_texture_info::<Engine>(cx, texture_info_value)
+            .expect("texture info");
+        assert_eq!(texture_info.texture, fake_handle(601));
+        assert_eq!(texture_info.mipLevel, 5);
+        assert_eq!(
+            (
+                texture_info.origin.x,
+                texture_info.origin.y,
+                texture_info.origin.z
+            ),
+            (2, 3, 4)
+        );
+        assert_eq!(
+            texture_info.aspect,
+            crate::WGPUTextureAspect_WGPUTextureAspect_DepthOnly
+        );
+
+        assert!(convert_texel_copy_buffer_info::<Engine>(cx, descriptor(&rt, &[])).is_err());
+        assert!(convert_texel_copy_texture_info::<Engine>(cx, descriptor(&rt, &[])).is_err());
+        assert!(convert_texel_copy_texture_info::<Engine>(
+            cx,
+            descriptor(&rt, &[("texture", texture), ("aspect", rt.string("bad"))])
+        )
+        .is_err());
+        assert!(convert_texel_copy_texture_info::<Engine>(
+            cx,
+            descriptor(
+                &rt,
+                &[
+                    ("texture", texture),
+                    (
+                        "origin",
+                        rt.set_like(&[
+                            rt.number(0.0),
+                            rt.number(0.0),
+                            rt.number(0.0),
+                            rt.number(0.0)
+                        ])
+                    )
+                ]
+            )
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn t6_render_pass_state_machine_and_t7_copy_calls_are_validation_only() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let encoder = device_create_command_encoder::<Engine>(cx, device, &[]).expect("encoder");
+        let view = Engine::new_instance(
+            cx,
+            crate::GPU_TEXTURE_VIEW_CLASS,
+            Box::new(TextureViewPayload {
+                texture_view: fake_handle(701),
+                texture: fake_handle(702),
+            }),
+        )
+        .expect("view");
+        let texture = Engine::new_instance(
+            cx,
+            crate::GPU_TEXTURE_CLASS,
+            Box::new(TexturePayload {
+                texture: fake_handle(702),
+                destroyed: AtomicBool::new(false),
+            }),
+        )
+        .expect("texture");
+        let attachment = descriptor(
+            &rt,
+            &[
+                ("view", view),
+                ("loadOp", rt.string("clear")),
+                ("storeOp", rt.string("store")),
+                (
+                    "clearValue",
+                    rt.set_like(&[
+                        rt.number(0.0),
+                        rt.number(0.0),
+                        rt.number(0.0),
+                        rt.number(1.0),
+                    ]),
+                ),
+            ],
+        );
+        let pass_desc = descriptor(&rt, &[("colorAttachments", rt.set_like(&[attachment]))]);
+        let pass = crate::command_encoder_begin_render_pass::<Engine>(cx, encoder, &[pass_desc])
+            .expect("begin render pass");
+        let pipeline = Engine::new_instance(
+            cx,
+            crate::GPU_RENDER_PIPELINE_CLASS,
+            Box::new(RenderPipelinePayload {
+                render_pipeline: fake_handle(703),
+                vertex_module: ptr::null_mut(),
+                fragment_module: ptr::null_mut(),
+                layout: ptr::null_mut(),
+            }),
+        )
+        .expect("render pipeline");
+        crate::render_pass_set_pipeline::<Engine>(cx, pass, &[pipeline]).expect("pipeline");
+        let render_buffer = device_create_buffer::<Engine>(
+            cx,
+            device,
+            &[descriptor(
+                &rt,
+                &[("size", rt.number(64.0)), ("usage", rt.number(48.0))],
+            )],
+        )
+        .expect("render buffer");
+        crate::render_pass_set_vertex_buffer::<Engine>(cx, pass, &[rt.number(0.0), rt.null()])
+            .expect("nullable vertex buffer");
+        crate::render_pass_set_vertex_buffer::<Engine>(
+            cx,
+            pass,
+            &[
+                rt.number(1.0),
+                render_buffer,
+                rt.number(4.0),
+                rt.number(16.0),
+            ],
+        )
+        .expect("vertex buffer range");
+        crate::render_pass_set_index_buffer::<Engine>(
+            cx,
+            pass,
+            &[render_buffer, rt.string("uint16")],
+        )
+        .expect("index buffer defaults");
+        let bind_group = Engine::new_instance(
+            cx,
+            crate::GPU_BIND_GROUP_CLASS,
+            Box::new(BindGroupPayload {
+                bind_group: fake_handle(704),
+                layout: ptr::null_mut(),
+                buffers: Vec::new(),
+                samplers: Vec::new(),
+                texture_views: Vec::new(),
+            }),
+        )
+        .expect("bind group");
+        crate::render_pass_set_bind_group::<Engine>(cx, pass, &[rt.number(0.0), bind_group])
+            .expect("bind group");
+        crate::render_pass_set_viewport::<Engine>(
+            cx,
+            pass,
+            &[
+                rt.number(0.0),
+                rt.number(0.0),
+                rt.number(4.0),
+                rt.number(4.0),
+                rt.number(0.0),
+                rt.number(1.0),
+            ],
+        )
+        .expect("viewport");
+        crate::render_pass_set_scissor_rect::<Engine>(
+            cx,
+            pass,
+            &[
+                rt.number(0.0),
+                rt.number(0.0),
+                rt.number(4.0),
+                rt.number(4.0),
+            ],
+        )
+        .expect("scissor");
+        crate::render_pass_draw::<Engine>(cx, pass, &[rt.number(3.0)]).expect("draw defaults");
+        crate::render_pass_draw_indexed::<Engine>(cx, pass, &[rt.number(3.0)])
+            .expect("draw indexed defaults");
+        assert!(crate::render_pass_set_viewport::<Engine>(
+            cx,
+            pass,
+            &[
+                rt.number(f64::INFINITY),
+                rt.number(0.0),
+                rt.number(4.0),
+                rt.number(4.0),
+                rt.number(0.0),
+                rt.number(1.0),
+            ],
+        )
+        .is_err());
+        crate::render_pass_end::<Engine>(cx, pass, &[]).expect("end");
+        assert_eq!(
+            crate::render_pass_end::<Engine>(cx, pass, &[]).expect_err("double end"),
+            "OperationError: GPURenderPassEncoder is ended"
+        );
+        assert_eq!(
+            crate::render_pass_draw::<Engine>(cx, pass, &[rt.number(3.0)])
+                .expect_err("use after end"),
+            "OperationError: GPURenderPassEncoder is ended"
+        );
+
+        let copy_encoder =
+            device_create_command_encoder::<Engine>(cx, device, &[]).expect("copy encoder");
+        let buffer = device_create_buffer::<Engine>(
+            cx,
+            device,
+            &[descriptor(
+                &rt,
+                &[("size", rt.number(1024.0)), ("usage", rt.number(12.0))],
+            )],
+        )
+        .expect("copy buffer");
+        let buffer_info = descriptor(
+            &rt,
+            &[
+                ("buffer", buffer),
+                ("bytesPerRow", rt.number(256.0)),
+                ("rowsPerImage", rt.number(1.0)),
+            ],
+        );
+        let texture_info = descriptor(&rt, &[("texture", texture)]);
+        let extent = descriptor(&rt, &[("width", rt.number(1.0))]);
+        crate::command_encoder_copy_buffer_to_texture::<Engine>(
+            cx,
+            copy_encoder,
+            &[buffer_info, texture_info, extent],
+        )
+        .expect("buffer to texture validation only");
+        crate::command_encoder_copy_texture_to_buffer::<Engine>(
+            cx,
+            copy_encoder,
+            &[texture_info, buffer_info, extent],
+        )
+        .expect("texture to buffer validation only");
+        crate::command_encoder_copy_texture_to_texture::<Engine>(
+            cx,
+            copy_encoder,
+            &[texture_info, texture_info, extent],
+        )
+        .expect("texture to texture validation only");
+        let data = rt.insert(MockValue::ArrayBuffer {
+            bytes: vec![0; 256],
+            detached: false,
+        });
+        let queue = device_queue_get::<Engine>(cx, device).expect("queue");
+        queue_write_texture::<Engine>(cx, queue, &[texture_info, data, buffer_info, extent])
+            .expect("write texture validation only");
+        release_device_held_values(&rt, cx, device);
     }
 }

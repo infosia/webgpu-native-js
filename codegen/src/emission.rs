@@ -298,17 +298,30 @@ fn validate_dict_or_sequence_unions(
                 union.typedef
             )));
         }
+        let numeric_kind = pair
+            .members
+            .first()
+            .and_then(|member| member.idl.first())
+            .and_then(|member| member.values.first())
+            .map(|value| value.type_name.as_str())
+            .unwrap_or_default();
         for (index, member) in pair.members.iter().enumerate() {
             let (idl, c) = member_values(member, &union.dictionary)?;
-            if idl.type_name != "GPUIntegerCoordinate"
-                || !idl.enforce_range
-                || idl.integer_width != Some(32)
-                || c.integer_width != Some(32)
-            {
+            let valid = match numeric_kind {
+                "GPUIntegerCoordinate" => {
+                    idl.type_name == "GPUIntegerCoordinate"
+                        && idl.enforce_range
+                        && idl.integer_width == Some(32)
+                        && c.integer_width == Some(32)
+                }
+                "double" => idl.type_name == "double" && c.type_name == "double",
+                _ => false,
+            };
+            if !valid {
                 return Err(unsupported_shape(
                     &union.typedef,
                     &member.member,
-                    "dict-or-sequence fields must be 32-bit GPUIntegerCoordinate values",
+                    "dict-or-sequence fields must be homogeneous GPUIntegerCoordinate or double values",
                 ));
             }
             if index >= union.min_length && idl.default_value.is_none() {
@@ -431,6 +444,42 @@ fn validate_descriptor_policy(
         "sentinel default",
         descriptor.sentinel_defaults.iter().map(String::as_str),
     )?;
+    let embedded = unique_entries(
+        &descriptor.dictionary,
+        "embedded dictionary",
+        descriptor
+            .embedded
+            .iter()
+            .map(|entry| entry.member.as_str()),
+    )?;
+    let mut embedded_idl_members = BTreeSet::new();
+    for entry in &descriptor.embedded {
+        let nested = descriptor_pair(report, &entry.dictionary)?;
+        if !selected.contains(entry.dictionary.as_str()) {
+            return Err(CodegenError::Policy(format!(
+                "embedded dictionary {}.{} names unselected descriptor {}",
+                descriptor.dictionary, entry.member, entry.dictionary
+            )));
+        }
+        let c_member = pair
+            .c_only_members
+            .iter()
+            .find(|member| member.name == entry.member)
+            .and_then(|member| member.values.first())
+            .ok_or_else(|| {
+                CodegenError::Policy(format!(
+                    "dead embedded dictionary {}.{}: member is not C-only",
+                    descriptor.dictionary, entry.member
+                ))
+            })?;
+        if nested.c_name.as_deref() != Some(c_member.type_name.as_str()) {
+            return Err(CodegenError::Policy(format!(
+                "embedded dictionary {}.{} type {} disagrees with {}",
+                descriptor.dictionary, entry.member, c_member.type_name, entry.dictionary
+            )));
+        }
+        embedded_idl_members.extend(nested.members.iter().map(|member| member.member.as_str()));
+    }
     let clamp_members: BTreeSet<&str> = pair
         .members
         .iter()
@@ -503,21 +552,21 @@ fn validate_descriptor_policy(
             &constant.value,
             "absent constant",
         )?;
-        let idl = pair
+        let member = pair
             .members
             .iter()
             .find(|member| member.member == constant.member)
-            .and_then(|member| member.idl.first())
-            .and_then(|member| member.values.first())
             .ok_or_else(|| {
                 CodegenError::Policy(format!(
                     "dead absent constant policy {}.{}",
                     descriptor.dictionary, constant.member
                 ))
             })?;
-        if idl.required || !idl.enforce_range || idl.default_value.is_some() {
+        let (idl, c) = member_values(member, &descriptor.dictionary)?;
+        let supported = idl.enforce_range || (idl.type_name == "float" && c.type_name == "float");
+        if idl.required || !supported || idl.default_value.is_some() {
             return Err(CodegenError::Policy(format!(
-                "dead absent constant policy {}.{}: member is not optional EnforceRange without an IDL default",
+                "dead absent constant policy {}.{}: member is not an optional numeric value without an IDL default",
                 descriptor.dictionary, constant.member
             )));
         }
@@ -659,7 +708,8 @@ fn validate_descriptor_policy(
             continue;
         }
         if handles.contains(name) {
-            if !idl.type_name.trim_end_matches('?').starts_with("GPU")
+            if !(idl.type_name.trim_end_matches('?').starts_with("GPU")
+                || idl.type_name.starts_with("(GPU"))
                 || !c.type_name.starts_with("WGPU")
                 || c.count_and_pointer
             {
@@ -704,6 +754,7 @@ fn validate_descriptor_policy(
             && !skips.contains(member.name.as_str())
             && !union_flatten.contains(member.name.as_str())
             && !chains.contains(member.name.as_str())
+            && !embedded_idl_members.contains(member.name.as_str())
         {
             return Err(CodegenError::Policy(format!(
                 "unpoliced IDL-only member {}.{}",
@@ -769,7 +820,10 @@ fn validate_descriptor_policy(
         .collect();
 
     for member in &pair.c_only_members {
-        if !zero.contains(member.name.as_str()) && !flattened_c.contains(member.name.as_str()) {
+        if !zero.contains(member.name.as_str())
+            && !flattened_c.contains(member.name.as_str())
+            && !embedded.contains(member.name.as_str())
+        {
             return Err(CodegenError::Policy(format!(
                 "unpoliced C-only member {}.{}",
                 descriptor.dictionary, member.name
@@ -1269,6 +1323,11 @@ fn emit_descriptor(
         .iter()
         .map(String::as_str)
         .collect();
+    let embedded: BTreeMap<&str, &str> = descriptor
+        .embedded
+        .iter()
+        .map(|entry| (entry.member.as_str(), entry.dictionary.as_str()))
+        .collect();
     let needs_arena = descriptor_needs_arena(pair, descriptor);
     let needs_static = descriptor_needs_static(report, pair, descriptor, descriptors);
 
@@ -1349,7 +1408,16 @@ fn emit_descriptor(
             emit_unsupported_check(&mut output, name, &value_name);
         }
     }
+    let embedded_member_names: BTreeSet<&str> = descriptor
+        .embedded
+        .iter()
+        .filter_map(|entry| descriptor_pair(report, &entry.dictionary).ok())
+        .flat_map(|pair| pair.members.iter().map(|member| member.member.as_str()))
+        .collect();
     for member in &pair.idl_only_members {
+        if embedded_member_names.contains(member.name.as_str()) {
+            continue;
+        }
         let name = &member.name;
         if let Some(skip) = skips.get(name.as_str()) {
             if skip.reject_if_present {
@@ -1389,6 +1457,26 @@ fn emit_descriptor(
         }
     }
 
+    for (member, nested) in &embedded {
+        let local = rust_field_name(member, false);
+        let function = format!(
+            "convert_{}",
+            snake_case(nested.strip_prefix("GPU").unwrap_or(nested))
+        );
+        let nested_pair = descriptor_pair(report, nested)?;
+        let nested_descriptor = descriptors.get(nested).ok_or_else(|| {
+            CodegenError::Policy(format!("embedded descriptor {nested} is not selected"))
+        })?;
+        if descriptor_needs_arena(nested_pair, nested_descriptor) {
+            let _ = writeln!(
+                output,
+                "    let {local} = {function}::<E>(cx, value, arena)?;"
+            );
+        } else {
+            let _ = writeln!(output, "    let {local} = {function}::<E>(cx, value)?;");
+        }
+    }
+
     for member in &members {
         if unsupported.contains(member.member.as_str()) {
             continue;
@@ -1401,7 +1489,17 @@ fn emit_descriptor(
             continue;
         }
         if let Some(helper) = handles.get(name.as_str()) {
-            let _ = writeln!(output, "    let {local} = {helper}::<E>(cx, {value})?;");
+            if idl.required {
+                let _ = writeln!(output, "    let {local} = {helper}::<E>(cx, {value})?;");
+            } else {
+                let _ = writeln!(
+                    output,
+                    "    let {local} = if E::is_undefined(cx, {value}) {{"
+                );
+                output.push_str("        ptr::null_mut()\n    } else {\n");
+                let _ = writeln!(output, "        {helper}::<E>(cx, {value})?");
+                output.push_str("    };\n");
+            }
         } else if let Some(helper) = handle_sequences.get(name.as_str()) {
             emit_handle_sequence_local(&mut output, name, &local, &value, helper, idl.required);
         } else if let Some(policy) = handle_or_enum.get(name.as_str()) {
@@ -1432,7 +1530,18 @@ fn emit_descriptor(
             )?;
         } else if let Some(union) = unions.get(idl.type_name.as_str()) {
             let convert = format!("convert_{}", snake_case(&union.typedef));
-            let _ = writeln!(output, "    let {local} = {convert}::<E>(cx, {value})?;");
+            if idl.required {
+                let _ = writeln!(output, "    let {local} = {convert}::<E>(cx, {value})?;");
+            } else {
+                let _ = writeln!(
+                    output,
+                    "    let {local} = if E::is_undefined(cx, {value}) {{"
+                );
+                output.push_str("        // The pinned C initializer uses the all-zero value for an absent numeric union.\n");
+                output.push_str("        unsafe { std::mem::zeroed() }\n    } else {\n");
+                let _ = writeln!(output, "        {convert}::<E>(cx, {value})?");
+                output.push_str("    };\n");
+            }
         } else if is_dictionary(report, &idl.type_name) {
             emit_nested_local(
                 &mut output,
@@ -1543,6 +1652,15 @@ fn emit_descriptor(
             if zero.contains(member.name.as_str()) {
                 let field = rust_field_name(&member.name, true);
                 let _ = writeln!(output, "        {field}: 0,");
+            }
+        }
+        for member in embedded.keys() {
+            let field = rust_field_name(member, true);
+            let local = rust_field_name(member, false);
+            if field == local {
+                let _ = writeln!(output, "        {field},");
+            } else {
+                let _ = writeln!(output, "        {field}: {local},");
             }
         }
         for policy in &descriptor.union_flatten {
@@ -1879,7 +1997,28 @@ fn emit_dict_or_sequence_union(
         "    let values = convert_sequence_from_method::<E, _>(cx, value, iterator_method, \"{}\", |item| {{",
         policy.typedef
     );
-    output.push_str("        enforce_u32::<E>(cx, item, \"coordinate\")\n    })?;\n");
+    let element_type = pair
+        .members
+        .first()
+        .and_then(|member| member.idl.first())
+        .and_then(|member| member.values.first())
+        .map(|value| value.type_name.as_str())
+        .unwrap_or_default();
+    match element_type {
+        "GPUIntegerCoordinate" => {
+            output.push_str("        enforce_u32::<E>(cx, item, \"coordinate\")\n    })?;\n")
+        }
+        "double" => {
+            output.push_str("        restricted_f64::<E>(cx, item, \"color channel\")\n    })?;\n")
+        }
+        _ => {
+            return Err(unsupported_shape(
+                &policy.typedef,
+                &policy.dictionary,
+                "unsupported sequence element type",
+            ))
+        }
+    }
     if policy.min_length == 1 {
         let _ = writeln!(
             output,
@@ -2538,14 +2677,43 @@ fn emit_field(
         if idl.required {
             let _ = writeln!(output, "        {field}: {conversion},");
         } else {
+            let default = idl
+                .default_value
+                .as_deref()
+                .or_else(|| absent_constants.get(name.as_str()).copied())
+                .ok_or_else(|| {
+                    unsupported_shape(dictionary, name, "optional float without an IDL default")
+                })?;
+            let _ = writeln!(
+                output,
+                "        {field}: if E::is_undefined(cx, {value}) {{"
+            );
+            let suffix = if idl.default_value.is_some() {
+                "_f32"
+            } else {
+                ""
+            };
+            let _ = writeln!(output, "            {default}{suffix}");
+            output.push_str("        } else {\n");
+            let _ = writeln!(output, "            {conversion}");
+            output.push_str("        },\n");
+        }
+        return Ok(());
+    }
+    if idl.type_name == "double" && c.type_name == "double" {
+        output.push_str("        // WebIDL restricted `double` rejects non-finite values.\n");
+        let conversion = format!("restricted_f64::<E>(cx, {value}, \"{name}\")?");
+        if idl.required {
+            let _ = writeln!(output, "        {field}: {conversion},");
+        } else {
             let default = idl.default_value.as_deref().ok_or_else(|| {
-                unsupported_shape(dictionary, name, "optional float without an IDL default")
+                unsupported_shape(dictionary, name, "optional double without an IDL default")
             })?;
             let _ = writeln!(
                 output,
                 "        {field}: if E::is_undefined(cx, {value}) {{"
             );
-            let _ = writeln!(output, "            {default}_f32");
+            let _ = writeln!(output, "            {default}_f64");
             output.push_str("        } else {\n");
             let _ = writeln!(output, "            {conversion}");
             output.push_str("        },\n");

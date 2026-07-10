@@ -556,7 +556,16 @@ pub(crate) struct DescriptorEntry {
     pub(crate) absent_constants: Vec<AbsentConstantPolicy>,
     #[serde(default)]
     pub(crate) sentinel_defaults: Vec<String>,
+    #[serde(default)]
+    pub(crate) embedded: Vec<EmbeddedDictionaryPolicy>,
     pub(crate) wrapper: Option<WrapperPolicy>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct EmbeddedDictionaryPolicy {
+    pub(crate) member: String,
+    pub(crate) dictionary: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1049,10 +1058,20 @@ fn validate_policy(
                 entry.typedef
             ))
         })?;
-        let expected = format!("(sequence<GPUIntegerCoordinate> or {})", entry.dictionary);
-        if alias.type_name != expected {
+        let sequence_element = if alias
+            .type_name
+            .starts_with("(sequence<GPUIntegerCoordinate> or ")
+        {
+            "GPUIntegerCoordinate"
+        } else if alias.type_name.starts_with("(sequence<double> or ") {
+            "double"
+        } else {
+            ""
+        };
+        let expected = format!("(sequence<{sequence_element}> or {})", entry.dictionary);
+        if sequence_element.is_empty() || alias.type_name != expected {
             return Err(CodegenError::Policy(format!(
-                "dict-or-sequence union {} has unsupported typedef shape {}; expected {expected}",
+                "dict-or-sequence union {} has unsupported typedef shape {}; expected a supported numeric sequence/dictionary union",
                 entry.typedef, alias.type_name
             )));
         }
@@ -1077,12 +1096,18 @@ fn validate_policy(
         }
         if fields.iter().any(|field| {
             let value = &field.values[0];
-            value.type_name != "GPUIntegerCoordinate"
-                || !value.enforce_range
-                || value.integer_width != Some(32)
+            match sequence_element {
+                "GPUIntegerCoordinate" => {
+                    value.type_name != "GPUIntegerCoordinate"
+                        || !value.enforce_range
+                        || value.integer_width != Some(32)
+                }
+                "double" => value.type_name != "double",
+                _ => true,
+            }
         }) {
             return Err(CodegenError::Policy(format!(
-                "dict-or-sequence union {} fields must be [EnforceRange] GPUIntegerCoordinate",
+                "dict-or-sequence union {} fields disagree with its numeric sequence element",
                 entry.typedef
             )));
         }
@@ -2277,8 +2302,8 @@ fn c_render_type(type_name: &str) -> String {
         "int64" => "int64_t".to_owned(),
         "usize" => "size_t".to_owned(),
         "bool" => "WGPUBool".to_owned(),
-        "float32" => "float".to_owned(),
-        "float64" => "double".to_owned(),
+        "float32" | "nullable_float32" => "float".to_owned(),
+        "float64" | "float64_supertype" => "double".to_owned(),
         "string" | "string_with_default_empty" | "nullable_string" | "out_string" => {
             "WGPUStringView".to_owned()
         }

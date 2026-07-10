@@ -1552,6 +1552,10 @@ const NONSTANDARD_RELEASE_VARIANTS_SUFFIX: &str = r#"    /// Release a command b
     ComputePassEncoder { /// Pass handle.
         pass: WGPUComputePassEncoder, /// Dispatch table.
         gpu: GpuDispatch },
+    /// Release a render-pass encoder.
+    RenderPassEncoder { /// Pass handle.
+        pass: WGPURenderPassEncoder, /// Dispatch table.
+        gpu: GpuDispatch },
 "#;
 
 const NONSTANDARD_RELEASE_ARMS_PREFIX: &str = r#"            Self::Adapter { adapter, gpu } => unsafe { (gpu.adapter_release)(adapter) },
@@ -1563,4 +1567,5 @@ const NONSTANDARD_RELEASE_ARMS_PREFIX: &str = r#"            Self::Adapter { ada
 
 const NONSTANDARD_RELEASE_ARMS_SUFFIX: &str = r#"            Self::CommandBuffer { command_buffer, gpu } => unsafe { (gpu.command_buffer_release)(command_buffer) },
             Self::ComputePassEncoder { pass, gpu } => unsafe { (gpu.compute_pass_encoder_release)(pass) },
+            Self::RenderPassEncoder { pass, gpu } => unsafe { (gpu.render_pass_encoder_release)(pass) },
 "#;

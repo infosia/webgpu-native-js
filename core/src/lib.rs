@@ -53,7 +53,9 @@ const GPU_DEVICE_LOST_INFO_CLASS: ClassId = ClassId(19);
 const GPU_TEXTURE_CLASS: ClassId = ClassId(20);
 const GPU_TEXTURE_VIEW_CLASS: ClassId = ClassId(21);
 const GPU_RENDER_PIPELINE_CLASS: ClassId = ClassId(22);
+const GPU_RENDER_PASS_ENCODER_CLASS: ClassId = ClassId(23);
 const WEBIDL_U32_MAX: u64 = u32::MAX as u64;
+const WGPU_DEPTH_CLEAR_VALUE_UNDEFINED: f32 = f32::NAN;
 
 /// A JavaScript class identifier scoped to an engine context.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -1509,6 +1511,15 @@ pub struct ComputePassEncoderPayload {
 // SAFETY: The `WGPUComputePassEncoder` is used on the engine thread or released in `tick()`.
 unsafe impl Send for ComputePassEncoderPayload {}
 
+/// Payload stored by a `GPURenderPassEncoder` wrapper.
+pub struct RenderPassEncoderPayload {
+    state: Arc<Mutex<RenderPassState>>,
+}
+
+// SAFETY: the native render-pass handle is used only on the engine thread and
+// copied into the release queue by finalization, matching the compute pass.
+unsafe impl Send for RenderPassEncoderPayload {}
+
 struct CommandEncoderState {
     encoder: WGPUCommandEncoder,
     ended: bool,
@@ -1535,6 +1546,16 @@ struct ComputePassState {
 // thread.
 // SAFETY: The `WGPUComputePassEncoder` is copied by finalizers and dereferenced in engine/`tick()`.
 unsafe impl Send for ComputePassState {}
+
+struct RenderPassState {
+    pass: WGPURenderPassEncoder,
+    ended: bool,
+    parent: Arc<Mutex<CommandEncoderState>>,
+}
+
+// SAFETY: the handle and parent state follow the same thread/release discipline
+// as `ComputePassState` and are protected by the state mutex.
+unsafe impl Send for RenderPassState {}
 
 #[derive(Clone, Copy)]
 struct MappedRange<E: JsEngine> {
@@ -2593,6 +2614,60 @@ pub fn queue_write_buffer<E: JsEngine + 'static>(
     Ok(E::undefined(cx))
 }
 
+/// Implements `GPUQueue.writeTexture`.
+pub fn queue_write_texture<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let Some(queue_payload) = E::payload(cx, this, GPU_QUEUE_CLASS)
+        .and_then(|payload| payload.downcast_ref::<QueuePayload>())
+    else {
+        return Err(E::type_error(
+            cx,
+            "GPUQueue.writeTexture called on an incompatible object",
+        ));
+    };
+    let destination_value = args
+        .first()
+        .copied()
+        .ok_or_else(|| E::type_error(cx, "destination"))?;
+    let data_value = args
+        .get(1)
+        .copied()
+        .ok_or_else(|| E::type_error(cx, "data"))?;
+    let layout_value = args
+        .get(2)
+        .copied()
+        .ok_or_else(|| E::type_error(cx, "dataLayout"))?;
+    let size_value = args
+        .get(3)
+        .copied()
+        .ok_or_else(|| E::type_error(cx, "size"))?;
+    let destination = convert_texel_copy_texture_info::<E>(cx, destination_value)?;
+    let layout = convert_texel_copy_buffer_layout::<E>(cx, layout_value)?;
+    let write_size = convert_gpu_extent3d::<E>(cx, size_value)?;
+    let source = convert_buffer_source::<E>(cx, data_value)?;
+    let start = usize::try_from(source.byte_offset).map_err(|_| E::type_error(cx, "data"))?;
+    let end_u64 = source
+        .byte_offset
+        .checked_add(source.byte_length)
+        .ok_or_else(|| E::type_error(cx, "data"))?;
+    let end = usize::try_from(end_u64).map_err(|_| E::type_error(cx, "data"))?;
+    let data_size = usize::try_from(source.byte_length).map_err(|_| E::type_error(cx, "data"))?;
+    unsafe {
+        (E::environment(cx).gpu().queue_write_texture)(
+            queue_payload.queue,
+            ptr::from_ref(&destination),
+            source.bytes[start..end].as_ptr().cast(),
+            data_size,
+            ptr::from_ref(&layout),
+            ptr::from_ref(&write_size),
+        );
+    }
+    Ok(E::undefined(cx))
+}
+
 struct ConvertedBufferSource {
     bytes: Vec<u8>,
     byte_offset: u64,
@@ -2805,6 +2880,147 @@ pub fn command_encoder_copy_buffer_to_buffer<E: JsEngine + 'static>(
         );
     }
     Ok(E::undefined(cx))
+}
+
+/// Implements `GPUCommandEncoder.copyBufferToTexture`.
+pub fn command_encoder_copy_buffer_to_texture<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let encoder = live_command_encoder::<E>(cx, this)?;
+    let source =
+        convert_texel_copy_buffer_info::<E>(cx, required_argument::<E>(cx, args, 0, "source")?)?;
+    let destination = convert_texel_copy_texture_info::<E>(
+        cx,
+        required_argument::<E>(cx, args, 1, "destination")?,
+    )?;
+    let copy_size =
+        convert_gpu_extent3d::<E>(cx, required_argument::<E>(cx, args, 2, "copySize")?)?;
+    unsafe {
+        (E::environment(cx)
+            .gpu()
+            .command_encoder_copy_buffer_to_texture)(
+            encoder,
+            ptr::from_ref(&source),
+            ptr::from_ref(&destination),
+            ptr::from_ref(&copy_size),
+        );
+    }
+    Ok(E::undefined(cx))
+}
+
+/// Implements `GPUCommandEncoder.copyTextureToBuffer`.
+pub fn command_encoder_copy_texture_to_buffer<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let encoder = live_command_encoder::<E>(cx, this)?;
+    let source =
+        convert_texel_copy_texture_info::<E>(cx, required_argument::<E>(cx, args, 0, "source")?)?;
+    let destination = convert_texel_copy_buffer_info::<E>(
+        cx,
+        required_argument::<E>(cx, args, 1, "destination")?,
+    )?;
+    let copy_size =
+        convert_gpu_extent3d::<E>(cx, required_argument::<E>(cx, args, 2, "copySize")?)?;
+    unsafe {
+        (E::environment(cx)
+            .gpu()
+            .command_encoder_copy_texture_to_buffer)(
+            encoder,
+            ptr::from_ref(&source),
+            ptr::from_ref(&destination),
+            ptr::from_ref(&copy_size),
+        );
+    }
+    Ok(E::undefined(cx))
+}
+
+/// Implements `GPUCommandEncoder.copyTextureToTexture`.
+pub fn command_encoder_copy_texture_to_texture<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let encoder = live_command_encoder::<E>(cx, this)?;
+    let source =
+        convert_texel_copy_texture_info::<E>(cx, required_argument::<E>(cx, args, 0, "source")?)?;
+    let destination = convert_texel_copy_texture_info::<E>(
+        cx,
+        required_argument::<E>(cx, args, 1, "destination")?,
+    )?;
+    let copy_size =
+        convert_gpu_extent3d::<E>(cx, required_argument::<E>(cx, args, 2, "copySize")?)?;
+    unsafe {
+        (E::environment(cx)
+            .gpu()
+            .command_encoder_copy_texture_to_texture)(
+            encoder,
+            ptr::from_ref(&source),
+            ptr::from_ref(&destination),
+            ptr::from_ref(&copy_size),
+        );
+    }
+    Ok(E::undefined(cx))
+}
+
+/// Implements `GPUCommandEncoder.beginRenderPass`.
+pub fn command_encoder_begin_render_pass<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let parent = command_encoder_state::<E>(cx, this)?;
+    let encoder = {
+        let state = parent
+            .lock()
+            .map_err(|_| E::operation_error(cx, "GPUCommandEncoder state is poisoned"))?;
+        if state.ended {
+            return Err(E::operation_error(cx, "GPUCommandEncoder is finished"));
+        }
+        state.encoder
+    };
+    let arena = Arena::new();
+    let descriptor = convert_render_pass_descriptor::<E>(
+        cx,
+        required_argument::<E>(cx, args, 0, "descriptor")?,
+        &arena,
+    )?;
+    let pass = unsafe {
+        (E::environment(cx).gpu().command_encoder_begin_render_pass)(
+            encoder,
+            ptr::from_ref(&descriptor),
+        )
+    };
+    if pass.is_null() {
+        return Err(E::operation_error(
+            cx,
+            "wgpuCommandEncoderBeginRenderPass returned null",
+        ));
+    }
+    if let Err(error) = E::register_class(cx, render_pass_encoder_class::<E>()) {
+        unsafe { (E::environment(cx).gpu().render_pass_encoder_release)(pass) };
+        return Err(error);
+    }
+    match E::new_instance(
+        cx,
+        GPU_RENDER_PASS_ENCODER_CLASS,
+        Box::new(RenderPassEncoderPayload {
+            state: Arc::new(Mutex::new(RenderPassState {
+                pass,
+                ended: false,
+                parent,
+            })),
+        }),
+    ) {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            unsafe { (E::environment(cx).gpu().render_pass_encoder_release)(pass) };
+            Err(error)
+        }
+    }
 }
 
 /// Implements `GPUCommandEncoder.beginComputePass`.
@@ -3022,6 +3238,217 @@ pub fn compute_pass_end<E: JsEngine + 'static>(
     Ok(E::undefined(cx))
 }
 
+/// Implements `GPURenderPassEncoder.setPipeline`.
+pub fn render_pass_set_pipeline<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let pass = live_render_pass::<E>(cx, this)?;
+    let pipeline =
+        render_pipeline_handle::<E>(cx, required_argument::<E>(cx, args, 0, "pipeline")?)?;
+    unsafe { (E::environment(cx).gpu().render_pass_encoder_set_pipeline)(pass, pipeline) };
+    Ok(E::undefined(cx))
+}
+
+/// Implements `GPURenderPassEncoder.setVertexBuffer`.
+pub fn render_pass_set_vertex_buffer<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let pass = live_render_pass::<E>(cx, this)?;
+    let slot = enforce_u32::<E>(cx, required_argument::<E>(cx, args, 0, "slot")?, "slot")?;
+    let buffer_value = required_argument::<E>(cx, args, 1, "buffer")?;
+    let buffer = if E::is_null(cx, buffer_value) {
+        ptr::null_mut()
+    } else {
+        buffer_handle::<E>(cx, buffer_value)?
+    };
+    let offset = optional_gpu_size_to_u64::<E>(cx, args.get(2).copied(), "offset", 0)?;
+    let size = optional_gpu_size_to_u64::<E>(cx, args.get(3).copied(), "size", u64::MAX)?;
+    unsafe {
+        (E::environment(cx)
+            .gpu()
+            .render_pass_encoder_set_vertex_buffer)(pass, slot, buffer, offset, size)
+    };
+    Ok(E::undefined(cx))
+}
+
+/// Implements `GPURenderPassEncoder.setIndexBuffer`.
+pub fn render_pass_set_index_buffer<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let pass = live_render_pass::<E>(cx, this)?;
+    let buffer = buffer_handle::<E>(cx, required_argument::<E>(cx, args, 0, "buffer")?)?;
+    let format =
+        convert_gpu_index_format::<E>(cx, required_argument::<E>(cx, args, 1, "indexFormat")?)?;
+    let offset = optional_gpu_size_to_u64::<E>(cx, args.get(2).copied(), "offset", 0)?;
+    let size = optional_gpu_size_to_u64::<E>(cx, args.get(3).copied(), "size", u64::MAX)?;
+    unsafe {
+        (E::environment(cx)
+            .gpu()
+            .render_pass_encoder_set_index_buffer)(pass, buffer, format, offset, size)
+    };
+    Ok(E::undefined(cx))
+}
+
+/// Implements `GPURenderPassEncoder.setBindGroup` with the compute-pass subset's empty dynamic offsets.
+pub fn render_pass_set_bind_group<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let pass = live_render_pass::<E>(cx, this)?;
+    let index = enforce_u32::<E>(cx, required_argument::<E>(cx, args, 0, "index")?, "index")?;
+    let bind_group = bind_group_handle::<E>(cx, required_argument::<E>(cx, args, 1, "bindGroup")?)?;
+    unsafe {
+        (E::environment(cx).gpu().render_pass_encoder_set_bind_group)(
+            pass,
+            index,
+            bind_group,
+            0,
+            ptr::null(),
+        )
+    };
+    Ok(E::undefined(cx))
+}
+
+/// Implements `GPURenderPassEncoder.draw`.
+pub fn render_pass_draw<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let pass = live_render_pass::<E>(cx, this)?;
+    let vertex_count = enforce_u32::<E>(
+        cx,
+        required_argument::<E>(cx, args, 0, "vertexCount")?,
+        "vertexCount",
+    )?;
+    let instance_count = optional_u32::<E>(cx, args.get(1).copied(), "instanceCount", 1)?;
+    let first_vertex = optional_u32::<E>(cx, args.get(2).copied(), "firstVertex", 0)?;
+    let first_instance = optional_u32::<E>(cx, args.get(3).copied(), "firstInstance", 0)?;
+    unsafe {
+        (E::environment(cx).gpu().render_pass_encoder_draw)(
+            pass,
+            vertex_count,
+            instance_count,
+            first_vertex,
+            first_instance,
+        )
+    };
+    Ok(E::undefined(cx))
+}
+
+/// Implements `GPURenderPassEncoder.drawIndexed`.
+pub fn render_pass_draw_indexed<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let pass = live_render_pass::<E>(cx, this)?;
+    let index_count = enforce_u32::<E>(
+        cx,
+        required_argument::<E>(cx, args, 0, "indexCount")?,
+        "indexCount",
+    )?;
+    let instance_count = optional_u32::<E>(cx, args.get(1).copied(), "instanceCount", 1)?;
+    let first_index = optional_u32::<E>(cx, args.get(2).copied(), "firstIndex", 0)?;
+    let base_vertex = match args.get(3).copied() {
+        Some(value) if !E::is_undefined(cx, value) => enforce_i32::<E>(cx, value, "baseVertex")?,
+        _ => 0,
+    };
+    let first_instance = optional_u32::<E>(cx, args.get(4).copied(), "firstInstance", 0)?;
+    unsafe {
+        (E::environment(cx).gpu().render_pass_encoder_draw_indexed)(
+            pass,
+            index_count,
+            instance_count,
+            first_index,
+            base_vertex,
+            first_instance,
+        )
+    };
+    Ok(E::undefined(cx))
+}
+
+/// Implements `GPURenderPassEncoder.setViewport`.
+pub fn render_pass_set_viewport<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let pass = live_render_pass::<E>(cx, this)?;
+    let x = restricted_f32::<E>(cx, required_argument::<E>(cx, args, 0, "x")?, "x")?;
+    let y = restricted_f32::<E>(cx, required_argument::<E>(cx, args, 1, "y")?, "y")?;
+    let width = restricted_f32::<E>(cx, required_argument::<E>(cx, args, 2, "width")?, "width")?;
+    let height = restricted_f32::<E>(cx, required_argument::<E>(cx, args, 3, "height")?, "height")?;
+    let min_depth = restricted_f32::<E>(
+        cx,
+        required_argument::<E>(cx, args, 4, "minDepth")?,
+        "minDepth",
+    )?;
+    let max_depth = restricted_f32::<E>(
+        cx,
+        required_argument::<E>(cx, args, 5, "maxDepth")?,
+        "maxDepth",
+    )?;
+    unsafe {
+        (E::environment(cx).gpu().render_pass_encoder_set_viewport)(
+            pass, x, y, width, height, min_depth, max_depth,
+        )
+    };
+    Ok(E::undefined(cx))
+}
+
+/// Implements `GPURenderPassEncoder.setScissorRect`.
+pub fn render_pass_set_scissor_rect<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let pass = live_render_pass::<E>(cx, this)?;
+    let x = enforce_u32::<E>(cx, required_argument::<E>(cx, args, 0, "x")?, "x")?;
+    let y = enforce_u32::<E>(cx, required_argument::<E>(cx, args, 1, "y")?, "y")?;
+    let width = enforce_u32::<E>(cx, required_argument::<E>(cx, args, 2, "width")?, "width")?;
+    let height = enforce_u32::<E>(cx, required_argument::<E>(cx, args, 3, "height")?, "height")?;
+    unsafe {
+        (E::environment(cx)
+            .gpu()
+            .render_pass_encoder_set_scissor_rect)(pass, x, y, width, height)
+    };
+    Ok(E::undefined(cx))
+}
+
+/// Implements `GPURenderPassEncoder.end`.
+pub fn render_pass_end<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    _args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let payload = E::payload(cx, this, GPU_RENDER_PASS_ENCODER_CLASS)
+        .and_then(|payload| payload.downcast_ref::<RenderPassEncoderPayload>())
+        .ok_or_else(|| {
+            E::type_error(
+                cx,
+                "GPURenderPassEncoder method called on an incompatible object",
+            )
+        })?;
+    let mut state = payload
+        .state
+        .lock()
+        .map_err(|_| E::operation_error(cx, "GPURenderPassEncoder state is poisoned"))?;
+    if state.ended {
+        return Err(E::operation_error(cx, "GPURenderPassEncoder is ended"));
+    }
+    unsafe { (E::environment(cx).gpu().render_pass_encoder_end)(state.pass) };
+    state.ended = true;
+    Ok(E::undefined(cx))
+}
+
 /// Finalizes a `GPUQueue` payload by enqueuing its release.
 pub fn finalize_queue(payload: Box<dyn Any + Send>, env: &Environment) {
     let Ok(payload) = payload.downcast::<QueuePayload>() else {
@@ -3056,6 +3483,20 @@ pub fn finalize_compute_pass_encoder(payload: Box<dyn Any + Send>, env: &Environ
         return;
     };
     let _ = env.queue().enqueue(ReleaseRequest::ComputePassEncoder {
+        pass: state.pass,
+        gpu: env.gpu(),
+    });
+}
+
+/// Finalizes a `GPURenderPassEncoder` payload by enqueuing its release.
+pub fn finalize_render_pass_encoder(payload: Box<dyn Any + Send>, env: &Environment) {
+    let Ok(payload) = payload.downcast::<RenderPassEncoderPayload>() else {
+        return;
+    };
+    let Ok(state) = payload.state.lock() else {
+        return;
+    };
+    let _ = env.queue().enqueue(ReleaseRequest::RenderPassEncoder {
         pass: state.pass,
         gpu: env.gpu(),
     });
@@ -3568,6 +4009,17 @@ fn optional_u32<E: JsEngine>(
     }
 }
 
+fn required_argument<E: JsEngine>(
+    cx: E::Context<'_>,
+    args: &[E::Value],
+    index: usize,
+    name: &'static str,
+) -> Result<E::Value, E::Error> {
+    args.get(index)
+        .copied()
+        .ok_or_else(|| E::type_error(cx, name))
+}
+
 fn device_handle<E: JsEngine + 'static>(
     cx: E::Context<'_>,
     value: E::Value,
@@ -3596,6 +4048,16 @@ fn texture_handle<E: JsEngine + 'static>(
         .and_then(|payload| payload.downcast_ref::<TexturePayload>())
         .map(|payload| payload.texture)
         .ok_or_else(|| E::type_error(cx, "GPUTexture is required"))
+}
+
+fn texture_view_handle<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    value: E::Value,
+) -> Result<WGPUTextureView, E::Error> {
+    E::payload(cx, value, GPU_TEXTURE_VIEW_CLASS)
+        .and_then(|payload| payload.downcast_ref::<TextureViewPayload>())
+        .map(|payload| payload.texture_view)
+        .ok_or_else(|| E::type_error(cx, "GPUTextureView is required"))
 }
 
 fn shader_module_handle<E: JsEngine + 'static>(
@@ -3648,6 +4110,16 @@ fn compute_pipeline_handle<E: JsEngine + 'static>(
         .ok_or_else(|| E::type_error(cx, "GPUComputePipeline is required"))
 }
 
+fn render_pipeline_handle<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    value: E::Value,
+) -> Result<WGPURenderPipeline, E::Error> {
+    E::payload(cx, value, GPU_RENDER_PIPELINE_CLASS)
+        .and_then(|payload| payload.downcast_ref::<RenderPipelinePayload>())
+        .map(|payload| payload.render_pipeline)
+        .ok_or_else(|| E::type_error(cx, "GPURenderPipeline is required"))
+}
+
 fn command_buffer_state<E: JsEngine + 'static>(
     cx: E::Context<'_>,
     value: E::Value,
@@ -3696,6 +4168,30 @@ fn live_compute_pass<E: JsEngine + 'static>(
         .map_err(|_| E::operation_error(cx, "GPUComputePassEncoder state is poisoned"))?;
     if state.ended {
         return Err(E::operation_error(cx, "GPUComputePassEncoder is ended"));
+    }
+    let parent = state
+        .parent
+        .lock()
+        .map_err(|_| E::operation_error(cx, "GPUCommandEncoder state is poisoned"))?;
+    if parent.ended {
+        return Err(E::operation_error(cx, "GPUCommandEncoder is finished"));
+    }
+    Ok(state.pass)
+}
+
+fn live_render_pass<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    value: E::Value,
+) -> Result<WGPURenderPassEncoder, E::Error> {
+    let payload = E::payload(cx, value, GPU_RENDER_PASS_ENCODER_CLASS)
+        .and_then(|payload| payload.downcast_ref::<RenderPassEncoderPayload>())
+        .ok_or_else(|| E::type_error(cx, "GPURenderPassEncoder is required"))?;
+    let state = payload
+        .state
+        .lock()
+        .map_err(|_| E::operation_error(cx, "GPURenderPassEncoder state is poisoned"))?;
+    if state.ended {
+        return Err(E::operation_error(cx, "GPURenderPassEncoder is ended"));
     }
     let parent = state
         .parent
@@ -3767,6 +4263,18 @@ fn restricted_f32<E: JsEngine>(
         return Err(E::type_error(cx, name));
     }
     Ok(converted)
+}
+
+fn restricted_f64<E: JsEngine>(
+    cx: E::Context<'_>,
+    value: E::Value,
+    name: &'static str,
+) -> Result<f64, E::Error> {
+    let number = E::to_f64(cx, value)?;
+    if !number.is_finite() {
+        return Err(E::type_error(cx, name));
+    }
+    Ok(number)
 }
 
 fn with_buffer_state<E, F, R>(cx: E::Context<'_>, this: E::Value, f: F) -> Result<R, E::Error>

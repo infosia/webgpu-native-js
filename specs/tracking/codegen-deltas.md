@@ -66,3 +66,12 @@ enum sentinels `Undefined` / `BindingNotUsed` (emitted only for absent optionals
 - **Constructor emission is not in the generator** (block 07 → S3): the
   `ConstructorSpec` slot is hand-wired for the four error classes; the
   generator learns constructors when a second constructible family appears.
+
+## Block 09 addition (2026-07-11)
+
+- **Render attachments accept `GPUTextureView` only.** The pinned IDL permits
+  `(GPUTexture or GPUTextureView)` for color/depth attachments; the C
+  descriptor takes only `WGPUTextureView`. Synthesizing a hidden temporary
+  view would create an unowned lifecycle behind the script's back, so a direct
+  `GPUTexture` raises a transparent TypeError telling the author to call
+  `createView()`. Revisit if implicit-view semantics are ever demanded.

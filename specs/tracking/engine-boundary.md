@@ -1320,3 +1320,13 @@ policy reasons: getBindGroupLayout (needs a non-creator lifecycle for
 pipeline-derived layouts — a real future design item), constants (standing).
 Noop accepts a vertex-only pipeline only WITH a minimal depthStencil — pinned
 that shape in parity (error scope resolves null). Parity 80 → 83.
+
+**Block 09 slice 4 landed (2026-07-11): render passes and copies (T6/T7).**
+Pinned TexelCopy names verified (`GPUTexelCopyBufferLayout/BufferInfo/
+TextureInfo`); GPUColor rides the dict-or-sequence kind with f64 elements;
+the render pass mirrors compute's state discipline exactly (parent-encoder
+state only, use-after-end/double-end fail, no exclusivity because compute has
+none). One IDL-vs-C mismatch recorded in codegen-deltas: attachments take
+views only, a direct texture gets a transparent TypeError. Parity 83 → 90
+(the block's exit target met). Suites: core 120, quickjs 53, JSC 23+1,
+codegen 41.
