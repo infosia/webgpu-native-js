@@ -583,8 +583,18 @@ pub(super) fn convert_render_pass_descriptor<E: JsEngine + 'static>(
         let converted = convert_sequence::<E, _>(cx, color_attachments_value, "colorAttachments", |item| {
             // T5: nullable sequence elements are C sentinel-filled struct holes.
             if E::is_null(cx, item) {
-                // SAFETY: the pinned C ABI defines the all-zero element as the hole sentinel.
-                Ok(unsafe { std::mem::zeroed() })
+                // The pinned webgpu.h INIT macro defines a hole with a null view,
+                // undefined depth slice/load/store values, and a zero color.
+                Ok(WGPURenderPassColorAttachment {
+                    nextInChain: ptr::null_mut(),
+                    view: ptr::null_mut(),
+                    depthSlice: WGPU_DEPTH_SLICE_UNDEFINED,
+                    resolveTarget: ptr::null_mut(),
+                    loadOp: WGPULoadOp_WGPULoadOp_Undefined,
+                    storeOp: WGPUStoreOp_WGPUStoreOp_Undefined,
+                    // SAFETY: WGPU_COLOR_INIT is the all-zero WGPUColor.
+                    clearValue: unsafe { std::mem::zeroed() },
+                })
             } else {
                 convert_render_pass_color_attachment::<E>(cx, item)
             }
@@ -2930,7 +2940,9 @@ pub(super) fn convert_bind_group_layout_descriptor<E: JsEngine>(
 /// Converts the dictionary-or-sequence `GPUExtent3D` typedef into `WGPUExtent3D`.
 #[allow(dead_code)] // T1 policy selects both typedefs; some land before their API consumer.
 pub(super) fn convert_gpu_extent3d<E: JsEngine>(cx: E::Context<'_>, value: E::Value) -> Result<WGPUExtent3D, E::Error> {
-    // T1: an iterable selects the sequence arm; otherwise dictionary conversion applies.
+    // T1: only an object can select the sequence or dictionary union arm.
+    if !E::is_object(cx, value) { return Err(E::type_error(cx, "GPUExtent3D must be an object")); }
+    // T1: an iterable object selects the sequence arm; otherwise dictionary conversion applies.
     let Some(iterator_method) = sequence_iterator_method::<E>(cx, value)? else {
         return convert_extent3d_dict::<E>(cx, value);
     };
@@ -2950,18 +2962,20 @@ pub(super) fn convert_gpu_extent3d<E: JsEngine>(cx: E::Context<'_>, value: E::Va
 /// Converts the dictionary-or-sequence `GPUOrigin3D` typedef into `WGPUOrigin3D`.
 #[allow(dead_code)] // T1 policy selects both typedefs; some land before their API consumer.
 pub(super) fn convert_gpu_origin3d<E: JsEngine>(cx: E::Context<'_>, value: E::Value) -> Result<WGPUOrigin3D, E::Error> {
-    // T1: an iterable selects the sequence arm; otherwise dictionary conversion applies.
+    // T1: only an object can select the sequence or dictionary union arm.
+    if !E::is_object(cx, value) { return Err(E::type_error(cx, "GPUOrigin3D must be an object")); }
+    // T1: an iterable object selects the sequence arm; otherwise dictionary conversion applies.
     let Some(iterator_method) = sequence_iterator_method::<E>(cx, value)? else {
         return convert_origin3d_dict::<E>(cx, value);
     };
     let values = convert_sequence_from_method::<E, _>(cx, value, iterator_method, "GPUOrigin3D", |item| {
         enforce_u32::<E>(cx, item, "coordinate")
     })?;
-    if values.is_empty() || values.len() > 3 {
-        return Err(E::type_error(cx, "GPUOrigin3D sequence length must be 1..=3"));
+    if values.len() > 3 {
+        return Err(E::type_error(cx, "GPUOrigin3D sequence length must be 0..=3"));
     }
     Ok(WGPUOrigin3D {
-        x: values[0],
+        x: values.first().copied().unwrap_or(0),
         y: values.get(1).copied().unwrap_or(0),
         z: values.get(2).copied().unwrap_or(0),
     })
@@ -2970,7 +2984,9 @@ pub(super) fn convert_gpu_origin3d<E: JsEngine>(cx: E::Context<'_>, value: E::Va
 /// Converts the dictionary-or-sequence `GPUColor` typedef into `WGPUColor`.
 #[allow(dead_code)] // T1 policy selects both typedefs; some land before their API consumer.
 pub(super) fn convert_gpu_color<E: JsEngine>(cx: E::Context<'_>, value: E::Value) -> Result<WGPUColor, E::Error> {
-    // T1: an iterable selects the sequence arm; otherwise dictionary conversion applies.
+    // T1: only an object can select the sequence or dictionary union arm.
+    if !E::is_object(cx, value) { return Err(E::type_error(cx, "GPUColor must be an object")); }
+    // T1: an iterable object selects the sequence arm; otherwise dictionary conversion applies.
     let Some(iterator_method) = sequence_iterator_method::<E>(cx, value)? else {
         return convert_color_dict::<E>(cx, value);
     };

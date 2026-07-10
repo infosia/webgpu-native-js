@@ -968,3 +968,57 @@ answered the wrong question. The pattern: comments argue *what the code does*
 ("only enqueues, never dereferences") when the obligation is *what must be
 true when it runs* ("the state it enqueues into is alive"). A SAFETY comment
 for a callback should start with its lifetime story, not its behavior.
+
+---
+
+## Block 09 Phase Review — 2026-07-11 ("Clean Review Then Fix")
+
+Three no-context lenses over `4470cb5..b21e276` (four slices: textures,
+bind-group resources, render pipeline, render pass + copies).
+
+**CRITICAL: none. Deletion experiments: nine mutations, ZERO survivors** — the
+C-field-asserting mock tests were the sole behavioral oracle for five of nine
+(enum-value swaps, retention drops, sentinel substitutions are script-invisible
+by construction), which is exactly the layering block 08's lens predicted.
+
+### MAJOR, all fixed
+1. The color-attachment hole emitted `mem::zeroed()` under a SAFETY comment
+   the header refutes — the INIT macro wants `depthSlice = UINT32_MAX`; a
+   zeroed hole claims "slice 0 explicitly". INIT-equivalent hole emitted,
+   comment corrected, sentinel asserted. (The other two zeroed holes were
+   verified correct against the yml before this review and stay.)
+2. `setVertexBuffer`/`setIndexBuffer` reused the mapping path's u32-capped
+   converter for `[EnforceRange] GPUSize64` args — a 4GiB+ offset threw where
+   the spec accepts. Uncapped GPUSize64 converter; 2^32/2^40 tested.
+3. The mock counted every retained descriptor handle but not the PRIMARY
+   handle of the new types — a dropped or doubled bind-group/pipeline release
+   would stay green. Per-type counters + exactly-once assertions.
+4. The recorded texture-as-attachment divergence was untested on either
+   engine, and the deltas entry embellished the message (the planner's
+   wording, corrected in place). Parity now pins the actual TypeError on both
+   engines.
+5. `bind-group-resources.js` ran under QuickJS only — the per-engine script
+   rule; now shared with JSC.
+
+### MINOR, fixed in the same pass
+Origin `[]` accepted per WebIDL (extent keeps its minimum); primitives can no
+longer sneak into the union's sequence arm (`size:"12"` was width 1 height 2!);
+`finish()` converts before consuming the encoder; both `end()`s check the
+parent; the void recording ops (draw/copies/writeTexture) got invocation
+counters so a silently-skipped FFI call finally fails a test; parity's
+liveness-only retention lines renamed honestly and four coverage lines added
+(over-length extent, method-after-end, texture-as-view TypeError, a
+deterministic nested-scope GPUValidationError for the render mistake).
+
+### Standing limitations recorded
+- **JSC cannot exercise finalizer-driven lifetime bugs** (F5: finalizers wait
+  for context teardown), so retention coverage for the iOS production engine
+  is core-mock + QuickJS-by-proxy. Recorded here and in engine-boundary.md.
+- **Crash-shaped failures are grep-invisible** — gates key on exit codes now
+  (workflow.md rule added).
+
+### Gate — PASSED. Block 09 is COMPLETE.
+Final gates (exit codes all 0, quoted per the new rule): core 125 (env
+unset), quickjs 53, JSC 24+1, codegen 41, workspace green, both clippys
+`-D warnings`, fmt, parity **95 lines byte-identical** on both engines.
+Exit criteria: all five met.

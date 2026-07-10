@@ -236,3 +236,17 @@ Commit message convention: `phase-N: <area> — <short>`, e.g.
 
 Network operations (`git push` / `git pull`, submodule fetches) are invoked by
 the **user** via the `!` prompt, never by Claude with the sandbox disabled.
+
+## Gate on exit codes, not on result lines
+
+The block 09 deletion lens proved it: a test binary that dies by signal
+(SIGTRAP from a native over-release, SIGABRT from a heap check) prints **no**
+`FAILED` line and no `test result:` line — in `cargo test --workspace` output
+the crate's results simply vanish, and any log grep keyed to those strings
+reports the run cleaner than it is. **Every gate decision keys on the process
+exit code**; result-line greps are for detail, never for the verdict.
+
+Related dev note: `cargo test -p quickjs-adapter` alone does not link — the
+yawgpu backend feature arrives via workspace feature unification. Use the
+documented per-package commands (with the backend feature) or the workspace
+gate.

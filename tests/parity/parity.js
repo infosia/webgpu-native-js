@@ -338,6 +338,14 @@
             device.createTexture({ size: [], format: "r8unorm", usage: 4 });
         });
         log(errorLine("texture:extent-length", lengthError));
+        var overLengthError = caught(function () {
+            device.createTexture({ size: [1, 2, 3, 4], format: "r8unorm", usage: 4 });
+        });
+        log(errorLine("texture:extent-over-length", overLengthError));
+        var primitiveExtentError = caught(function () {
+            device.createTexture({ size: "12", format: "r8unorm", usage: 4 });
+        });
+        log(errorLine("texture:extent-primitive", primitiveExtentError));
 
         var retainedTexture = device.createTexture({
             size: [1],
@@ -355,7 +363,7 @@
         return gpu.requestAdapter().then(function () {
             return gpu.requestAdapter();
         }).then(function () {
-            log("texture:view-retained:" +
+            log("texture:view-alive:" +
                 (retainedTextureView !== null &&
                  typeof Object.getPrototypeOf(retainedTextureView) === "object"));
             retainedTextureView = null;
@@ -402,7 +410,7 @@
         return gpu.requestAdapter().then(function () {
             return gpu.requestAdapter();
         }).then(function () {
-            log("bindGroup:outlives-resources:" +
+            log("bindGroup:resources-alive:" +
                 (retainedBindGroup !== null &&
                  typeof Object.getPrototypeOf(retainedBindGroup) === "object"));
             retainedBindGroup = null;
@@ -461,6 +469,19 @@
             if (error !== null) {
                 throw new Error("minimal render pipeline validation failed: " + error.message);
             }
+            device.pushErrorScope("validation");
+            device.pushErrorScope("out-of-memory");
+            device.createRenderPipeline({
+                layout: "auto",
+                vertex: { module: module, entryPoint: "main" }
+            });
+            return device.popErrorScope().then(function (inner) {
+                return device.popErrorScope().then(function (outer) {
+                    log("scope:render-pipeline:" +
+                        (inner === null ? "null" : inner.constructor.name) + "," +
+                        (outer === null ? "null" : outer.constructor.name));
+                });
+            });
         });
     }
 
@@ -510,6 +531,17 @@
         });
         log("renderPass:clearValue-wrong-length:" + wrongColor.name);
 
+        var textureAsView = caught(function () {
+            device.createCommandEncoder().beginRenderPass({
+                colorAttachments: [{
+                    view: sourceTexture,
+                    loadOp: "load",
+                    storeOp: "store"
+                }]
+            });
+        });
+        log(errorLine("renderPass:texture-as-view", textureAsView));
+
         var stateEncoder = device.createCommandEncoder();
         var statePass = stateEncoder.beginRenderPass({
             colorAttachments: [{
@@ -521,6 +553,8 @@
         statePass.end();
         var doubleEnd = caught(function () { statePass.end(); });
         log("renderPass:double-end:" + doubleEnd.name);
+        var methodAfterEnd = caught(function () { statePass.draw(3); });
+        log(errorLine("renderPass:method-after-end", methodAfterEnd));
 
         var missingTexture = caught(function () {
             device.createCommandEncoder().copyTextureToTexture(

@@ -617,6 +617,21 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
         matches!(cx.runtime.get(value), MockValue::Null)
     }
 
+    fn is_object(cx: Self::Context<'_>, value: Self::Value) -> bool {
+        matches!(
+            cx.runtime.get(value),
+            MockValue::Object(_)
+                | MockValue::Iterable { .. }
+                | MockValue::Iterator { .. }
+                | MockValue::Callable(_)
+                | MockValue::Promise { .. }
+                | MockValue::Resolver { .. }
+                | MockValue::ArrayBuffer { .. }
+                | MockValue::ExternalArrayBuffer { .. }
+                | MockValue::Instance { .. }
+        )
+    }
+
     fn is_callable(cx: Self::Context<'_>, value: Self::Value) -> bool {
         matches!(
             cx.runtime.get(value),
@@ -983,6 +998,13 @@ struct MockGpuState {
     texture_view_releases: usize,
     bind_group_layout_releases: usize,
     pipeline_layout_releases: usize,
+    bind_group_releases: usize,
+    compute_pipeline_releases: usize,
+    render_pipeline_releases: usize,
+    command_encoder_releases: usize,
+    command_buffer_releases: usize,
+    compute_pass_encoder_releases: usize,
+    render_pass_encoder_releases: usize,
     buffer_destroys: usize,
     texture_destroys: usize,
     buffer_unmaps: usize,
@@ -1004,6 +1026,9 @@ struct MockGpuState {
     next_pop_error: Option<MockPopError>,
     device_lost_callback: Option<WGPUDeviceLostCallbackInfo>,
     uncaptured_error_callback: Option<WGPUUncapturedErrorCallbackInfo>,
+    recording_calls: BTreeMap<&'static str, usize>,
+    vertex_buffer_ranges: Vec<(u64, u64)>,
+    index_buffer_ranges: Vec<(u64, u64)>,
 }
 
 struct MockPopError {
@@ -1701,6 +1726,13 @@ unsafe fn queue_write_texture(
     _data_layout: *const WGPUTexelCopyBufferLayout,
     _write_size: *const WGPUExtent3D,
 ) {
+    GPU_STATE.with(|state| {
+        *state
+            .borrow_mut()
+            .recording_calls
+            .entry("queue_write_texture")
+            .or_default() += 1;
+    });
     // T7: yawgpu Noop does not execute texture writes; the mock records no texels either.
 }
 
@@ -1763,12 +1795,20 @@ unsafe fn pipeline_layout_release(_layout: WGPUPipelineLayout) {
     GPU_STATE.with(|state| state.borrow_mut().pipeline_layout_releases += 1);
 }
 unsafe fn bind_group_add_ref(_bind_group: WGPUBindGroup) {}
-unsafe fn bind_group_release(_bind_group: WGPUBindGroup) {}
+unsafe fn bind_group_release(_bind_group: WGPUBindGroup) {
+    GPU_STATE.with(|state| state.borrow_mut().bind_group_releases += 1);
+}
 unsafe fn compute_pipeline_add_ref(_pipeline: WGPUComputePipeline) {}
-unsafe fn compute_pipeline_release(_pipeline: WGPUComputePipeline) {}
+unsafe fn compute_pipeline_release(_pipeline: WGPUComputePipeline) {
+    GPU_STATE.with(|state| state.borrow_mut().compute_pipeline_releases += 1);
+}
 unsafe fn render_pipeline_add_ref(_pipeline: WGPURenderPipeline) {}
-unsafe fn render_pipeline_release(_pipeline: WGPURenderPipeline) {}
-unsafe fn command_encoder_release(_encoder: WGPUCommandEncoder) {}
+unsafe fn render_pipeline_release(_pipeline: WGPURenderPipeline) {
+    GPU_STATE.with(|state| state.borrow_mut().render_pipeline_releases += 1);
+}
+unsafe fn command_encoder_release(_encoder: WGPUCommandEncoder) {
+    GPU_STATE.with(|state| state.borrow_mut().command_encoder_releases += 1);
+}
 
 unsafe fn command_encoder_copy_buffer_to_buffer(
     _encoder: WGPUCommandEncoder,
@@ -1825,6 +1865,13 @@ unsafe fn command_encoder_copy_buffer_to_texture(
     _destination: *const WGPUTexelCopyTextureInfo,
     _copy_size: *const WGPUExtent3D,
 ) {
+    GPU_STATE.with(|state| {
+        *state
+            .borrow_mut()
+            .recording_calls
+            .entry("copy_buffer_to_texture")
+            .or_default() += 1;
+    });
 }
 
 unsafe fn command_encoder_copy_texture_to_buffer(
@@ -1833,6 +1880,13 @@ unsafe fn command_encoder_copy_texture_to_buffer(
     _destination: *const WGPUTexelCopyBufferInfo,
     _copy_size: *const WGPUExtent3D,
 ) {
+    GPU_STATE.with(|state| {
+        *state
+            .borrow_mut()
+            .recording_calls
+            .entry("copy_texture_to_buffer")
+            .or_default() += 1;
+    });
 }
 
 unsafe fn command_encoder_copy_texture_to_texture(
@@ -1841,6 +1895,13 @@ unsafe fn command_encoder_copy_texture_to_texture(
     _destination: *const WGPUTexelCopyTextureInfo,
     _copy_size: *const WGPUExtent3D,
 ) {
+    GPU_STATE.with(|state| {
+        *state
+            .borrow_mut()
+            .recording_calls
+            .entry("copy_texture_to_texture")
+            .or_default() += 1;
+    });
 }
 
 unsafe fn command_encoder_finish(
@@ -1850,12 +1911,23 @@ unsafe fn command_encoder_finish(
     fake_handle(9001)
 }
 
-unsafe fn command_buffer_release(_command_buffer: WGPUCommandBuffer) {}
-unsafe fn compute_pass_encoder_release(_pass: WGPUComputePassEncoder) {}
+unsafe fn command_buffer_release(_command_buffer: WGPUCommandBuffer) {
+    GPU_STATE.with(|state| state.borrow_mut().command_buffer_releases += 1);
+}
+unsafe fn compute_pass_encoder_release(_pass: WGPUComputePassEncoder) {
+    GPU_STATE.with(|state| state.borrow_mut().compute_pass_encoder_releases += 1);
+}
 unsafe fn compute_pass_encoder_set_pipeline(
     _pass: WGPUComputePassEncoder,
     _pipeline: WGPUComputePipeline,
 ) {
+    GPU_STATE.with(|state| {
+        *state
+            .borrow_mut()
+            .recording_calls
+            .entry("compute_set_pipeline")
+            .or_default() += 1;
+    });
 }
 unsafe fn compute_pass_encoder_set_bind_group(
     _pass: WGPUComputePassEncoder,
@@ -1864,6 +1936,13 @@ unsafe fn compute_pass_encoder_set_bind_group(
     _offset_count: usize,
     _offsets: *const u32,
 ) {
+    GPU_STATE.with(|state| {
+        *state
+            .borrow_mut()
+            .recording_calls
+            .entry("compute_set_bind_group")
+            .or_default() += 1;
+    });
 }
 unsafe fn compute_pass_encoder_dispatch_workgroups(
     _pass: WGPUComputePassEncoder,
@@ -1871,29 +1950,69 @@ unsafe fn compute_pass_encoder_dispatch_workgroups(
     _y: u32,
     _z: u32,
 ) {
+    GPU_STATE.with(|state| {
+        *state
+            .borrow_mut()
+            .recording_calls
+            .entry("dispatch_workgroups")
+            .or_default() += 1;
+    });
 }
-unsafe fn compute_pass_encoder_end(_pass: WGPUComputePassEncoder) {}
-unsafe fn render_pass_encoder_release(_pass: WGPURenderPassEncoder) {}
+unsafe fn compute_pass_encoder_end(_pass: WGPUComputePassEncoder) {
+    GPU_STATE.with(|state| {
+        *state
+            .borrow_mut()
+            .recording_calls
+            .entry("compute_end")
+            .or_default() += 1;
+    });
+}
+unsafe fn render_pass_encoder_release(_pass: WGPURenderPassEncoder) {
+    GPU_STATE.with(|state| state.borrow_mut().render_pass_encoder_releases += 1);
+}
 unsafe fn render_pass_encoder_set_pipeline(
     _pass: WGPURenderPassEncoder,
     _pipeline: WGPURenderPipeline,
 ) {
+    GPU_STATE.with(|state| {
+        *state
+            .borrow_mut()
+            .recording_calls
+            .entry("render_set_pipeline")
+            .or_default() += 1;
+    });
 }
 unsafe fn render_pass_encoder_set_vertex_buffer(
     _pass: WGPURenderPassEncoder,
     _slot: u32,
     _buffer: WGPUBuffer,
-    _offset: u64,
-    _size: u64,
+    offset: u64,
+    size: u64,
 ) {
+    GPU_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        *state
+            .recording_calls
+            .entry("render_set_vertex_buffer")
+            .or_default() += 1;
+        state.vertex_buffer_ranges.push((offset, size));
+    });
 }
 unsafe fn render_pass_encoder_set_index_buffer(
     _pass: WGPURenderPassEncoder,
     _buffer: WGPUBuffer,
     _format: WGPUIndexFormat,
-    _offset: u64,
-    _size: u64,
+    offset: u64,
+    size: u64,
 ) {
+    GPU_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        *state
+            .recording_calls
+            .entry("render_set_index_buffer")
+            .or_default() += 1;
+        state.index_buffer_ranges.push((offset, size));
+    });
 }
 unsafe fn render_pass_encoder_set_bind_group(
     _pass: WGPURenderPassEncoder,
@@ -1902,6 +2021,13 @@ unsafe fn render_pass_encoder_set_bind_group(
     _offset_count: usize,
     _offsets: *const u32,
 ) {
+    GPU_STATE.with(|state| {
+        *state
+            .borrow_mut()
+            .recording_calls
+            .entry("render_set_bind_group")
+            .or_default() += 1;
+    });
 }
 unsafe fn render_pass_encoder_draw(
     _pass: WGPURenderPassEncoder,
@@ -1910,6 +2036,13 @@ unsafe fn render_pass_encoder_draw(
     _first_vertex: u32,
     _first_instance: u32,
 ) {
+    GPU_STATE.with(|state| {
+        *state
+            .borrow_mut()
+            .recording_calls
+            .entry("draw")
+            .or_default() += 1;
+    });
 }
 unsafe fn render_pass_encoder_draw_indexed(
     _pass: WGPURenderPassEncoder,
@@ -1919,6 +2052,13 @@ unsafe fn render_pass_encoder_draw_indexed(
     _base_vertex: i32,
     _first_instance: u32,
 ) {
+    GPU_STATE.with(|state| {
+        *state
+            .borrow_mut()
+            .recording_calls
+            .entry("draw_indexed")
+            .or_default() += 1;
+    });
 }
 unsafe fn render_pass_encoder_set_viewport(
     _pass: WGPURenderPassEncoder,
@@ -1929,6 +2069,13 @@ unsafe fn render_pass_encoder_set_viewport(
     _min_depth: f32,
     _max_depth: f32,
 ) {
+    GPU_STATE.with(|state| {
+        *state
+            .borrow_mut()
+            .recording_calls
+            .entry("set_viewport")
+            .or_default() += 1;
+    });
 }
 unsafe fn render_pass_encoder_set_scissor_rect(
     _pass: WGPURenderPassEncoder,
@@ -1937,8 +2084,23 @@ unsafe fn render_pass_encoder_set_scissor_rect(
     _width: u32,
     _height: u32,
 ) {
+    GPU_STATE.with(|state| {
+        *state
+            .borrow_mut()
+            .recording_calls
+            .entry("set_scissor_rect")
+            .or_default() += 1;
+    });
 }
-unsafe fn render_pass_encoder_end(_pass: WGPURenderPassEncoder) {}
+unsafe fn render_pass_encoder_end(_pass: WGPURenderPassEncoder) {
+    GPU_STATE.with(|state| {
+        *state
+            .borrow_mut()
+            .recording_calls
+            .entry("render_end")
+            .or_default() += 1;
+    });
+}
 
 fn read_view(view: WGPUStringView) -> Vec<u8> {
     if view.data.is_null() || view.length == crate::wgpu_strlen() {
@@ -2389,6 +2551,10 @@ mod tests {
         )
         .expect("origin sequence");
         assert_eq!((origin.x, origin.y, origin.z), (2, 3, 4));
+
+        let empty_origin =
+            convert_gpu_origin3d::<Engine>(cx, rt.set_like(&[])).expect("empty origin sequence");
+        assert_eq!((empty_origin.x, empty_origin.y, empty_origin.z), (0, 0, 0));
     }
 
     #[test]
@@ -2426,6 +2592,17 @@ mod tests {
         assert_eq!(
             convert_gpu_extent3d::<Engine>(cx, iterable).expect_err("iterator throw"),
             "iterator next 1 failed"
+        );
+    }
+
+    #[test]
+    fn t1_union_rejects_primitive_values_before_iterator_probe() {
+        let rt = runtime();
+        let cx = rt.context();
+        assert_eq!(
+            convert_gpu_extent3d::<Engine>(cx, rt.string("12"))
+                .expect_err("primitive string must not select sequence arm"),
+            "TypeError: GPUExtent3D must be an object"
         );
     }
 
@@ -4135,6 +4312,7 @@ mod tests {
             assert_eq!(state.sampler_releases, 1);
             assert_eq!(state.texture_view_releases, 1);
             assert_eq!(state.bind_group_layout_releases, 1);
+            assert_eq!(state.bind_group_releases, 1);
         });
     }
 
@@ -4186,6 +4364,7 @@ mod tests {
             let state = state.borrow();
             assert_eq!(state.shader_module_releases, 1);
             assert_eq!(state.pipeline_layout_releases, 1);
+            assert_eq!(state.compute_pipeline_releases, 1);
         });
     }
 
@@ -4703,7 +4882,11 @@ mod tests {
             &rt.env,
         );
         assert_eq!(rt.queue().drain().expect("drain render pipeline"), 1);
-        GPU_STATE.with(|state| assert_eq!(state.borrow().shader_module_releases, 1));
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.shader_module_releases, 1);
+            assert_eq!(state.render_pipeline_releases, 1);
+        });
     }
 
     #[test]
@@ -4759,6 +4942,7 @@ mod tests {
             let state = state.borrow();
             assert_eq!(state.shader_module_releases, 2);
             assert_eq!(state.pipeline_layout_releases, 1);
+            assert_eq!(state.render_pipeline_releases, 1);
         });
     }
 
@@ -5444,6 +5628,131 @@ mod tests {
         buffer_unmap::<Engine>(cx, buffer, &[]).expect("first unmap");
         buffer_unmap::<Engine>(cx, buffer, &[]).expect("second unmap");
         GPU_STATE.with(|state| assert_eq!(state.borrow().buffer_unmaps, 1));
+    }
+
+    #[test]
+    fn command_encoder_finish_converts_descriptor_before_ending_encoder() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let encoder = device_create_command_encoder::<Engine>(cx, device, &[]).expect("encoder");
+        let descriptor = descriptor(&rt, &[]);
+        rt.set_property_error(descriptor, "label", "label getter failed");
+
+        assert_eq!(
+            command_encoder_finish::<Engine>(cx, encoder, &[descriptor])
+                .expect_err("throwing label getter"),
+            "label getter failed"
+        );
+        command_encoder_finish::<Engine>(cx, encoder, &[])
+            .expect("encoder remains usable after conversion failure");
+    }
+
+    #[test]
+    fn pass_end_rejects_after_parent_encoder_is_finished_without_calling_ffi() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+
+        let compute_encoder =
+            device_create_command_encoder::<Engine>(cx, device, &[]).expect("compute encoder");
+        let compute_pass =
+            crate::command_encoder_begin_compute_pass::<Engine>(cx, compute_encoder, &[])
+                .expect("compute pass");
+        command_encoder_finish::<Engine>(cx, compute_encoder, &[]).expect("finish parent");
+        assert_eq!(
+            crate::compute_pass_end::<Engine>(cx, compute_pass, &[])
+                .expect_err("compute end after parent finish"),
+            "OperationError: GPUCommandEncoder is finished"
+        );
+
+        let render_encoder =
+            device_create_command_encoder::<Engine>(cx, device, &[]).expect("render encoder");
+        let render_descriptor = descriptor(&rt, &[("colorAttachments", rt.set_like(&[]))]);
+        let render_pass = crate::command_encoder_begin_render_pass::<Engine>(
+            cx,
+            render_encoder,
+            &[render_descriptor],
+        )
+        .expect("render pass");
+        command_encoder_finish::<Engine>(cx, render_encoder, &[]).expect("finish parent");
+        assert_eq!(
+            crate::render_pass_end::<Engine>(cx, render_pass, &[])
+                .expect_err("render end after parent finish"),
+            "OperationError: GPUCommandEncoder is finished"
+        );
+
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.recording_calls.get("compute_end"), None);
+            assert_eq!(state.recording_calls.get("render_end"), None);
+        });
+    }
+
+    #[test]
+    fn command_and_pass_primary_handles_release_exactly_once() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let encoder = device_create_command_encoder::<Engine>(cx, device, &[]).expect("encoder");
+        let compute_pass = crate::command_encoder_begin_compute_pass::<Engine>(cx, encoder, &[])
+            .expect("compute pass");
+        crate::compute_pass_end::<Engine>(cx, compute_pass, &[]).expect("end compute pass");
+        let render_descriptor = descriptor(&rt, &[("colorAttachments", rt.set_like(&[]))]);
+        let render_pass =
+            crate::command_encoder_begin_render_pass::<Engine>(cx, encoder, &[render_descriptor])
+                .expect("render pass");
+        crate::render_pass_end::<Engine>(cx, render_pass, &[]).expect("end render pass");
+        let command_buffer = command_encoder_finish::<Engine>(cx, encoder, &[]).expect("finish");
+
+        let encoder_state = crate::command_encoder_state::<Engine>(cx, encoder).expect("state");
+        let command_buffer_state =
+            crate::command_buffer_state::<Engine>(cx, command_buffer).expect("state");
+        let compute_state =
+            Engine::payload(cx, compute_pass, crate::GPU_COMPUTE_PASS_ENCODER_CLASS)
+                .and_then(|payload| payload.downcast_ref::<crate::ComputePassEncoderPayload>())
+                .map(|payload| Arc::clone(&payload.state))
+                .expect("compute state");
+        let render_state = Engine::payload(cx, render_pass, crate::GPU_RENDER_PASS_ENCODER_CLASS)
+            .and_then(|payload| payload.downcast_ref::<crate::RenderPassEncoderPayload>())
+            .map(|payload| Arc::clone(&payload.state))
+            .expect("render state");
+
+        crate::finalize_command_encoder(
+            Box::new(crate::CommandEncoderPayload {
+                state: encoder_state,
+            }),
+            &rt.env,
+        );
+        crate::finalize_command_buffer(
+            Box::new(crate::CommandBufferPayload {
+                state: command_buffer_state,
+            }),
+            &rt.env,
+        );
+        crate::finalize_compute_pass_encoder(
+            Box::new(crate::ComputePassEncoderPayload {
+                state: compute_state,
+            }),
+            &rt.env,
+        );
+        crate::finalize_render_pass_encoder(
+            Box::new(crate::RenderPassEncoderPayload {
+                state: render_state,
+            }),
+            &rt.env,
+        );
+        assert_eq!(rt.queue().drain().expect("drain command handles"), 4);
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.command_encoder_releases, 1);
+            assert_eq!(state.command_buffer_releases, 1);
+            assert_eq!(state.compute_pass_encoder_releases, 1);
+            assert_eq!(state.render_pass_encoder_releases, 1);
+        });
     }
 
     #[test]
@@ -6448,7 +6757,19 @@ mod tests {
         let colors = unsafe { std::slice::from_raw_parts(native.colorAttachments, 2) };
         assert_eq!(colors[0].view, fake_handle(501));
         assert!(colors[1].view.is_null());
+        assert_eq!(colors[1].depthSlice, u32::MAX);
         assert!(colors[1].resolveTarget.is_null());
+        assert_eq!(colors[1].loadOp, crate::WGPULoadOp_WGPULoadOp_Undefined);
+        assert_eq!(colors[1].storeOp, crate::WGPUStoreOp_WGPUStoreOp_Undefined);
+        assert_eq!(
+            (
+                colors[1].clearValue.r,
+                colors[1].clearValue.g,
+                colors[1].clearValue.b,
+                colors[1].clearValue.a
+            ),
+            (0.0, 0.0, 0.0, 0.0)
+        );
         let native_depth = unsafe { native.depthStencilAttachment.as_ref() }.expect("depth");
         assert_eq!(native_depth.view, fake_handle(501));
     }
@@ -6578,6 +6899,58 @@ mod tests {
     }
 
     #[test]
+    fn t6_compute_pass_validation_only_ops_call_every_ffi_pointer() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let encoder = device_create_command_encoder::<Engine>(cx, device, &[]).expect("encoder");
+        let pass = crate::command_encoder_begin_compute_pass::<Engine>(cx, encoder, &[])
+            .expect("compute pass");
+        let pipeline = Engine::new_instance(
+            cx,
+            crate::GPU_COMPUTE_PIPELINE_CLASS,
+            Box::new(ComputePipelinePayload {
+                pipeline: fake_handle(690),
+                module: ptr::null_mut(),
+                layout: ptr::null_mut(),
+            }),
+        )
+        .expect("compute pipeline");
+        let bind_group = Engine::new_instance(
+            cx,
+            crate::GPU_BIND_GROUP_CLASS,
+            Box::new(BindGroupPayload {
+                bind_group: fake_handle(691),
+                layout: ptr::null_mut(),
+                buffers: Vec::new(),
+                samplers: Vec::new(),
+                texture_views: Vec::new(),
+            }),
+        )
+        .expect("bind group");
+
+        crate::compute_pass_set_pipeline::<Engine>(cx, pass, &[pipeline]).expect("pipeline");
+        crate::compute_pass_set_bind_group::<Engine>(cx, pass, &[rt.number(0.0), bind_group])
+            .expect("bind group");
+        crate::compute_pass_dispatch_workgroups::<Engine>(cx, pass, &[rt.number(2.0)])
+            .expect("dispatch");
+        crate::compute_pass_end::<Engine>(cx, pass, &[]).expect("end");
+
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            for name in [
+                "compute_set_pipeline",
+                "compute_set_bind_group",
+                "dispatch_workgroups",
+                "compute_end",
+            ] {
+                assert_eq!(state.recording_calls.get(name), Some(&1), "{name}");
+            }
+        });
+    }
+
+    #[test]
     fn t6_render_pass_state_machine_and_t7_copy_calls_are_validation_only() {
         reset_gpu();
         let rt = runtime();
@@ -6651,8 +7024,8 @@ mod tests {
             &[
                 rt.number(1.0),
                 render_buffer,
-                rt.number(4.0),
-                rt.number(16.0),
+                rt.number(4_294_967_296.0),
+                rt.number(1_099_511_627_776.0),
             ],
         )
         .expect("vertex buffer range");
@@ -6662,6 +7035,17 @@ mod tests {
             &[render_buffer, rt.string("uint16")],
         )
         .expect("index buffer defaults");
+        crate::render_pass_set_index_buffer::<Engine>(
+            cx,
+            pass,
+            &[
+                render_buffer,
+                rt.string("uint32"),
+                rt.number(1_099_511_627_776.0),
+                rt.number(4_294_967_296.0),
+            ],
+        )
+        .expect("index buffer GPUSize64 range");
         let bind_group = Engine::new_instance(
             cx,
             crate::GPU_BIND_GROUP_CLASS,
@@ -6773,6 +7157,34 @@ mod tests {
         let queue = device_queue_get::<Engine>(cx, device).expect("queue");
         queue_write_texture::<Engine>(cx, queue, &[texture_info, data, buffer_info, extent])
             .expect("write texture validation only");
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(
+                state.vertex_buffer_ranges,
+                vec![(0, u64::MAX), (4_294_967_296, 1_099_511_627_776)]
+            );
+            assert_eq!(
+                state.index_buffer_ranges,
+                vec![(0, u64::MAX), (1_099_511_627_776, 4_294_967_296)]
+            );
+            for (name, expected) in [
+                ("render_set_pipeline", 1),
+                ("render_set_vertex_buffer", 2),
+                ("render_set_index_buffer", 2),
+                ("render_set_bind_group", 1),
+                ("set_viewport", 1),
+                ("set_scissor_rect", 1),
+                ("draw", 1),
+                ("draw_indexed", 1),
+                ("render_end", 1),
+                ("copy_buffer_to_texture", 1),
+                ("copy_texture_to_buffer", 1),
+                ("copy_texture_to_texture", 1),
+                ("queue_write_texture", 1),
+            ] {
+                assert_eq!(state.recording_calls.get(name), Some(&expected), "{name}");
+            }
+        });
         release_device_held_values(&rt, cx, device);
     }
 }

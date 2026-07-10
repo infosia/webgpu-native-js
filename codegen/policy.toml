@@ -449,7 +449,7 @@ max_length = 3
 [[dict_or_sequence_union]]
 typedef = "GPUOrigin3D"
 dictionary = "GPUOrigin3DDict"
-min_length = 1
+min_length = 0
 max_length = 3
 
 [[dict_or_sequence_union]]

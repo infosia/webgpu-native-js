@@ -345,6 +345,8 @@ pub trait JsEngine: Sized {
     fn is_undefined(cx: Self::Context<'_>, value: Self::Value) -> bool;
     /// Returns true for JavaScript `null`.
     fn is_null(cx: Self::Context<'_>, value: Self::Value) -> bool;
+    /// Returns true for a JavaScript object (including callable objects).
+    fn is_object(cx: Self::Context<'_>, value: Self::Value) -> bool;
     /// Returns true when a JavaScript value is callable.
     fn is_callable(cx: Self::Context<'_>, value: Self::Value) -> bool;
     /// Converts with JavaScript `ToNumber`.
@@ -3088,6 +3090,13 @@ pub fn command_encoder_finish<E: JsEngine + 'static>(
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
     let state = command_encoder_state::<E>(cx, this)?;
+    let arena = Arena::new();
+    let native = match args.first().copied() {
+        Some(value) if !E::is_undefined(cx, value) => {
+            Some(convert_command_buffer_descriptor::<E>(cx, value, &arena)?)
+        }
+        _ => None,
+    };
     let encoder = {
         let mut state = state
             .lock()
@@ -3097,13 +3106,6 @@ pub fn command_encoder_finish<E: JsEngine + 'static>(
         }
         state.ended = true;
         state.encoder
-    };
-    let arena = Arena::new();
-    let native = match args.first().copied() {
-        Some(value) if !E::is_undefined(cx, value) => {
-            Some(convert_command_buffer_descriptor::<E>(cx, value, &arena)?)
-        }
-        _ => None,
     };
     let command_buffer = unsafe {
         (E::environment(cx).gpu().command_encoder_finish)(
@@ -3233,6 +3235,14 @@ pub fn compute_pass_end<E: JsEngine + 'static>(
     if state.ended {
         return Err(E::operation_error(cx, "GPUComputePassEncoder is ended"));
     }
+    let parent = state
+        .parent
+        .lock()
+        .map_err(|_| E::operation_error(cx, "GPUCommandEncoder state is poisoned"))?;
+    if parent.ended {
+        return Err(E::operation_error(cx, "GPUCommandEncoder is finished"));
+    }
+    drop(parent);
     unsafe { (E::environment(cx).gpu().compute_pass_encoder_end)(state.pass) };
     state.ended = true;
     Ok(E::undefined(cx))
@@ -3265,8 +3275,8 @@ pub fn render_pass_set_vertex_buffer<E: JsEngine + 'static>(
     } else {
         buffer_handle::<E>(cx, buffer_value)?
     };
-    let offset = optional_gpu_size_to_u64::<E>(cx, args.get(2).copied(), "offset", 0)?;
-    let size = optional_gpu_size_to_u64::<E>(cx, args.get(3).copied(), "size", u64::MAX)?;
+    let offset = optional_gpu_size64_to_u64::<E>(cx, args.get(2).copied(), "offset", 0)?;
+    let size = optional_gpu_size64_to_u64::<E>(cx, args.get(3).copied(), "size", u64::MAX)?;
     unsafe {
         (E::environment(cx)
             .gpu()
@@ -3285,8 +3295,8 @@ pub fn render_pass_set_index_buffer<E: JsEngine + 'static>(
     let buffer = buffer_handle::<E>(cx, required_argument::<E>(cx, args, 0, "buffer")?)?;
     let format =
         convert_gpu_index_format::<E>(cx, required_argument::<E>(cx, args, 1, "indexFormat")?)?;
-    let offset = optional_gpu_size_to_u64::<E>(cx, args.get(2).copied(), "offset", 0)?;
-    let size = optional_gpu_size_to_u64::<E>(cx, args.get(3).copied(), "size", u64::MAX)?;
+    let offset = optional_gpu_size64_to_u64::<E>(cx, args.get(2).copied(), "offset", 0)?;
+    let size = optional_gpu_size64_to_u64::<E>(cx, args.get(3).copied(), "size", u64::MAX)?;
     unsafe {
         (E::environment(cx)
             .gpu()
@@ -3444,6 +3454,14 @@ pub fn render_pass_end<E: JsEngine + 'static>(
     if state.ended {
         return Err(E::operation_error(cx, "GPURenderPassEncoder is ended"));
     }
+    let parent = state
+        .parent
+        .lock()
+        .map_err(|_| E::operation_error(cx, "GPUCommandEncoder state is poisoned"))?;
+    if parent.ended {
+        return Err(E::operation_error(cx, "GPUCommandEncoder is finished"));
+    }
+    drop(parent);
     unsafe { (E::environment(cx).gpu().render_pass_encoder_end)(state.pass) };
     state.ended = true;
     Ok(E::undefined(cx))
@@ -3980,6 +3998,22 @@ fn optional_gpu_size_to_u64<E: JsEngine>(
         return Err(E::type_error(cx, name));
     }
     Ok(value)
+}
+
+fn optional_gpu_size64_to_u64<E: JsEngine>(
+    cx: E::Context<'_>,
+    value: Option<E::Value>,
+    name: &'static str,
+    default: u64,
+) -> Result<u64, E::Error> {
+    let Some(value) = value else {
+        return Ok(default);
+    };
+    if E::is_undefined(cx, value) {
+        Ok(default)
+    } else {
+        enforce_u64::<E>(cx, value, name)
+    }
 }
 
 fn optional_gpu_size_to_usize<E: JsEngine>(

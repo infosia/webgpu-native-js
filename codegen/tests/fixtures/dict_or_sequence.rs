@@ -60,7 +60,9 @@ pub(super) fn convert_origin3d_dict<E: JsEngine>(
 /// Converts the dictionary-or-sequence `GPUExtent3D` typedef into `WGPUExtent3D`.
 #[allow(dead_code)] // T1 policy selects both typedefs; some land before their API consumer.
 pub(super) fn convert_gpu_extent3d<E: JsEngine>(cx: E::Context<'_>, value: E::Value) -> Result<WGPUExtent3D, E::Error> {
-    // T1: an iterable selects the sequence arm; otherwise dictionary conversion applies.
+    // T1: only an object can select the sequence or dictionary union arm.
+    if !E::is_object(cx, value) { return Err(E::type_error(cx, "GPUExtent3D must be an object")); }
+    // T1: an iterable object selects the sequence arm; otherwise dictionary conversion applies.
     let Some(iterator_method) = sequence_iterator_method::<E>(cx, value)? else {
         return convert_extent3d_dict::<E>(cx, value);
     };
@@ -80,7 +82,9 @@ pub(super) fn convert_gpu_extent3d<E: JsEngine>(cx: E::Context<'_>, value: E::Va
 /// Converts the dictionary-or-sequence `GPUOrigin3D` typedef into `WGPUOrigin3D`.
 #[allow(dead_code)] // T1 policy selects both typedefs; some land before their API consumer.
 pub(super) fn convert_gpu_origin3d<E: JsEngine>(cx: E::Context<'_>, value: E::Value) -> Result<WGPUOrigin3D, E::Error> {
-    // T1: an iterable selects the sequence arm; otherwise dictionary conversion applies.
+    // T1: only an object can select the sequence or dictionary union arm.
+    if !E::is_object(cx, value) { return Err(E::type_error(cx, "GPUOrigin3D must be an object")); }
+    // T1: an iterable object selects the sequence arm; otherwise dictionary conversion applies.
     let Some(iterator_method) = sequence_iterator_method::<E>(cx, value)? else {
         return convert_origin3d_dict::<E>(cx, value);
     };

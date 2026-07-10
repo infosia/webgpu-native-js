@@ -1208,6 +1208,11 @@ impl core::JsEngine for Engine {
         unsafe { JSValueIsNull(cx.ctx, value) }
     }
 
+    fn is_object(cx: Self::Context<'_>, value: Self::Value) -> bool {
+        // SAFETY: value belongs to cx.
+        unsafe { JSValueIsObject(cx.ctx, value) }
+    }
+
     fn is_callable(cx: Self::Context<'_>, value: Self::Value) -> bool {
         // SAFETY: the object predicate guards the JSValueRef-to-JSObjectRef cast.
         unsafe { JSValueIsObject(cx.ctx, value) && JSObjectIsFunction(cx.ctx, value.cast_mut()) }
@@ -3319,6 +3324,21 @@ mod tests {
             &runtime,
             "if (!uncapturedEventPassed || !deviceLostPassed) throw new Error('device event callback did not run');",
             "device-events-check.js",
+        );
+    }
+
+    #[test]
+    fn bind_group_layout_and_resource_arms_follow_the_shared_script() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("JSC runtime");
+        let device = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("device", device)
+            .expect("set device");
+        eval(
+            &runtime,
+            include_str!("../../../tests/bind-group-resources.js"),
+            "tests/bind-group-resources.js",
         );
     }
 

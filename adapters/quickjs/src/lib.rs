@@ -728,6 +728,10 @@ impl core::JsEngine for Engine {
         unsafe { qjs::JS_IsNull(value) }
     }
 
+    fn is_object(_cx: Self::Context<'_>, value: Self::Value) -> bool {
+        unsafe { qjs::JS_IsObject(value) }
+    }
+
     fn is_callable(cx: Self::Context<'_>, value: Self::Value) -> bool {
         unsafe { qjs::JS_IsFunction(cx.ctx, value) }
     }

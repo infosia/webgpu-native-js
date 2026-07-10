@@ -1983,7 +1983,13 @@ fn emit_dict_or_sequence_union(
         output,
         "pub(super) fn {function}<E: JsEngine>(cx: E::Context<'_>, value: E::Value) -> Result<{target}, E::Error> {{"
     );
-    output.push_str("    // T1: an iterable selects the sequence arm; otherwise dictionary conversion applies.\n");
+    output.push_str("    // T1: only an object can select the sequence or dictionary union arm.\n");
+    let _ = writeln!(
+        output,
+        "    if !E::is_object(cx, value) {{ return Err(E::type_error(cx, \"{} must be an object\")); }}",
+        policy.typedef
+    );
+    output.push_str("    // T1: an iterable object selects the sequence arm; otherwise dictionary conversion applies.\n");
     output.push_str(
         "    let Some(iterator_method) = sequence_iterator_method::<E>(cx, value)? else {\n",
     );
@@ -2019,7 +2025,9 @@ fn emit_dict_or_sequence_union(
             ))
         }
     }
-    if policy.min_length == 1 {
+    if policy.min_length == 0 {
+        let _ = writeln!(output, "    if values.len() > {} {{", policy.max_length);
+    } else if policy.min_length == 1 {
         let _ = writeln!(
             output,
             "    if values.is_empty() || values.len() > {} {{",
@@ -2052,9 +2060,14 @@ fn emit_dict_or_sequence_union(
                     "trailing field has no default",
                 )
             })?;
+            let accessor = if index == 0 {
+                "values.first()".to_owned()
+            } else {
+                format!("values.get({index})")
+            };
             let _ = writeln!(
                 output,
-                "        {field}: values.get({index}).copied().unwrap_or({default}),"
+                "        {field}: {accessor}.copied().unwrap_or({default}),"
             );
         }
     }
@@ -2354,8 +2367,26 @@ fn emit_sequence_local(
         if element_nullable {
             output.push_str("            // T5: nullable sequence elements are C sentinel-filled struct holes.\n");
             output.push_str("            if E::is_null(cx, item) {\n");
-            output.push_str("                // SAFETY: the pinned C ABI defines the all-zero element as the hole sentinel.\n");
-            output.push_str("                Ok(unsafe { std::mem::zeroed() })\n");
+            if element == "GPURenderPassColorAttachment" {
+                output.push_str("                // The pinned webgpu.h INIT macro defines a hole with a null view,\n");
+                output.push_str("                // undefined depth slice/load/store values, and a zero color.\n");
+                output.push_str("                Ok(WGPURenderPassColorAttachment {\n");
+                output.push_str("                    nextInChain: ptr::null_mut(),\n");
+                output.push_str("                    view: ptr::null_mut(),\n");
+                output.push_str("                    depthSlice: WGPU_DEPTH_SLICE_UNDEFINED,\n");
+                output.push_str("                    resolveTarget: ptr::null_mut(),\n");
+                output.push_str("                    loadOp: WGPULoadOp_WGPULoadOp_Undefined,\n");
+                output
+                    .push_str("                    storeOp: WGPUStoreOp_WGPUStoreOp_Undefined,\n");
+                output.push_str(
+                    "                    // SAFETY: WGPU_COLOR_INIT is the all-zero WGPUColor.\n",
+                );
+                output.push_str("                    clearValue: unsafe { std::mem::zeroed() },\n");
+                output.push_str("                })\n");
+            } else {
+                output.push_str("                // SAFETY: the pinned C ABI defines the all-zero element as the hole sentinel.\n");
+                output.push_str("                Ok(unsafe { std::mem::zeroed() })\n");
+            }
             output.push_str("            } else {\n");
         }
         if descriptor_needs_arena(nested_pair, nested) {

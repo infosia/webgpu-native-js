@@ -163,7 +163,11 @@ Filled so far (headless-tested end-to-end under both engines):
 - `GPUQueue`: `writeBuffer`, `writeTexture`, `submit`, `onSubmittedWorkDone` (`device.queue`
   is `[SameObject]`)
 - `createShaderModule` (WGSL), `createBindGroupLayout`, `createPipelineLayout`,
-  `createBindGroup`, `createComputePipeline`, `createCommandEncoder`
+  `createBindGroup` (buffer, sampler, and texture-view resources),
+  `createComputePipeline`, `createRenderPipeline` (full descriptor: vertex
+  buffers with holes, depth-stencil, multisample, fragment targets with
+  blending), `createSampler`, `createTexture` / `GPUTextureView` (readonly
+  attributes read through the C getters), `createCommandEncoder`
 - `GPUCommandEncoder`: compute/render passes, buffer and texture copy recording,
   and `finish`; render pass: pipeline/buffer/bind-group state, viewport/scissor,
   draw/drawIndexed, and `end`;
@@ -175,7 +179,7 @@ WebIDL semantics are taken seriously: iterator-based `sequence<T>` conversion
 width checks on both the 64→32 and 64→`size_t` edges (tested with 2^32 on
 64-bit hosts), nullable vs non-null string distinctions, and required-member
 enforcement. Known deviations (e.g. validation errors surface as synchronous
-exceptions until error scopes land) are recorded in `specs/`, never silent.
+exceptions for null-handle catastrophes; validation errors route to error scopes) are recorded in `specs/`, never silent.
 
 Texture tests on yawgpu's headless Noop backend cover descriptor conversion,
 creation, validation, attributes, and lifecycle only. Noop texture-copy
@@ -253,7 +257,9 @@ Working through a phased plan (see `specs/`): the engine boundary, the async
 and mapping machinery, and the API surface above are in place; the
 JavaScriptCore adapter validates the central design bet end-to-end. Next:
 code generation from WebIDL joined with `webgpu.yml` (the same input pairing
-`dawn.node` generates from), then error scopes, then mobile bring-up.
+`dawn.node` generates from) landed, as did error scopes, the GPUError
+hierarchy, `onuncapturederror`/`device.lost`, and the texture/render surface.
+Next: mobile bring-up.
 
 ## License
 

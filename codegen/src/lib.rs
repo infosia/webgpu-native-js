@@ -1082,10 +1082,7 @@ fn validate_policy(
             )));
         }
         let fields = index.dictionary_members(&entry.dictionary);
-        if entry.min_length == 0
-            || entry.min_length > entry.max_length
-            || entry.max_length != fields.len()
-        {
+        if entry.min_length > entry.max_length || entry.max_length != fields.len() {
             return Err(CodegenError::Policy(format!(
                 "dict-or-sequence union {} has invalid length range {}..={} for {} fields",
                 entry.typedef,

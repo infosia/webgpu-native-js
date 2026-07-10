@@ -10,7 +10,7 @@ generator's report; this file is the committed, reviewable index.
 | IDL item | Disposition | Reason |
 |---|---|---|
 | `GPUBindGroupLayoutEntry.externalTexture` | reject-if-present | external textures out of scope |
-| `GPUBindGroupLayoutEntry.sampler` / `.texture` / `.storageTexture` (present) | member-named TypeError | bind-group resources are buffer-only for now (block 03 §7); silence was retired 2026-07-10 (slice 2b) |
+| ~~`GPUBindGroupLayoutEntry.sampler` / `.texture` / `.storageTexture`~~ | **shipped in block 09 slice 2 (2026-07-11)** — the "buffer-only" rejections converted to positive tests | historical: rejected 2026-07-10 (slice 2b) until the texture surface existed |
 | `GPUShaderModuleDescriptor.compilationHints` | reject-if-present | recorded deferral (block 03 §7) |
 | `GPUProgrammableStage.constants` | reject-if-present | pipeline constants deferred (block 03 §7); silent drop retired by the Phase 4 review |
 | `GPUComputePassDescriptor.timestampWrites` | reject-if-present | query sets out of scope |
@@ -73,5 +73,9 @@ enum sentinels `Undefined` / `BindingNotUsed` (emitted only for absent optionals
   `(GPUTexture or GPUTextureView)` for color/depth attachments; the C
   descriptor takes only `WGPUTextureView`. Synthesizing a hidden temporary
   view would create an unowned lifecycle behind the script's back, so a direct
-  `GPUTexture` raises a transparent TypeError telling the author to call
-  `createView()`. Revisit if implicit-view semantics are ever demanded.
+  `GPUTexture` raises the converter's TypeError (`GPUTextureView is required`).
+  *(Corrected 2026-07-11 by the block 09 review: this entry originally claimed
+  the message "tells the author to call createView()" — an embellishment the
+  planner wrote beyond the agent's report. The message is the generic one; it
+  is now pinned by a parity line on both engines.)* Revisit if implicit-view
+  semantics are ever demanded.

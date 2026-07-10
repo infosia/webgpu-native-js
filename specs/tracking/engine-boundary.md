@@ -1330,3 +1330,10 @@ none). One IDL-vs-C mismatch recorded in codegen-deltas: attachments take
 views only, a direct texture gets a transparent TypeError. Parity 83 → 90
 (the block's exit target met). Suites: core 120, quickjs 53, JSC 23+1,
 codegen 41.
+
+**Block 09 COMPLETE (2026-07-11).** Review: 0 CRITICAL / 5 MAJOR / minors, all
+fixed — full record in phase-reviews.md. Deletion lens: nine mutations, zero
+survivors. Standing limitation recorded: JSC's F5 makes finalizer-driven
+lifetime bugs structurally untestable under the iOS production engine —
+lifetime coverage lives in core mocks and QuickJS; keep that in mind whenever
+a retention bug class appears. Parity: 95 lines.

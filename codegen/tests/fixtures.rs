@@ -520,9 +520,9 @@ fn dict_or_sequence_union_policy_rejects_wrong_alias_and_lengths() {
         .to_string()
         .contains("fields disagree with its numeric sequence element"));
 
-    let wrong_length = policy.replace("min_length = 1", "min_length = 0");
+    let wrong_length = policy.replace("max_length = 3", "max_length = 2");
     let error = generate_conversions_with_policy(&idl, &yaml, &wrong_length)
-        .expect_err("zero-length union policy must fail");
+        .expect_err("union policy must cover every dictionary field");
     assert!(error.to_string().contains("invalid length range"));
 }
 
