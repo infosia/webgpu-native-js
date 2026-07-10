@@ -1097,3 +1097,26 @@ hand-written code's silence was itself unrecorded; now both the behavior and
 the decision are written down. Four new core rejection tests + one QuickJS
 script test; every pre-existing test unchanged; core 66, quickjs 42, JSC 17,
 parity byte-identical, all clippy/fmt green.
+
+**Phase 4 slice 2c landed (2026-07-10): the whole block 01–03 descriptor
+surface is generated.** Union flattening (`GPUBindGroupEntry.resource` →
+buffer/offset/size with `WGPU_WHOLE_SIZE` for absent size), the WGSL chained
+struct (B3, `sType` always set), handle sequences (`bindGroupLayouts`), the
+`GPUProgrammableStage` ⋈ `WGPUComputeState` name-map, `layout: "auto"` → null
+C handle, `timestampWrites`/`compilationHints`/`constants` policy-skipped with
+reasons. Only two hand-written `convert_*` remain in core, both generic
+non-descriptor machinery (the WebIDL sequence walker; command-buffer state
+collection).
+
+**And the oracle earned its keep in the other direction: G7 preserved five
+hand-written deviations as loud policy entries, and the planner retired all
+five.** `GPUBindGroupEntry.binding` optional-default-0 (IDL: `required` —
+DR-M3's missed sibling); three `required sequence` members defaulting to empty
+(`entries` ×2, `bindGroupLayouts`); and `entryPoint: null` treated as absent —
+where the pinned IDL (`USVString entryPoint;`, line 685) refutes B4's own
+prose, which was corrected in block 03. Each fix carries new member-named
+TypeError tests (core + script level). Also deliberate, recorded: a present
+non-buffer binding resource is now a clear TypeError instead of a silent
+misread (2b's precedent applied to the union arm). Final: codegen 24, core 72,
+quickjs 43, JSC 17+1, parity byte-identical both engines, workspace green,
+clippys/fmt clean.

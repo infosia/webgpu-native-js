@@ -11,14 +11,20 @@
 # `[[descriptor]]` selects each descriptor conversion emitted into `core`.
 # `target` overrides the joined C type only for an existing core-owned target.
 # `unsupported` names WebIDL nested dictionaries that must reject when present
-# and preserve their zero C form when absent. `zero` accounts for C-only fields,
-# and `default_empty_sequence` records an existing oracle deviation from a
-# required WebIDL sequence. Nested `[[descriptor.strings]]` entries are the B4
-# nullable/non-nullable classification for every joined string member. Policy
-# is checked both ways: unknown, duplicate, dead, disagreeing, and unpoliced
-# entries all fail generation.
+# and preserve their zero C form when absent. `zero` accounts for C-only fields.
+# Nested `[[descriptor.strings]]` entries classify WebIDL nullability for every
+# joined string member. Policy also records name maps, skips with reasons,
+# native handles and handle sequences, flattened unions, typed chains,
+# handle-or-enum unions, retained wrapper captures, and precisely-scoped
+# required-member defaults. It is checked both ways: unknown, duplicate, dead,
+# disagreeing, and unpoliced entries all fail generation.
 
 schema_version = 1
+
+[[name_map]]
+idl = "GPUProgrammableStage"
+c = "WGPUComputeState"
+reason = "WebIDL names the reusable programmable stage while the C ABI names its compute specialization"
 
 [[subset]]
 interface = "GPUDevice"
@@ -83,6 +89,152 @@ member = "label"
 nullable = false
 
 [[descriptor]]
+dictionary = "GPUBindGroupEntry"
+
+[[descriptor.union_flatten]]
+member = "resource"
+union_type = "GPUBindingResource"
+arm = "GPUBufferBinding"
+unsupported_error = "resource must be a GPUBufferBinding"
+zero_c_members = ["sampler", "texture_view"]
+
+[[descriptor.union_flatten.fields]]
+member = "buffer"
+c_member = "buffer"
+handle_helper = "buffer_handle"
+
+[[descriptor.union_flatten.fields]]
+member = "offset"
+c_member = "offset"
+
+[[descriptor.union_flatten.fields]]
+member = "size"
+c_member = "size"
+absent_constant = "WGPU_WHOLE_SIZE"
+
+[[descriptor]]
+dictionary = "GPUBindGroupDescriptor"
+
+[[descriptor.strings]]
+member = "label"
+nullable = false
+
+[[descriptor.handles]]
+member = "layout"
+helper = "bind_group_layout_handle"
+
+[descriptor.wrapper]
+target = "ConvertedBindGroupDescriptor"
+native_field = "native"
+
+[[descriptor.wrapper.captures]]
+field = "layout"
+source = "layout"
+
+[[descriptor.wrapper.sequence_captures]]
+field = "buffers"
+source = "entries"
+element_field = "buffer"
+
+[[descriptor]]
+dictionary = "GPUPipelineLayoutDescriptor"
+zero = []
+
+[[descriptor.strings]]
+member = "label"
+nullable = false
+
+[[descriptor.handle_sequences]]
+member = "bindGroupLayouts"
+helper = "bind_group_layout_handle"
+
+[[descriptor]]
+dictionary = "GPUShaderModuleDescriptor"
+
+[[descriptor.strings]]
+member = "label"
+nullable = false
+
+[[descriptor.skips]]
+member = "compilationHints"
+reason = "recorded deferral: block 03 section 7"
+
+[[descriptor.chains]]
+member = "code"
+target = "WGPUShaderSourceWGSL"
+field = "code"
+s_type = "WGPUSType_WGPUSType_ShaderSourceWGSL"
+reason = "B3 requires WGSL source to be represented by a typed chained struct"
+
+[[descriptor]]
+dictionary = "GPUProgrammableStage"
+
+[[descriptor.strings]]
+member = "entryPoint"
+nullable = false
+
+[[descriptor.handles]]
+member = "module"
+helper = "shader_module_handle"
+
+[[descriptor.skips]]
+member = "constants"
+reason = "recorded deferral: pipeline constants are outside the block 01-03 surface"
+
+[[descriptor]]
+dictionary = "GPUComputePipelineDescriptor"
+
+[[descriptor.strings]]
+member = "label"
+nullable = false
+
+[[descriptor.handle_or_enum_unions]]
+member = "layout"
+union_type = "(GPUPipelineLayout or GPUAutoLayoutMode)"
+handle_type = "GPUPipelineLayout"
+handle_helper = "pipeline_layout_handle"
+enum_type = "GPUAutoLayoutMode"
+enum_value = "auto"
+reason = "the C ABI represents auto layout with a null pipeline-layout handle"
+
+[descriptor.wrapper]
+target = "ConvertedComputePipelineDescriptor"
+native_field = "native"
+
+[[descriptor.wrapper.captures]]
+field = "module"
+source = "compute.module"
+
+[[descriptor.wrapper.captures]]
+field = "layout"
+source = "layout"
+
+[[descriptor]]
+dictionary = "GPUCommandEncoderDescriptor"
+
+[[descriptor.strings]]
+member = "label"
+nullable = false
+
+[[descriptor]]
+dictionary = "GPUCommandBufferDescriptor"
+
+[[descriptor.strings]]
+member = "label"
+nullable = false
+
+[[descriptor]]
+dictionary = "GPUComputePassDescriptor"
+
+[[descriptor.strings]]
+member = "label"
+nullable = false
+
+[[descriptor.skips]]
+member = "timestampWrites"
+reason = "out of scope until query sets"
+
+[[descriptor]]
 dictionary = "GPUBufferBindingLayout"
 
 [[descriptor]]
@@ -92,7 +244,6 @@ zero = ["binding_array_size"]
 
 [[descriptor]]
 dictionary = "GPUBindGroupLayoutDescriptor"
-default_empty_sequence = ["entries"]
 
 [[descriptor.strings]]
 member = "label"

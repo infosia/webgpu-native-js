@@ -20,6 +20,17 @@ fn joined_fixture(name: &str) -> JoinReport {
     join_inputs(&idl, &yaml, &policy).expect("fixture joins")
 }
 
+fn pinned_inputs() -> (String, String, String) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("repository root");
+    let idl = fs::read_to_string(root.join("third_party/gpuweb/webgpu.idl")).expect("pinned IDL");
+    let yaml = fs::read_to_string(root.join("third_party/webgpu-headers/webgpu.yml"))
+        .expect("pinned YAML");
+    let policy = fs::read_to_string(root.join("codegen/policy.toml")).expect("policy");
+    (idl, yaml, policy)
+}
+
 #[test]
 fn clean_join_fixture_has_no_mismatches() {
     let report = joined_fixture("clean");
@@ -80,13 +91,7 @@ fn nullable_and_required_dictionary_members_remain_distinct() {
 
 #[test]
 fn full_pinned_inputs_parse_and_subset_join_offline() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("repository root");
-    let idl = fs::read_to_string(root.join("third_party/gpuweb/webgpu.idl")).expect("pinned IDL");
-    let yaml = fs::read_to_string(root.join("third_party/webgpu-headers/webgpu.yml"))
-        .expect("pinned YAML");
-    let policy = fs::read_to_string(root.join("codegen/policy.toml")).expect("policy");
+    let (idl, yaml, policy) = pinned_inputs();
     let report = join_inputs(&idl, &yaml, &policy).expect("full pinned join");
     assert_eq!(report.parser.remaining_bytes, 0);
     assert_eq!(report.parser.definitions, 209);
@@ -94,6 +99,91 @@ fn full_pinned_inputs_parse_and_subset_join_offline() {
     assert!(report.parser.saw_enforce_range);
     assert!(report.parser.saw_same_object);
     assert!(report.parser.saw_exposed);
+}
+
+#[test]
+fn new_descriptor_policy_reasons_are_surfaced_in_the_report() {
+    let (idl, yaml, policy) = pinned_inputs();
+    let report = webgpu_native_js_codegen::render_report(
+        &join_inputs(&idl, &yaml, &policy).expect("full pinned join"),
+    );
+    for reason in [
+        "recorded deferral: block 03 section 7",
+        "out of scope until query sets",
+        "WebIDL names the reusable programmable stage",
+    ] {
+        assert!(report.contains(reason), "missing policy reason: {reason}");
+    }
+}
+
+#[test]
+fn new_descriptor_policy_kinds_reject_missing_and_dead_entries() {
+    let (idl, yaml, policy) = pinned_inputs();
+    let cases = [
+        (
+            policy.replace(
+                "[[descriptor.union_flatten.fields]]\nmember = \"size\"\nc_member = \"size\"\nabsent_constant = \"WGPU_WHOLE_SIZE\"\n",
+                "",
+            ),
+            "size",
+        ),
+        (
+            policy.replace(
+                "[[descriptor.chains]]\nmember = \"code\"\ntarget = \"WGPUShaderSourceWGSL\"\nfield = \"code\"\ns_type = \"WGPUSType_WGPUSType_ShaderSourceWGSL\"\nreason = \"B3 requires WGSL source to be represented by a typed chained struct\"\n",
+                "",
+            ),
+            "code",
+        ),
+        (
+            policy.replace("helper = \"bind_group_layout_handle\"", "helper = \"not a helper\""),
+            "invalid",
+        ),
+        (
+            policy.replace("enum_value = \"auto\"", "enum_value = \"missing\""),
+            "missing",
+        ),
+        (
+            policy.replace(
+                "member = \"timestampWrites\"\nreason = \"out of scope until query sets\"",
+                "member = \"timestampWrites\"\nreason = \"out of scope until query sets\"\n\n[[descriptor.skips]]\nmember = \"notTimestampWrites\"\nreason = \"dead test entry\"",
+            ),
+            "notTimestampWrites",
+        ),
+    ];
+    for (bad_policy, needle) in cases {
+        let error = generate_conversions(&idl, &yaml, &bad_policy).expect_err("policy must fail");
+        assert!(error.to_string().contains(needle), "{error}");
+    }
+}
+
+#[test]
+fn new_descriptor_emission_shapes_match_snapshot() {
+    let (idl, yaml, policy) = pinned_inputs();
+    let emitted = generate_conversions(&idl, &yaml, &policy).expect("full descriptor emission");
+    let mut selected = String::new();
+    for name in [
+        "convert_bind_group_entry",
+        "convert_pipeline_layout_descriptor",
+        "convert_shader_module_descriptor",
+        "convert_programmable_stage",
+    ] {
+        if !selected.is_empty() {
+            selected.push('\n');
+        }
+        let marker = format!("fn {name}<");
+        let function = emitted.find(&marker).expect("emitted function");
+        let start = emitted[..function]
+            .rfind("/// Converts")
+            .expect("function documentation");
+        let end = emitted[function..]
+            .find("\n/// Converts")
+            .map_or(emitted.len(), |offset| function + offset);
+        selected.push_str(emitted[start..end].trim_end());
+        selected.push('\n');
+    }
+    let expected =
+        fs::read_to_string(fixtures().join("descriptor_surface.rs")).expect("shape snapshot");
+    assert_eq!(selected, expected);
 }
 
 #[test]

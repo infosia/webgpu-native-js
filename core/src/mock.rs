@@ -1985,7 +1985,7 @@ mod tests {
     }
 
     #[test]
-    fn b4_nullable_entry_point_differs_from_non_null_label() {
+    fn b4_optional_entry_point_preserves_absence_and_stringifies_null() {
         let rt = runtime();
         let cx = rt.context();
         let module = Engine::new_instance(
@@ -2016,12 +2016,42 @@ mod tests {
             crate::wgpu_strlen()
         );
 
+        let null_compute = descriptor(&rt, &[("module", module), ("entryPoint", rt.null())]);
+        let null_desc = descriptor(&rt, &[("compute", null_compute)]);
+        let null = convert_compute_pipeline_descriptor::<Engine>(cx, null_desc, &arena)
+            .expect("pipeline descriptor");
+        assert!(!null.native.compute.entryPoint.data.is_null());
+        assert_eq!(read_view(null.native.compute.entryPoint), b"null");
+
         let empty_compute = descriptor(&rt, &[("module", module), ("entryPoint", rt.string(""))]);
         let empty_desc = descriptor(&rt, &[("compute", empty_compute)]);
         let empty = convert_compute_pipeline_descriptor::<Engine>(cx, empty_desc, &arena)
             .expect("pipeline descriptor");
         assert!(!empty.native.compute.entryPoint.data.is_null());
         assert_eq!(empty.native.compute.entryPoint.length, 0);
+    }
+
+    #[test]
+    fn compute_pipeline_auto_layout_emits_a_null_native_handle() {
+        let rt = runtime();
+        let cx = rt.context();
+        let module = Engine::new_instance(
+            cx,
+            crate::GPU_SHADER_MODULE_CLASS,
+            Box::new(ShaderModulePayload {
+                module: fake_handle(42),
+            }),
+        )
+        .expect("shader module");
+        let compute = descriptor(&rt, &[("module", module)]);
+        let desc = descriptor(&rt, &[("layout", rt.string("auto")), ("compute", compute)]);
+        let arena = Arena::new();
+
+        let converted = convert_compute_pipeline_descriptor::<Engine>(cx, desc, &arena)
+            .expect("auto layout descriptor");
+
+        assert!(converted.native.layout.is_null());
+        assert!(converted.layout.is_null());
     }
 
     #[test]
@@ -2053,6 +2083,32 @@ mod tests {
         assert_eq!(one.entryCount, 1);
         assert!(!one.entries.is_null());
         assert_eq!(unsafe { (*one.entries).binding }, 0);
+    }
+
+    #[test]
+    fn bind_group_layout_descriptor_requires_entries() {
+        let rt = runtime();
+        let cx = rt.context();
+        let arena = Arena::new();
+
+        assert_eq!(
+            convert_bind_group_layout_descriptor::<Engine>(cx, descriptor(&rt, &[]), &arena)
+                .expect_err("absent entries must be rejected"),
+            "TypeError: entries"
+        );
+    }
+
+    #[test]
+    fn pipeline_layout_descriptor_requires_bind_group_layouts() {
+        let rt = runtime();
+        let cx = rt.context();
+        let arena = Arena::new();
+
+        assert_eq!(
+            convert_pipeline_layout_descriptor::<Engine>(cx, descriptor(&rt, &[]), &arena)
+                .expect_err("absent bindGroupLayouts must be rejected"),
+            "TypeError: bindGroupLayouts"
+        );
     }
 
     #[test]
@@ -2360,6 +2416,102 @@ mod tests {
         GPU_STATE.with(|state| {
             assert_eq!(state.borrow().buffer_add_refs, 0);
         });
+    }
+
+    #[test]
+    fn bind_group_entry_requires_binding() {
+        let rt = runtime();
+        let cx = rt.context();
+        let layout = Engine::new_instance(
+            cx,
+            crate::GPU_BIND_GROUP_LAYOUT_CLASS,
+            Box::new(BindGroupLayoutPayload {
+                layout: fake_handle(77),
+            }),
+        )
+        .expect("layout");
+        let resource = descriptor(&rt, &[]);
+        let entry = descriptor(&rt, &[("resource", resource)]);
+        let desc = descriptor(
+            &rt,
+            &[("layout", layout), ("entries", rt.set_like(&[entry]))],
+        );
+        let arena = Arena::new();
+
+        assert_eq!(
+            convert_bind_group_descriptor::<Engine>(cx, desc, &arena)
+                .err()
+                .expect("absent binding must be rejected"),
+            "TypeError: binding"
+        );
+    }
+
+    #[test]
+    fn bind_group_descriptor_requires_entries() {
+        let rt = runtime();
+        let cx = rt.context();
+        let layout = Engine::new_instance(
+            cx,
+            crate::GPU_BIND_GROUP_LAYOUT_CLASS,
+            Box::new(BindGroupLayoutPayload {
+                layout: fake_handle(77),
+            }),
+        )
+        .expect("layout");
+        let desc = descriptor(&rt, &[("layout", layout)]);
+        let arena = Arena::new();
+
+        assert_eq!(
+            convert_bind_group_descriptor::<Engine>(cx, desc, &arena)
+                .err()
+                .expect("absent entries must be rejected"),
+            "TypeError: entries"
+        );
+    }
+
+    #[test]
+    fn unsupported_bind_group_resource_kind_throws_a_named_type_error() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let layout = Engine::new_instance(
+            cx,
+            crate::GPU_BIND_GROUP_LAYOUT_CLASS,
+            Box::new(BindGroupLayoutPayload {
+                layout: fake_handle(77),
+            }),
+        )
+        .expect("layout");
+        let resource = descriptor(&rt, &[("sampler", descriptor(&rt, &[]))]);
+        let entry = descriptor(&rt, &[("binding", rt.number(0.0)), ("resource", resource)]);
+        let entries = rt.set_like(&[entry]);
+        let desc = descriptor(&rt, &[("layout", layout), ("entries", entries)]);
+        let arena = Arena::new();
+
+        assert_eq!(
+            convert_bind_group_descriptor::<Engine>(cx, desc, &arena)
+                .err()
+                .expect("sampler resource must be rejected"),
+            "TypeError: resource must be a GPUBufferBinding"
+        );
+
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let buffer_desc = descriptor(&rt, &[("size", rt.number(4.0)), ("usage", rt.number(8.0))]);
+        let buffer = device_create_buffer::<Engine>(cx, device, &[buffer_desc]).expect("buffer");
+        let direct_entry = descriptor(&rt, &[("binding", rt.number(0.0)), ("resource", buffer)]);
+        let direct_desc = descriptor(
+            &rt,
+            &[
+                ("layout", layout),
+                ("entries", rt.set_like(&[direct_entry])),
+            ],
+        );
+        assert_eq!(
+            convert_bind_group_descriptor::<Engine>(cx, direct_desc, &arena)
+                .err()
+                .expect("direct buffer resource must be rejected"),
+            "TypeError: resource must be a GPUBufferBinding"
+        );
     }
 
     #[test]

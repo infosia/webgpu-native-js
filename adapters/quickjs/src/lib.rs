@@ -2477,6 +2477,13 @@ mod tests {
             r#"
                 var nullLabel = device.createBuffer({ size: 4, usage: 8, label: null });
                 if (nullLabel.label !== 'null') throw new Error('null label did not stringify');
+                let missingEntriesError;
+                try { device.createBindGroupLayout({}); }
+                catch (error) { missingEntriesError = error; }
+                if (!(missingEntriesError instanceof TypeError) ||
+                    missingEntriesError.message !== 'entries') {
+                    throw new Error('absent entries error was not named: ' + missingEntriesError);
+                }
                 for (const entry of [{ visibility: 1 }, { binding: 0 }]) {
                     var threw = false;
                     try { device.createBindGroupLayout({ entries: [entry] }); }
@@ -2522,6 +2529,69 @@ mod tests {
                 }
             "#,
             "unsupported-bind-group-layout-kinds.js",
+        );
+        runtime.clear_global("device").expect("clear device");
+        runtime.run_gc();
+        let _ = runtime.drain_releases().expect("drain");
+    }
+
+    #[test]
+    fn unsupported_bind_group_resource_kind_throws_a_named_type_error() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let wrapped = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("device", wrapped)
+            .expect("set device");
+        eval_drop(
+            &runtime,
+            r#"
+                const resourceLayout = device.createBindGroupLayout({ entries: [] });
+                const directResourceBuffer = device.createBuffer({ size: 4, usage: 8 });
+                let missingBindingError;
+                try {
+                    device.createBindGroup({
+                        layout: resourceLayout,
+                        entries: [{ resource: { buffer: directResourceBuffer } }]
+                    });
+                } catch (caught) {
+                    missingBindingError = caught;
+                }
+                if (!(missingBindingError instanceof TypeError) ||
+                    missingBindingError.message !== 'binding') {
+                    throw new Error('absent binding error was not named: ' + missingBindingError);
+                }
+                let resourceError;
+                try {
+                    device.createBindGroup({
+                        layout: resourceLayout,
+                        entries: [{ binding: 0, resource: { sampler: {} } }]
+                    });
+                } catch (caught) {
+                    resourceError = caught;
+                }
+                if (!(resourceError instanceof TypeError)) {
+                    throw new Error('unsupported resource did not throw TypeError');
+                }
+                if (resourceError.message !== 'resource must be a GPUBufferBinding') {
+                    throw new Error('unsupported resource error was not named: ' + resourceError.message);
+                }
+                let directResourceError;
+                try {
+                    device.createBindGroup({
+                        layout: resourceLayout,
+                        entries: [{ binding: 0, resource: directResourceBuffer }]
+                    });
+                } catch (caught) {
+                    directResourceError = caught;
+                }
+                if (!(directResourceError instanceof TypeError) ||
+                    directResourceError.message !== 'resource must be a GPUBufferBinding') {
+                    throw new Error('direct buffer resource did not require GPUBufferBinding');
+                }
+                directResourceBuffer.destroy();
+            "#,
+            "unsupported-bind-group-resource.js",
         );
         runtime.clear_global("device").expect("clear device");
         runtime.run_gc();

@@ -247,7 +247,7 @@ pub fn join_inputs(idl: &str, yaml: &str, policy: &str) -> Result<JoinReport, Co
     }
 
     let index = IdlIndex::new(&definitions);
-    validate_policy(&policy, &index)?;
+    validate_policy(&policy, &index, &yaml)?;
     let report = build_report(idl, definitions.len(), rewrites, &index, &yaml, &policy);
     emission::validate_policy(&report, &policy)?;
     Ok(report)
@@ -328,7 +328,17 @@ pub(crate) struct Policy {
     pub(crate) schema_version: u32,
     pub(crate) subset: Vec<SubsetEntry>,
     #[serde(default)]
+    pub(crate) name_map: Vec<NameMapEntry>,
+    #[serde(default)]
     pub(crate) descriptor: Vec<DescriptorEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct NameMapEntry {
+    pub(crate) idl: String,
+    pub(crate) c: String,
+    pub(crate) reason: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -352,6 +362,21 @@ pub(crate) struct DescriptorEntry {
     pub(crate) zero: Vec<String>,
     #[serde(default)]
     pub(crate) default_empty_sequence: Vec<String>,
+    #[serde(default)]
+    pub(crate) skips: Vec<SkipPolicy>,
+    #[serde(default)]
+    pub(crate) handles: Vec<HandlePolicy>,
+    #[serde(default)]
+    pub(crate) handle_sequences: Vec<HandlePolicy>,
+    #[serde(default)]
+    pub(crate) union_flatten: Vec<UnionFlattenPolicy>,
+    #[serde(default)]
+    pub(crate) chains: Vec<ChainPolicy>,
+    #[serde(default)]
+    pub(crate) handle_or_enum_unions: Vec<HandleOrEnumUnionPolicy>,
+    #[serde(default)]
+    pub(crate) required_defaults: Vec<RequiredDefaultPolicy>,
+    pub(crate) wrapper: Option<WrapperPolicy>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -359,6 +384,98 @@ pub(crate) struct DescriptorEntry {
 pub(crate) struct StringPolicy {
     pub(crate) member: String,
     pub(crate) nullable: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SkipPolicy {
+    pub(crate) member: String,
+    pub(crate) reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct HandlePolicy {
+    pub(crate) member: String,
+    pub(crate) helper: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct UnionFlattenPolicy {
+    pub(crate) member: String,
+    pub(crate) union_type: String,
+    pub(crate) arm: String,
+    pub(crate) unsupported_error: String,
+    #[serde(default)]
+    pub(crate) fields: Vec<UnionFlattenField>,
+    #[serde(default)]
+    pub(crate) zero_c_members: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct UnionFlattenField {
+    pub(crate) member: String,
+    pub(crate) c_member: String,
+    pub(crate) handle_helper: Option<String>,
+    pub(crate) absent_constant: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ChainPolicy {
+    pub(crate) member: String,
+    pub(crate) target: String,
+    pub(crate) field: String,
+    pub(crate) s_type: String,
+    pub(crate) reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct HandleOrEnumUnionPolicy {
+    pub(crate) member: String,
+    pub(crate) union_type: String,
+    pub(crate) handle_type: String,
+    pub(crate) handle_helper: String,
+    pub(crate) enum_type: String,
+    pub(crate) enum_value: String,
+    pub(crate) reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RequiredDefaultPolicy {
+    pub(crate) member: String,
+    pub(crate) value: u64,
+    pub(crate) reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WrapperPolicy {
+    pub(crate) target: String,
+    pub(crate) native_field: String,
+    #[serde(default)]
+    pub(crate) captures: Vec<WrapperCapturePolicy>,
+    #[serde(default)]
+    pub(crate) sequence_captures: Vec<WrapperSequenceCapturePolicy>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WrapperCapturePolicy {
+    pub(crate) field: String,
+    pub(crate) source: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WrapperSequenceCapturePolicy {
+    pub(crate) field: String,
+    pub(crate) source: String,
+    pub(crate) element_field: String,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -659,7 +776,11 @@ fn preprocess_namespace_consts(idl: &str) -> Result<(String, Vec<String>), Codeg
     Ok((cooked, rewrites))
 }
 
-fn validate_policy(policy: &Policy, index: &IdlIndex<'_>) -> Result<(), CodegenError> {
+fn validate_policy(
+    policy: &Policy,
+    index: &IdlIndex<'_>,
+    yaml: &YamlRoot,
+) -> Result<(), CodegenError> {
     let mut seen = BTreeSet::new();
     for entry in &policy.subset {
         if !seen.insert(entry.interface.as_str()) {
@@ -707,6 +828,49 @@ fn validate_policy(policy: &Policy, index: &IdlIndex<'_>) -> Result<(), CodegenE
             return Err(CodegenError::Policy(format!(
                 "unknown descriptor {}",
                 entry.dictionary
+            )));
+        }
+    }
+    let selected_descriptors: BTreeSet<&str> = policy
+        .descriptor
+        .iter()
+        .map(|entry| entry.dictionary.as_str())
+        .collect();
+    let mut seen_idl_maps = BTreeSet::new();
+    let mut seen_c_maps = BTreeSet::new();
+    for entry in &policy.name_map {
+        if entry.reason.trim().is_empty() {
+            return Err(CodegenError::Policy(format!(
+                "name-map {} -> {} has an empty reason",
+                entry.idl, entry.c
+            )));
+        }
+        if !seen_idl_maps.insert(entry.idl.as_str()) || !seen_c_maps.insert(entry.c.as_str()) {
+            return Err(CodegenError::Policy(format!(
+                "duplicate name-map {} -> {}",
+                entry.idl, entry.c
+            )));
+        }
+        if !index.dictionaries.contains_key(&entry.idl) {
+            return Err(CodegenError::Policy(format!(
+                "dead name-map {}: IDL dictionary does not exist",
+                entry.idl
+            )));
+        }
+        if !yaml
+            .structs
+            .iter()
+            .any(|value| c_type_name(&value.name) == entry.c)
+        {
+            return Err(CodegenError::Policy(format!(
+                "dead name-map {}: C struct {} does not exist",
+                entry.idl, entry.c
+            )));
+        }
+        if !selected_descriptors.contains(entry.idl.as_str()) {
+            return Err(CodegenError::Policy(format!(
+                "dead name-map {}: dictionary is not selected for emission",
+                entry.idl
             )));
         }
     }
@@ -836,7 +1000,46 @@ fn build_report(
         report.interfaces.push(pair);
     }
 
-    build_transitive_types(index, yaml, idl_type_roots, c_type_roots, &mut report);
+    build_transitive_types(
+        index,
+        yaml,
+        policy,
+        idl_type_roots,
+        c_type_roots,
+        &mut report,
+    );
+    for descriptor in &policy.descriptor {
+        for skip in &descriptor.skips {
+            report.skips.push(format!(
+                "member {}.{} ({})",
+                descriptor.dictionary, skip.member, skip.reason
+            ));
+        }
+        for default in &descriptor.required_defaults {
+            report.skips.push(format!(
+                "required-default {}.{} = {} ({})",
+                descriptor.dictionary, default.member, default.value, default.reason
+            ));
+        }
+        for chain in &descriptor.chains {
+            report.skips.push(format!(
+                "chain {}.{} -> {} ({})",
+                descriptor.dictionary, chain.member, chain.target, chain.reason
+            ));
+        }
+        for union in &descriptor.handle_or_enum_unions {
+            report.skips.push(format!(
+                "handle-or-enum union {}.{} ({})",
+                descriptor.dictionary, union.member, union.reason
+            ));
+        }
+    }
+    for name_map in &policy.name_map {
+        report.skips.push(format!(
+            "name-map {} <-> {} ({})",
+            name_map.idl, name_map.c, name_map.reason
+        ));
+    }
     report.mismatches.sort();
     report.mismatches.dedup();
     report.skips.sort();
@@ -847,6 +1050,7 @@ fn build_report(
 fn build_transitive_types(
     index: &IdlIndex<'_>,
     yaml: &YamlRoot,
+    policy: &Policy,
     idl_roots: BTreeSet<String>,
     c_roots: BTreeSet<String>,
     report: &mut JoinReport,
@@ -873,8 +1077,19 @@ fn build_transitive_types(
 
     for name in &idl_types {
         if index.dictionaries.contains_key(name) {
+            let mapped = policy
+                .name_map
+                .iter()
+                .find(|entry| entry.idl == *name)
+                .map(|entry| entry.c.as_str());
             let candidate = canonical(idl_base_name(name));
-            let c_struct = struct_map.get(&candidate).copied();
+            let c_struct = mapped
+                .and_then(|target| {
+                    yaml.structs
+                        .iter()
+                        .find(|value| c_type_name(&value.name) == target)
+                })
+                .or_else(|| struct_map.get(&candidate).copied());
             let mut pair = TypePair {
                 idl_name: Some(name.clone()),
                 c_name: c_struct.map(|value| c_type_name(&value.name)),
@@ -888,6 +1103,7 @@ fn build_transitive_types(
                 matched_c_structs.insert(c_struct.name.clone());
                 join_dictionary_fields(index, name, c_struct, yaml, &mut pair, report);
             } else {
+                pair.idl_only_members = index.dictionary_members(name);
                 report
                     .mismatches
                     .push(mismatch(format!("dictionary {name}: IDL-only type")));
@@ -944,6 +1160,11 @@ fn build_transitive_types(
                     }
                 }
             } else {
+                pair.enum_values
+                    .extend(values.iter().map(|value| EnumValuePair {
+                        idl_value: Some(value.clone()),
+                        c_value: None,
+                    }));
                 report
                     .mismatches
                     .push(mismatch(format!("enum {name}: IDL-only type")));
@@ -983,7 +1204,15 @@ fn build_transitive_types(
                         c_chained: is_chained_struct(value),
                         members: Vec::new(),
                         idl_only_members: Vec::new(),
-                        c_only_members: Vec::new(),
+                        c_only_members: value
+                            .members
+                            .iter()
+                            .map(|member| CMemberModel {
+                                name: member.name.clone(),
+                                values: vec![c_value(member, yaml)],
+                                callback: None,
+                            })
+                            .collect(),
                         enum_values: Vec::new(),
                     });
                 }
@@ -1252,7 +1481,9 @@ fn c_value(value: &YamlValue, yaml: &YamlRoot) -> ValueModel {
         required: !value.optional,
         pointer: value.pointer.clone(),
         count_and_pointer: source_type.starts_with("array<"),
-        string_view: source_type.starts_with("string") || source_type == "out_string",
+        string_view: source_type.starts_with("string")
+            || source_type == "nullable_string"
+            || source_type == "out_string",
         chained: struct_name.is_some_and(|name| {
             yaml.structs
                 .iter()

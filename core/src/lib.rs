@@ -24,7 +24,12 @@ mod generated {
 
 #[cfg(test)]
 use generated::convert_buffer_binding_layout;
-use generated::{convert_bind_group_layout_descriptor, convert_buffer_descriptor};
+use generated::{
+    convert_bind_group_descriptor, convert_bind_group_layout_descriptor, convert_buffer_descriptor,
+    convert_command_buffer_descriptor, convert_command_encoder_descriptor,
+    convert_compute_pass_descriptor, convert_compute_pipeline_descriptor,
+    convert_pipeline_layout_descriptor, convert_shader_module_descriptor,
+};
 
 /// Result type used by the core crate.
 pub type Result<T, E> = std::result::Result<T, E>;
@@ -2974,190 +2979,6 @@ struct ConvertedComputePipelineDescriptor {
     layout: WGPUPipelineLayout,
 }
 
-fn convert_shader_module_descriptor<E: JsEngine>(
-    cx: E::Context<'_>,
-    value: E::Value,
-    arena: &Arena,
-) -> Result<WGPUShaderModuleDescriptor, E::Error> {
-    let code_value = required_member::<E>(cx, value, "code")?;
-    let code = E::to_str(cx, code_value, arena)?;
-    let label = optional_non_null_string::<E>(cx, value, "label", arena)?;
-    let source = arena
-        .alloc_slice(vec![WGPUShaderSourceWGSL {
-            chain: WGPUChainedStruct {
-                next: ptr::null_mut(),
-                sType: WGPUSType_WGPUSType_ShaderSourceWGSL,
-            },
-            code: WGPUStringView::from_bytes(code.as_bytes()),
-        }])
-        .as_ptr();
-    // SAFETY: the vector literal above contains exactly one initialized source,
-    // and `Arena::alloc_slice` keeps its allocation address-stable for `arena`.
-    let chain = unsafe { ptr::addr_of!((*source).chain) }.cast_mut();
-    Ok(WGPUShaderModuleDescriptor {
-        nextInChain: chain,
-        label: WGPUStringView::from_bytes(label.as_bytes()),
-    })
-}
-
-fn convert_pipeline_layout_descriptor<E: JsEngine + 'static>(
-    cx: E::Context<'_>,
-    value: E::Value,
-    arena: &Arena,
-) -> Result<WGPUPipelineLayoutDescriptor, E::Error> {
-    let label = optional_non_null_string::<E>(cx, value, "label", arena)?;
-    let layouts_value = E::get_property(cx, value, "bindGroupLayouts")?;
-    let layouts = if E::is_undefined(cx, layouts_value) {
-        &[][..]
-    } else {
-        convert_bind_group_layout_sequence::<E>(cx, layouts_value, arena)?
-    };
-    Ok(WGPUPipelineLayoutDescriptor {
-        nextInChain: ptr::null_mut(),
-        label: WGPUStringView::from_bytes(label.as_bytes()),
-        bindGroupLayoutCount: layouts.len(),
-        bindGroupLayouts: if layouts.is_empty() {
-            ptr::null()
-        } else {
-            layouts.as_ptr()
-        },
-        immediateSize: 0,
-    })
-}
-
-fn convert_bind_group_descriptor<E: JsEngine + 'static>(
-    cx: E::Context<'_>,
-    value: E::Value,
-    arena: &Arena,
-) -> Result<ConvertedBindGroupDescriptor, E::Error> {
-    let label = optional_non_null_string::<E>(cx, value, "label", arena)?;
-    let layout = bind_group_layout_handle::<E>(cx, required_member::<E>(cx, value, "layout")?)?;
-    let entries_value = E::get_property(cx, value, "entries")?;
-    let (entries, buffers) = if E::is_undefined(cx, entries_value) {
-        (&[][..], Vec::new())
-    } else {
-        convert_bind_group_entries::<E>(cx, entries_value, arena)?
-    };
-    Ok(ConvertedBindGroupDescriptor {
-        native: WGPUBindGroupDescriptor {
-            nextInChain: ptr::null_mut(),
-            label: WGPUStringView::from_bytes(label.as_bytes()),
-            layout,
-            entryCount: entries.len(),
-            entries: if entries.is_empty() {
-                ptr::null()
-            } else {
-                entries.as_ptr()
-            },
-        },
-        layout,
-        buffers,
-    })
-}
-
-fn convert_compute_pipeline_descriptor<E: JsEngine + 'static>(
-    cx: E::Context<'_>,
-    value: E::Value,
-    arena: &Arena,
-) -> Result<ConvertedComputePipelineDescriptor, E::Error> {
-    let label = optional_non_null_string::<E>(cx, value, "label", arena)?;
-    let layout_value = E::get_property(cx, value, "layout")?;
-    let layout = if E::is_undefined(cx, layout_value) || E::is_null(cx, layout_value) {
-        ptr::null_mut()
-    } else {
-        pipeline_layout_handle::<E>(cx, layout_value)?
-    };
-    let compute_value = required_member::<E>(cx, value, "compute")?;
-    let module = shader_module_handle::<E>(cx, required_member::<E>(cx, compute_value, "module")?)?;
-    let entry_point = optional_nullable_string::<E>(cx, compute_value, "entryPoint", arena)?;
-    Ok(ConvertedComputePipelineDescriptor {
-        native: WGPUComputePipelineDescriptor {
-            nextInChain: ptr::null_mut(),
-            label: WGPUStringView::from_bytes(label.as_bytes()),
-            layout,
-            compute: WGPUComputeState {
-                nextInChain: ptr::null_mut(),
-                module,
-                entryPoint: entry_point,
-                constantCount: 0,
-                constants: ptr::null(),
-            },
-        },
-        module,
-        layout,
-    })
-}
-
-fn convert_command_encoder_descriptor<E: JsEngine>(
-    cx: E::Context<'_>,
-    value: E::Value,
-    arena: &Arena,
-) -> Result<WGPUCommandEncoderDescriptor, E::Error> {
-    let label = optional_non_null_string::<E>(cx, value, "label", arena)?;
-    Ok(WGPUCommandEncoderDescriptor {
-        nextInChain: ptr::null_mut(),
-        label: WGPUStringView::from_bytes(label.as_bytes()),
-    })
-}
-
-fn convert_command_buffer_descriptor<E: JsEngine>(
-    cx: E::Context<'_>,
-    value: E::Value,
-    arena: &Arena,
-) -> Result<WGPUCommandBufferDescriptor, E::Error> {
-    let label = optional_non_null_string::<E>(cx, value, "label", arena)?;
-    Ok(WGPUCommandBufferDescriptor {
-        nextInChain: ptr::null_mut(),
-        label: WGPUStringView::from_bytes(label.as_bytes()),
-    })
-}
-
-fn convert_compute_pass_descriptor<E: JsEngine>(
-    cx: E::Context<'_>,
-    value: E::Value,
-    arena: &Arena,
-) -> Result<WGPUComputePassDescriptor, E::Error> {
-    let label = optional_non_null_string::<E>(cx, value, "label", arena)?;
-    Ok(WGPUComputePassDescriptor {
-        nextInChain: ptr::null_mut(),
-        label: WGPUStringView::from_bytes(label.as_bytes()),
-        timestampWrites: ptr::null(),
-    })
-}
-
-fn optional_non_null_string<'a, E: JsEngine>(
-    cx: E::Context<'_>,
-    obj: E::Value,
-    name: &'static str,
-    arena: &'a Arena,
-) -> Result<&'a str, E::Error> {
-    let value = E::get_property(cx, obj, name)?;
-    if E::is_undefined(cx, value) {
-        Ok("")
-    } else {
-        E::to_str(cx, value, arena)
-    }
-}
-
-fn optional_nullable_string<E: JsEngine>(
-    cx: E::Context<'_>,
-    obj: E::Value,
-    name: &'static str,
-    arena: &Arena,
-) -> Result<WGPUStringView, E::Error> {
-    let value = E::get_property(cx, obj, name)?;
-    if E::is_undefined(cx, value) || E::is_null(cx, value) {
-        Ok(WGPUStringView {
-            data: ptr::null(),
-            length: wgpu_strlen(),
-        })
-    } else {
-        Ok(WGPUStringView::from_bytes(
-            E::to_str(cx, value, arena)?.as_bytes(),
-        ))
-    }
-}
-
 fn convert_sequence<E: JsEngine, T>(
     cx: E::Context<'_>,
     value: E::Value,
@@ -3184,68 +3005,6 @@ fn convert_sequence<E: JsEngine, T>(
         let item = E::get_property(cx, result, "value")?;
         converted.push(convert(item)?);
     }
-}
-
-fn convert_bind_group_entries<'a, E: JsEngine + 'static>(
-    cx: E::Context<'_>,
-    value: E::Value,
-    arena: &'a Arena,
-) -> Result<(&'a [WGPUBindGroupEntry], Vec<WGPUBuffer>), E::Error> {
-    let mut buffers = Vec::new();
-    let entries = convert_sequence::<E, _>(cx, value, "entries", |item| {
-        let entry = convert_bind_group_entry::<E>(cx, item)?;
-        if !entry.buffer.is_null() {
-            buffers.push(entry.buffer);
-        }
-        Ok(entry)
-    })?;
-    Ok((arena.alloc_slice(entries), buffers))
-}
-
-fn convert_bind_group_entry<E: JsEngine + 'static>(
-    cx: E::Context<'_>,
-    value: E::Value,
-) -> Result<WGPUBindGroupEntry, E::Error> {
-    let binding = optional_u32::<E>(
-        cx,
-        Some(E::get_property(cx, value, "binding")?),
-        "binding",
-        0,
-    )?;
-    let resource = required_member::<E>(cx, value, "resource")?;
-    let buffer_value = E::get_property(cx, resource, "buffer")?;
-    let buffer = if E::is_undefined(cx, buffer_value) {
-        buffer_handle::<E>(cx, resource)?
-    } else {
-        buffer_handle::<E>(cx, buffer_value)?
-    };
-    let offset = optional_member_u64::<E>(cx, resource, "offset", 0)?;
-    let size_value = E::get_property(cx, resource, "size")?;
-    let size = if E::is_undefined(cx, size_value) {
-        WGPU_WHOLE_SIZE as u64
-    } else {
-        enforce_u64::<E>(cx, size_value, "size")?
-    };
-    Ok(WGPUBindGroupEntry {
-        nextInChain: ptr::null_mut(),
-        binding,
-        buffer,
-        offset,
-        size,
-        sampler: ptr::null_mut(),
-        textureView: ptr::null_mut(),
-    })
-}
-
-fn convert_bind_group_layout_sequence<'a, E: JsEngine + 'static>(
-    cx: E::Context<'_>,
-    value: E::Value,
-    arena: &'a Arena,
-) -> Result<&'a [WGPUBindGroupLayout], E::Error> {
-    let layouts = convert_sequence::<E, _>(cx, value, "bindGroupLayouts", |item| {
-        bind_group_layout_handle::<E>(cx, item)
-    })?;
-    Ok(arena.alloc_slice(layouts))
 }
 
 fn convert_command_buffer_sequence<E: JsEngine + 'static>(
@@ -3302,20 +3061,6 @@ fn optional_u32<E: JsEngine>(
         Ok(default)
     } else {
         enforce_u32::<E>(cx, value, name)
-    }
-}
-
-fn optional_member_u64<E: JsEngine>(
-    cx: E::Context<'_>,
-    obj: E::Value,
-    name: &'static str,
-    default: u64,
-) -> Result<u64, E::Error> {
-    let value = E::get_property(cx, obj, name)?;
-    if E::is_undefined(cx, value) {
-        Ok(default)
-    } else {
-        enforce_u64::<E>(cx, value, name)
     }
 }
 

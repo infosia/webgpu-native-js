@@ -96,16 +96,15 @@ pub(super) fn convert_bind_group_layout_descriptor<E: JsEngine>(
     arena: &Arena,
 ) -> Result<WGPUBindGroupLayoutDescriptor, E::Error> {
     let label_value = E::get_property(cx, value, "label")?;
-    let entries_value = E::get_property(cx, value, "entries")?;
+    // DR-M3: required dictionary members reject undefined.
+    let entries_value = required_member::<E>(cx, value, "entries")?;
     // B4: non-nullable strings default only for undefined; null is stringified.
     let label = if E::is_undefined(cx, label_value) {
         ""
     } else {
         E::to_str(cx, label_value, arena)?
     };
-    let entries = if E::is_undefined(cx, entries_value) {
-        &[][..]
-    } else {
+    let entries = {
         let converted = convert_sequence::<E, _>(cx, entries_value, "entries", |item| {
             convert_bind_group_layout_entry::<E>(cx, item)
         })?;

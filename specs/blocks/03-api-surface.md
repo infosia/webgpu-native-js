@@ -121,11 +121,20 @@ On the JS side, WebIDL decides: `label` is a **non-nullable** `USVString`
 defaulting to `""`, so an **absent/undefined** member takes the default and a JS
 `null` converts by `ToString` to the four-character string `"null"`. A helper
 that maps JS `null` to `""` is applying B4 one layer up, where it does not hold.
-`entryPoint` is genuinely **nullable** in the IDL, so there JS `null` means
-absent — that is the one place JS `null` and the C null encoding coincide. The
-review found `createBuffer` converting labels WebIDL-correctly and every other
-descriptor routing through the null-swallowing helper; one behaviour must win,
-and it is WebIDL's.
+The review found `createBuffer` converting labels WebIDL-correctly and every
+other descriptor routing through the null-swallowing helper; one behaviour must
+win, and it is WebIDL's.
+
+*(Second correction, 2026-07-10, Phase 4: the paragraph above originally
+continued "`entryPoint` is genuinely nullable in the IDL, so there JS `null`
+means absent." **That claim was written from memory and the pinned IDL refutes
+it**: `webgpu.idl:685` reads `USVString entryPoint;` — optional, NOT nullable.
+So JS `null` converts by `ToString` to the string `"null"` (a real, almost
+certainly nonexistent entry-point name), and only an ABSENT member maps to the
+C nullable sentinel `{NULL, WGPU_STRLEN}`. The codegen join surfaced the
+discrepancy as a policy entry that needed a deviation reason, which is exactly
+the loud-mismatch mechanism working. B4's C-side table stands; the JS-side rule
+is: absence is the only thing that means absence.)*
 
 **B5 — `count + pointer` arrays.** `entryCount`/`entries`,
 `bindGroupLayoutCount`/`bindGroupLayouts`, `commandCount`/`commands`. All counts
