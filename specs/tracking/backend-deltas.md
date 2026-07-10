@@ -372,3 +372,12 @@ these runs execute unsandboxed by design.
   diagnostic) — never a contract; the one parity line that had pinned backend
   prose now pins the binding-owned prefix and asserts the backend detail's
   presence without pinning its text.
+
+**Owner decision (2026-07-11): no upstream reports will be filed — for any
+external project.** The deltas above (D7–D9, D11) and any future ones are
+catalogued for this project's own reference: they explain skipped tests,
+bound what a Tier 2 backend can be expected to do, and record which side
+diverges from the pinned spec/header. Nothing here implies an intent to file
+issues against wgpu-native, quickjs-ng, or anything else. (This also closes
+the standing "report quickjs-ng maxByteLength upstream" item as
+won't-do.)
