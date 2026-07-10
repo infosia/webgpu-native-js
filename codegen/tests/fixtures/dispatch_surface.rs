@@ -20,6 +20,8 @@ macro_rules! for_each_gpu_dispatch_entry {
             (device_create_compute_pipeline, wgpuDeviceCreateComputePipeline, unsafe fn(device: $crate::WGPUDevice, descriptor: *const $crate::WGPUComputePipelineDescriptor) -> $crate::WGPUComputePipeline),
             (device_create_command_encoder, wgpuDeviceCreateCommandEncoder, unsafe fn(device: $crate::WGPUDevice, descriptor: *const $crate::WGPUCommandEncoderDescriptor) -> $crate::WGPUCommandEncoder),
             (device_get_queue, wgpuDeviceGetQueue, unsafe fn(device: $crate::WGPUDevice) -> $crate::WGPUQueue),
+            (device_push_error_scope, wgpuDevicePushErrorScope, unsafe fn(device: $crate::WGPUDevice, filter: $crate::WGPUErrorFilter)),
+            (device_pop_error_scope, wgpuDevicePopErrorScope, unsafe fn(device: $crate::WGPUDevice, callback_info: $crate::WGPUPopErrorScopeCallbackInfo) -> $crate::WGPUFuture),
             (buffer_add_ref, wgpuBufferAddRef, unsafe fn(buffer: $crate::WGPUBuffer)),
             (buffer_release, wgpuBufferRelease, unsafe fn(buffer: $crate::WGPUBuffer)),
             (buffer_map_async, wgpuBufferMapAsync, unsafe fn(buffer: $crate::WGPUBuffer, mode: $crate::WGPUMapMode, offset: usize, size: usize, callback_info: $crate::WGPUBufferMapCallbackInfo) -> $crate::WGPUFuture),

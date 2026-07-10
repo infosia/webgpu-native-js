@@ -30,6 +30,59 @@ pub fn emit_conversions(report: &JoinReport, policy: &str) -> Result<String, Cod
         let pair = descriptor_pair(report, &descriptor.dictionary)?;
         output.push_str(&emit_descriptor(report, pair, descriptor, &descriptors)?);
     }
+    let enum_conversions = emit_operation_enum_conversions(report)?;
+    if !enum_conversions.is_empty() {
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        output.push_str(&enum_conversions);
+    }
+    Ok(output)
+}
+
+fn emit_operation_enum_conversions(report: &JoinReport) -> Result<String, CodegenError> {
+    let mut selected = BTreeMap::new();
+    for argument in report
+        .interfaces
+        .iter()
+        .flat_map(|interface| interface.members.iter())
+        .flat_map(|member| member.idl.iter())
+        .flat_map(|overload| overload.values.iter().skip(1))
+    {
+        let name = argument.type_name.trim_end_matches('?');
+        if let Some(pair) = enum_pair(report, name) {
+            selected.insert(name, pair);
+        }
+    }
+
+    let mut output = String::new();
+    for (index, (name, pair)) in selected.into_iter().enumerate() {
+        let c_type = pair
+            .c_name
+            .as_deref()
+            .ok_or_else(|| unsupported_shape("operation argument", name, "enum has no C type"))?;
+        if index != 0 {
+            output.push('\n');
+        }
+        let function = format!("convert_{}", snake_case(name));
+        let _ = writeln!(
+            output,
+            "pub(super) fn {function}<E: JsEngine>(cx: E::Context<'_>, value: E::Value) -> Result<{c_type}, E::Error> {{"
+        );
+        output.push_str(
+            "    // B6: generated WebIDL string-enum conversion rejects unknown values.\n",
+        );
+        output.push_str("    let arena = Arena::new();\n");
+        output.push_str("    match E::to_str(cx, value, &arena)? {\n");
+        for enum_value in &pair.enum_values {
+            if let (Some(idl_value), Some(c_value)) = (&enum_value.idl_value, &enum_value.c_value) {
+                let constant = enum_constant(c_type, c_value);
+                let _ = writeln!(output, "        \"{idl_value}\" => Ok({constant}),");
+            }
+        }
+        let _ = writeln!(output, "        _ => Err(E::type_error(cx, \"{name}\")),");
+        output.push_str("    }\n}\n");
+    }
     Ok(output)
 }
 
@@ -70,6 +123,18 @@ pub(crate) fn validate_policy(report: &JoinReport, policy: &Policy) -> Result<()
 
 fn validate_enum_value_skips(report: &JoinReport, policy: &Policy) -> Result<(), CodegenError> {
     let mut generated_enums = BTreeSet::new();
+    for argument in report
+        .interfaces
+        .iter()
+        .flat_map(|interface| interface.members.iter())
+        .flat_map(|member| member.idl.iter())
+        .flat_map(|overload| overload.values.iter().skip(1))
+    {
+        let name = argument.type_name.trim_end_matches('?');
+        if enum_pair(report, name).is_some() {
+            generated_enums.insert(name);
+        }
+    }
     for descriptor in &policy.descriptor {
         let pair = descriptor_pair(report, &descriptor.dictionary)?;
         for value in pair

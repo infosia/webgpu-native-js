@@ -188,6 +188,8 @@ unsafe extern "C" {
     fn JSValueUnprotect(ctx: JSContextRef, value: JSValueRef);
     /// Creates JavaScript `undefined`.
     fn JSValueMakeUndefined(ctx: JSContextRef) -> JSValueRef;
+    /// Creates JavaScript `null`.
+    fn JSValueMakeNull(ctx: JSContextRef) -> JSValueRef;
     /// Creates a JavaScript number.
     fn JSValueMakeNumber(ctx: JSContextRef, number: f64) -> JSValueRef;
     /// Creates a JavaScript string value.
@@ -198,6 +200,12 @@ unsafe extern "C" {
     fn JSClassRelease(class: JSClassRef);
     /// Creates an object with a class and private data.
     fn JSObjectMake(ctx: JSContextRef, class: JSClassRef, data: *mut c_void) -> JSObjectRef;
+    /// Creates a constructor function associated with a class prototype.
+    fn JSObjectMakeConstructor(
+        ctx: JSContextRef,
+        class: JSClassRef,
+        call_as_constructor: Option<CallAsConstructorCallback>,
+    ) -> JSObjectRef;
     /// Creates a JavaScript array from argument values.
     fn JSObjectMakeArray(
         ctx: JSContextRef,
@@ -250,6 +258,8 @@ unsafe extern "C" {
         attributes: JSPropertyAttributes,
         exception: *mut JSValueRef,
     );
+    /// Sets an object's JavaScript prototype.
+    fn JSObjectSetPrototype(ctx: JSContextRef, object: JSObjectRef, value: JSValueRef);
     /// Calls a JavaScript object as a function.
     fn JSObjectCallAsFunction(
         ctx: JSContextRef,
@@ -471,6 +481,7 @@ struct CachedMethod {
 pub struct State {
     finalizer: Arc<FinalizerState>,
     classes: Mutex<BTreeMap<core::ClassId, ClassEntry>>,
+    constructors: Mutex<BTreeMap<usize, core::ClassId>>,
     method_class: JSClassRef,
     outstanding_deferreds: Arc<Mutex<Vec<DeferredSlot>>>,
     settle_trampoline: Mutex<Option<JSValueRef>>,
@@ -491,6 +502,7 @@ impl State {
         Ok(Self {
             finalizer: Arc::new(FinalizerState::new(gpu)),
             classes: Mutex::new(BTreeMap::new()),
+            constructors: Mutex::new(BTreeMap::new()),
             method_class,
             outstanding_deferreds: Arc::new(Mutex::new(Vec::new())),
             settle_trampoline: Mutex::new(None),
@@ -1079,6 +1091,140 @@ impl core::JsEngine for Engine {
                     _name: name,
                 },
             );
+        if let Some(constructor_spec) = &spec.constructor {
+            // SAFETY: class is live and wrapper_construct has the verified
+            // JSObjectCallAsConstructorCallback ABI from the pinned SDK.
+            let constructor =
+                unsafe { JSObjectMakeConstructor(cx.ctx, class, Some(wrapper_construct)) };
+            if constructor.is_null() {
+                return Err(Self::operation_error(cx, "JSObjectMakeConstructor failed"));
+            }
+            state
+                .constructors
+                .lock()
+                .map_err(|_| Self::operation_error(cx, "constructor registry is poisoned"))?
+                .insert(constructor as usize, spec.id);
+            let prototype = JsString::new("prototype")
+                .map_err(|_| Self::operation_error(cx, "prototype string failed"))?;
+            let mut exception = ptr::null();
+            // SAFETY: constructor belongs to cx and exposes the prototype
+            // created by JSObjectMakeConstructor.
+            let child_prototype = unsafe {
+                JSObjectGetProperty(cx.ctx, constructor, prototype.as_raw(), &mut exception)
+            };
+            if !exception.is_null() {
+                return Err(exception);
+            }
+            let child_prototype =
+                unsafe { JSValueToObject(cx.ctx, child_prototype, &mut exception) };
+            if !exception.is_null() || child_prototype.is_null() {
+                return Err(if exception.is_null() {
+                    Self::operation_error(cx, "constructor prototype is not an object")
+                } else {
+                    exception
+                });
+            }
+            let constructor_name = JsString::new("constructor")
+                .map_err(|_| Self::operation_error(cx, "constructor string failed"))?;
+            // SAFETY: prototype and constructor belong to the live cx.
+            unsafe {
+                JSObjectSetProperty(
+                    cx.ctx,
+                    child_prototype,
+                    constructor_name.as_raw(),
+                    constructor.cast_const(),
+                    PROPERTY_NONE,
+                    &mut exception,
+                )
+            };
+            if !exception.is_null() {
+                return Err(exception);
+            }
+            if let Some(parent) = spec
+                .constructor
+                .as_ref()
+                .and_then(|constructor| constructor.parent)
+            {
+                let parent_constructor = state
+                    .constructors
+                    .lock()
+                    .map_err(|_| Self::operation_error(cx, "constructor registry is poisoned"))?
+                    .iter()
+                    .find_map(|(constructor, class)| {
+                        (*class == parent).then_some(*constructor as JSObjectRef)
+                    })
+                    .ok_or_else(|| Self::operation_error(cx, "parent class is not registered"))?;
+                // SAFETY: the parent constructor belongs to cx.
+                let parent_prototype = unsafe {
+                    JSObjectGetProperty(
+                        cx.ctx,
+                        parent_constructor,
+                        prototype.as_raw(),
+                        &mut exception,
+                    )
+                };
+                if !exception.is_null() {
+                    return Err(exception);
+                }
+                // SAFETY: prototype values belong to the live cx. This creates
+                // JS inheritance without a native JSClass finalizer chain.
+                unsafe { JSObjectSetPrototype(cx.ctx, child_prototype, parent_prototype) };
+            }
+            let name_property = JsString::new("name")
+                .map_err(|_| Self::operation_error(cx, "name string failed"))?;
+            let function_name = JsString::new(spec.name)
+                .map_err(|_| Self::type_error(cx, "class name contains a nul byte"))?;
+            // SAFETY: constructor and strings belong to the live cx.
+            let function_name = unsafe { JSValueMakeString(cx.ctx, function_name.as_raw()) };
+            unsafe {
+                JSObjectSetProperty(
+                    cx.ctx,
+                    constructor,
+                    name_property.as_raw(),
+                    function_name,
+                    PROPERTY_NONE,
+                    &mut exception,
+                )
+            };
+            if !exception.is_null() {
+                return Err(exception);
+            }
+            let length_property = JsString::new("length")
+                .map_err(|_| Self::operation_error(cx, "length string failed"))?;
+            // SAFETY: constructor and property belong to the live cx.
+            let length = unsafe { JSValueMakeNumber(cx.ctx, f64::from(constructor_spec.length)) };
+            unsafe {
+                JSObjectSetProperty(
+                    cx.ctx,
+                    constructor,
+                    length_property.as_raw(),
+                    length,
+                    PROPERTY_NONE,
+                    &mut exception,
+                )
+            };
+            if !exception.is_null() {
+                return Err(exception);
+            }
+            let property = JsString::new(spec.name)
+                .map_err(|_| Self::type_error(cx, "class name contains a nul byte"))?;
+            let global = unsafe { JSContextGetGlobalObject(cx.ctx) };
+            let mut exception = ptr::null();
+            // SAFETY: global, constructor, and property belong to the live cx.
+            unsafe {
+                JSObjectSetProperty(
+                    cx.ctx,
+                    global,
+                    property.as_raw(),
+                    constructor.cast_const(),
+                    PROPERTY_NONE,
+                    &mut exception,
+                )
+            };
+            if !exception.is_null() {
+                return Err(exception);
+            }
+        }
         Ok(spec.id)
     }
 
@@ -1145,6 +1291,11 @@ impl core::JsEngine for Engine {
         unsafe { JSValueMakeUndefined(cx.ctx) }
     }
 
+    fn null(cx: Self::Context<'_>) -> Self::Value {
+        // SAFETY: cx is live.
+        unsafe { JSValueMakeNull(cx.ctx) }
+    }
+
     fn number(cx: Self::Context<'_>, value: f64) -> core::Result<Self::Value, Self::Error> {
         // SAFETY: cx is live.
         let value = unsafe { JSValueMakeNumber(cx.ctx, value) };
@@ -1169,8 +1320,43 @@ impl core::JsEngine for Engine {
         make_error(cx, message, false)
     }
 
-    fn async_error_value(cx: Self::Context<'_>, message: &str) -> Self::Value {
-        Self::string(cx, message).unwrap_or_else(|_| Self::undefined(cx))
+    fn async_error_value(cx: Self::Context<'_>, name: &str, message: &str) -> Self::Value {
+        let error = make_error(cx, message, false);
+        cx.scope.track(error);
+        let mut exception = ptr::null();
+        // SAFETY: error belongs to cx and make_error returns an object unless
+        // allocation failed, in which case the conversion reports an exception.
+        let object = unsafe { JSValueToObject(cx.ctx, error, &mut exception) };
+        if !exception.is_null() || object.is_null() {
+            return if exception.is_null() {
+                error
+            } else {
+                exception
+            };
+        }
+        let Ok(property) = JsString::new("name") else {
+            return error;
+        };
+        let Ok(name) = JsString::new(name) else {
+            return error;
+        };
+        // SAFETY: cx, object, and both strings are live for this property set.
+        let value = unsafe { JSValueMakeString(cx.ctx, name.as_raw()) };
+        unsafe {
+            JSObjectSetProperty(
+                cx.ctx,
+                object,
+                property.as_raw(),
+                value,
+                PROPERTY_NONE,
+                &mut exception,
+            )
+        };
+        if exception.is_null() {
+            error
+        } else {
+            exception
+        }
     }
 
     fn error_value_from_error(_cx: Self::Context<'_>, error: Self::Error) -> Self::Value {
@@ -1708,6 +1894,71 @@ unsafe extern "C" fn method_call(
                 Engine::operation_error(cx, "Rust callback panicked"),
             );
             ptr::null()
+        }
+    }
+}
+
+unsafe extern "C" fn wrapper_construct(
+    ctx: JSContextRef,
+    constructor: JSObjectRef,
+    argument_count: usize,
+    arguments: *const JSValueRef,
+    exception: *mut JSValueRef,
+) -> JSObjectRef {
+    let scope = Scope::new(ctx);
+    let cx = Context { ctx, scope: &scope };
+    match catch_unwind(AssertUnwindSafe(|| {
+        let state = state_from_context(ctx);
+        let class = state
+            .constructors
+            .lock()
+            .map_err(|_| Engine::operation_error(cx, "constructor registry is poisoned"))?
+            .get(&(constructor as usize))
+            .copied()
+            .ok_or_else(|| Engine::operation_error(cx, "constructor is not registered"))?;
+        let call = state
+            .classes
+            .lock()
+            .map_err(|_| Engine::operation_error(cx, "class registry is poisoned"))?
+            .get(&class)
+            .and_then(|entry| entry.spec.constructor.as_ref())
+            .map(|constructor| constructor.call)
+            .ok_or_else(|| Engine::operation_error(cx, "constructor is not registered"))?;
+        let args = if argument_count == 0 || arguments.is_null() {
+            &[]
+        } else {
+            // SAFETY: JSC provides argument_count live values for this callback.
+            unsafe { std::slice::from_raw_parts(arguments, argument_count) }
+        };
+        let value = call(cx, args)?;
+        let mut conversion_exception = ptr::null();
+        // SAFETY: value belongs to cx; constructors in core return objects.
+        let object = unsafe { JSValueToObject(ctx, value, &mut conversion_exception) };
+        if !conversion_exception.is_null() {
+            return Err(conversion_exception);
+        }
+        if object.is_null() {
+            return Err(Engine::operation_error(
+                cx,
+                "constructor returned no object",
+            ));
+        }
+        Ok((value, object))
+    })) {
+        Ok(Ok((value, object))) => {
+            scope.escape(value);
+            object
+        }
+        Ok(Err(error)) => {
+            write_exception(exception, error);
+            ptr::null_mut()
+        }
+        Err(_) => {
+            write_exception(
+                exception,
+                Engine::operation_error(cx, "Rust callback panicked"),
+            );
+            ptr::null_mut()
         }
     }
 }
@@ -2579,6 +2830,38 @@ mod tests {
     }
 
     #[test]
+    fn shared_error_class_constructor_script_passes() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("JSC runtime");
+        let device = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("device", device)
+            .expect("set device");
+        eval(
+            &runtime,
+            include_str!("../../../tests/error-classes.js"),
+            "error-classes.js",
+        );
+    }
+
+    #[test]
+    fn shared_named_async_rejection_script_passes() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("JSC runtime");
+        let device = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("device", device)
+            .expect("set device");
+        eval(
+            &runtime,
+            include_str!("../../../tests/error-rejection.js"),
+            "error-rejection.js",
+        );
+        unsafe { runtime.tick(setup.instance) }.expect("tick empty pop");
+        assert!(global_bool(&runtime, "errorRejectionDone"));
+    }
+
+    #[test]
     fn promise_continuation_can_reenter_device_method() {
         let setup = native_setup();
         let runtime = Runtime::new().expect("JSC runtime");
@@ -2617,6 +2900,7 @@ mod tests {
         Box::leak(Box::new(core::ClassSpec::<Engine> {
             name: "RuntimeProvidedPanicClass",
             id: PANIC_CLASS,
+            constructor: None,
             properties: &[],
             methods: Box::leak(Box::new([core::MethodSpec::<Engine> {
                 name: "runtimeProvidedPanicMethod",

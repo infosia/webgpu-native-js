@@ -42,6 +42,10 @@ const GPU_COMMAND_ENCODER_CLASS: ClassId = ClassId(11);
 const GPU_COMMAND_BUFFER_CLASS: ClassId = ClassId(12);
 const GPU_COMPUTE_PASS_ENCODER_CLASS: ClassId = ClassId(13);
 const GPU_SAMPLER_CLASS: ClassId = ClassId(14);
+const GPU_ERROR_CLASS: ClassId = ClassId(15);
+const GPU_VALIDATION_ERROR_CLASS: ClassId = ClassId(16);
+const GPU_OUT_OF_MEMORY_ERROR_CLASS: ClassId = ClassId(17);
+const GPU_INTERNAL_ERROR_CLASS: ClassId = ClassId(18);
 const WEBIDL_U32_MAX: u64 = u32::MAX as u64;
 
 /// A JavaScript class identifier scoped to an engine context.
@@ -234,6 +238,8 @@ pub trait JsEngine: Sized {
     ) -> Option<&'a (dyn Any + Send)>;
     /// Creates a JavaScript `undefined` value.
     fn undefined(cx: Self::Context<'_>) -> Self::Value;
+    /// Creates a JavaScript `null` value.
+    fn null(cx: Self::Context<'_>) -> Self::Value;
     /// Creates a JavaScript number value.
     fn number(cx: Self::Context<'_>, value: f64) -> Result<Self::Value, Self::Error>;
     /// Creates a JavaScript string value.
@@ -242,8 +248,8 @@ pub trait JsEngine: Sized {
     fn type_error(cx: Self::Context<'_>, message: &str) -> Self::Error;
     /// Creates a synchronous JavaScript operation error.
     fn operation_error(cx: Self::Context<'_>, message: &str) -> Self::Error;
-    /// Creates a rejection reason from a scoped context.
-    fn async_error_value(cx: Self::Context<'_>, message: &str) -> Self::Value;
+    /// Creates a named rejection error object from a scoped context.
+    fn async_error_value(cx: Self::Context<'_>, name: &str, message: &str) -> Self::Value;
     /// Converts an already-created engine error into a rejection value.
     fn error_value_from_error(cx: Self::Context<'_>, error: Self::Error) -> Self::Value;
     /// Creates a promise and its owned deferred resolving functions.
@@ -404,6 +410,13 @@ enum SettlementRequest<E: JsEngine + 'static> {
     },
     Error {
         deferred: Deferred<E>,
+        name: &'static str,
+        message: String,
+    },
+    PopErrorScope {
+        deferred: Deferred<E>,
+        status: WGPUPopErrorScopeStatus,
+        type_: WGPUErrorType,
         message: String,
     },
 }
@@ -457,8 +470,41 @@ impl<E: JsEngine + 'static> SettlementRequest<E> {
                 }
             }
             Self::Success { deferred } => (deferred, Ok(E::undefined(cx))),
-            Self::Error { deferred, message } => {
-                (deferred, Err(E::async_error_value(cx, &message)))
+            Self::Error {
+                deferred,
+                name,
+                message,
+            } => {
+                // S8: OperationError/AbortError are specified as DOMExceptions;
+                // this binding records the deviation and creates a named Error.
+                (deferred, Err(E::async_error_value(cx, name, &message)))
+            }
+            Self::PopErrorScope {
+                deferred,
+                status,
+                type_,
+                message,
+            } => {
+                if status != WGPUPopErrorScopeStatus_WGPUPopErrorScopeStatus_Success {
+                    // S8: WebGPU specifies a DOMException here. This binding's
+                    // recorded deviation is a plain Error carrying name/message.
+                    let message = if message.is_empty() {
+                        "popErrorScope failed".to_owned()
+                    } else {
+                        format!("popErrorScope failed: {message}")
+                    };
+                    return (
+                        deferred,
+                        Err(E::async_error_value(cx, "OperationError", &message)),
+                    );
+                }
+                if type_ == WGPUErrorType_WGPUErrorType_NoError {
+                    return (deferred, Ok(E::null(cx)));
+                }
+                match new_gpu_error::<E>(cx, type_, message) {
+                    Ok(value) => (deferred, Ok(value)),
+                    Err(error) => (deferred, Err(E::error_value_from_error(cx, error))),
+                }
             }
         }
     }
@@ -535,7 +581,8 @@ impl SettlementQueue {
                     SettlementRequest::Adapter { deferred, .. }
                     | SettlementRequest::Device { deferred, .. }
                     | SettlementRequest::Success { deferred }
-                    | SettlementRequest::Error { deferred, .. } => {
+                    | SettlementRequest::Error { deferred, .. }
+                    | SettlementRequest::PopErrorScope { deferred, .. } => {
                         E::release_deferred(cx, deferred)
                     }
                 }
@@ -564,6 +611,12 @@ pub type MethodFn<E> = fn(
     &[<E as JsEngine>::Value],
 ) -> Result<<E as JsEngine>::Value, <E as JsEngine>::Error>;
 
+/// JavaScript constructor callback.
+pub type ConstructorFn<E> = fn(
+    <E as JsEngine>::Context<'_>,
+    &[<E as JsEngine>::Value],
+) -> Result<<E as JsEngine>::Value, <E as JsEngine>::Error>;
+
 /// JavaScript finalizer callback.
 pub type FinalizerFn = fn(Box<dyn Any + Send>, &Environment);
 
@@ -587,12 +640,24 @@ pub struct MethodSpec<E: JsEngine + 'static> {
     pub call: MethodFn<E>,
 }
 
+/// A JavaScript constructor specification.
+pub struct ConstructorSpec<E: JsEngine + 'static> {
+    /// Constructor arity.
+    pub length: u8,
+    /// Parent class for constructor-prototype inheritance.
+    pub parent: Option<ClassId>,
+    /// Constructor callback.
+    pub call: ConstructorFn<E>,
+}
+
 /// A JavaScript class specification.
 pub struct ClassSpec<E: JsEngine + 'static> {
     /// Class name.
     pub name: &'static str,
     /// Class identifier requested by core.
     pub id: ClassId,
+    /// Script constructor, when the interface is constructible.
+    pub constructor: Option<ConstructorSpec<E>>,
     /// Properties installed on the class prototype.
     pub properties: &'static [PropertySpec<E>],
     /// Methods installed on the class prototype.
@@ -1063,6 +1128,19 @@ pub fn register_adapter_class<E: JsEngine + 'static>(
     E::register_class(cx, adapter_class::<E>())
 }
 
+/// Registers the script-visible WebGPU error classes.
+pub fn register_error_classes<E: JsEngine + 'static>(cx: E::Context<'_>) -> Result<(), E::Error> {
+    for spec in [
+        gpu_error_class::<E>(),
+        gpu_validation_error_class::<E>(),
+        gpu_out_of_memory_error_class::<E>(),
+        gpu_internal_error_class::<E>(),
+    ] {
+        let _ = E::register_class(cx, spec)?;
+    }
+    Ok(())
+}
+
 /// Wraps a native instance as a JavaScript `GPU`.
 pub fn wrap_gpu<E: JsEngine + 'static>(
     cx: E::Context<'_>,
@@ -1078,6 +1156,7 @@ pub fn wrap_gpu<E: JsEngine + 'static>(
     let _ = register_adapter_class::<E>(cx)?;
     let _ = register_device_class::<E>(cx)?;
     let _ = register_buffer_class::<E>(cx)?;
+    register_error_classes::<E>(cx)?;
     E::new_instance(cx, GPU_CLASS, Box::new(GpuPayload { instance }))
 }
 
@@ -1105,11 +1184,213 @@ pub unsafe fn wrap_device<E: JsEngine + 'static>(
     }
     let _ = register_device_class::<E>(cx)?;
     let _ = register_buffer_class::<E>(cx)?;
+    register_error_classes::<E>(cx)?;
     E::new_instance(
         cx,
         GPU_DEVICE_CLASS,
         Box::new(DevicePayload::<E>::new(device)),
     )
+}
+
+struct ErrorPayload {
+    message: String,
+}
+
+fn new_gpu_error<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    type_: WGPUErrorType,
+    message: String,
+) -> Result<E::Value, E::Error> {
+    let class = if type_ == WGPUErrorType_WGPUErrorType_Validation {
+        GPU_VALIDATION_ERROR_CLASS
+    } else if type_ == WGPUErrorType_WGPUErrorType_OutOfMemory {
+        GPU_OUT_OF_MEMORY_ERROR_CLASS
+    } else if type_ == WGPUErrorType_WGPUErrorType_Internal
+        || type_ == WGPUErrorType_WGPUErrorType_Unknown
+    {
+        GPU_INTERNAL_ERROR_CLASS
+    } else {
+        return Err(E::operation_error(cx, "unknown WebGPU error type"));
+    };
+    E::new_instance(cx, class, Box::new(ErrorPayload { message }))
+}
+
+fn gpu_error_message_get<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+) -> Result<E::Value, E::Error> {
+    let payload = [
+        GPU_ERROR_CLASS,
+        GPU_VALIDATION_ERROR_CLASS,
+        GPU_OUT_OF_MEMORY_ERROR_CLASS,
+        GPU_INTERNAL_ERROR_CLASS,
+    ]
+    .into_iter()
+    .find_map(|class| E::payload(cx, this, class))
+    .and_then(|payload| payload.downcast_ref::<ErrorPayload>())
+    .ok_or_else(|| E::type_error(cx, "GPUError.message called on an incompatible object"))?;
+    E::string(cx, &payload.message)
+}
+
+fn gpu_error_illegal_constructor<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    _args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    Err(E::type_error(cx, "GPUError is not constructible"))
+}
+
+fn construct_gpu_error<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    args: &[E::Value],
+    class: ClassId,
+) -> Result<E::Value, E::Error> {
+    let arena = Arena::new();
+    let message = E::to_str(
+        cx,
+        args.first().copied().unwrap_or_else(|| E::undefined(cx)),
+        &arena,
+    )?;
+    E::new_instance(
+        cx,
+        class,
+        Box::new(ErrorPayload {
+            message: message.to_owned(),
+        }),
+    )
+}
+
+fn gpu_validation_error_constructor<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    construct_gpu_error::<E>(cx, args, GPU_VALIDATION_ERROR_CLASS)
+}
+
+fn gpu_out_of_memory_error_constructor<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    construct_gpu_error::<E>(cx, args, GPU_OUT_OF_MEMORY_ERROR_CLASS)
+}
+
+fn gpu_internal_error_constructor<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    construct_gpu_error::<E>(cx, args, GPU_INTERNAL_ERROR_CLASS)
+}
+
+fn gpu_error_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
+    class_spec_once::<E, _>(GPU_ERROR_CLASS, || ClassSpec {
+        name: "GPUError",
+        id: GPU_ERROR_CLASS,
+        constructor: Some(ConstructorSpec {
+            length: 0,
+            parent: None,
+            call: gpu_error_illegal_constructor::<E>,
+        }),
+        properties: Box::leak(Box::new([PropertySpec {
+            name: "message",
+            get: Some(gpu_error_message_get::<E>),
+            set: None,
+        }])),
+        methods: &[],
+        finalizer: |_payload, _env| {},
+    })
+}
+
+fn gpu_validation_error_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
+    error_subclass::<E>(
+        GPU_VALIDATION_ERROR_CLASS,
+        "GPUValidationError",
+        gpu_validation_error_constructor::<E>,
+    )
+}
+
+fn gpu_out_of_memory_error_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
+    error_subclass::<E>(
+        GPU_OUT_OF_MEMORY_ERROR_CLASS,
+        "GPUOutOfMemoryError",
+        gpu_out_of_memory_error_constructor::<E>,
+    )
+}
+
+fn gpu_internal_error_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
+    error_subclass::<E>(
+        GPU_INTERNAL_ERROR_CLASS,
+        "GPUInternalError",
+        gpu_internal_error_constructor::<E>,
+    )
+}
+
+fn error_subclass<E: JsEngine + 'static>(
+    id: ClassId,
+    name: &'static str,
+    constructor: ConstructorFn<E>,
+) -> &'static ClassSpec<E> {
+    class_spec_once::<E, _>(id, || ClassSpec {
+        name,
+        id,
+        constructor: Some(ConstructorSpec {
+            length: 1,
+            parent: Some(GPU_ERROR_CLASS),
+            call: constructor,
+        }),
+        properties: Box::leak(Box::new([PropertySpec {
+            name: "message",
+            get: Some(gpu_error_message_get::<E>),
+            set: None,
+        }])),
+        methods: &[],
+        finalizer: |_payload, _env| {},
+    })
+}
+
+/// Implements `GPUDevice.pushErrorScope`.
+pub fn device_push_error_scope<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let device = device_handle::<E>(cx, this)?;
+    let filter = convert_gpu_error_filter::<E>(
+        cx,
+        args.first().copied().unwrap_or_else(|| E::undefined(cx)),
+    )?;
+    unsafe {
+        (E::environment(cx).gpu().device_push_error_scope)(device, filter);
+    }
+    Ok(E::undefined(cx))
+}
+
+/// Implements `GPUDevice.popErrorScope`.
+pub fn device_pop_error_scope<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    _args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let device = device_handle::<E>(cx, this)?;
+    let (promise, deferred) = E::new_promise(cx)?;
+    let mut request = Box::new(PopErrorScopeRequest::<E> {
+        deferred: Some(deferred),
+        settlements: Arc::clone(E::environment(cx).settlements()),
+        _registration: None,
+    });
+    request._registration = Some(E::register_deferred(
+        cx,
+        NonNull::from(&mut request.deferred),
+    ));
+    let info = WGPUPopErrorScopeCallbackInfo {
+        nextInChain: ptr::null_mut(),
+        mode: WGPUCallbackMode_WGPUCallbackMode_AllowProcessEvents,
+        callback: Some(pop_error_scope_callback::<E>),
+        userdata1: Box::into_raw(request).cast(),
+        userdata2: ptr::null_mut(),
+    };
+    unsafe {
+        (E::environment(cx).gpu().device_pop_error_scope)(device, info);
+    }
+    Ok(promise)
 }
 
 /// Implements `GPUDevice.createBuffer`.
@@ -2122,6 +2403,12 @@ struct QueueWorkDoneRequest<E: JsEngine + 'static> {
     _registration: Option<E::DeferredRegistration>,
 }
 
+struct PopErrorScopeRequest<E: JsEngine + 'static> {
+    deferred: Option<Deferred<E>>,
+    settlements: Arc<SettlementQueue>,
+    _registration: Option<E::DeferredRegistration>,
+}
+
 unsafe fn string_view_to_owned(view: WGPUStringView) -> String {
     if view.data.is_null() || view.length == wgpu_strlen() {
         return String::new();
@@ -2133,7 +2420,16 @@ unsafe fn string_view_to_owned(view: WGPUStringView) -> String {
 }
 
 unsafe fn callback_message(message: WGPUStringView, fallback: &'static str) -> String {
-    let backend = if message.data.is_null() {
+    let backend = unsafe { callback_string(message) };
+    if backend.is_empty() {
+        fallback.to_owned()
+    } else {
+        format!("{fallback}: {backend}")
+    }
+}
+
+unsafe fn callback_string(message: WGPUStringView) -> String {
+    if message.data.is_null() {
         String::new()
     } else if message.length == wgpu_strlen() {
         unsafe { std::ffi::CStr::from_ptr(message.data) }
@@ -2144,11 +2440,6 @@ unsafe fn callback_message(message: WGPUStringView, fallback: &'static str) -> S
             std::slice::from_raw_parts(message.data.cast::<u8>(), message.length)
         })
         .into_owned()
-    };
-    if backend.is_empty() {
-        fallback.to_owned()
-    } else {
-        format!("{fallback}: {backend}")
     }
 }
 
@@ -2194,6 +2485,7 @@ unsafe extern "C" fn request_adapter_callback<E: JsEngine + 'static>(
             }
             SettlementRequest::Error {
                 deferred,
+                name: "OperationError",
                 message: unsafe { callback_message(message, "requestAdapter failed") },
             }
         };
@@ -2243,6 +2535,7 @@ unsafe extern "C" fn request_device_callback<E: JsEngine + 'static>(
             }
             SettlementRequest::Error {
                 deferred,
+                name: "OperationError",
                 message: unsafe { callback_message(message, "requestDevice failed") },
             }
         };
@@ -2271,17 +2564,18 @@ unsafe extern "C" fn buffer_map_callback<E: JsEngine + 'static>(
             }
             SettlementRequest::Success { deferred }
         } else {
-            let fallback = if status == WGPUMapAsyncStatus_WGPUMapAsyncStatus_Error {
-                "mapAsync error"
+            let (name, fallback) = if status == WGPUMapAsyncStatus_WGPUMapAsyncStatus_Error {
+                ("OperationError", "mapAsync error")
             } else if status == WGPUMapAsyncStatus_WGPUMapAsyncStatus_Aborted {
-                "mapAsync aborted"
+                ("AbortError", "mapAsync aborted")
             } else if status == WGPUMapAsyncStatus_WGPUMapAsyncStatus_CallbackCancelled {
-                "mapAsync callback cancelled"
+                ("AbortError", "mapAsync callback cancelled")
             } else {
-                "mapAsync failed"
+                ("OperationError", "mapAsync failed")
             };
             SettlementRequest::Error {
                 deferred,
+                name,
                 message: unsafe { callback_message(message, fallback) },
             }
         };
@@ -2308,8 +2602,34 @@ unsafe extern "C" fn queue_work_done_callback<E: JsEngine + 'static>(
         } else {
             SettlementRequest::Error {
                 deferred,
+                name: "OperationError",
                 message: unsafe { callback_message(message, "onSubmittedWorkDone failed") },
             }
+        };
+        let _ = request.settlements.enqueue::<E>(settlement);
+    }));
+}
+
+unsafe extern "C" fn pop_error_scope_callback<E: JsEngine + 'static>(
+    status: WGPUPopErrorScopeStatus,
+    type_: WGPUErrorType,
+    message: WGPUStringView,
+    userdata1: *mut c_void,
+    _userdata2: *mut c_void,
+) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let Some(raw) = ptr::NonNull::new(userdata1.cast::<PopErrorScopeRequest<E>>()) else {
+            return;
+        };
+        let mut request = unsafe { Box::from_raw(raw.as_ptr()) };
+        let Some(deferred) = request.deferred.take() else {
+            return;
+        };
+        let settlement = SettlementRequest::PopErrorScope {
+            deferred,
+            status,
+            type_,
+            message: unsafe { callback_string(message) },
         };
         let _ = request.settlements.enqueue::<E>(settlement);
     }));

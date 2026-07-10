@@ -679,8 +679,56 @@ impl core::JsEngine for Engine {
         if unsafe { qjs::JS_IsException(proto) } {
             return Err(take_exception_value(cx));
         }
+        if let Some(parent) = spec
+            .constructor
+            .as_ref()
+            .and_then(|constructor| constructor.parent)
+        {
+            let parent_id = state
+                .classes
+                .lock()
+                .map_err(|_| Self::operation_error(cx, "class registry is poisoned"))?
+                .get(&parent)
+                .map(|entry| entry.quickjs_id)
+                .ok_or_else(|| Self::operation_error(cx, "parent class is not registered"))?;
+            let parent_proto = unsafe { qjs::JS_GetClassProto(cx.ctx, parent_id) };
+            if unsafe { qjs::JS_IsException(parent_proto) } {
+                return Err(take_exception_value(cx));
+            }
+            let rc = unsafe { qjs::JS_SetPrototype(cx.ctx, proto, parent_proto) };
+            unsafe { qjs::JS_FreeValue(cx.ctx, parent_proto) };
+            if rc < 0 {
+                return Err(take_exception_value(cx));
+            }
+        }
         install_methods(cx, state, proto, spec)?;
         install_properties(cx, state, proto, spec)?;
+        let constructor = if let Some(constructor) = &spec.constructor {
+            let magic = allocate_magic(cx, state, spec.id, CallbackKind::Constructor, 0)?;
+            let function = qjs::JSCFunctionType {
+                constructor_magic: Some(qjs_constructor),
+            };
+            let constructor_value = unsafe {
+                qjs::JS_NewCFunction2(
+                    cx.ctx,
+                    function.generic,
+                    class_name.as_ptr(),
+                    i32::from(constructor.length),
+                    qjs::JSCFunctionEnum_JS_CFUNC_constructor_magic,
+                    magic,
+                )
+            };
+            if unsafe { qjs::JS_IsException(constructor_value) } {
+                return Err(take_exception_value(cx));
+            }
+            if unsafe { qjs::JS_SetConstructor(cx.ctx, constructor_value, proto) } < 0 {
+                unsafe { qjs::JS_FreeValue(cx.ctx, constructor_value) };
+                return Err(take_exception_value(cx));
+            }
+            Some(constructor_value)
+        } else {
+            None
+        };
         unsafe {
             qjs::JS_SetClassProto(cx.ctx, quickjs_id, proto);
         }
@@ -694,6 +742,15 @@ impl core::JsEngine for Engine {
             .lock()
             .map_err(|_| Self::operation_error(cx, "class registry is poisoned"))?
             .insert(quickjs_id, spec.id);
+        if let Some(constructor) = constructor {
+            let global = unsafe { qjs::JS_GetGlobalObject(cx.ctx) };
+            let rc =
+                unsafe { qjs::JS_SetPropertyStr(cx.ctx, global, class_name.as_ptr(), constructor) };
+            unsafe { qjs::JS_FreeValue(cx.ctx, global) };
+            if rc < 0 {
+                return Err(take_exception_value(cx));
+            }
+        }
         Ok(spec.id)
     }
 
@@ -742,6 +799,10 @@ impl core::JsEngine for Engine {
         qjs_value_with_tag(qjs::JS_TAG_UNDEFINED as i64)
     }
 
+    fn null(_cx: Self::Context<'_>) -> Self::Value {
+        qjs_value_with_tag(qjs::JS_TAG_NULL as i64)
+    }
+
     fn number(cx: Self::Context<'_>, value: f64) -> core::Result<Self::Value, Self::Error> {
         let value = unsafe { qjs::JS_NewFloat64(cx.ctx, value) };
         cx.scope.track(value);
@@ -764,15 +825,22 @@ impl core::JsEngine for Engine {
         take_exception_value(cx)
     }
 
-    fn async_error_value(cx: Self::Context<'_>, message: &str) -> Self::Value {
-        match CString::new(message) {
-            Ok(message) => {
-                let value = unsafe { qjs::JS_NewString(cx.ctx, message.as_ptr()) };
-                cx.scope.track(value);
-                value
-            }
-            Err(_) => Self::undefined(cx),
+    fn async_error_value(cx: Self::Context<'_>, name: &str, message: &str) -> Self::Value {
+        let error = unsafe { qjs::JS_NewError(cx.ctx) };
+        if unsafe { qjs::JS_IsException(error) } {
+            return take_exception_value(cx);
         }
+        cx.scope.track(error);
+        for (key, text) in [(c"name", name), (c"message", message)] {
+            let value = unsafe { qjs::JS_NewStringLen(cx.ctx, text.as_ptr().cast(), text.len()) };
+            if unsafe { qjs::JS_IsException(value) } {
+                return take_exception_value(cx);
+            }
+            if unsafe { qjs::JS_SetPropertyStr(cx.ctx, error, key.as_ptr(), value) } < 0 {
+                return take_exception_value(cx);
+            }
+        }
+        error
     }
 
     fn error_value_from_error(_cx: Self::Context<'_>, error: Self::Error) -> Self::Value {
@@ -1146,6 +1214,7 @@ enum CallbackKind {
     Method = 1,
     Getter = 2,
     Setter = 3,
+    Constructor = 4,
 }
 
 fn allocate_magic(
@@ -1278,6 +1347,37 @@ unsafe extern "C" fn qjs_setter(
         };
         setter(cx, this_val, value)?;
         Ok(Engine::undefined(cx))
+    })
+}
+
+unsafe extern "C" fn qjs_constructor(
+    ctx: *mut qjs::JSContext,
+    _new_target: qjs::JSValue,
+    argc: c_int,
+    argv: *mut qjs::JSValue,
+    magic_value: c_int,
+) -> qjs::JSValue {
+    catch_callback(ctx, |cx| {
+        let target = callback_target(cx, magic_value, CallbackKind::Constructor)?;
+        let state = state_from_context(ctx);
+        let constructor = {
+            let classes = state
+                .classes
+                .lock()
+                .map_err(|_| Engine::operation_error(cx, "class registry is poisoned"))?;
+            classes
+                .get(&target.class)
+                .and_then(|entry| entry.spec.constructor.as_ref())
+                .map(|constructor| constructor.call)
+                .ok_or_else(|| Engine::operation_error(cx, "constructor is not registered"))?
+        };
+        let args = if argc <= 0 || argv.is_null() {
+            &[]
+        } else {
+            // SAFETY: QuickJS provides argc live arguments for this callback.
+            unsafe { std::slice::from_raw_parts(argv, argc as usize) }
+        };
+        constructor(cx, args)
     })
 }
 
@@ -1863,6 +1963,7 @@ mod tests {
         Box::leak(Box::new(core::ClassSpec::<Engine> {
             name: "PanicClass",
             id: PANIC_CLASS,
+            constructor: None,
             properties: Box::leak(Box::new([core::PropertySpec::<Engine> {
                 name: "panicProp",
                 get: Some(panicking_getter),
@@ -1888,6 +1989,7 @@ mod tests {
         Box::leak(Box::new(core::ClassSpec::<Engine> {
             name: "TeardownClass",
             id: TEARDOWN_CLASS,
+            constructor: None,
             properties: &[],
             methods: &[],
             finalizer: teardown_finalizer,
@@ -2156,6 +2258,43 @@ mod tests {
             "async-owned-error-check.js",
         );
         runtime.clear_global("asyncFailure").expect("clear promise");
+    }
+
+    #[test]
+    fn shared_error_class_constructor_script_passes() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let device = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("device", device)
+            .expect("set device");
+        eval_drop(
+            &runtime,
+            include_str!("../../../tests/error-classes.js"),
+            "error-classes.js",
+        );
+        runtime.clear_global("device").expect("clear device");
+        runtime.run_gc();
+        let _ = runtime.drain_releases().expect("drain releases");
+    }
+
+    #[test]
+    fn shared_named_async_rejection_script_passes() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let device = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("device", device)
+            .expect("set device");
+        eval_drop(
+            &runtime,
+            include_str!("../../../tests/error-rejection.js"),
+            "error-rejection.js",
+        );
+        unsafe { runtime.tick(setup.instance) }.expect("tick empty pop");
+        let done = global_value(&runtime, "errorRejectionDone");
+        assert!(unsafe { qjs::JS_ToBool(runtime.raw_context(), done) } != 0);
+        unsafe { qjs::JS_FreeValue(runtime.raw_context(), done) };
     }
 
     #[test]

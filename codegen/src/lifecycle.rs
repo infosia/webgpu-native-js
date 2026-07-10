@@ -1049,6 +1049,7 @@ fn emit_one_class(
     );
     let _ = writeln!(output, "        name: \"{interface}\",");
     let _ = writeln!(output, "        id: {class_id},");
+    output.push_str("        constructor: None,\n");
 
     let selected = subset.map_or(&[][..], |entry| entry.members.as_slice());
     let mut properties: Vec<_> = selected

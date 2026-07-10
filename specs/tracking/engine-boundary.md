@@ -1171,3 +1171,19 @@ J19-safe slice path). The two optional args landed with the element-vs-byte
 distinction, red-first proven (removing the multiplications: `left: [11,20,0,0]`
 vs `right: [20,21,30,31]`). Bounds reject before narrowing (B7/A21). Parity
 gains `writeBuffer view:8,5,3,0`, byte-identical both engines. Core 89.
+
+**P6a landed (2026-07-10): error scopes, the GPUError classes, A9 retired.**
+The first script-constructible classes in the binding (additive `ConstructorSpec`
+slot on ClassSpec — QuickJS via the constructor-magic ABI, JSC via
+`JSObjectMakeConstructor` with explicit prototype linking to avoid native-class
+finalizer chains). `pushErrorScope` with a generated filter enum; `popErrorScope`
+through the standard J1/J2 machinery (the header-verified `mode` field);
+resolutions: null / typed GPUError instance / named `OperationError` rejection
+carrying the backend message. Every shared async rejection reason is now an
+Error object with name+message (A9's deferral closed; the one string-asserting
+test updated, sanctioned). Parity gains `errorScope:GPUValidationError` — the
+deterministic invalid op (OOB writeBuffer) verified against yawgpu's own
+validation test, not assumed. Negative demo seen red (wrong class mapping →
+ClassId mismatch). Suites: core 93, quickjs 48, JSC 19+1, parity byte-identical.
+S6 (uncaptured, host-forwarded) and S7 (device.lost, header reading first)
+remain for P6b.

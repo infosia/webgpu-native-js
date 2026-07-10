@@ -82,6 +82,8 @@ members = [
   "createCommandEncoder",
   "queue",
   "destroy",
+  "pushErrorScope",
+  "popErrorScope",
 ]
 
 [[subset]]
@@ -159,6 +161,16 @@ path = "adapter_request_device"
 interface = "GPUDevice"
 member = "createBuffer"
 path = "device_create_buffer"
+
+[[lifecycle.methods]]
+interface = "GPUDevice"
+member = "pushErrorScope"
+path = "device_push_error_scope"
+
+[[lifecycle.methods]]
+interface = "GPUDevice"
+member = "popErrorScope"
+path = "device_pop_error_scope"
 
 [[lifecycle.methods]]
 interface = "GPUBuffer"

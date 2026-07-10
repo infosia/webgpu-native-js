@@ -54,11 +54,16 @@
             }
             log("bigint:" + bigintName);
 
-            labelBuffer.destroy();
-            paritySampler = null;
-            log("destroy:ok");
-            finished = true;
-            globalThis.parityDone = true;
+            device.pushErrorScope("validation");
+            device.queue.writeBuffer(labelBuffer, 8, new Uint8Array(4));
+            device.popErrorScope().then(function (error) {
+                log("errorScope:" + (error === null ? "null" : error.constructor.name));
+                labelBuffer.destroy();
+                paritySampler = null;
+                log("destroy:ok");
+                finished = true;
+                globalThis.parityDone = true;
+            }).catch(fail);
         } catch (error) {
             fail(error);
         }

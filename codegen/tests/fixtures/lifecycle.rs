@@ -82,6 +82,7 @@ pub(super) fn device_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
     class_spec_once::<E, _>(GPU_DEVICE_CLASS, || ClassSpec {
         name: "GPUDevice",
         id: GPU_DEVICE_CLASS,
+        constructor: None,
         properties: &[],
         methods: Box::leak(Box::new([
             MethodSpec { name: "createSampler", length: 0, call: device_create_sampler::<E> },
@@ -94,6 +95,7 @@ pub(super) fn sampler_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
     class_spec_once::<E, _>(GPU_SAMPLER_CLASS, || ClassSpec {
         name: "GPUSampler",
         id: GPU_SAMPLER_CLASS,
+        constructor: None,
         properties: Box::leak(Box::new([
             PropertySpec { name: "label", get: Some(sampler_label_get::<E>), set: Some(sampler_label_set::<E>) },
         ])),

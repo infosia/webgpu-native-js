@@ -33,6 +33,10 @@ pub struct GpuDispatch {
     pub device_create_command_encoder: unsafe fn(WGPUDevice, *const WGPUCommandEncoderDescriptor) -> WGPUCommandEncoder,
     /// `wgpuDeviceGetQueue`.
     pub device_get_queue: unsafe fn(WGPUDevice) -> WGPUQueue,
+    /// `wgpuDevicePushErrorScope`.
+    pub device_push_error_scope: unsafe fn(WGPUDevice, WGPUErrorFilter),
+    /// `wgpuDevicePopErrorScope`.
+    pub device_pop_error_scope: unsafe fn(WGPUDevice, WGPUPopErrorScopeCallbackInfo) -> WGPUFuture,
     /// `wgpuBufferAddRef`.
     pub buffer_add_ref: unsafe fn(WGPUBuffer),
     /// `wgpuBufferRelease`.
@@ -127,6 +131,8 @@ macro_rules! for_each_gpu_dispatch_entry {
             (device_create_compute_pipeline, wgpuDeviceCreateComputePipeline, unsafe fn(device: $crate::WGPUDevice, descriptor: *const $crate::WGPUComputePipelineDescriptor) -> $crate::WGPUComputePipeline),
             (device_create_command_encoder, wgpuDeviceCreateCommandEncoder, unsafe fn(device: $crate::WGPUDevice, descriptor: *const $crate::WGPUCommandEncoderDescriptor) -> $crate::WGPUCommandEncoder),
             (device_get_queue, wgpuDeviceGetQueue, unsafe fn(device: $crate::WGPUDevice) -> $crate::WGPUQueue),
+            (device_push_error_scope, wgpuDevicePushErrorScope, unsafe fn(device: $crate::WGPUDevice, filter: $crate::WGPUErrorFilter)),
+            (device_pop_error_scope, wgpuDevicePopErrorScope, unsafe fn(device: $crate::WGPUDevice, callback_info: $crate::WGPUPopErrorScopeCallbackInfo) -> $crate::WGPUFuture),
             (buffer_add_ref, wgpuBufferAddRef, unsafe fn(buffer: $crate::WGPUBuffer)),
             (buffer_release, wgpuBufferRelease, unsafe fn(buffer: $crate::WGPUBuffer)),
             (buffer_map_async, wgpuBufferMapAsync, unsafe fn(buffer: $crate::WGPUBuffer, mode: $crate::WGPUMapMode, offset: usize, size: usize, callback_info: $crate::WGPUBufferMapCallbackInfo) -> $crate::WGPUFuture),
@@ -779,6 +785,17 @@ pub(super) fn convert_bind_group_layout_descriptor<E: JsEngine>(
     })
 }
 
+pub(super) fn convert_gpu_error_filter<E: JsEngine>(cx: E::Context<'_>, value: E::Value) -> Result<WGPUErrorFilter, E::Error> {
+    // B6: generated WebIDL string-enum conversion rejects unknown values.
+    let arena = Arena::new();
+    match E::to_str(cx, value, &arena)? {
+        "validation" => Ok(WGPUErrorFilter_WGPUErrorFilter_Validation),
+        "out-of-memory" => Ok(WGPUErrorFilter_WGPUErrorFilter_OutOfMemory),
+        "internal" => Ok(WGPUErrorFilter_WGPUErrorFilter_Internal),
+        _ => Err(E::type_error(cx, "GPUErrorFilter")),
+    }
+}
+
 /// Payload stored by a `GPUShaderModule` wrapper.
 pub struct ShaderModulePayload {
     pub(super) module: WGPUShaderModule,
@@ -1338,6 +1355,7 @@ pub(super) fn gpu_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
     class_spec_once::<E, _>(GPU_CLASS, || ClassSpec {
         name: "GPU",
         id: GPU_CLASS,
+        constructor: None,
         properties: &[],
         methods: Box::leak(Box::new([
             MethodSpec { name: "requestAdapter", length: 0, call: gpu_request_adapter::<E> },
@@ -1350,6 +1368,7 @@ pub(super) fn adapter_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
     class_spec_once::<E, _>(GPU_ADAPTER_CLASS, || ClassSpec {
         name: "GPUAdapter",
         id: GPU_ADAPTER_CLASS,
+        constructor: None,
         properties: &[],
         methods: Box::leak(Box::new([
             MethodSpec { name: "requestDevice", length: 0, call: adapter_request_device::<E> },
@@ -1362,11 +1381,14 @@ pub(super) fn device_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
     class_spec_once::<E, _>(GPU_DEVICE_CLASS, || ClassSpec {
         name: "GPUDevice",
         id: GPU_DEVICE_CLASS,
+        constructor: None,
         properties: Box::leak(Box::new([
             PropertySpec { name: "queue", get: Some(device_queue_get::<E>), set: None },
         ])),
         methods: Box::leak(Box::new([
             MethodSpec { name: "createBuffer", length: 1, call: device_create_buffer::<E> },
+            MethodSpec { name: "pushErrorScope", length: 1, call: device_push_error_scope::<E> },
+            MethodSpec { name: "popErrorScope", length: 0, call: device_pop_error_scope::<E> },
             MethodSpec { name: "createShaderModule", length: 1, call: device_create_shader_module::<E> },
             MethodSpec { name: "createSampler", length: 0, call: device_create_sampler::<E> },
             MethodSpec { name: "createBindGroupLayout", length: 1, call: device_create_bind_group_layout::<E> },
@@ -1383,6 +1405,7 @@ pub(super) fn buffer_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
     class_spec_once::<E, _>(GPU_BUFFER_CLASS, || ClassSpec {
         name: "GPUBuffer",
         id: GPU_BUFFER_CLASS,
+        constructor: None,
         properties: Box::leak(Box::new([
             PropertySpec { name: "label", get: Some(buffer_label_get::<E>), set: Some(buffer_label_set::<E>) },
             PropertySpec { name: "size", get: Some(buffer_size_get::<E>), set: None },
@@ -1402,6 +1425,7 @@ pub(super) fn queue_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
     class_spec_once::<E, _>(GPU_QUEUE_CLASS, || ClassSpec {
         name: "GPUQueue",
         id: GPU_QUEUE_CLASS,
+        constructor: None,
         properties: &[],
         methods: Box::leak(Box::new([
             MethodSpec { name: "writeBuffer", length: 3, call: queue_write_buffer::<E> },
@@ -1416,6 +1440,7 @@ pub(super) fn shader_module_class<E: JsEngine + 'static>() -> &'static ClassSpec
     class_spec_once::<E, _>(GPU_SHADER_MODULE_CLASS, || ClassSpec {
         name: "GPUShaderModule",
         id: GPU_SHADER_MODULE_CLASS,
+        constructor: None,
         properties: &[],
         methods: &[],
         finalizer: finalize_shader_module,
@@ -1426,6 +1451,7 @@ pub(super) fn sampler_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
     class_spec_once::<E, _>(GPU_SAMPLER_CLASS, || ClassSpec {
         name: "GPUSampler",
         id: GPU_SAMPLER_CLASS,
+        constructor: None,
         properties: Box::leak(Box::new([
             PropertySpec { name: "label", get: Some(sampler_label_get::<E>), set: Some(sampler_label_set::<E>) },
         ])),
@@ -1438,6 +1464,7 @@ pub(super) fn bind_group_layout_class<E: JsEngine + 'static>() -> &'static Class
     class_spec_once::<E, _>(GPU_BIND_GROUP_LAYOUT_CLASS, || ClassSpec {
         name: "GPUBindGroupLayout",
         id: GPU_BIND_GROUP_LAYOUT_CLASS,
+        constructor: None,
         properties: &[],
         methods: &[],
         finalizer: finalize_bind_group_layout,
@@ -1448,6 +1475,7 @@ pub(super) fn pipeline_layout_class<E: JsEngine + 'static>() -> &'static ClassSp
     class_spec_once::<E, _>(GPU_PIPELINE_LAYOUT_CLASS, || ClassSpec {
         name: "GPUPipelineLayout",
         id: GPU_PIPELINE_LAYOUT_CLASS,
+        constructor: None,
         properties: &[],
         methods: &[],
         finalizer: finalize_pipeline_layout,
@@ -1458,6 +1486,7 @@ pub(super) fn bind_group_class<E: JsEngine + 'static>() -> &'static ClassSpec<E>
     class_spec_once::<E, _>(GPU_BIND_GROUP_CLASS, || ClassSpec {
         name: "GPUBindGroup",
         id: GPU_BIND_GROUP_CLASS,
+        constructor: None,
         properties: &[],
         methods: &[],
         finalizer: finalize_bind_group,
@@ -1468,6 +1497,7 @@ pub(super) fn compute_pipeline_class<E: JsEngine + 'static>() -> &'static ClassS
     class_spec_once::<E, _>(GPU_COMPUTE_PIPELINE_CLASS, || ClassSpec {
         name: "GPUComputePipeline",
         id: GPU_COMPUTE_PIPELINE_CLASS,
+        constructor: None,
         properties: &[],
         methods: &[],
         finalizer: finalize_compute_pipeline,
@@ -1478,6 +1508,7 @@ pub(super) fn command_encoder_class<E: JsEngine + 'static>() -> &'static ClassSp
     class_spec_once::<E, _>(GPU_COMMAND_ENCODER_CLASS, || ClassSpec {
         name: "GPUCommandEncoder",
         id: GPU_COMMAND_ENCODER_CLASS,
+        constructor: None,
         properties: &[],
         methods: Box::leak(Box::new([
             MethodSpec { name: "copyBufferToBuffer", length: 5, call: command_encoder_copy_buffer_to_buffer::<E> },
@@ -1492,6 +1523,7 @@ pub(super) fn compute_pass_encoder_class<E: JsEngine + 'static>() -> &'static Cl
     class_spec_once::<E, _>(GPU_COMPUTE_PASS_ENCODER_CLASS, || ClassSpec {
         name: "GPUComputePassEncoder",
         id: GPU_COMPUTE_PASS_ENCODER_CLASS,
+        constructor: None,
         properties: &[],
         methods: Box::leak(Box::new([
             MethodSpec { name: "setPipeline", length: 1, call: compute_pass_set_pipeline::<E> },
@@ -1507,6 +1539,7 @@ pub(super) fn command_buffer_class<E: JsEngine + 'static>() -> &'static ClassSpe
     class_spec_once::<E, _>(GPU_COMMAND_BUFFER_CLASS, || ClassSpec {
         name: "GPUCommandBuffer",
         id: GPU_COMMAND_BUFFER_CLASS,
+        constructor: None,
         properties: &[],
         methods: &[],
         finalizer: finalize_command_buffer,

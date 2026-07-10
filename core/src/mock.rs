@@ -17,8 +17,9 @@ use crate::{
     WGPUBindGroup, WGPUBindGroupDescriptor, WGPUBindGroupLayout, WGPUBindGroupLayoutDescriptor,
     WGPUCommandBuffer, WGPUCommandBufferDescriptor, WGPUCommandEncoder,
     WGPUCommandEncoderDescriptor, WGPUComputePassDescriptor, WGPUComputePassEncoder,
-    WGPUComputePipeline, WGPUComputePipelineDescriptor, WGPUFuture, WGPUPipelineLayout,
-    WGPUPipelineLayoutDescriptor, WGPUQueue, WGPUQueueWorkDoneCallbackInfo, WGPUSampler,
+    WGPUComputePipeline, WGPUComputePipelineDescriptor, WGPUErrorFilter, WGPUErrorType, WGPUFuture,
+    WGPUPipelineLayout, WGPUPipelineLayoutDescriptor, WGPUPopErrorScopeCallbackInfo,
+    WGPUPopErrorScopeStatus, WGPUQueue, WGPUQueueWorkDoneCallbackInfo, WGPUSampler,
     WGPUSamplerDescriptor, WGPUShaderModule, WGPUShaderModuleDescriptor,
 };
 
@@ -700,6 +701,10 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
         cx.runtime.undefined()
     }
 
+    fn null(cx: Self::Context<'_>) -> Self::Value {
+        cx.runtime.null()
+    }
+
     fn number(cx: Self::Context<'_>, value: f64) -> Result<Self::Value, Self::Error> {
         Ok(cx.runtime.number(value))
     }
@@ -716,8 +721,10 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
         format!("OperationError: {message}")
     }
 
-    fn async_error_value(cx: Self::Context<'_>, message: &str) -> Self::Value {
-        cx.runtime.string(message)
+    fn async_error_value(cx: Self::Context<'_>, name: &str, message: &str) -> Self::Value {
+        let name = cx.runtime.string(name);
+        let message = cx.runtime.string(message);
+        cx.runtime.object(&[("name", name), ("message", message)])
     }
 
     fn error_value_from_error(cx: Self::Context<'_>, error: Self::Error) -> Self::Value {
@@ -947,6 +954,15 @@ struct MockGpuState {
     native_order: Vec<&'static str>,
     buffers: BTreeMap<WGPUBuffer, Vec<u8>>,
     mapped_ranges: BTreeMap<WGPUBuffer, Vec<MockMappedRange>>,
+    error_scope_stack: Vec<WGPUErrorFilter>,
+    pushed_error_filters: Vec<WGPUErrorFilter>,
+    next_pop_error: Option<MockPopError>,
+}
+
+struct MockPopError {
+    status: WGPUPopErrorScopeStatus,
+    type_: WGPUErrorType,
+    message: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1128,6 +1144,51 @@ unsafe fn device_get_queue(_device: WGPUDevice) -> WGPUQueue {
         state.borrow_mut().device_get_queue_calls += 1;
         fake_handle(1001)
     })
+}
+
+unsafe fn device_push_error_scope(_device: WGPUDevice, filter: WGPUErrorFilter) {
+    GPU_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        state.error_scope_stack.push(filter);
+        state.pushed_error_filters.push(filter);
+    });
+}
+
+unsafe fn device_pop_error_scope(
+    _device: WGPUDevice,
+    info: WGPUPopErrorScopeCallbackInfo,
+) -> WGPUFuture {
+    let result = GPU_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        if let Some(result) = state.next_pop_error.take() {
+            let _ = state.error_scope_stack.pop();
+            result
+        } else if state.error_scope_stack.pop().is_some() {
+            MockPopError {
+                status: crate::WGPUPopErrorScopeStatus_WGPUPopErrorScopeStatus_Success,
+                type_: crate::WGPUErrorType_WGPUErrorType_NoError,
+                message: String::new(),
+            }
+        } else {
+            MockPopError {
+                status: crate::WGPUPopErrorScopeStatus_WGPUPopErrorScopeStatus_Error,
+                type_: crate::WGPUErrorType_WGPUErrorType_NoError,
+                message: "error scope stack is empty".to_owned(),
+            }
+        }
+    });
+    if let Some(callback) = info.callback {
+        unsafe {
+            callback(
+                result.status,
+                result.type_,
+                WGPUStringView::from_bytes(result.message.as_bytes()),
+                info.userdata1,
+                info.userdata2,
+            );
+        }
+    }
+    WGPUFuture { id: 3 }
 }
 
 unsafe fn device_create_shader_module(
@@ -1567,13 +1628,14 @@ mod tests {
         convert_pipeline_layout_descriptor, convert_sampler_descriptor,
         convert_shader_module_descriptor, device_create_bind_group, device_create_buffer,
         device_create_command_encoder, device_create_compute_pipeline, device_create_sampler,
-        device_queue_get, finalize_bind_group, finalize_buffer, finalize_compute_pipeline,
-        finalize_device, finalize_queue, finalize_sampler, queue_submit, queue_work_done_callback,
-        queue_write_buffer, request_adapter_callback, request_device_callback, wrap_device,
-        AdapterRequest, BindGroupLayoutPayload, BindGroupPayload, BufferPayload,
-        ComputePipelinePayload, DevicePayload, DeviceRequest, JsEngine, PendingNative,
-        PendingNativeHandle, PipelineLayoutPayload, QueueError, QueuePayload, QueueWorkDoneRequest,
-        SamplerPayload, SettlementRequest, ShaderModulePayload,
+        device_pop_error_scope, device_push_error_scope, device_queue_get, finalize_bind_group,
+        finalize_buffer, finalize_compute_pipeline, finalize_device, finalize_queue,
+        finalize_sampler, queue_submit, queue_work_done_callback, queue_write_buffer,
+        request_adapter_callback, request_device_callback, wrap_device, AdapterRequest,
+        BindGroupLayoutPayload, BindGroupPayload, BufferPayload, ComputePipelinePayload,
+        DevicePayload, DeviceRequest, ErrorPayload, JsEngine, PendingNative, PendingNativeHandle,
+        PipelineLayoutPayload, QueueError, QueuePayload, QueueWorkDoneRequest, SamplerPayload,
+        SettlementRequest, ShaderModulePayload,
     };
     use std::sync::Mutex;
 
@@ -3236,10 +3298,163 @@ mod tests {
             .promise_result(promise)
             .expect("settled promise")
             .expect_err("rejected promise");
+        let MockValue::Object(properties) = rt.get(reason) else {
+            panic!("rejection reason is not an error object");
+        };
         assert!(matches!(
-            rt.get(reason),
-            MockValue::String(message) if message.contains("backend diagnostic")
+            properties.get("name").copied().map(|value| rt.get(value)),
+            Some(MockValue::String(name)) if name == "OperationError"
         ));
+        assert!(matches!(
+            properties.get("message").copied().map(|value| rt.get(value)),
+            Some(MockValue::String(message)) if message.contains("backend diagnostic")
+        ));
+    }
+
+    #[test]
+    fn s1_push_error_scope_round_trips_each_generated_filter_and_rejects_unknown() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        for filter in ["validation", "out-of-memory", "internal"] {
+            device_push_error_scope::<Engine>(cx, device, &[rt.string(filter)])
+                .expect("push error scope");
+        }
+        GPU_STATE.with(|state| {
+            assert_eq!(
+                state.borrow().pushed_error_filters,
+                [
+                    crate::WGPUErrorFilter_WGPUErrorFilter_Validation,
+                    crate::WGPUErrorFilter_WGPUErrorFilter_OutOfMemory,
+                    crate::WGPUErrorFilter_WGPUErrorFilter_Internal,
+                ]
+            );
+        });
+        let error = device_push_error_scope::<Engine>(cx, device, &[rt.string("future-filter")])
+            .expect_err("unknown filter");
+        assert!(error.starts_with("TypeError:"));
+    }
+
+    #[test]
+    fn s2_pop_error_scope_resolves_null_and_each_error_class_with_message() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+
+        device_push_error_scope::<Engine>(cx, device, &[rt.string("validation")])
+            .expect("push null scope");
+        let promise = device_pop_error_scope::<Engine>(cx, device, &[]).expect("pop null scope");
+        rt.env
+            .settlements()
+            .drain::<Engine>(cx)
+            .expect("drain null result");
+        let value = rt
+            .promise_result(promise)
+            .expect("settled null promise")
+            .expect("resolved null promise");
+        assert!(matches!(rt.get(value), MockValue::Null));
+
+        for (type_, class, message) in [
+            (
+                crate::WGPUErrorType_WGPUErrorType_Validation,
+                crate::GPU_VALIDATION_ERROR_CLASS,
+                "validation diagnostic",
+            ),
+            (
+                crate::WGPUErrorType_WGPUErrorType_OutOfMemory,
+                crate::GPU_OUT_OF_MEMORY_ERROR_CLASS,
+                "out of memory diagnostic",
+            ),
+            (
+                crate::WGPUErrorType_WGPUErrorType_Internal,
+                crate::GPU_INTERNAL_ERROR_CLASS,
+                "internal diagnostic",
+            ),
+        ] {
+            device_push_error_scope::<Engine>(cx, device, &[rt.string("validation")])
+                .expect("push error scope");
+            GPU_STATE.with(|state| {
+                state.borrow_mut().next_pop_error = Some(MockPopError {
+                    status: crate::WGPUPopErrorScopeStatus_WGPUPopErrorScopeStatus_Success,
+                    type_,
+                    message: message.to_owned(),
+                });
+            });
+            let promise =
+                device_pop_error_scope::<Engine>(cx, device, &[]).expect("pop error scope");
+            rt.env
+                .settlements()
+                .drain::<Engine>(cx)
+                .expect("drain error result");
+            let value = rt
+                .promise_result(promise)
+                .expect("settled error promise")
+                .expect("resolved error promise");
+            let MockValue::Instance {
+                class: actual,
+                payload,
+            } = rt.get(value)
+            else {
+                panic!("pop did not resolve a GPUError instance");
+            };
+            assert_eq!(actual, class);
+            assert_eq!(
+                payload
+                    .downcast_ref::<ErrorPayload>()
+                    .expect("error payload")
+                    .message,
+                message
+            );
+        }
+    }
+
+    #[test]
+    fn s2_empty_pop_rejects_named_operation_error_with_backend_message() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let promise = device_pop_error_scope::<Engine>(cx, device, &[]).expect("pop empty scope");
+        rt.env
+            .settlements()
+            .drain::<Engine>(cx)
+            .expect("drain rejection");
+        let reason = rt
+            .promise_result(promise)
+            .expect("settled promise")
+            .expect_err("empty pop must reject");
+        let MockValue::Object(properties) = rt.get(reason) else {
+            panic!("rejection reason is not an error object");
+        };
+        assert!(matches!(
+            properties.get("name").copied().map(|value| rt.get(value)),
+            Some(MockValue::String(name)) if name == "OperationError"
+        ));
+        assert!(matches!(
+            properties.get("message").copied().map(|value| rt.get(value)),
+            Some(MockValue::String(message)) if message.contains("error scope stack is empty")
+        ));
+    }
+
+    #[test]
+    fn s2_two_pop_settlements_keep_a30_single_batch() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        for _ in 0..2 {
+            device_push_error_scope::<Engine>(cx, device, &[rt.string("validation")])
+                .expect("push scope");
+        }
+        let first = device_pop_error_scope::<Engine>(cx, device, &[]).expect("first pop");
+        let second = device_pop_error_scope::<Engine>(cx, device, &[]).expect("second pop");
+        assert_eq!(rt.env.settlements().drain::<Engine>(cx), Ok(2));
+        assert_eq!(rt.settle_calls.get(), 1);
+        assert_eq!(&*rt.settlement_batch_sizes.borrow(), &[2]);
+        assert!(matches!(rt.promise_result(first), Some(Ok(_))));
+        assert!(matches!(rt.promise_result(second), Some(Ok(_))));
     }
 
     #[test]
