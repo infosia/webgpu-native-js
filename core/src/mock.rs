@@ -4,6 +4,7 @@ use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::ptr;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::{
@@ -42,12 +43,18 @@ pub struct Scope<'a> {
 pub struct Runtime {
     env: Environment,
     values: RefCell<Vec<MockValue>>,
+    global: Value,
+    symbol_iterator: Value,
     classes: RefCell<BTreeMap<ClassId, &'static str>>,
     reclaimed_values: Cell<usize>,
     reclaimed_handles: RefCell<Vec<Value>>,
     detach_noop: Cell<bool>,
     duplicated_values: RefCell<BTreeMap<Value, usize>>,
     property_errors: RefCell<BTreeMap<(Value, String), String>>,
+    property_value_errors: RefCell<BTreeMap<(Value, Value), String>>,
+    call_errors: RefCell<BTreeMap<Value, String>>,
+    property_value_calls: Cell<usize>,
+    calls: Cell<usize>,
     coercion_unmap: Cell<Option<Value>>,
     settle_calls: Cell<usize>,
     settlement_batch_sizes: RefCell<Vec<usize>>,
@@ -58,15 +65,33 @@ impl Runtime {
     /// Creates a mock runtime with the provided WebGPU dispatch.
     #[must_use]
     pub fn new(gpu: GpuDispatch) -> Self {
+        let symbol_iterator = Value(1);
+        let symbol = Value(2);
+        let global = Value(3);
+        let mut symbol_properties = BTreeMap::new();
+        symbol_properties.insert("iterator".to_owned(), symbol_iterator);
+        let mut global_properties = BTreeMap::new();
+        global_properties.insert("Symbol".to_owned(), symbol);
         Self {
             env: Environment::new(gpu, Arc::new(ReleaseQueue::new())),
-            values: RefCell::new(vec![MockValue::Undefined]),
+            values: RefCell::new(vec![
+                MockValue::Undefined,
+                MockValue::SymbolIterator,
+                MockValue::Object(symbol_properties),
+                MockValue::Object(global_properties),
+            ]),
+            global,
+            symbol_iterator,
             classes: RefCell::new(BTreeMap::new()),
             reclaimed_values: Cell::new(0),
             reclaimed_handles: RefCell::new(Vec::new()),
             detach_noop: Cell::new(false),
             duplicated_values: RefCell::new(BTreeMap::new()),
             property_errors: RefCell::new(BTreeMap::new()),
+            property_value_errors: RefCell::new(BTreeMap::new()),
+            call_errors: RefCell::new(BTreeMap::new()),
+            property_value_calls: Cell::new(0),
+            calls: Cell::new(0),
             coercion_unmap: Cell::new(None),
             settle_calls: Cell::new(0),
             settlement_batch_sizes: RefCell::new(Vec::new()),
@@ -111,6 +136,19 @@ impl Runtime {
         self.property_errors
             .borrow_mut()
             .insert((object, property.to_owned()), error.to_owned());
+    }
+
+    fn set_property_value_error(&self, object: Value, key: Value, error: &str) {
+        self.property_value_errors.borrow_mut().insert(
+            (self.canonical(object), self.canonical(key)),
+            error.to_owned(),
+        );
+    }
+
+    fn set_call_error(&self, callable: Value, error: &str) {
+        self.call_errors
+            .borrow_mut()
+            .insert(self.canonical(callable), error.to_owned());
     }
 
     fn reenter_unmap_on_next_coercion(&self, buffer: Value) {
@@ -163,6 +201,23 @@ impl Runtime {
             map.insert((*key).to_owned(), *value);
         }
         self.insert(MockValue::Object(map))
+    }
+
+    fn set_like(&self, values: &[Value]) -> Value {
+        self.iterable(values, None)
+    }
+
+    fn throwing_iterable(&self, values: &[Value], throw_on_next: usize) -> Value {
+        self.iterable(values, Some(throw_on_next))
+    }
+
+    fn iterable(&self, values: &[Value], throw_on_next: Option<usize>) -> Value {
+        let iterator_method = self.insert(MockValue::Callable(MockCallable::Iterator));
+        self.insert(MockValue::Iterable {
+            values: values.to_vec(),
+            iterator_method,
+            throw_on_next,
+        })
     }
 
     /// Returns the undefined value.
@@ -244,6 +299,12 @@ impl Runtime {
         let mut values = self.values.borrow_mut();
         values.push(value);
         Value(values.len() - 1)
+    }
+
+    fn tracked_alias(&self, scope: &Scope<'_>, value: Value) -> Value {
+        let owned = self.insert(MockValue::Scoped(self.canonical(value)));
+        scope.owned.borrow_mut().push(owned);
+        owned
     }
 
     fn get(&self, value: Value) -> MockValue {
@@ -332,11 +393,24 @@ enum MockValue {
     Undefined,
     Scoped(Value),
     Reclaimed,
+    SymbolIterator,
     Null,
     Number(f64),
     Bool(bool),
     String(String),
     Object(BTreeMap<String, Value>),
+    Iterable {
+        values: Vec<Value>,
+        iterator_method: Value,
+        throw_on_next: Option<usize>,
+    },
+    Iterator {
+        values: Vec<Value>,
+        next_method: Value,
+        next_index: Rc<Cell<usize>>,
+        throw_on_next: Option<usize>,
+    },
+    Callable(MockCallable),
     Promise {
         settled: bool,
         result: Option<std::result::Result<Value, Value>>,
@@ -359,6 +433,12 @@ enum MockValue {
         class: ClassId,
         payload: &'static (dyn Any + Send),
     },
+}
+
+#[derive(Clone, Copy)]
+enum MockCallable {
+    Iterator,
+    Next,
 }
 
 /// Mock engine marker type parameterized by mapped-range behavior.
@@ -402,13 +482,99 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
                 .get(key)
                 .copied()
                 .unwrap_or_else(|| cx.runtime.undefined()),
+            MockValue::Iterator { next_method, .. } if key == "next" => next_method,
             _ => cx.runtime.undefined(),
         };
-        let owned = cx
+        Ok(cx.runtime.tracked_alias(cx.scope, value))
+    }
+
+    fn global(cx: Self::Context<'_>) -> Self::Value {
+        cx.runtime.tracked_alias(cx.scope, cx.runtime.global)
+    }
+
+    fn get_property_value(
+        cx: Self::Context<'_>,
+        obj: Self::Value,
+        key: Self::Value,
+    ) -> Result<Self::Value, Self::Error> {
+        cx.runtime
+            .property_value_calls
+            .set(cx.runtime.property_value_calls.get() + 1);
+        let obj = cx.runtime.canonical(obj);
+        let key = cx.runtime.canonical(key);
+        if let Some(error) = cx
             .runtime
-            .insert(MockValue::Scoped(cx.runtime.canonical(value)));
-        cx.scope.owned.borrow_mut().push(owned);
-        Ok(owned)
+            .property_value_errors
+            .borrow()
+            .get(&(obj, key))
+            .cloned()
+        {
+            return Err(error);
+        }
+        let value = match cx.runtime.get(obj) {
+            MockValue::Iterable {
+                iterator_method, ..
+            } if key == cx.runtime.symbol_iterator => iterator_method,
+            _ => cx.runtime.undefined(),
+        };
+        Ok(cx.runtime.tracked_alias(cx.scope, value))
+    }
+
+    fn call(
+        cx: Self::Context<'_>,
+        f: Self::Value,
+        this: Self::Value,
+        _args: &[Self::Value],
+    ) -> Result<Self::Value, Self::Error> {
+        cx.runtime.calls.set(cx.runtime.calls.get() + 1);
+        let f = cx.runtime.canonical(f);
+        if let Some(error) = cx.runtime.call_errors.borrow().get(&f).cloned() {
+            return Err(error);
+        }
+        let result = match cx.runtime.get(f) {
+            MockValue::Callable(MockCallable::Iterator) => {
+                let MockValue::Iterable {
+                    values,
+                    throw_on_next,
+                    ..
+                } = cx.runtime.get(this)
+                else {
+                    return Err("TypeError: invalid iterator receiver".to_owned());
+                };
+                let next_method = cx.runtime.insert(MockValue::Callable(MockCallable::Next));
+                cx.runtime.insert(MockValue::Iterator {
+                    values,
+                    next_method,
+                    next_index: Rc::new(Cell::new(0)),
+                    throw_on_next,
+                })
+            }
+            MockValue::Callable(MockCallable::Next) => {
+                let MockValue::Iterator {
+                    values,
+                    next_index,
+                    throw_on_next,
+                    ..
+                } = cx.runtime.get(this)
+                else {
+                    return Err("TypeError: invalid next receiver".to_owned());
+                };
+                let index = next_index.get();
+                if throw_on_next == Some(index) {
+                    return Err(format!("iterator next {index} failed"));
+                }
+                let (done, value) = if let Some(value) = values.get(index).copied() {
+                    next_index.set(index + 1);
+                    (false, value)
+                } else {
+                    (true, cx.runtime.undefined())
+                };
+                let done = cx.runtime.bool(done);
+                cx.runtime.object(&[("done", done), ("value", value)])
+            }
+            _ => return Err("TypeError: value is not callable".to_owned()),
+        };
+        Ok(cx.runtime.tracked_alias(cx.scope, result))
     }
 
     fn is_undefined(cx: Self::Context<'_>, value: Self::Value) -> bool {
@@ -430,8 +596,12 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
             MockValue::Undefined
             | MockValue::Scoped(_)
             | MockValue::Reclaimed
+            | MockValue::SymbolIterator
             | MockValue::Null
             | MockValue::Object(_)
+            | MockValue::Iterable { .. }
+            | MockValue::Iterator { .. }
+            | MockValue::Callable(_)
             | MockValue::Promise { .. }
             | MockValue::Resolver { .. }
             | MockValue::ArrayBuffer { .. }
@@ -444,11 +614,15 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
         match cx.runtime.get(value) {
             MockValue::Undefined => false,
             MockValue::Scoped(_) | MockValue::Reclaimed => false,
+            MockValue::SymbolIterator => true,
             MockValue::Null => false,
             MockValue::Bool(value) => value,
             MockValue::Number(value) => value != 0.0 && !value.is_nan(),
             MockValue::String(value) => !value.is_empty(),
             MockValue::Object(_)
+            | MockValue::Iterable { .. }
+            | MockValue::Iterator { .. }
+            | MockValue::Callable(_)
             | MockValue::Promise { .. }
             | MockValue::Resolver { .. }
             | MockValue::ArrayBuffer { .. }
@@ -465,11 +639,15 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
         match cx.runtime.get(value) {
             MockValue::Undefined => Ok(arena.alloc_str("undefined")),
             MockValue::Scoped(_) | MockValue::Reclaimed => Ok(arena.alloc_str("undefined")),
+            MockValue::SymbolIterator => Ok(arena.alloc_str("Symbol(Symbol.iterator)")),
             MockValue::Null => Ok(arena.alloc_str("null")),
             MockValue::Number(value) => Ok(arena.alloc_str(&value.to_string())),
             MockValue::Bool(value) => Ok(arena.alloc_str(if value { "true" } else { "false" })),
             MockValue::String(value) => Ok(arena.alloc_str(&value)),
             MockValue::Object(_)
+            | MockValue::Iterable { .. }
+            | MockValue::Iterator { .. }
+            | MockValue::Callable(_)
             | MockValue::Promise { .. }
             | MockValue::Resolver { .. }
             | MockValue::ArrayBuffer { .. }
@@ -1313,6 +1491,71 @@ mod tests {
         rt.object(fields)
     }
 
+    #[test]
+    fn js_engine_global_returns_a_scope_tracked_global_object() {
+        let rt = runtime();
+        let reclaimed_before = rt.reclaimed_values();
+        rt.with_scope(|cx| {
+            let global = Engine::global(cx);
+            let symbol = Engine::get_property(cx, global, "Symbol").expect("Symbol");
+            assert!(!Engine::is_undefined(cx, symbol));
+        });
+        assert_eq!(rt.reclaimed_values() - reclaimed_before, 2);
+    }
+
+    #[test]
+    fn js_engine_get_property_value_tracks_success_and_propagates_error() {
+        let rt = runtime();
+        let iterable = rt.set_like(&[rt.number(7.0)]);
+        let reclaimed_before = rt.reclaimed_values();
+        rt.with_scope(|cx| {
+            let method = Engine::get_property_value(cx, iterable, rt.symbol_iterator)
+                .expect("Symbol.iterator method");
+            assert!(matches!(rt.get(method), MockValue::Callable(_)));
+        });
+        assert_eq!(rt.reclaimed_values() - reclaimed_before, 1);
+        assert_eq!(rt.property_value_calls.get(), 1);
+
+        rt.set_property_value_error(iterable, rt.symbol_iterator, "symbol getter failed");
+        rt.with_scope(|cx| {
+            assert_eq!(
+                Engine::get_property_value(cx, iterable, rt.symbol_iterator)
+                    .expect_err("symbol getter must fail"),
+                "symbol getter failed"
+            );
+        });
+        assert_eq!(rt.property_value_calls.get(), 2);
+    }
+
+    #[test]
+    fn js_engine_call_tracks_success_and_propagates_error() {
+        let rt = runtime();
+        let iterable = rt.set_like(&[rt.number(11.0)]);
+        let MockValue::Iterable {
+            iterator_method, ..
+        } = rt.get(iterable)
+        else {
+            panic!("set-like mock must be iterable");
+        };
+        let reclaimed_before = rt.reclaimed_values();
+        rt.with_scope(|cx| {
+            let iterator = Engine::call(cx, iterator_method, iterable, &[]).expect("iterator");
+            assert!(matches!(rt.get(iterator), MockValue::Iterator { .. }));
+        });
+        assert_eq!(rt.reclaimed_values() - reclaimed_before, 1);
+        assert_eq!(rt.calls.get(), 1);
+
+        rt.set_call_error(iterator_method, "iterator method failed");
+        rt.with_scope(|cx| {
+            assert_eq!(
+                Engine::call(cx, iterator_method, iterable, &[])
+                    .expect_err("iterator call must fail"),
+                "iterator method failed"
+            );
+        });
+        assert_eq!(rt.calls.get(), 2);
+    }
+
     fn release_device_held_values(rt: &Runtime, cx: Context<'_>, device: Value) {
         let payload = Engine::payload(cx, device, crate::GPU_DEVICE_CLASS)
             .and_then(|payload| payload.downcast_ref::<DevicePayload<Engine>>())
@@ -1447,7 +1690,7 @@ mod tests {
             .expect("shader descriptor");
         assert_eq!(read_view(shader.label), b"null");
 
-        let empty = descriptor(&rt, &[("length", rt.number(0.0))]);
+        let empty = rt.set_like(&[]);
         let bind_group_layout_desc = descriptor(&rt, &[("label", rt.null()), ("entries", empty)]);
         let bind_group_layout =
             convert_bind_group_layout_descriptor::<Engine>(cx, bind_group_layout_desc, &arena)
@@ -1715,7 +1958,7 @@ mod tests {
         let cx = rt.context();
         let arena = Arena::new();
 
-        let empty_entries = descriptor(&rt, &[("length", rt.number(0.0))]);
+        let empty_entries = rt.set_like(&[]);
         let empty_desc = descriptor(&rt, &[("entries", empty_entries)]);
         let empty = convert_bind_group_layout_descriptor::<Engine>(cx, empty_desc, &arena)
             .expect("empty layout");
@@ -1731,13 +1974,88 @@ mod tests {
                 ("buffer", buffer_layout),
             ],
         );
-        let entries = descriptor(&rt, &[("length", rt.number(1.0)), ("0", entry)]);
+        let entries = rt.set_like(&[entry]);
         let desc = descriptor(&rt, &[("entries", entries)]);
         let one = convert_bind_group_layout_descriptor::<Engine>(cx, desc, &arena)
             .expect("one-entry layout");
         assert_eq!(one.entryCount, 1);
         assert!(!one.entries.is_null());
         assert_eq!(unsafe { (*one.entries).binding }, 0);
+    }
+
+    #[test]
+    fn j11_array_like_sequence_is_rejected_as_not_iterable() {
+        let rt = runtime();
+        let first = Engine::new_instance(
+            rt.context(),
+            crate::GPU_BIND_GROUP_LAYOUT_CLASS,
+            Box::new(BindGroupLayoutPayload {
+                layout: fake_handle(41),
+            }),
+        )
+        .expect("first layout");
+        let second = Engine::new_instance(
+            rt.context(),
+            crate::GPU_BIND_GROUP_LAYOUT_CLASS,
+            Box::new(BindGroupLayoutPayload {
+                layout: fake_handle(42),
+            }),
+        )
+        .expect("second layout");
+        let array_like = descriptor(
+            &rt,
+            &[("length", rt.number(2.0)), ("0", first), ("1", second)],
+        );
+        let desc = descriptor(&rt, &[("bindGroupLayouts", array_like)]);
+        let arena = Arena::new();
+
+        rt.with_scope(|cx| {
+            assert_eq!(
+                convert_pipeline_layout_descriptor::<Engine>(cx, desc, &arena)
+                    .expect_err("array-like must be rejected"),
+                "TypeError: bindGroupLayouts is not iterable"
+            );
+        });
+        assert_eq!(arena.allocations.borrow().len(), 0);
+    }
+
+    #[test]
+    fn j11_set_like_sequence_is_accepted_in_iteration_order() {
+        let rt = runtime();
+        let first_handle = fake_handle(51);
+        let second_handle = fake_handle(52);
+        let first = Engine::new_instance(
+            rt.context(),
+            crate::GPU_BIND_GROUP_LAYOUT_CLASS,
+            Box::new(BindGroupLayoutPayload {
+                layout: first_handle,
+            }),
+        )
+        .expect("first layout");
+        let second = Engine::new_instance(
+            rt.context(),
+            crate::GPU_BIND_GROUP_LAYOUT_CLASS,
+            Box::new(BindGroupLayoutPayload {
+                layout: second_handle,
+            }),
+        )
+        .expect("second layout");
+        let set_like = rt.set_like(&[first, second]);
+        let desc = descriptor(&rt, &[("bindGroupLayouts", set_like)]);
+        let arena = Arena::new();
+
+        rt.with_scope(|cx| {
+            let converted = convert_pipeline_layout_descriptor::<Engine>(cx, desc, &arena)
+                .expect("set-like sequence");
+            assert_eq!(converted.bindGroupLayoutCount, 2);
+            let layouts = unsafe {
+                std::slice::from_raw_parts(
+                    converted.bindGroupLayouts,
+                    converted.bindGroupLayoutCount,
+                )
+            };
+            assert_eq!(layouts, [first_handle, second_handle]);
+        });
     }
 
     #[test]
@@ -1749,7 +2067,7 @@ mod tests {
             descriptor(&rt, &[("visibility", rt.number(1.0))]),
             descriptor(&rt, &[("binding", rt.number(0.0))]),
         ] {
-            let entries = descriptor(&rt, &[("length", rt.number(1.0)), ("0", entry)]);
+            let entries = rt.set_like(&[entry]);
             let desc = descriptor(&rt, &[("entries", entries)]);
             assert!(convert_bind_group_layout_descriptor::<Engine>(cx, desc, &arena).is_err());
         }
@@ -1759,7 +2077,7 @@ mod tests {
             &[("binding", rt.number(0.0)), ("visibility", rt.number(1.0))],
         );
         rt.set_property_error(entry, "visibility", "visibility getter failed");
-        let entries = descriptor(&rt, &[("length", rt.number(1.0)), ("0", entry)]);
+        let entries = rt.set_like(&[entry]);
         let desc = descriptor(&rt, &[("entries", entries)]);
         assert_eq!(
             convert_bind_group_layout_descriptor::<Engine>(cx, desc, &arena)
@@ -1883,14 +2201,7 @@ mod tests {
             &[("binding", rt.number(0.0)), ("resource", first_resource)],
         );
         let bad_entry = descriptor(&rt, &[("binding", rt.number(1.0))]);
-        let entries = descriptor(
-            &rt,
-            &[
-                ("length", rt.number(2.0)),
-                ("0", first_entry),
-                ("1", bad_entry),
-            ],
-        );
+        let entries = rt.set_like(&[first_entry, bad_entry]);
         let desc = descriptor(&rt, &[("layout", layout), ("entries", entries)]);
         let arena = Arena::new();
 
@@ -1900,6 +2211,49 @@ mod tests {
         GPU_STATE.with(|state| {
             assert_eq!(state.borrow().buffer_add_refs, 0);
         });
+    }
+
+    #[test]
+    fn j11_mid_iteration_throw_leaks_no_addref_and_allocates_no_entries() {
+        reset_gpu();
+        let rt = runtime();
+        let arena = Arena::new();
+
+        rt.with_scope(|cx| {
+            let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+            let buffer_desc =
+                descriptor(&rt, &[("size", rt.number(16.0)), ("usage", rt.number(8.0))]);
+            let buffer =
+                device_create_buffer::<Engine>(cx, device, &[buffer_desc]).expect("buffer");
+            let layout = Engine::new_instance(
+                cx,
+                crate::GPU_BIND_GROUP_LAYOUT_CLASS,
+                Box::new(BindGroupLayoutPayload {
+                    layout: fake_handle(77),
+                }),
+            )
+            .expect("layout");
+            let resource = descriptor(&rt, &[("buffer", buffer)]);
+            let entry = descriptor(&rt, &[("binding", rt.number(0.0)), ("resource", resource)]);
+            let entries = rt.throwing_iterable(&[entry, entry], 1);
+            let desc = descriptor(&rt, &[("layout", layout), ("entries", entries)]);
+
+            let error = convert_bind_group_descriptor::<Engine>(cx, desc, &arena)
+                .err()
+                .expect("second next() must throw");
+            assert_eq!(error, "iterator next 1 failed");
+            assert_eq!(arena.allocations.borrow().len(), 0);
+            assert_eq!(
+                device_create_bind_group::<Engine>(cx, device, &[desc])
+                    .expect_err("createBindGroup must propagate next() throw"),
+                "iterator next 1 failed"
+            );
+        });
+
+        assert_eq!(arena.allocations.borrow().len(), 0);
+        GPU_STATE.with(|state| assert_eq!(state.borrow().buffer_add_refs, 0));
+        assert_eq!(rt.live_scoped_values(), 0);
+        assert!(rt.calls.get() >= 4);
     }
 
     /// This asserts we call `AddRef` once per stored buffer. It does not prove
@@ -1923,7 +2277,7 @@ mod tests {
         .expect("layout");
         let resource = descriptor(&rt, &[("buffer", buffer)]);
         let entry = descriptor(&rt, &[("binding", rt.number(0.0)), ("resource", resource)]);
-        let entries = descriptor(&rt, &[("length", rt.number(1.0)), ("0", entry)]);
+        let entries = rt.set_like(&[entry]);
         let desc = descriptor(&rt, &[("layout", layout), ("entries", entries)]);
 
         let bind_group =
@@ -2434,7 +2788,7 @@ mod tests {
         let queue = device_queue_get::<Engine>(cx, device).expect("queue");
         let encoder = device_create_command_encoder::<Engine>(cx, device, &[]).expect("encoder");
         let command = command_encoder_finish::<Engine>(cx, encoder, &[]).expect("command");
-        let commands = descriptor(&rt, &[("length", rt.number(1.0)), ("0", command)]);
+        let commands = rt.set_like(&[command]);
 
         queue_submit::<Engine>(cx, queue, &[commands]).expect("first submit");
         assert_eq!(

@@ -915,3 +915,32 @@ engine's habit until it was written down:
    contract. J17's conformance script must catch every rejection explicitly
    (block 04 → J20). This is the same class of silent divergence J1/J2 closed,
    caught at the spec stage this time.
+
+---
+
+## Q9 — Phase 3 handoffs: J11 first, then the JSC adapter
+
+**Dispatched 2026-07-10, in this order and deliberately.** J11 (iterator-based
+sequence conversion) changes `core/`'s conversion machinery and both existing
+test surfaces. Landing it *before* the JSC adapter keeps the JSC exit gate
+honest: when the adapter is wired, `core/` is already sequence-correct and the
+gate measures only the adapter. Landing them together would let sequence churn
+hide under "the gate firing, as declared (J3)".
+
+**P3a — J11 / B20 close-out.** Trait gains `global` / `get_property_value` /
+`call` (additive); `sequence_len`/`sequence_item` are deleted with their only
+consumer; conversion walks `Symbol.iterator` per WebIDL. B20's deviation tests
+become conformance tests: array-likes rejected, `Set`s accepted, mid-iteration
+failure aborts cleanly (B5). The mock models the protocol as the harder engine:
+property reads on it can throw, and iteration is observable.
+
+**P3b — the JSC adapter (J4–J21).** Follows P3a. Recorded here when dispatched.
+
+**P3a landed (2026-07-10), reviewed and accepted.** Two known simplifications
+against WebIDL's full sequence algorithm, recorded rather than silent:
+(1) a non-object value (e.g. a primitive string) is not pre-rejected — it walks
+its prototype's `Symbol.iterator` and fails per-element, so the outcome is still
+a `TypeError` with a less precise message; (2) an element-conversion failure
+does not invoke `IteratorClose` (`return()`), so a generator's `finally` does
+not run on abort. Both are honest-mistake-visible and trusted-script-acceptable
+(invariant 8); revisit if the upstream CTS is ever run.

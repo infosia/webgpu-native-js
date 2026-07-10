@@ -560,6 +560,48 @@ impl core::JsEngine for Engine {
         }
     }
 
+    fn global(cx: Self::Context<'_>) -> Self::Value {
+        let value = unsafe { qjs::JS_GetGlobalObject(cx.ctx) };
+        cx.scope.track(value);
+        value
+    }
+
+    fn get_property_value(
+        cx: Self::Context<'_>,
+        obj: Self::Value,
+        key: Self::Value,
+    ) -> core::Result<Self::Value, Self::Error> {
+        let atom = unsafe { qjs::JS_ValueToAtom(cx.ctx, key) };
+        if atom == qjs::JS_ATOM_NULL {
+            return Err(take_exception_value(cx));
+        }
+        let value = unsafe { qjs::JS_GetProperty(cx.ctx, obj, atom) };
+        unsafe { qjs::JS_FreeAtom(cx.ctx, atom) };
+        if unsafe { qjs::JS_IsException(value) } {
+            Err(take_exception_value(cx))
+        } else {
+            cx.scope.track(value);
+            Ok(value)
+        }
+    }
+
+    fn call(
+        cx: Self::Context<'_>,
+        f: Self::Value,
+        this: Self::Value,
+        args: &[Self::Value],
+    ) -> core::Result<Self::Value, Self::Error> {
+        let argc = c_int::try_from(args.len())
+            .map_err(|_| Self::type_error(cx, "too many call arguments"))?;
+        let value = unsafe { qjs::JS_Call(cx.ctx, f, this, argc, args.as_ptr().cast_mut()) };
+        if unsafe { qjs::JS_IsException(value) } {
+            Err(take_exception_value(cx))
+        } else {
+            cx.scope.track(value);
+            Ok(value)
+        }
+    }
+
     fn is_undefined(_cx: Self::Context<'_>, value: Self::Value) -> bool {
         unsafe { qjs::JS_IsUndefined(value) }
     }
@@ -1827,6 +1869,20 @@ mod tests {
         unsafe { qjs::JS_FreeValue(runtime.raw_context(), value) };
     }
 
+    fn engine_ok<T>(result: core::Result<T, qjs::JSValue>, message: &str) -> T {
+        match result {
+            Ok(value) => value,
+            Err(_) => panic!("{message}"),
+        }
+    }
+
+    fn engine_err<T>(result: core::Result<T, qjs::JSValue>, message: &str) -> qjs::JSValue {
+        match result {
+            Ok(_) => panic!("{message}"),
+            Err(error) => error,
+        }
+    }
+
     fn global_value(runtime: &Runtime, name: &str) -> qjs::JSValue {
         let name = std::ffi::CString::new(name).expect("global name");
         let global = unsafe { qjs::JS_GetGlobalObject(runtime.raw_context()) };
@@ -1834,6 +1890,94 @@ mod tests {
         unsafe { qjs::JS_FreeValue(runtime.raw_context(), global) };
         assert!(!unsafe { qjs::JS_IsException(value) }, "global lookup");
         value
+    }
+
+    #[test]
+    fn js_engine_global_returns_a_scope_tracked_owned_value() {
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let scope = super::Scope::new(runtime.raw_context());
+        let cx = Context {
+            ctx: runtime.raw_context(),
+            scope: &scope,
+        };
+
+        let global = Engine::global(cx);
+        assert!(!unsafe { qjs::JS_IsUndefined(global) });
+        assert_eq!(scope.values.borrow().len(), 1);
+    }
+
+    #[test]
+    fn js_engine_get_property_value_tracks_success_and_owned_error() {
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let object = runtime
+            .eval(
+                "({ answer: 42, get boom() { throw new Error('property boom'); } })",
+                "property-value-primitives.js",
+            )
+            .expect("object");
+        {
+            let scope = super::Scope::new(runtime.raw_context());
+            let cx = Context {
+                ctx: runtime.raw_context(),
+                scope: &scope,
+            };
+            let key = engine_ok(Engine::string(cx, "answer"), "answer key");
+            let value = engine_ok(Engine::get_property_value(cx, object, key), "answer value");
+            assert_eq!(engine_ok(Engine::to_f64(cx, value), "answer number"), 42.0);
+            assert_eq!(scope.values.borrow().len(), 2);
+
+            let error_key = engine_ok(Engine::string(cx, "boom"), "boom key");
+            let error = engine_err(
+                Engine::get_property_value(cx, object, error_key),
+                "getter must throw",
+            );
+            assert!(!unsafe { qjs::JS_HasException(runtime.raw_context()) });
+            let arena = core::Arena::new();
+            assert!(engine_ok(Engine::to_str(cx, error, &arena), "error string")
+                .contains("property boom"));
+            assert_eq!(scope.values.borrow().len(), 4);
+        }
+        unsafe { qjs::JS_FreeValue(runtime.raw_context(), object) };
+    }
+
+    #[test]
+    fn js_engine_call_tracks_success_and_owned_error() {
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let function = runtime
+            .eval(
+                "(function (value) { if (value < 0) throw new Error('call boom'); return this.base + value; })",
+                "call-primitive-function.js",
+            )
+            .expect("function");
+        let receiver = runtime
+            .eval("({ base: 40 })", "call-primitive-receiver.js")
+            .expect("receiver");
+        {
+            let scope = super::Scope::new(runtime.raw_context());
+            let cx = Context {
+                ctx: runtime.raw_context(),
+                scope: &scope,
+            };
+            let two = engine_ok(Engine::number(cx, 2.0), "two");
+            let value = engine_ok(Engine::call(cx, function, receiver, &[two]), "call result");
+            assert_eq!(engine_ok(Engine::to_f64(cx, value), "result number"), 42.0);
+
+            let negative = engine_ok(Engine::number(cx, -1.0), "negative");
+            let error = engine_err(
+                Engine::call(cx, function, receiver, &[negative]),
+                "function must throw",
+            );
+            assert!(!unsafe { qjs::JS_HasException(runtime.raw_context()) });
+            let arena = core::Arena::new();
+            assert!(
+                engine_ok(Engine::to_str(cx, error, &arena), "error string").contains("call boom")
+            );
+            assert_eq!(scope.values.borrow().len(), 4);
+        }
+        unsafe {
+            qjs::JS_FreeValue(runtime.raw_context(), function);
+            qjs::JS_FreeValue(runtime.raw_context(), receiver);
+        }
     }
 
     impl AdapterRequestState {
@@ -2885,9 +3029,7 @@ mod tests {
     }
 
     #[test]
-    /// Documents a known deviation from WebIDL: plain array-like objects are
-    /// accepted by today's temporary length/index sequence conversion.
-    fn sequence_conversion_array_like_is_known_webidl_deviation() {
+    fn sequence_conversion_rejects_array_like_objects() {
         let setup = native_setup();
         let runtime = Runtime::new().expect("quickjs runtime");
         let wrapped = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
@@ -2897,19 +3039,26 @@ mod tests {
         eval_drop(
             &runtime,
             r#"
-                // Known deviation: WebIDL sequence<T> is iterator-based and
-                // rejects plain array-like objects. Phase 4 codegen will replace
-                // today's temporary length/index conversion.
-                var deviationBgl = device.createBindGroupLayout({ entries: [] });
-                var arrayLikeLayouts = { length: 1, 0: deviationBgl };
-                var deviationLayout = device.createPipelineLayout({ bindGroupLayouts: arrayLikeLayouts });
+                var arrayLikeEncoder = device.createCommandEncoder();
+                var arrayLikeCommand = arrayLikeEncoder.finish();
+                var arrayLikeCommands = { length: 1, 0: arrayLikeCommand };
+                var arrayLikeThrewTypeError = false;
+                try {
+                    device.queue.submit(arrayLikeCommands);
+                } catch (e) {
+                    arrayLikeThrewTypeError = e instanceof TypeError &&
+                        String(e).indexOf('commands is not iterable') >= 0;
+                }
+                if (!arrayLikeThrewTypeError) {
+                    throw new Error('array-like sequence must throw TypeError');
+                }
             "#,
-            "sequence-array-like-deviation.js",
+            "sequence-array-like-conformance.js",
         );
         eval_drop(
             &runtime,
-            "deviationBgl = deviationLayout = null;",
-            "sequence-array-like-deviation-cleanup.js",
+            "arrayLikeEncoder = arrayLikeCommand = arrayLikeCommands = null;",
+            "sequence-array-like-conformance-cleanup.js",
         );
         runtime.clear_global("device").expect("clear device");
         runtime.run_gc();
@@ -2918,9 +3067,7 @@ mod tests {
     }
 
     #[test]
-    /// Documents a known deviation from WebIDL: iterable sequence values such
-    /// as `Set` are rejected until Phase 4 codegen defines iterator conversion.
-    fn sequence_conversion_set_rejection_is_known_webidl_deviation() {
+    fn sequence_conversion_accepts_set_and_generator_iterables() {
         let setup = native_setup();
         let runtime = Runtime::new().expect("quickjs runtime");
         let wrapped = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
@@ -2930,26 +3077,66 @@ mod tests {
         eval_drop(
             &runtime,
             r#"
-                // Known deviation: WebIDL sequence<T> accepts iterable objects
-                // such as Set. Phase 4 codegen will replace today's temporary
-                // length/index conversion.
-                var setBgl = device.createBindGroupLayout({ entries: [] });
-                var threw = false;
-                try {
-                    device.createPipelineLayout({ bindGroupLayouts: new Set([setBgl]) });
-                } catch (e) {
-                    threw = true;
+                var setEncoder = device.createCommandEncoder();
+                var setCommand = setEncoder.finish();
+                device.queue.submit(new Set([setCommand]));
+
+                var generatorEncoder = device.createCommandEncoder();
+                var generatorCommand = generatorEncoder.finish();
+                function* commandGenerator() {
+                    yield generatorCommand;
                 }
-                if (!threw) {
-                    throw new Error('Set sequence should be rejected by current deviation');
-                }
+                device.queue.submit(commandGenerator());
             "#,
-            "sequence-set-deviation.js",
+            "sequence-iterable-conformance.js",
         );
         eval_drop(
             &runtime,
-            "setBgl = null;",
-            "sequence-set-deviation-cleanup.js",
+            "setEncoder = setCommand = generatorEncoder = generatorCommand = null;",
+            "sequence-iterable-conformance-cleanup.js",
+        );
+        runtime.clear_global("device").expect("clear device");
+        runtime.run_gc();
+        runtime.run_gc();
+        let _ = runtime.drain_releases().expect("drain");
+    }
+
+    #[test]
+    fn sequence_conversion_propagates_mid_iteration_throw_without_consuming() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let wrapped = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("device", wrapped)
+            .expect("set device");
+        eval_drop(
+            &runtime,
+            r#"
+                var throwingEncoder = device.createCommandEncoder();
+                var throwingCommand = throwingEncoder.finish();
+                function* throwingCommands() {
+                    yield throwingCommand;
+                    throw new Error('mid-iteration next failed');
+                }
+                var nextErrorPropagated = false;
+                try {
+                    device.queue.submit(throwingCommands());
+                } catch (e) {
+                    nextErrorPropagated = String(e).indexOf('mid-iteration next failed') >= 0;
+                }
+                if (!nextErrorPropagated) {
+                    throw new Error('iterator next error did not propagate');
+                }
+
+                // Conversion failed before submit consumed any yielded command.
+                device.queue.submit([throwingCommand]);
+            "#,
+            "sequence-mid-iteration-error.js",
+        );
+        eval_drop(
+            &runtime,
+            "throwingEncoder = throwingCommand = null;",
+            "sequence-mid-iteration-error-cleanup.js",
         );
         runtime.clear_global("device").expect("clear device");
         runtime.run_gc();

@@ -291,6 +291,21 @@ pub trait JsEngine: Sized {
         obj: Self::Value,
         key: &str,
     ) -> Result<Self::Value, Self::Error>;
+    /// Returns the engine's global object as a call-scoped owned value.
+    fn global(cx: Self::Context<'_>) -> Self::Value;
+    /// Gets an object property whose key is itself a JavaScript value.
+    fn get_property_value(
+        cx: Self::Context<'_>,
+        obj: Self::Value,
+        key: Self::Value,
+    ) -> Result<Self::Value, Self::Error>;
+    /// Calls a JavaScript function with the provided receiver and arguments.
+    fn call(
+        cx: Self::Context<'_>,
+        f: Self::Value,
+        this: Self::Value,
+        args: &[Self::Value],
+    ) -> Result<Self::Value, Self::Error>;
     /// Returns true for JavaScript `undefined`.
     fn is_undefined(cx: Self::Context<'_>, value: Self::Value) -> bool;
     /// Returns true for JavaScript `null`.
@@ -3153,22 +3168,32 @@ fn optional_nullable_string<E: JsEngine>(
     }
 }
 
-fn sequence_len<E: JsEngine>(
+fn convert_sequence<E: JsEngine, T>(
     cx: E::Context<'_>,
     value: E::Value,
     name: &'static str,
-) -> Result<usize, E::Error> {
-    let len = required_member::<E>(cx, value, "length")?;
-    let len = enforce_u64::<E>(cx, len, name)?;
-    usize::try_from(len).map_err(|_| E::type_error(cx, name))
-}
+    mut convert: impl FnMut(E::Value) -> Result<T, E::Error>,
+) -> Result<Vec<T>, E::Error> {
+    let global = E::global(cx);
+    let symbol = E::get_property(cx, global, "Symbol")?;
+    let iterator_key = E::get_property(cx, symbol, "iterator")?;
+    let iterator_method = E::get_property_value(cx, value, iterator_key)?;
+    if E::is_undefined(cx, iterator_method) || E::is_null(cx, iterator_method) {
+        return Err(E::type_error(cx, &format!("{name} is not iterable")));
+    }
 
-fn sequence_item<E: JsEngine>(
-    cx: E::Context<'_>,
-    value: E::Value,
-    index: usize,
-) -> Result<E::Value, E::Error> {
-    E::get_property(cx, value, &index.to_string())
+    let iterator = E::call(cx, iterator_method, value, &[])?;
+    let next = E::get_property(cx, iterator, "next")?;
+    let mut converted = Vec::new();
+    loop {
+        let result = E::call(cx, next, iterator, &[])?;
+        let done = E::get_property(cx, result, "done")?;
+        if E::to_bool(cx, done) {
+            return Ok(converted);
+        }
+        let item = E::get_property(cx, result, "value")?;
+        converted.push(convert(item)?);
+    }
 }
 
 fn convert_bind_group_layout_entries<'a, E: JsEngine>(
@@ -3176,12 +3201,9 @@ fn convert_bind_group_layout_entries<'a, E: JsEngine>(
     value: E::Value,
     arena: &'a Arena,
 ) -> Result<&'a [WGPUBindGroupLayoutEntry], E::Error> {
-    let len = sequence_len::<E>(cx, value, "entries.length")?;
-    let mut entries = Vec::with_capacity(len);
-    for index in 0..len {
-        let item = sequence_item::<E>(cx, value, index)?;
-        entries.push(convert_bind_group_layout_entry::<E>(cx, item)?);
-    }
+    let entries = convert_sequence::<E, _>(cx, value, "entries", |item| {
+        convert_bind_group_layout_entry::<E>(cx, item)
+    })?;
     Ok(arena.alloc_slice(entries))
 }
 
@@ -3257,17 +3279,14 @@ fn convert_bind_group_entries<'a, E: JsEngine + 'static>(
     value: E::Value,
     arena: &'a Arena,
 ) -> Result<(&'a [WGPUBindGroupEntry], Vec<WGPUBuffer>), E::Error> {
-    let len = sequence_len::<E>(cx, value, "entries.length")?;
-    let mut entries = Vec::with_capacity(len);
     let mut buffers = Vec::new();
-    for index in 0..len {
-        let item = sequence_item::<E>(cx, value, index)?;
+    let entries = convert_sequence::<E, _>(cx, value, "entries", |item| {
         let entry = convert_bind_group_entry::<E>(cx, item)?;
         if !entry.buffer.is_null() {
             buffers.push(entry.buffer);
         }
-        entries.push(entry);
-    }
+        Ok(entry)
+    })?;
     Ok((arena.alloc_slice(entries), buffers))
 }
 
@@ -3311,14 +3330,9 @@ fn convert_bind_group_layout_sequence<'a, E: JsEngine + 'static>(
     value: E::Value,
     arena: &'a Arena,
 ) -> Result<&'a [WGPUBindGroupLayout], E::Error> {
-    let len = sequence_len::<E>(cx, value, "bindGroupLayouts.length")?;
-    let mut layouts = Vec::with_capacity(len);
-    for index in 0..len {
-        layouts.push(bind_group_layout_handle::<E>(
-            cx,
-            sequence_item::<E>(cx, value, index)?,
-        )?);
-    }
+    let layouts = convert_sequence::<E, _>(cx, value, "bindGroupLayouts", |item| {
+        bind_group_layout_handle::<E>(cx, item)
+    })?;
     Ok(arena.alloc_slice(layouts))
 }
 
@@ -3326,15 +3340,9 @@ fn convert_command_buffer_sequence<E: JsEngine + 'static>(
     cx: E::Context<'_>,
     value: E::Value,
 ) -> Result<Vec<Arc<Mutex<CommandBufferState>>>, E::Error> {
-    let len = sequence_len::<E>(cx, value, "commands.length")?;
-    let mut commands = Vec::with_capacity(len);
-    for index in 0..len {
-        commands.push(command_buffer_state::<E>(
-            cx,
-            sequence_item::<E>(cx, value, index)?,
-        )?);
-    }
-    Ok(commands)
+    convert_sequence::<E, _>(cx, value, "commands", |item| {
+        command_buffer_state::<E>(cx, item)
+    })
 }
 
 fn required_member<E: JsEngine>(
