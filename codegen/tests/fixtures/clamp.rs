@@ -3,7 +3,7 @@ pub(super) fn convert_sampler_descriptor<E: JsEngine>(
     cx: E::Context<'_>,
     value: E::Value,
 ) -> Result<WGPUSamplerDescriptor, E::Error> {
-    let max_anisotropy_value = E::get_property(cx, value, "maxAnisotropy")?;
+    let max_anisotropy_value = dictionary_member::<E>(cx, value, "maxAnisotropy")?;
     Ok(WGPUSamplerDescriptor {
         nextInChain: ptr::null_mut(),
         // WebIDL `[Clamp]`: NaN becomes +0, the value is clamped to the

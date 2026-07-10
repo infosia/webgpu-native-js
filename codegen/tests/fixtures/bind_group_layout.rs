@@ -3,9 +3,9 @@ pub(super) fn convert_buffer_binding_layout<E: JsEngine>(
     cx: E::Context<'_>,
     value: E::Value,
 ) -> Result<WGPUBufferBindingLayout, E::Error> {
-    let type_value = E::get_property(cx, value, "type")?;
-    let has_dynamic_offset_value = E::get_property(cx, value, "hasDynamicOffset")?;
-    let min_binding_size_value = E::get_property(cx, value, "minBindingSize")?;
+    let type_value = dictionary_member::<E>(cx, value, "type")?;
+    let has_dynamic_offset_value = dictionary_member::<E>(cx, value, "hasDynamicOffset")?;
+    let min_binding_size_value = dictionary_member::<E>(cx, value, "minBindingSize")?;
     // B6: string enums are joined to C values; absence uses the IDL default or C sentinel.
     let type_ = if E::is_undefined(cx, type_value) {
         WGPUBufferBindingType_WGPUBufferBindingType_Uniform
@@ -44,23 +44,23 @@ pub(super) fn convert_bind_group_layout_entry<E: JsEngine>(
     // DR-M3: required dictionary members reject undefined.
     let binding_value = required_member::<E>(cx, value, "binding")?;
     let visibility_value = required_member::<E>(cx, value, "visibility")?;
-    let buffer_value = E::get_property(cx, value, "buffer")?;
-    let sampler_value = E::get_property(cx, value, "sampler")?;
+    let buffer_value = dictionary_member::<E>(cx, value, "buffer")?;
+    let sampler_value = dictionary_member::<E>(cx, value, "sampler")?;
     // G7 carve-out: fail early instead of silently emitting a wrong layout.
     if !E::is_undefined(cx, sampler_value) {
         return Err(E::type_error(cx, "sampler bindings are not supported yet"));
     }
-    let texture_value = E::get_property(cx, value, "texture")?;
+    let texture_value = dictionary_member::<E>(cx, value, "texture")?;
     // G7 carve-out: fail early instead of silently emitting a wrong layout.
     if !E::is_undefined(cx, texture_value) {
         return Err(E::type_error(cx, "texture bindings are not supported yet"));
     }
-    let storage_texture_value = E::get_property(cx, value, "storageTexture")?;
+    let storage_texture_value = dictionary_member::<E>(cx, value, "storageTexture")?;
     // G7 carve-out: fail early instead of silently emitting a wrong layout.
     if !E::is_undefined(cx, storage_texture_value) {
         return Err(E::type_error(cx, "storageTexture bindings are not supported yet"));
     }
-    let external_texture_value = E::get_property(cx, value, "externalTexture")?;
+    let external_texture_value = dictionary_member::<E>(cx, value, "externalTexture")?;
     // G7 carve-out: fail early instead of silently emitting a wrong layout.
     if !E::is_undefined(cx, external_texture_value) {
         return Err(E::type_error(cx, "externalTexture bindings are not supported yet"));
@@ -95,7 +95,7 @@ pub(super) fn convert_bind_group_layout_descriptor<E: JsEngine>(
     value: E::Value,
     arena: &Arena,
 ) -> Result<WGPUBindGroupLayoutDescriptor, E::Error> {
-    let label_value = E::get_property(cx, value, "label")?;
+    let label_value = dictionary_member::<E>(cx, value, "label")?;
     // DR-M3: required dictionary members reject undefined.
     let entries_value = required_member::<E>(cx, value, "entries")?;
     // B4: non-nullable strings default only for undefined; null is stringified.

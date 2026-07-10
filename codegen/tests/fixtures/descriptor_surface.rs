@@ -45,10 +45,10 @@ pub(super) fn convert_pipeline_layout_descriptor<E: JsEngine + 'static>(
     value: E::Value,
     arena: &Arena,
 ) -> Result<WGPUPipelineLayoutDescriptor, E::Error> {
-    let label_value = E::get_property(cx, value, "label")?;
+    let label_value = dictionary_member::<E>(cx, value, "label")?;
     // DR-M3: required dictionary members reject undefined.
     let bind_group_layouts_value = required_member::<E>(cx, value, "bindGroupLayouts")?;
-    let immediate_size_value = E::get_property(cx, value, "immediateSize")?;
+    let immediate_size_value = dictionary_member::<E>(cx, value, "immediateSize")?;
     // B4: non-nullable strings default only for undefined; null is stringified.
     let label = if E::is_undefined(cx, label_value) {
         ""
@@ -86,10 +86,10 @@ pub(super) fn convert_shader_module_descriptor<E: JsEngine>(
     value: E::Value,
     arena: &Arena,
 ) -> Result<WGPUShaderModuleDescriptor, E::Error> {
-    let label_value = E::get_property(cx, value, "label")?;
+    let label_value = dictionary_member::<E>(cx, value, "label")?;
     // DR-M3: required dictionary members reject undefined.
     let code_value = required_member::<E>(cx, value, "code")?;
-    let compilation_hints_value = E::get_property(cx, value, "compilationHints")?;
+    let compilation_hints_value = dictionary_member::<E>(cx, value, "compilationHints")?;
     // Policy skip: reject present unsupported API instead of ignoring it.
     if !E::is_undefined(cx, compilation_hints_value) {
         return Err(E::type_error(cx, "compilationHints are not supported yet"));
@@ -125,8 +125,8 @@ pub(super) fn convert_programmable_stage<E: JsEngine + 'static>(
 ) -> Result<WGPUComputeState, E::Error> {
     // DR-M3: required dictionary members reject undefined.
     let module_value = required_member::<E>(cx, value, "module")?;
-    let entry_point_value = E::get_property(cx, value, "entryPoint")?;
-    let constants_value = E::get_property(cx, value, "constants")?;
+    let entry_point_value = dictionary_member::<E>(cx, value, "entryPoint")?;
+    let constants_value = dictionary_member::<E>(cx, value, "constants")?;
     // Policy skip: reject present unsupported API instead of ignoring it.
     if !E::is_undefined(cx, constants_value) {
         return Err(E::type_error(cx, "constants are not supported yet"));

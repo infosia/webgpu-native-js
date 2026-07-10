@@ -157,6 +157,9 @@ Filled so far (headless-tested end-to-end under both engines):
 - `wrap_device` → `GPUDevice`; `GPU.requestAdapter` → `GPUAdapter.requestDevice`
 - `GPUBuffer`: `createBuffer` (incl. `mappedAtCreation`), `mapAsync`,
   `getMappedRange`, `unmap`, `destroy`, `size`/`usage`/`label`
+- `GPUTexture`: `createTexture`, `createView`, `destroy`, and readonly
+  dimensions/counts/dimension/format/usage; `GPUTextureView` creation retains
+  its parent texture
 - `GPUQueue`: `writeBuffer`, `submit`, `onSubmittedWorkDone` (`device.queue`
   is `[SameObject]`)
 - `createShaderModule` (WGSL), `createBindGroupLayout`, `createPipelineLayout`,
@@ -171,6 +174,12 @@ width checks on both the 64→32 and 64→`size_t` edges (tested with 2^32 on
 64-bit hosts), nullable vs non-null string distinctions, and required-member
 enforcement. Known deviations (e.g. validation errors surface as synchronous
 exceptions until error scopes land) are recorded in `specs/`, never silent.
+
+Texture tests on yawgpu's headless Noop backend cover descriptor conversion,
+creation, validation, attributes, and lifecycle only. Noop texture-copy
+operations do not move texel data, so the headless suite deliberately makes no
+claim about texture bytes; byte-level texture tests require a separately gated
+real GPU.
 
 Buffer mapping is strategy-selected per engine: **zero-copy detach** on QuickJS
 (the `ArrayBuffer` aliases the mapping and is detached at `unmap()`), and

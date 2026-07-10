@@ -115,7 +115,11 @@ fn clamp_fixture_is_distinct_from_enforce_range_and_matches_snapshot() {
 
     let (idl, yaml, policy) = fixture("clamp");
     let emitted = generate_conversions_with_policy(&idl, &yaml, &policy).expect("Clamp emission");
-    let expected = fs::read_to_string(fixtures().join("clamp.rs")).expect("Clamp snapshot");
+    let expectation = fixtures().join("clamp.rs");
+    if std::env::var_os("UPDATE_DESCRIPTOR_SNAPSHOTS").is_some() {
+        fs::write(&expectation, &emitted).expect("regenerate Clamp snapshot");
+    }
+    let expected = fs::read_to_string(expectation).expect("Clamp snapshot");
     assert_eq!(emitted, expected);
 
     let missing = idl.replace("[Clamp] ", "");
@@ -163,7 +167,7 @@ fn full_pinned_inputs_parse_and_subset_join_offline() {
     let report = join_inputs(&idl, &yaml).expect("full pinned join");
     assert_eq!(report.parser.remaining_bytes, 0);
     assert_eq!(report.parser.definitions, 209);
-    assert_eq!(report.interfaces.len(), 12);
+    assert_eq!(report.interfaces.len(), 14);
     assert!(report.parser.saw_enforce_range);
     assert!(report.parser.saw_same_object);
     assert!(report.parser.saw_exposed);
@@ -196,7 +200,7 @@ fn generated_dispatch_macro_matches_focused_shape_fixture() {
     let expected =
         fs::read_to_string(fixtures().join("dispatch_surface.rs")).expect("dispatch snapshot");
     assert_eq!(dispatch_macro_surface(&emitted), expected);
-    assert_eq!(expected.matches(", unsafe fn(").count(), 53);
+    assert_eq!(expected.matches(", unsafe fn(").count(), 68);
 }
 
 #[test]
@@ -249,6 +253,8 @@ fn generated_lifecycle_covers_every_selected_class_and_retention_set() {
         "queue_class",
         "shader_module_class",
         "sampler_class",
+        "texture_class",
+        "texture_view_class",
         "bind_group_layout_class",
         "pipeline_layout_class",
         "bind_group_class",
@@ -273,6 +279,9 @@ fn generated_lifecycle_covers_every_selected_class_and_retention_set() {
     ));
     assert!(emitted.contains(
         "pub struct ComputePipelinePayload {\n    pub(super) pipeline: WGPUComputePipeline,\n    pub(super) module: WGPUShaderModule,\n    pub(super) layout: WGPUPipelineLayout,\n}"
+    ));
+    assert!(emitted.contains(
+        "pub struct TextureViewPayload {\n    pub(super) texture_view: WGPUTextureView,\n    pub(super) texture: WGPUTexture,\n}"
     ));
 }
 
@@ -438,8 +447,11 @@ fn new_descriptor_emission_shapes_match_snapshot() {
         selected.push_str(emitted[start..end].trim_end());
         selected.push('\n');
     }
-    let expected =
-        fs::read_to_string(fixtures().join("descriptor_surface.rs")).expect("shape snapshot");
+    let expected = fixtures().join("descriptor_surface.rs");
+    if std::env::var_os("UPDATE_DESCRIPTOR_SNAPSHOTS").is_some() {
+        fs::write(&expected, &selected).expect("regenerate descriptor shape snapshot");
+    }
+    let expected = fs::read_to_string(expected).expect("shape snapshot");
     assert_eq!(selected, expected);
 }
 
@@ -447,8 +459,42 @@ fn new_descriptor_emission_shapes_match_snapshot() {
 fn emitted_descriptor_matches_snapshot() {
     let (idl, yaml, policy) = fixture("emission");
     let emitted = generate_conversions_with_policy(&idl, &yaml, &policy).expect("fixture emission");
-    let expected = fs::read_to_string(fixtures().join("emission.rs")).expect("snapshot");
+    let expectation = fixtures().join("emission.rs");
+    if std::env::var_os("UPDATE_DESCRIPTOR_SNAPSHOTS").is_some() {
+        fs::write(&expectation, &emitted).expect("regenerate emission snapshot");
+    }
+    let expected = fs::read_to_string(expectation).expect("snapshot");
     assert_eq!(emitted, expected);
+}
+
+#[test]
+fn emitted_dict_or_sequence_unions_match_snapshot() {
+    let (idl, yaml, policy) = fixture("dict_or_sequence");
+    let emitted = generate_conversions_with_policy(&idl, &yaml, &policy)
+        .expect("dict-or-sequence fixture emission");
+    let expectation = fixtures().join("dict_or_sequence.rs");
+    if std::env::var_os("UPDATE_DICT_OR_SEQUENCE").is_some() {
+        fs::write(&expectation, &emitted).expect("regenerate dict-or-sequence snapshot");
+    }
+    let expected = fs::read_to_string(expectation).expect("dict-or-sequence snapshot");
+    assert_eq!(emitted, expected);
+}
+
+#[test]
+fn dict_or_sequence_union_policy_rejects_wrong_alias_and_lengths() {
+    let (idl, yaml, policy) = fixture("dict_or_sequence");
+    let wrong_alias = idl.replace(
+        "sequence<GPUIntegerCoordinate> or GPUExtent3DDict",
+        "sequence<double> or GPUExtent3DDict",
+    );
+    let error = generate_conversions_with_policy(&wrong_alias, &yaml, &policy)
+        .expect_err("wrong union element must fail");
+    assert!(error.to_string().contains("unsupported typedef shape"));
+
+    let wrong_length = policy.replace("min_length = 1", "min_length = 0");
+    let error = generate_conversions_with_policy(&idl, &yaml, &wrong_length)
+        .expect_err("zero-length union policy must fail");
+    assert!(error.to_string().contains("invalid length range"));
 }
 
 #[test]
@@ -456,8 +502,11 @@ fn emitted_nested_layout_descriptors_match_snapshot() {
     let (idl, yaml, policy) = fixture("bind_group_layout");
     let emitted =
         generate_conversions_with_policy(&idl, &yaml, &policy).expect("nested fixture emission");
-    let expected =
-        fs::read_to_string(fixtures().join("bind_group_layout.rs")).expect("nested snapshot");
+    let expectation = fixtures().join("bind_group_layout.rs");
+    if std::env::var_os("UPDATE_DESCRIPTOR_SNAPSHOTS").is_some() {
+        fs::write(&expectation, &emitted).expect("regenerate nested snapshot");
+    }
+    let expected = fs::read_to_string(expectation).expect("nested snapshot");
     assert_eq!(emitted, expected);
 }
 
@@ -525,6 +574,42 @@ fn generated_enum_idl_only_values_require_a_reasoned_policy_skip() {
 fn report_renders_c_only_enum_values_by_mismatch_class() {
     let report = render_report(&joined_fixture("bind_group_layout"));
     assert!(report.contains("enum GPUBufferBindingType: C-only value binding_not_used"));
+}
+
+#[test]
+fn texture_format_join_covers_every_pinned_value_and_reports_only_the_sentinel() {
+    let (idl, yaml, _policy) = pinned_inputs();
+    let report = join_inputs(&idl, &yaml).expect("full pinned join");
+    let format = report
+        .enums
+        .iter()
+        .find(|pair| pair.idl_name.as_deref() == Some("GPUTextureFormat"))
+        .expect("texture format join");
+    assert_eq!(
+        format
+            .enum_values
+            .iter()
+            .filter(|value| value.idl_value.is_some())
+            .count(),
+        101
+    );
+    assert_eq!(
+        format
+            .enum_values
+            .iter()
+            .filter(|value| value.c_value.is_some())
+            .count(),
+        102
+    );
+    let rendered = render_report(&report);
+    let mismatch = rendered
+        .lines()
+        .filter(|line| line.contains("enum GPUTextureFormat:"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        mismatch,
+        ["  enum GPUTextureFormat: C-only value undefined"]
+    );
 }
 
 #[test]

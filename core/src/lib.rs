@@ -50,6 +50,8 @@ const GPU_VALIDATION_ERROR_CLASS: ClassId = ClassId(16);
 const GPU_OUT_OF_MEMORY_ERROR_CLASS: ClassId = ClassId(17);
 const GPU_INTERNAL_ERROR_CLASS: ClassId = ClassId(18);
 const GPU_DEVICE_LOST_INFO_CLASS: ClassId = ClassId(19);
+const GPU_TEXTURE_CLASS: ClassId = ClassId(20);
+const GPU_TEXTURE_VIEW_CLASS: ClassId = ClassId(21);
 const WEBIDL_U32_MAX: u64 = u32::MAX as u64;
 
 /// A JavaScript class identifier scoped to an engine context.
@@ -96,11 +98,15 @@ impl WGPUStringViewExt for WGPUStringView {
 pub use generated::{
     device_create_bind_group, device_create_bind_group_layout, device_create_command_encoder,
     device_create_compute_pipeline, device_create_pipeline_layout, device_create_sampler,
-    device_create_shader_module, finalize_bind_group, finalize_bind_group_layout,
-    finalize_command_encoder, finalize_compute_pipeline, finalize_pipeline_layout,
-    finalize_sampler, finalize_shader_module, sampler_label_get, sampler_label_set,
-    BindGroupLayoutPayload, BindGroupPayload, CommandEncoderPayload, ComputePipelinePayload,
-    GpuDispatch, PipelineLayoutPayload, ReleaseRequest, SamplerPayload, ShaderModulePayload,
+    device_create_shader_module, device_create_texture, finalize_bind_group,
+    finalize_bind_group_layout, finalize_command_encoder, finalize_compute_pipeline,
+    finalize_pipeline_layout, finalize_sampler, finalize_shader_module, finalize_texture,
+    finalize_texture_view, sampler_label_get, sampler_label_set, texture_create_view,
+    texture_depth_or_array_layers_get, texture_dimension_get, texture_format_get,
+    texture_height_get, texture_mip_level_count_get, texture_sample_count_get, texture_usage_get,
+    texture_width_get, BindGroupLayoutPayload, BindGroupPayload, CommandEncoderPayload,
+    ComputePipelinePayload, GpuDispatch, PipelineLayoutPayload, ReleaseRequest, SamplerPayload,
+    ShaderModulePayload, TexturePayload, TextureViewPayload,
 };
 /// A per-context environment shared by wrapper callbacks.
 pub struct Environment {
@@ -2151,6 +2157,23 @@ pub fn buffer_destroy<E: JsEngine + 'static>(
     })
 }
 
+/// Implements `GPUTexture.destroy`; native destruction is distinct from wrapper release.
+pub fn texture_destroy<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    _args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let payload = E::payload(cx, this, GPU_TEXTURE_CLASS)
+        .and_then(|payload| payload.downcast_ref::<TexturePayload>())
+        .ok_or_else(|| E::type_error(cx, "GPUTexture.destroy called on an incompatible object"))?;
+    if !payload.destroyed.swap(true, Ordering::AcqRel) {
+        unsafe {
+            (E::environment(cx).gpu().texture_destroy)(payload.texture);
+        }
+    }
+    Ok(E::undefined(cx))
+}
+
 /// Implements `GPU.requestAdapter`.
 pub fn gpu_request_adapter<E: JsEngine + 'static>(
     cx: E::Context<'_>,
@@ -3410,16 +3433,36 @@ fn convert_sequence<E: JsEngine, T>(
     cx: E::Context<'_>,
     value: E::Value,
     name: &'static str,
-    mut convert: impl FnMut(E::Value) -> Result<T, E::Error>,
+    convert: impl FnMut(E::Value) -> Result<T, E::Error>,
 ) -> Result<Vec<T>, E::Error> {
+    let Some(iterator_method) = sequence_iterator_method::<E>(cx, value)? else {
+        return Err(E::type_error(cx, &format!("{name} is not iterable")));
+    };
+    convert_sequence_from_method::<E, _>(cx, value, iterator_method, name, convert)
+}
+
+fn sequence_iterator_method<E: JsEngine>(
+    cx: E::Context<'_>,
+    value: E::Value,
+) -> Result<Option<E::Value>, E::Error> {
     let global = E::global(cx);
     let symbol = E::get_property(cx, global, "Symbol")?;
     let iterator_key = E::get_property(cx, symbol, "iterator")?;
     let iterator_method = E::get_property_value(cx, value, iterator_key)?;
     if E::is_undefined(cx, iterator_method) || E::is_null(cx, iterator_method) {
-        return Err(E::type_error(cx, &format!("{name} is not iterable")));
+        Ok(None)
+    } else {
+        Ok(Some(iterator_method))
     }
+}
 
+fn convert_sequence_from_method<E: JsEngine, T>(
+    cx: E::Context<'_>,
+    value: E::Value,
+    iterator_method: E::Value,
+    _name: &'static str,
+    mut convert: impl FnMut(E::Value) -> Result<T, E::Error>,
+) -> Result<Vec<T>, E::Error> {
     let iterator = E::call(cx, iterator_method, value, &[])?;
     let next = E::get_property(cx, iterator, "next")?;
     let mut converted = Vec::new();
@@ -3448,11 +3491,23 @@ fn required_member<E: JsEngine>(
     obj: E::Value,
     name: &'static str,
 ) -> Result<E::Value, E::Error> {
-    let value = E::get_property(cx, obj, name)?;
+    let value = dictionary_member::<E>(cx, obj, name)?;
     if E::is_undefined(cx, value) {
         Err(E::type_error(cx, name))
     } else {
         Ok(value)
+    }
+}
+
+fn dictionary_member<E: JsEngine>(
+    cx: E::Context<'_>,
+    obj: E::Value,
+    name: &'static str,
+) -> Result<E::Value, E::Error> {
+    if E::is_undefined(cx, obj) || E::is_null(cx, obj) {
+        Ok(E::undefined(cx))
+    } else {
+        E::get_property(cx, obj, name)
     }
 }
 
@@ -3520,6 +3575,16 @@ fn buffer_handle<E: JsEngine + 'static>(
         .and_then(|payload| payload.downcast_ref::<BufferPayload<E>>())
         .and_then(|payload| payload.state.lock().ok().map(|state| state.buffer))
         .ok_or_else(|| E::type_error(cx, "GPUBuffer is required"))
+}
+
+fn texture_handle<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    value: E::Value,
+) -> Result<WGPUTexture, E::Error> {
+    E::payload(cx, value, GPU_TEXTURE_CLASS)
+        .and_then(|payload| payload.downcast_ref::<TexturePayload>())
+        .map(|payload| payload.texture)
+        .ok_or_else(|| E::type_error(cx, "GPUTexture is required"))
 }
 
 fn shader_module_handle<E: JsEngine + 'static>(

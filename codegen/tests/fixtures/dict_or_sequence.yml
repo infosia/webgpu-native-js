@@ -1,0 +1,24 @@
+structs:
+  - name: extent_3D
+    type: standalone
+    members:
+      - name: width
+        type: uint32
+      - name: height
+        type: uint32
+        default: 1
+      - name: depth_or_array_layers
+        type: uint32
+        default: 1
+  - name: origin_3D
+    type: standalone
+    members:
+      - name: x
+        type: uint32
+        default: 0
+      - name: y
+        type: uint32
+        default: 0
+      - name: z
+        type: uint32
+        default: 0

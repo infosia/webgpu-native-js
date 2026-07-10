@@ -7,8 +7,8 @@ pub(super) fn convert_buffer_descriptor<E: JsEngine>(
     // DR-M3: required dictionary members reject undefined.
     let size_value = required_member::<E>(cx, value, "size")?;
     let usage_value = required_member::<E>(cx, value, "usage")?;
-    let mapped_at_creation_value = E::get_property(cx, value, "mappedAtCreation")?;
-    let label_value = E::get_property(cx, value, "label")?;
+    let mapped_at_creation_value = dictionary_member::<E>(cx, value, "mappedAtCreation")?;
+    let label_value = dictionary_member::<E>(cx, value, "label")?;
     // B4: non-nullable strings default only for undefined; null is stringified.
     let label = if E::is_undefined(cx, label_value) {
         ""

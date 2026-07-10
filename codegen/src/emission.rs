@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use crate::{
-    ChainPolicy, CodegenError, DescriptorEntry, HandleOrEnumUnionPolicy, JoinReport, MemberPair,
-    Policy, SkipPolicy, TypePair, UnionFlattenPolicy, ValueModel,
+    ChainPolicy, CodegenError, DescriptorEntry, DictOrSequenceUnionPolicy, HandleOrEnumUnionPolicy,
+    JoinReport, MemberPair, Policy, SkipPolicy, TypePair, UnionFlattenPolicy, ValueModel,
 };
 
 /// Emits all descriptor conversions selected by `policy` from `report`.
@@ -22,13 +22,30 @@ pub fn emit_conversions(report: &JoinReport, policy: &str) -> Result<String, Cod
         .iter()
         .map(|entry| (entry.dictionary.as_str(), entry))
         .collect();
+    let unions: BTreeMap<&str, &DictOrSequenceUnionPolicy> = policy
+        .dict_or_sequence_union
+        .iter()
+        .map(|entry| (entry.typedef.as_str(), entry))
+        .collect();
     let mut output = String::new();
     for (index, descriptor) in policy.descriptor.iter().enumerate() {
         if index != 0 {
             output.push('\n');
         }
         let pair = descriptor_pair(report, &descriptor.dictionary)?;
-        output.push_str(&emit_descriptor(report, pair, descriptor, &descriptors)?);
+        output.push_str(&emit_descriptor(
+            report,
+            pair,
+            descriptor,
+            &descriptors,
+            &unions,
+        )?);
+    }
+    for union in &policy.dict_or_sequence_union {
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        output.push_str(&emit_dict_or_sequence_union(report, union, &descriptors)?);
     }
     let enum_conversions = emit_operation_enum_conversions(report)?;
     if !enum_conversions.is_empty() {
@@ -92,10 +109,16 @@ pub(crate) fn validate_policy(report: &JoinReport, policy: &Policy) -> Result<()
         .iter()
         .map(|entry| entry.dictionary.as_str())
         .collect();
+    let union_typedefs: BTreeSet<&str> = policy
+        .dict_or_sequence_union
+        .iter()
+        .map(|entry| entry.typedef.as_str())
+        .collect();
     for descriptor in &policy.descriptor {
         let pair = descriptor_pair(report, &descriptor.dictionary)?;
-        validate_descriptor_policy(report, pair, descriptor, &selected)?;
+        validate_descriptor_policy(report, pair, descriptor, &selected, &union_typedefs)?;
     }
+    validate_dict_or_sequence_unions(report, policy)?;
     validate_enum_value_skips(report, policy)?;
     for interface in &report.interfaces {
         for member in &interface.members {
@@ -243,11 +266,69 @@ fn descriptor_pair<'a>(
         })
 }
 
+fn validate_dict_or_sequence_unions(
+    report: &JoinReport,
+    policy: &Policy,
+) -> Result<(), CodegenError> {
+    for union in &policy.dict_or_sequence_union {
+        let alias = report.enums.iter().any(|pair| {
+            pair.idl_name
+                .as_deref()
+                .is_some_and(|name| name.starts_with(&format!("{} = ", union.typedef)))
+        });
+        if !alias {
+            return Err(CodegenError::Policy(format!(
+                "dict-or-sequence union {} is not joined",
+                union.typedef
+            )));
+        }
+        let pair = descriptor_pair(report, &union.dictionary)?;
+        let target = pair.c_name.as_deref().ok_or_else(|| {
+            CodegenError::Policy(format!(
+                "dict-or-sequence union {} dictionary {} has no joined C target",
+                union.typedef, union.dictionary
+            ))
+        })?;
+        if pair.members.len() != union.max_length
+            || !pair.c_only_members.is_empty()
+            || !pair.idl_only_members.is_empty()
+        {
+            return Err(CodegenError::Policy(format!(
+                "dict-or-sequence union {} does not join one-to-one to {target}",
+                union.typedef
+            )));
+        }
+        for (index, member) in pair.members.iter().enumerate() {
+            let (idl, c) = member_values(member, &union.dictionary)?;
+            if idl.type_name != "GPUIntegerCoordinate"
+                || !idl.enforce_range
+                || idl.integer_width != Some(32)
+                || c.integer_width != Some(32)
+            {
+                return Err(unsupported_shape(
+                    &union.typedef,
+                    &member.member,
+                    "dict-or-sequence fields must be 32-bit GPUIntegerCoordinate values",
+                ));
+            }
+            if index >= union.min_length && idl.default_value.is_none() {
+                return Err(unsupported_shape(
+                    &union.typedef,
+                    &member.member,
+                    "trailing sequence field has no dictionary default",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_descriptor_policy(
     report: &JoinReport,
     pair: &TypePair,
     descriptor: &DescriptorEntry,
     selected: &BTreeSet<&str>,
+    union_typedefs: &BTreeSet<&str>,
 ) -> Result<(), CodegenError> {
     if pair.c_name.is_none() && descriptor.target.is_none() {
         return Err(CodegenError::Policy(format!(
@@ -337,6 +418,19 @@ fn validate_descriptor_policy(
             .iter()
             .map(|entry| entry.member.as_str()),
     )?;
+    let absent_constants = unique_entries(
+        &descriptor.dictionary,
+        "absent constant",
+        descriptor
+            .absent_constants
+            .iter()
+            .map(|entry| entry.member.as_str()),
+    )?;
+    let sentinel_defaults = unique_entries(
+        &descriptor.dictionary,
+        "sentinel default",
+        descriptor.sentinel_defaults.iter().map(String::as_str),
+    )?;
     let clamp_members: BTreeSet<&str> = pair
         .members
         .iter()
@@ -356,6 +450,7 @@ fn validate_descriptor_policy(
         ("chain", &chains),
         ("handle-or-enum union", &handle_or_enum_unions),
         ("required default", &required_defaults),
+        ("absent constant", &absent_constants),
     ] {
         for entry in entries {
             if !special.insert(*entry) {
@@ -398,6 +493,32 @@ fn validate_descriptor_policy(
             return Err(CodegenError::Policy(format!(
                 "dead required default policy {}.{}: member is not required EnforceRange",
                 descriptor.dictionary, default.member
+            )));
+        }
+    }
+    for constant in &descriptor.absent_constants {
+        validate_identifier(
+            &descriptor.dictionary,
+            &constant.member,
+            &constant.value,
+            "absent constant",
+        )?;
+        let idl = pair
+            .members
+            .iter()
+            .find(|member| member.member == constant.member)
+            .and_then(|member| member.idl.first())
+            .and_then(|member| member.values.first())
+            .ok_or_else(|| {
+                CodegenError::Policy(format!(
+                    "dead absent constant policy {}.{}",
+                    descriptor.dictionary, constant.member
+                ))
+            })?;
+        if idl.required || !idl.enforce_range || idl.default_value.is_some() {
+            return Err(CodegenError::Policy(format!(
+                "dead absent constant policy {}.{}: member is not optional EnforceRange without an IDL default",
+                descriptor.dictionary, constant.member
             )));
         }
     }
@@ -561,6 +682,9 @@ fn validate_descriptor_policy(
         if handle_or_enum_unions.contains(name) {
             continue;
         }
+        if union_typedefs.contains(idl.type_name.as_str()) {
+            continue;
+        }
         if is_dictionary(report, &idl.type_name) && !selected.contains(idl.type_name.as_str()) {
             return Err(CodegenError::Policy(format!(
                 "unpoliced unsupported nested dictionary {}.{name}",
@@ -676,6 +800,41 @@ fn validate_descriptor_policy(
         if !pair.members.iter().any(|member| member.member == *name) {
             return Err(CodegenError::Policy(format!(
                 "dead default-empty sequence policy {}.{name}: member is not joined",
+                descriptor.dictionary
+            )));
+        }
+    }
+    for name in &sentinel_defaults {
+        let idl = pair
+            .members
+            .iter()
+            .find(|member| member.member == *name)
+            .and_then(|member| member.idl.first())
+            .and_then(|member| member.values.first())
+            .ok_or_else(|| {
+                CodegenError::Policy(format!(
+                    "dead sentinel default policy {}.{name}",
+                    descriptor.dictionary
+                ))
+            })?;
+        let enum_pair = enum_pair(report, &idl.type_name).ok_or_else(|| {
+            CodegenError::Policy(format!(
+                "dead sentinel default policy {}.{name}: member is not an enum",
+                descriptor.dictionary
+            ))
+        })?;
+        if idl.required
+            || idl.default_value.is_none()
+            || !enum_pair.enum_values.iter().any(|value| {
+                value.idl_value.is_none()
+                    && value
+                        .c_value
+                        .as_deref()
+                        .is_some_and(|value| canonical(value) == "undefined")
+            })
+        {
+            return Err(CodegenError::Policy(format!(
+                "dead sentinel default policy {}.{name}: no optional IDL default/C undefined pair",
                 descriptor.dictionary
             )));
         }
@@ -998,6 +1157,7 @@ fn emit_descriptor(
     pair: &TypePair,
     descriptor: &DescriptorEntry,
     descriptors: &BTreeMap<&str, &DescriptorEntry>,
+    unions: &BTreeMap<&str, &DictOrSequenceUnionPolicy>,
 ) -> Result<String, CodegenError> {
     let dictionary = &descriptor.dictionary;
     let target = descriptor
@@ -1055,6 +1215,16 @@ fn emit_descriptor(
         .iter()
         .map(|entry| (entry.member.as_str(), entry.value))
         .collect();
+    let absent_constants: BTreeMap<&str, &str> = descriptor
+        .absent_constants
+        .iter()
+        .map(|entry| (entry.member.as_str(), entry.value.as_str()))
+        .collect();
+    let sentinel_defaults: BTreeSet<&str> = descriptor
+        .sentinel_defaults
+        .iter()
+        .map(String::as_str)
+        .collect();
     let default_empty: BTreeSet<&str> = descriptor
         .default_empty_sequence
         .iter()
@@ -1082,6 +1252,12 @@ fn emit_descriptor(
         output,
         "/// Converts a JavaScript `{dictionary}` into `{return_target}`."
     );
+    if unions
+        .values()
+        .any(|union| union.dictionary == descriptor.dictionary)
+    {
+        output.push_str("#[allow(dead_code)] // T1 emits union arms even before every typedef has an API consumer.\n");
+    }
     let _ = writeln!(
         output,
         "pub(super) fn {function}<E: JsEngine{}>(",
@@ -1103,7 +1279,7 @@ fn emit_descriptor(
                 let value_name = format!("{}_value", snake_case(name));
                 let _ = writeln!(
                     output,
-                    "    let {value_name} = E::get_property(cx, value, \"{name}\")?;"
+                    "    let {value_name} = dictionary_member::<E>(cx, value, \"{name}\")?;"
                 );
                 emit_rejected_skip_check(&mut output, name, &value_name);
             }
@@ -1113,7 +1289,7 @@ fn emit_descriptor(
         if required_defaults.contains_key(name.as_str()) {
             let _ = writeln!(
                 output,
-                "    let {value_name} = E::get_property(cx, value, \"{name}\")?;"
+                "    let {value_name} = dictionary_member::<E>(cx, value, \"{name}\")?;"
             );
         } else if idl.required && !default_empty.contains(name.as_str()) {
             if !cited_required {
@@ -1127,7 +1303,7 @@ fn emit_descriptor(
         } else {
             let _ = writeln!(
                 output,
-                "    let {value_name} = E::get_property(cx, value, \"{name}\")?;"
+                "    let {value_name} = dictionary_member::<E>(cx, value, \"{name}\")?;"
             );
         }
         if unsupported.contains(name.as_str()) {
@@ -1141,7 +1317,7 @@ fn emit_descriptor(
                 let value_name = format!("{}_value", snake_case(name));
                 let _ = writeln!(
                     output,
-                    "    let {value_name} = E::get_property(cx, value, \"{name}\")?;"
+                    "    let {value_name} = dictionary_member::<E>(cx, value, \"{name}\")?;"
                 );
                 emit_rejected_skip_check(&mut output, name, &value_name);
             }
@@ -1166,7 +1342,7 @@ fn emit_descriptor(
         } else {
             let _ = writeln!(
                 output,
-                "    let {value_name} = E::get_property(cx, value, \"{name}\")?;"
+                "    let {value_name} = dictionary_member::<E>(cx, value, \"{name}\")?;"
             );
         }
         if unsupported.contains(name.as_str()) {
@@ -1206,7 +1382,18 @@ fn emit_descriptor(
                 idl,
             )?;
         } else if is_enum(report, &idl.type_name) {
-            emit_enum_local(&mut output, report, dictionary, name, &local, &value, idl)?;
+            emit_enum_local(
+                &mut output,
+                report,
+                dictionary,
+                name,
+                &value,
+                idl,
+                sentinel_defaults.contains(name.as_str()),
+            )?;
+        } else if let Some(union) = unions.get(idl.type_name.as_str()) {
+            let convert = format!("convert_{}", snake_case(&union.typedef));
+            let _ = writeln!(output, "    let {local} = {convert}::<E>(cx, {value})?;");
         } else if is_dictionary(report, &idl.type_name) {
             emit_nested_local(
                 &mut output,
@@ -1286,6 +1473,8 @@ fn emit_descriptor(
             &handle_sequences,
             &handle_or_enum,
             &required_defaults,
+            &absent_constants,
+            unions,
         )?;
     }
     if raw_c {
@@ -1523,6 +1712,111 @@ fn emit_chain_local(output: &mut String, name: &str, value: &str, policy: &Chain
     );
 }
 
+fn emit_dict_or_sequence_union(
+    report: &JoinReport,
+    policy: &DictOrSequenceUnionPolicy,
+    descriptors: &BTreeMap<&str, &DescriptorEntry>,
+) -> Result<String, CodegenError> {
+    let pair = descriptor_pair(report, &policy.dictionary)?;
+    let descriptor = descriptors.get(policy.dictionary.as_str()).ok_or_else(|| {
+        CodegenError::Policy(format!(
+            "dict-or-sequence union {} lost selected dictionary {}",
+            policy.typedef, policy.dictionary
+        ))
+    })?;
+    if descriptor_needs_arena(pair, descriptor) {
+        return Err(unsupported_shape(
+            &policy.typedef,
+            &policy.dictionary,
+            "dict-or-sequence dictionary unexpectedly needs an arena",
+        ));
+    }
+    let target = pair.c_name.as_deref().ok_or_else(|| {
+        unsupported_shape(
+            &policy.typedef,
+            &policy.dictionary,
+            "dictionary has no C target",
+        )
+    })?;
+    let function = format!("convert_{}", snake_case(&policy.typedef));
+    let dictionary_function = format!(
+        "convert_{}",
+        snake_case(
+            policy
+                .dictionary
+                .strip_prefix("GPU")
+                .unwrap_or(&policy.dictionary)
+        )
+    );
+    let mut output = String::new();
+    let _ = writeln!(
+        output,
+        "/// Converts the dictionary-or-sequence `{}` typedef into `{target}`.",
+        policy.typedef
+    );
+    output.push_str("#[allow(dead_code)] // T1 policy selects both typedefs; some land before their API consumer.\n");
+    let _ = writeln!(
+        output,
+        "pub(super) fn {function}<E: JsEngine>(cx: E::Context<'_>, value: E::Value) -> Result<{target}, E::Error> {{"
+    );
+    output.push_str("    // T1: an iterable selects the sequence arm; otherwise dictionary conversion applies.\n");
+    output.push_str(
+        "    let Some(iterator_method) = sequence_iterator_method::<E>(cx, value)? else {\n",
+    );
+    let _ = writeln!(
+        output,
+        "        return {dictionary_function}::<E>(cx, value);"
+    );
+    output.push_str("    };\n");
+    let _ = writeln!(
+        output,
+        "    let values = convert_sequence_from_method::<E, _>(cx, value, iterator_method, \"{}\", |item| {{",
+        policy.typedef
+    );
+    output.push_str("        enforce_u32::<E>(cx, item, \"coordinate\")\n    })?;\n");
+    if policy.min_length == 1 {
+        let _ = writeln!(
+            output,
+            "    if values.is_empty() || values.len() > {} {{",
+            policy.max_length
+        );
+    } else {
+        let _ = writeln!(
+            output,
+            "    if values.len() < {} || values.len() > {} {{",
+            policy.min_length, policy.max_length
+        );
+    }
+    let _ = writeln!(
+        output,
+        "        return Err(E::type_error(cx, \"{} sequence length must be {}..={}\"));",
+        policy.typedef, policy.min_length, policy.max_length
+    );
+    output.push_str("    }\n");
+    let _ = writeln!(output, "    Ok({target} {{");
+    for (index, member) in pair.members.iter().enumerate() {
+        let (idl, c) = member_values(member, &policy.dictionary)?;
+        let field = rust_field_name(&c.name, true);
+        if index < policy.min_length {
+            let _ = writeln!(output, "        {field}: values[{index}],");
+        } else {
+            let default = idl.default_value.as_deref().ok_or_else(|| {
+                unsupported_shape(
+                    &policy.typedef,
+                    &member.member,
+                    "trailing field has no default",
+                )
+            })?;
+            let _ = writeln!(
+                output,
+                "        {field}: values.get({index}).copied().unwrap_or({default}),"
+            );
+        }
+    }
+    output.push_str("    })\n}\n");
+    Ok(output)
+}
+
 fn emit_string_local(
     output: &mut String,
     dictionary: &str,
@@ -1588,10 +1882,11 @@ fn emit_enum_local(
     report: &JoinReport,
     dictionary: &str,
     name: &str,
-    local: &str,
     value: &str,
     idl: &ValueModel,
+    prefer_sentinel: bool,
 ) -> Result<(), CodegenError> {
+    let local = rust_field_name(name, false);
     let pair = enum_pair(report, &idl.type_name).ok_or_else(|| {
         unsupported_shape(dictionary, name, &format!("missing enum {}", idl.type_name))
     })?;
@@ -1618,7 +1913,12 @@ fn emit_enum_local(
         .as_deref()
         .and_then(|value| value.strip_prefix('"'))
         .and_then(|value| value.strip_suffix('"'));
-    let default = if let Some(idl_default) = idl_default {
+    let default = if prefer_sentinel {
+        let undefined = undefined.ok_or_else(|| {
+            unsupported_shape(dictionary, name, "enum has no C undefined sentinel")
+        })?;
+        enum_constant(c_type, undefined)
+    } else if let Some(idl_default) = idl_default {
         let value = pair
             .enum_values
             .iter()
@@ -1742,26 +2042,6 @@ fn emit_sequence_local(
     default_empty: bool,
     descriptors: &BTreeMap<&str, &DescriptorEntry>,
 ) -> Result<(), CodegenError> {
-    if !is_dictionary(report, element) {
-        return Err(unsupported_shape(
-            dictionary,
-            name,
-            &format!("sequence element {element} is not a dictionary"),
-        ));
-    }
-    let nested = descriptors.get(element).ok_or_else(|| {
-        unsupported_shape(
-            dictionary,
-            name,
-            &format!("sequence dictionary {element} is not selected"),
-        )
-    })?;
-    let nested_pair = descriptor_pair(report, element)?;
-    let nested_function = format!(
-        "convert_{}",
-        snake_case(element.strip_prefix("GPU").unwrap_or(element))
-    );
-    let nested_needs_arena = descriptor_needs_arena(nested_pair, nested);
     let _ = writeln!(
         output,
         "    let {local} = {}",
@@ -1775,13 +2055,50 @@ fn emit_sequence_local(
         output,
         "        let converted = convert_sequence::<E, _>(cx, {value}, \"{name}\", |item| {{"
     );
-    if nested_needs_arena {
+    if is_dictionary(report, element) {
+        let nested = descriptors.get(element).ok_or_else(|| {
+            unsupported_shape(
+                dictionary,
+                name,
+                &format!("sequence dictionary {element} is not selected"),
+            )
+        })?;
+        let nested_pair = descriptor_pair(report, element)?;
+        let nested_function = format!(
+            "convert_{}",
+            snake_case(element.strip_prefix("GPU").unwrap_or(element))
+        );
+        if descriptor_needs_arena(nested_pair, nested) {
+            let _ = writeln!(
+                output,
+                "            {nested_function}::<E>(cx, item, arena)"
+            );
+        } else {
+            let _ = writeln!(output, "            {nested_function}::<E>(cx, item)");
+        }
+    } else if let Some(pair) = enum_pair(report, element) {
+        let c_type = pair.c_name.as_deref().ok_or_else(|| {
+            unsupported_shape(dictionary, name, &format!("enum {element} has no C type"))
+        })?;
+        output.push_str("            let enum_arena = Arena::new();\n");
+        output.push_str("            match E::to_str(cx, item, &enum_arena)? {\n");
+        for enum_value in &pair.enum_values {
+            if let (Some(idl_value), Some(c_value)) = (&enum_value.idl_value, &enum_value.c_value) {
+                let constant = enum_constant(c_type, c_value);
+                let _ = writeln!(output, "                \"{idl_value}\" => Ok({constant}),");
+            }
+        }
         let _ = writeln!(
             output,
-            "            {nested_function}::<E>(cx, item, arena)"
+            "                _ => Err(E::type_error(cx, \"{element}\")),"
         );
+        output.push_str("            }\n");
     } else {
-        let _ = writeln!(output, "            {nested_function}::<E>(cx, item)");
+        return Err(unsupported_shape(
+            dictionary,
+            name,
+            &format!("sequence element {element} is neither a dictionary nor an enum"),
+        ));
     }
     output.push_str("        })?;\n        arena.alloc_slice(converted)\n    };\n");
     Ok(())
@@ -1801,6 +2118,8 @@ fn emit_field(
     handle_sequences: &BTreeMap<&str, &str>,
     handle_or_enum: &BTreeMap<&str, &HandleOrEnumUnionPolicy>,
     required_defaults: &BTreeMap<&str, u64>,
+    absent_constants: &BTreeMap<&str, &str>,
+    unions: &BTreeMap<&str, &DictOrSequenceUnionPolicy>,
 ) -> Result<(), CodegenError> {
     let (idl, c) = member_values(member, dictionary)?;
     let name = &member.member;
@@ -1867,7 +2186,10 @@ fn emit_field(
         }
         return Ok(());
     }
-    if is_enum(report, &idl.type_name) || is_dictionary(report, &idl.type_name) {
+    if is_enum(report, &idl.type_name)
+        || is_dictionary(report, &idl.type_name)
+        || unions.contains_key(idl.type_name.as_str())
+    {
         if field == local {
             let _ = writeln!(output, "        {field},");
         } else {
@@ -1993,9 +2315,13 @@ fn emit_field(
         } else if idl.required {
             let _ = writeln!(output, "        {field}: {conversion},");
         } else {
-            let default = idl.default_value.as_deref().ok_or_else(|| {
-                unsupported_shape(dictionary, name, "optional integer without an IDL default")
-            })?;
+            let default = idl
+                .default_value
+                .as_deref()
+                .or_else(|| absent_constants.get(name.as_str()).copied())
+                .ok_or_else(|| {
+                    unsupported_shape(dictionary, name, "optional integer without a default")
+                })?;
             let _ = writeln!(
                 output,
                 "        {field}: if E::is_undefined(cx, {value}) {{"
@@ -2154,7 +2480,7 @@ fn sequence_element(type_name: &str) -> Option<&str> {
         .and_then(|value| value.strip_suffix('>'))
 }
 
-fn enum_constant(c_type: &str, c_value: &str) -> String {
+pub(crate) fn enum_constant(c_type: &str, c_value: &str) -> String {
     format!("{c_type}_{c_type}_{}", pascal_case(c_value))
 }
 

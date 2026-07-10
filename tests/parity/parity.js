@@ -6,6 +6,7 @@
 
     var finished = false;
     var labelBuffer;
+    var retainedTextureView;
 
     function log(line) {
         globalThis.parityLog.push(String(line));
@@ -281,6 +282,85 @@
         ].join(","));
     }
 
+    function textureAttributes(texture) {
+        return [
+            texture.width,
+            texture.height,
+            texture.depthOrArrayLayers,
+            texture.mipLevelCount,
+            texture.sampleCount,
+            texture.dimension,
+            texture.format,
+            texture.usage
+        ].join(",");
+    }
+
+    function runTextures() {
+        // Headless Noop texture copies are no-ops. These checks intentionally
+        // cover creation/conversion/attributes only, never texel bytes.
+        var texture = device.createTexture({
+            size: { width: 4, height: 2 },
+            format: "r8unorm",
+            usage: 4
+        });
+        log("texture:create:ok");
+        log("texture:width:" + texture.width);
+        log("texture:height:" + texture.height);
+        log("texture:depthOrArrayLayers:" + texture.depthOrArrayLayers);
+        log("texture:mipLevelCount:" + texture.mipLevelCount);
+        log("texture:sampleCount:" + texture.sampleCount);
+        log("texture:dimension:" + texture.dimension);
+        log("texture:format:" + texture.format);
+        log("texture:usage:" + texture.usage);
+
+        var dictTexture = device.createTexture({
+            size: { width: 4, height: 2 },
+            format: "r8unorm",
+            usage: 4
+        });
+        var sequenceTexture = device.createTexture({
+            size: [4, 2],
+            format: "r8unorm",
+            usage: 4
+        });
+        var dictAttributes = textureAttributes(dictTexture);
+        var sequenceAttributes = textureAttributes(sequenceTexture);
+        log("texture:extent-dict:" + dictAttributes);
+        log("texture:extent-sequence:" + sequenceAttributes);
+        log("texture:extent-equal:" + (dictAttributes === sequenceAttributes));
+
+        var formatError = caught(function () {
+            device.createTexture({ size: [1], format: "not-a-format", usage: 4 });
+        });
+        log(errorLine("texture:format-rejection", formatError));
+        var lengthError = caught(function () {
+            device.createTexture({ size: [], format: "r8unorm", usage: 4 });
+        });
+        log(errorLine("texture:extent-length", lengthError));
+
+        var retainedTexture = device.createTexture({
+            size: [1],
+            format: "r8unorm",
+            usage: 4
+        });
+        retainedTextureView = retainedTexture.createView();
+        retainedTexture = null;
+        texture.destroy();
+        dictTexture.destroy();
+        sequenceTexture.destroy();
+    }
+
+    function runTextureRetention() {
+        return gpu.requestAdapter().then(function () {
+            return gpu.requestAdapter();
+        }).then(function () {
+            log("texture:view-retained:" +
+                (retainedTextureView !== null &&
+                 typeof Object.getPrototypeOf(retainedTextureView) === "object"));
+            retainedTextureView = null;
+        });
+    }
+
     function runRequiredMembers() {
         var entriesError = caught(function () {
             device.createBindGroupLayout({});
@@ -409,7 +489,8 @@
     }
 
     function finishConformance() {
-        return runErrorScopes()
+        return runTextureRetention()
+            .then(runErrorScopes)
             .then(runOrdering)
             .then(function () {
                 labelBuffer.destroy();
@@ -448,6 +529,8 @@
         });
         paritySampler.label = "sampler-round-trip";
         log("sampler:" + paritySampler.label);
+
+        runTextures();
 
         runCoercions();
         runStrings();

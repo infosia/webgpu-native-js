@@ -394,11 +394,22 @@ pub(crate) struct Policy {
     #[serde(default)]
     pub(crate) name_map: Vec<NameMapEntry>,
     #[serde(default)]
+    pub(crate) dict_or_sequence_union: Vec<DictOrSequenceUnionPolicy>,
+    #[serde(default)]
     pub(crate) descriptor: Vec<DescriptorEntry>,
     #[serde(default)]
     pub(crate) enum_value_skip: Vec<EnumValueSkipPolicy>,
     pub(crate) dispatch: Option<DispatchPolicy>,
     pub(crate) lifecycle: Option<LifecyclePolicy>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DictOrSequenceUnionPolicy {
+    pub(crate) typedef: String,
+    pub(crate) dictionary: String,
+    pub(crate) min_length: usize,
+    pub(crate) max_length: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -541,6 +552,10 @@ pub(crate) struct DescriptorEntry {
     pub(crate) handle_or_enum_unions: Vec<HandleOrEnumUnionPolicy>,
     #[serde(default)]
     pub(crate) required_defaults: Vec<RequiredDefaultPolicy>,
+    #[serde(default)]
+    pub(crate) absent_constants: Vec<AbsentConstantPolicy>,
+    #[serde(default)]
+    pub(crate) sentinel_defaults: Vec<String>,
     pub(crate) wrapper: Option<WrapperPolicy>,
 }
 
@@ -625,6 +640,13 @@ pub(crate) struct RequiredDefaultPolicy {
     pub(crate) member: String,
     pub(crate) value: u64,
     pub(crate) reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AbsentConstantPolicy {
+    pub(crate) member: String,
+    pub(crate) value: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1011,6 +1033,64 @@ fn validate_policy(
         .iter()
         .map(|entry| entry.dictionary.as_str())
         .collect();
+    let mut seen_unions = BTreeSet::new();
+    for entry in &policy.dict_or_sequence_union {
+        if !seen_unions.insert(entry.typedef.as_str()) {
+            return Err(CodegenError::Policy(format!(
+                "duplicate dict-or-sequence union {}",
+                entry.typedef
+            )));
+        }
+        let alias = index.typedefs.get(&entry.typedef).ok_or_else(|| {
+            CodegenError::Policy(format!(
+                "unknown dict-or-sequence union typedef {}",
+                entry.typedef
+            ))
+        })?;
+        let expected = format!("(sequence<GPUIntegerCoordinate> or {})", entry.dictionary);
+        if alias.type_name != expected {
+            return Err(CodegenError::Policy(format!(
+                "dict-or-sequence union {} has unsupported typedef shape {}; expected {expected}",
+                entry.typedef, alias.type_name
+            )));
+        }
+        if !index.dictionaries.contains_key(&entry.dictionary) {
+            return Err(CodegenError::Policy(format!(
+                "dict-or-sequence union {} names unknown dictionary {}",
+                entry.typedef, entry.dictionary
+            )));
+        }
+        let fields = index.dictionary_members(&entry.dictionary);
+        if entry.min_length == 0
+            || entry.min_length > entry.max_length
+            || entry.max_length != fields.len()
+        {
+            return Err(CodegenError::Policy(format!(
+                "dict-or-sequence union {} has invalid length range {}..={} for {} fields",
+                entry.typedef,
+                entry.min_length,
+                entry.max_length,
+                fields.len()
+            )));
+        }
+        if fields.iter().any(|field| {
+            let value = &field.values[0];
+            value.type_name != "GPUIntegerCoordinate"
+                || !value.enforce_range
+                || value.integer_width != Some(32)
+        }) {
+            return Err(CodegenError::Policy(format!(
+                "dict-or-sequence union {} fields must be [EnforceRange] GPUIntegerCoordinate",
+                entry.typedef
+            )));
+        }
+        if !selected_descriptors.contains(entry.dictionary.as_str()) {
+            return Err(CodegenError::Policy(format!(
+                "dict-or-sequence union {} requires selected dictionary {}",
+                entry.typedef, entry.dictionary
+            )));
+        }
+    }
     let mut seen_idl_maps = BTreeSet::new();
     let mut seen_c_maps = BTreeSet::new();
     for entry in &policy.name_map {
@@ -1151,6 +1231,10 @@ fn build_report(
 
     let mut idl_type_roots = BTreeSet::new();
     let mut c_type_roots = BTreeSet::new();
+    for entry in &policy.dict_or_sequence_union {
+        idl_type_roots.insert(entry.typedef.clone());
+        idl_type_roots.insert(entry.dictionary.clone());
+    }
     for entry in &policy.subset {
         let effective = index.effective_members(&entry.interface);
         let object = object_map
@@ -1261,6 +1345,12 @@ fn build_report(
                 descriptor.dictionary, union.member, union.reason
             ));
         }
+    }
+    for union in &policy.dict_or_sequence_union {
+        report.skips.push(format!(
+            "dict-or-sequence union {} <-> {} (sequence length {}..={})",
+            union.typedef, union.dictionary, union.min_length, union.max_length
+        ));
     }
     for skip in &policy.enum_value_skip {
         report.skips.push(format!(

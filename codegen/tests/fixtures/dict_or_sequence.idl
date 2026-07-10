@@ -1,0 +1,15 @@
+typedef [EnforceRange] unsigned long GPUIntegerCoordinate;
+
+dictionary GPUExtent3DDict {
+    required GPUIntegerCoordinate width;
+    GPUIntegerCoordinate height = 1;
+    GPUIntegerCoordinate depthOrArrayLayers = 1;
+};
+typedef (sequence<GPUIntegerCoordinate> or GPUExtent3DDict) GPUExtent3D;
+
+dictionary GPUOrigin3DDict {
+    GPUIntegerCoordinate x = 0;
+    GPUIntegerCoordinate y = 0;
+    GPUIntegerCoordinate z = 0;
+};
+typedef (sequence<GPUIntegerCoordinate> or GPUOrigin3DDict) GPUOrigin3D;

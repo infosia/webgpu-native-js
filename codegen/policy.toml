@@ -38,6 +38,8 @@ skip_members = [
 add_ref = [
   { interface = "GPUDevice", reason = "adopted devices and child payloads retain the native device" },
   { interface = "GPUBuffer", reason = "mapped ranges and bind-group descriptors retain buffers" },
+  { interface = "GPUTexture", reason = "texture views retain their parent texture" },
+  { interface = "GPUTextureView", reason = "standard resource lifecycle keeps AddRef available for retained descriptors" },
   { interface = "GPUQueue", reason = "the SameObject queue wrapper owns an independent native reference" },
   { interface = "GPUShaderModule", reason = "compute-pipeline descriptors retain shader modules" },
   { interface = "GPUSampler", reason = "standard resource lifecycle keeps AddRef available for retained descriptors" },
@@ -73,6 +75,7 @@ reason = "WebIDL names the reusable programmable stage while the C ABI names its
 interface = "GPUDevice"
 members = [
   "createBuffer",
+  "createTexture",
   "createSampler",
   "createShaderModule",
   "createBindGroupLayout",
@@ -89,6 +92,25 @@ members = [
 [[subset]]
 interface = "GPUBuffer"
 members = ["mapAsync", "getMappedRange", "unmap", "destroy", "size", "usage", "label"]
+
+[[subset]]
+interface = "GPUTexture"
+members = [
+  "createView",
+  "destroy",
+  "width",
+  "height",
+  "depthOrArrayLayers",
+  "mipLevelCount",
+  "sampleCount",
+  "dimension",
+  "format",
+  "usage",
+]
+
+[[subset]]
+interface = "GPUTextureView"
+members = []
 
 [[subset]]
 interface = "GPUQueue"
@@ -139,6 +161,8 @@ members = []
 standard_interfaces = [
   "GPUShaderModule",
   "GPUSampler",
+  "GPUTexture",
+  "GPUTextureView",
   "GPUBindGroupLayout",
   "GPUPipelineLayout",
   "GPUBindGroup",
@@ -176,6 +200,11 @@ path = "device_pop_error_scope"
 interface = "GPUBuffer"
 member = "destroy"
 path = "buffer_destroy"
+
+[[lifecycle.methods]]
+interface = "GPUTexture"
+member = "destroy"
+path = "texture_destroy"
 
 [[lifecycle.methods]]
 interface = "GPUBuffer"
@@ -286,6 +315,33 @@ interface = "GPUCommandEncoder"
 kind = "stateful_encoder_payload"
 reason = "B10/B19 keep the encoder handle in shared ended-state and pass null for an omitted optional descriptor"
 
+[[lifecycle.quirks]]
+interface = "GPUTexture"
+kind = "destroyable_resource_payload"
+reason = "T2/R14 keeps destroy idempotent while finalization remains a distinct release"
+
+[[name_map]]
+idl = "GPUExtent3DDict"
+c = "WGPUExtent3D"
+reason = "the WebIDL dictionary suffix is absent from the C standalone struct"
+
+[[name_map]]
+idl = "GPUOrigin3DDict"
+c = "WGPUOrigin3D"
+reason = "the WebIDL dictionary suffix is absent from the C standalone struct"
+
+[[dict_or_sequence_union]]
+typedef = "GPUExtent3D"
+dictionary = "GPUExtent3DDict"
+min_length = 1
+max_length = 3
+
+[[dict_or_sequence_union]]
+typedef = "GPUOrigin3D"
+dictionary = "GPUOrigin3DDict"
+min_length = 1
+max_length = 3
+
 [[descriptor]]
 dictionary = "GPUBufferDescriptor"
 target = "BufferDescriptor"
@@ -293,6 +349,46 @@ target = "BufferDescriptor"
 [[descriptor.strings]]
 member = "label"
 nullable = false
+
+[[descriptor]]
+dictionary = "GPUExtent3DDict"
+
+[[descriptor]]
+dictionary = "GPUOrigin3DDict"
+
+[[descriptor]]
+dictionary = "GPUTextureDescriptor"
+default_empty_sequence = ["viewFormats"]
+
+[[descriptor.strings]]
+member = "label"
+nullable = false
+
+[[descriptor.skips]]
+member = "textureBindingViewDimension"
+reason = "the pinned C ABI exposes this optional feature through texture creation inference, not the base descriptor"
+reject_if_present = true
+
+[[descriptor]]
+dictionary = "GPUTextureViewDescriptor"
+sentinel_defaults = ["aspect"]
+
+[[descriptor.strings]]
+member = "label"
+nullable = false
+
+[[descriptor.absent_constants]]
+member = "mipLevelCount"
+value = "WGPU_MIP_LEVEL_COUNT_UNDEFINED"
+
+[[descriptor.absent_constants]]
+member = "arrayLayerCount"
+value = "WGPU_ARRAY_LAYER_COUNT_UNDEFINED"
+
+[[descriptor.skips]]
+member = "swizzle"
+reason = "texture component swizzle requires the optional chained feature descriptor"
+reject_if_present = true
 
 [[descriptor]]
 dictionary = "GPUSamplerDescriptor"

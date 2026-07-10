@@ -21,7 +21,9 @@ use crate::{
     WGPUErrorFilter, WGPUErrorType, WGPUFuture, WGPUPipelineLayout, WGPUPipelineLayoutDescriptor,
     WGPUPopErrorScopeCallbackInfo, WGPUPopErrorScopeStatus, WGPUQueue,
     WGPUQueueWorkDoneCallbackInfo, WGPUSampler, WGPUSamplerDescriptor, WGPUShaderModule,
-    WGPUShaderModuleDescriptor, WGPUUncapturedErrorCallbackInfo,
+    WGPUShaderModuleDescriptor, WGPUTexture, WGPUTextureDescriptor, WGPUTextureDimension,
+    WGPUTextureFormat, WGPUTextureUsage, WGPUTextureView, WGPUTextureViewDescriptor,
+    WGPUUncapturedErrorCallbackInfo,
 };
 
 /// Mock JavaScript value handle.
@@ -966,6 +968,8 @@ struct MockGpuState {
     queue_add_refs: usize,
     shader_module_add_refs: usize,
     sampler_add_refs: usize,
+    texture_add_refs: usize,
+    texture_view_add_refs: usize,
     bind_group_layout_add_refs: usize,
     pipeline_layout_add_refs: usize,
     device_releases: usize,
@@ -973,15 +977,21 @@ struct MockGpuState {
     queue_releases: usize,
     shader_module_releases: usize,
     sampler_releases: usize,
+    texture_releases: usize,
+    texture_view_releases: usize,
     bind_group_layout_releases: usize,
     pipeline_layout_releases: usize,
     buffer_destroys: usize,
+    texture_destroys: usize,
     buffer_unmaps: usize,
     mapped_range_calls: usize,
     const_mapped_range_calls: usize,
     labels: Vec<Vec<u8>>,
     descriptors: Vec<RecordedDescriptor>,
     sampler_descriptors: Vec<RecordedSamplerDescriptor>,
+    texture_descriptors: Vec<RecordedTextureDescriptor>,
+    texture_view_descriptors: Vec<RecordedTextureViewDescriptor>,
+    textures: BTreeMap<WGPUTexture, RecordedTextureDescriptor>,
     null_create_buffer: bool,
     null_create_sampler: bool,
     native_order: Vec<&'static str>,
@@ -1028,6 +1038,32 @@ struct RecordedSamplerDescriptor {
     lod_max_clamp: f32,
     compare: crate::WGPUCompareFunction,
     max_anisotropy: u16,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RecordedTextureDescriptor {
+    width: u32,
+    height: u32,
+    depth_or_array_layers: u32,
+    mip_level_count: u32,
+    sample_count: u32,
+    dimension: WGPUTextureDimension,
+    format: WGPUTextureFormat,
+    usage: WGPUTextureUsage,
+    view_formats: Vec<WGPUTextureFormat>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RecordedTextureViewDescriptor {
+    texture: WGPUTexture,
+    format: WGPUTextureFormat,
+    dimension: crate::WGPUTextureViewDimension,
+    usage: WGPUTextureUsage,
+    aspect: crate::WGPUTextureAspect,
+    base_mip_level: u32,
+    mip_level_count: u32,
+    base_array_layer: u32,
+    array_layer_count: u32,
 }
 
 /// Resets the mock GPU call log.
@@ -1275,6 +1311,120 @@ unsafe fn device_create_sampler(
         state.next += 1;
         fake_handle(2500 + state.next)
     })
+}
+
+unsafe fn device_create_texture(
+    _device: WGPUDevice,
+    descriptor: *const WGPUTextureDescriptor,
+) -> WGPUTexture {
+    let Some(descriptor) = (unsafe { descriptor.as_ref() }) else {
+        return ptr::null_mut();
+    };
+    let view_formats = if descriptor.viewFormatCount == 0 || descriptor.viewFormats.is_null() {
+        Vec::new()
+    } else {
+        unsafe {
+            std::slice::from_raw_parts(descriptor.viewFormats, descriptor.viewFormatCount).to_vec()
+        }
+    };
+    GPU_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let recorded = RecordedTextureDescriptor {
+            width: descriptor.size.width,
+            height: descriptor.size.height,
+            depth_or_array_layers: descriptor.size.depthOrArrayLayers,
+            mip_level_count: descriptor.mipLevelCount,
+            sample_count: descriptor.sampleCount,
+            dimension: descriptor.dimension,
+            format: descriptor.format,
+            usage: descriptor.usage,
+            view_formats,
+        };
+        state.next += 1;
+        let texture = fake_handle(2600 + state.next);
+        state.texture_descriptors.push(recorded.clone());
+        state.textures.insert(texture, recorded);
+        texture
+    })
+}
+
+unsafe fn texture_create_view(
+    texture: WGPUTexture,
+    descriptor: *const WGPUTextureViewDescriptor,
+) -> WGPUTextureView {
+    let Some(descriptor) = (unsafe { descriptor.as_ref() }) else {
+        return ptr::null_mut();
+    };
+    GPU_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        state
+            .texture_view_descriptors
+            .push(RecordedTextureViewDescriptor {
+                texture,
+                format: descriptor.format,
+                dimension: descriptor.dimension,
+                usage: descriptor.usage,
+                aspect: descriptor.aspect,
+                base_mip_level: descriptor.baseMipLevel,
+                mip_level_count: descriptor.mipLevelCount,
+                base_array_layer: descriptor.baseArrayLayer,
+                array_layer_count: descriptor.arrayLayerCount,
+            });
+        state.next += 1;
+        fake_handle(2700 + state.next)
+    })
+}
+
+unsafe fn texture_destroy(_texture: WGPUTexture) {
+    GPU_STATE.with(|state| state.borrow_mut().texture_destroys += 1);
+}
+
+fn texture_value<T: Copy>(
+    texture: WGPUTexture,
+    get: impl FnOnce(&RecordedTextureDescriptor) -> T,
+    fallback: T,
+) -> T {
+    GPU_STATE.with(|state| state.borrow().textures.get(&texture).map_or(fallback, get))
+}
+
+unsafe fn texture_get_width(texture: WGPUTexture) -> u32 {
+    texture_value(texture, |value| value.width, 0)
+}
+
+unsafe fn texture_get_height(texture: WGPUTexture) -> u32 {
+    texture_value(texture, |value| value.height, 0)
+}
+
+unsafe fn texture_get_depth_or_array_layers(texture: WGPUTexture) -> u32 {
+    texture_value(texture, |value| value.depth_or_array_layers, 0)
+}
+
+unsafe fn texture_get_mip_level_count(texture: WGPUTexture) -> u32 {
+    texture_value(texture, |value| value.mip_level_count, 0)
+}
+
+unsafe fn texture_get_sample_count(texture: WGPUTexture) -> u32 {
+    texture_value(texture, |value| value.sample_count, 0)
+}
+
+unsafe fn texture_get_dimension(texture: WGPUTexture) -> WGPUTextureDimension {
+    texture_value(
+        texture,
+        |value| value.dimension,
+        crate::WGPUTextureDimension_WGPUTextureDimension_Undefined,
+    )
+}
+
+unsafe fn texture_get_format(texture: WGPUTexture) -> WGPUTextureFormat {
+    texture_value(
+        texture,
+        |value| value.format,
+        crate::WGPUTextureFormat_WGPUTextureFormat_Undefined,
+    )
+}
+
+unsafe fn texture_get_usage(texture: WGPUTexture) -> WGPUTextureUsage {
+    texture_value(texture, |value| value.usage, 0)
 }
 
 unsafe fn device_create_bind_group_layout(
@@ -1561,6 +1711,18 @@ unsafe fn sampler_add_ref(_sampler: WGPUSampler) {
 unsafe fn sampler_release(_sampler: WGPUSampler) {
     GPU_STATE.with(|state| state.borrow_mut().sampler_releases += 1);
 }
+unsafe fn texture_add_ref(_texture: WGPUTexture) {
+    GPU_STATE.with(|state| state.borrow_mut().texture_add_refs += 1);
+}
+unsafe fn texture_release(_texture: WGPUTexture) {
+    GPU_STATE.with(|state| state.borrow_mut().texture_releases += 1);
+}
+unsafe fn texture_view_add_ref(_texture_view: WGPUTextureView) {
+    GPU_STATE.with(|state| state.borrow_mut().texture_view_add_refs += 1);
+}
+unsafe fn texture_view_release(_texture_view: WGPUTextureView) {
+    GPU_STATE.with(|state| state.borrow_mut().texture_view_releases += 1);
+}
 unsafe fn sampler_set_label(_sampler: WGPUSampler, label: WGPUStringView) {
     GPU_STATE.with(|state| state.borrow_mut().labels.push(read_view(label)));
 }
@@ -1672,20 +1834,27 @@ mod tests {
         convert_bind_group_layout_descriptor, convert_buffer_binding_layout,
         convert_buffer_descriptor, convert_command_buffer_descriptor,
         convert_command_encoder_descriptor, convert_compute_pass_descriptor,
-        convert_compute_pipeline_descriptor, convert_pipeline_layout_descriptor,
-        convert_sampler_descriptor, convert_shader_module_descriptor, device_create_bind_group,
-        device_create_buffer, device_create_command_encoder, device_create_compute_pipeline,
-        device_create_sampler, device_lost_get, device_lost_info_message_get,
+        convert_compute_pipeline_descriptor, convert_gpu_extent3d, convert_gpu_origin3d,
+        convert_pipeline_layout_descriptor, convert_sampler_descriptor,
+        convert_shader_module_descriptor, convert_texture_descriptor,
+        convert_texture_view_descriptor, device_create_bind_group, device_create_buffer,
+        device_create_command_encoder, device_create_compute_pipeline, device_create_sampler,
+        device_create_texture, device_lost_get, device_lost_info_message_get,
         device_lost_info_reason_get, device_on_uncaptured_error_get,
         device_on_uncaptured_error_set, device_pop_error_scope, device_push_error_scope,
         device_queue_get, finalize_bind_group, finalize_buffer, finalize_compute_pipeline,
-        finalize_device, finalize_queue, finalize_sampler, queue_submit, queue_work_done_callback,
-        queue_write_buffer, request_adapter_callback, request_device_callback, wrap_device,
+        finalize_device, finalize_queue, finalize_sampler, finalize_texture, finalize_texture_view,
+        queue_submit, queue_work_done_callback, queue_write_buffer, request_adapter_callback,
+        request_device_callback, texture_depth_or_array_layers_get, texture_dimension_get,
+        texture_format_get, texture_height_get, texture_mip_level_count_get,
+        texture_sample_count_get, texture_usage_get, texture_width_get, wrap_device,
         AdapterPayload, AdapterRequest, BindGroupLayoutPayload, BindGroupPayload, BufferPayload,
         ComputePipelinePayload, DeviceEventState, DevicePayload, DeviceRequest, ErrorPayload,
         JsEngine, PendingNative, PendingNativeHandle, PipelineLayoutPayload, QueueError,
         QueuePayload, QueueWorkDoneRequest, SamplerPayload, SettlementRequest, ShaderModulePayload,
+        TexturePayload, TextureViewPayload,
     };
+    use std::sync::atomic::AtomicBool;
     use std::sync::{Mutex, Weak};
 
     struct SendPtr<T>(*mut T);
@@ -2042,6 +2211,195 @@ mod tests {
     }
 
     #[test]
+    fn t1_extent_and_origin_dictionary_arms_apply_webidl_defaults() {
+        let rt = runtime();
+        let cx = rt.context();
+        let extent =
+            convert_gpu_extent3d::<Engine>(cx, descriptor(&rt, &[("width", rt.number(7.0))]))
+                .expect("extent dictionary");
+        assert_eq!(
+            (extent.width, extent.height, extent.depthOrArrayLayers),
+            (7, 1, 1)
+        );
+
+        let origin =
+            convert_gpu_origin3d::<Engine>(cx, descriptor(&rt, &[])).expect("origin dictionary");
+        assert_eq!((origin.x, origin.y, origin.z), (0, 0, 0));
+    }
+
+    #[test]
+    fn t1_extent_and_origin_sequence_arms_use_iterator_protocol_and_trailing_defaults() {
+        let rt = runtime();
+        let cx = rt.context();
+        let extent =
+            convert_gpu_extent3d::<Engine>(cx, rt.set_like(&[rt.number(4.0), rt.number(5.0)]))
+                .expect("extent sequence");
+        assert_eq!(
+            (extent.width, extent.height, extent.depthOrArrayLayers),
+            (4, 5, 1)
+        );
+
+        let origin = convert_gpu_origin3d::<Engine>(
+            cx,
+            rt.set_like(&[rt.number(2.0), rt.number(3.0), rt.number(4.0)]),
+        )
+        .expect("origin sequence");
+        assert_eq!((origin.x, origin.y, origin.z), (2, 3, 4));
+    }
+
+    #[test]
+    fn t1_union_rejects_wrong_lengths_missing_width_and_invalid_coordinates() {
+        for values in [Vec::new(), vec![1.0, 2.0, 3.0, 4.0]] {
+            let rt = runtime();
+            let cx = rt.context();
+            let values = values
+                .into_iter()
+                .map(|value| rt.number(value))
+                .collect::<Vec<_>>();
+            let error =
+                convert_gpu_extent3d::<Engine>(cx, rt.set_like(&values)).expect_err("wrong length");
+            assert!(error.contains("sequence length must be 1..=3"), "{error}");
+        }
+
+        let rt = runtime();
+        let cx = rt.context();
+        assert_eq!(
+            convert_gpu_extent3d::<Engine>(cx, descriptor(&rt, &[])).expect_err("missing width"),
+            "TypeError: width"
+        );
+        for value in [-1.0, 1.5, f64::INFINITY, f64::from(u32::MAX) + 1.0] {
+            let error = convert_gpu_origin3d::<Engine>(cx, rt.set_like(&[rt.number(value)]))
+                .expect_err("invalid coordinate");
+            assert_eq!(error, "TypeError: coordinate");
+        }
+    }
+
+    #[test]
+    fn t1_union_propagates_iterator_failures() {
+        let rt = runtime();
+        let cx = rt.context();
+        let iterable = rt.throwing_iterable(&[rt.number(1.0), rt.number(2.0)], 1);
+        assert_eq!(
+            convert_gpu_extent3d::<Engine>(cx, iterable).expect_err("iterator throw"),
+            "iterator next 1 failed"
+        );
+    }
+
+    #[test]
+    fn t2_texture_descriptor_converts_union_enums_flags_and_enum_sequence() {
+        let rt = runtime();
+        let cx = rt.context();
+        let arena = Arena::new();
+        let size = rt.set_like(&[rt.number(8.0), rt.number(4.0), rt.number(2.0)]);
+        let view_formats = rt.set_like(&[rt.string("rgba8unorm"), rt.string("rgba8unorm-srgb")]);
+        let value = descriptor(
+            &rt,
+            &[
+                ("size", size),
+                ("mipLevelCount", rt.number(3.0)),
+                ("sampleCount", rt.number(4.0)),
+                ("dimension", rt.string("2d")),
+                ("format", rt.string("rgba8unorm")),
+                ("usage", rt.number(20.0)),
+                ("viewFormats", view_formats),
+            ],
+        );
+        let native =
+            convert_texture_descriptor::<Engine>(cx, value, &arena).expect("texture descriptor");
+        assert_eq!(
+            (
+                native.size.width,
+                native.size.height,
+                native.size.depthOrArrayLayers
+            ),
+            (8, 4, 2)
+        );
+        assert_eq!((native.mipLevelCount, native.sampleCount), (3, 4));
+        assert_eq!(
+            native.dimension,
+            crate::WGPUTextureDimension_WGPUTextureDimension_2D
+        );
+        assert_eq!(
+            native.format,
+            crate::WGPUTextureFormat_WGPUTextureFormat_RGBA8Unorm
+        );
+        assert_eq!(native.usage, 20);
+        assert_eq!(native.viewFormatCount, 2);
+        assert_eq!(
+            unsafe { *native.viewFormats },
+            crate::WGPUTextureFormat_WGPUTextureFormat_RGBA8Unorm
+        );
+    }
+
+    #[test]
+    fn t2_texture_descriptor_defaults_and_enum_errors_follow_webidl() {
+        let rt = runtime();
+        let cx = rt.context();
+        let arena = Arena::new();
+        let value = descriptor(
+            &rt,
+            &[
+                ("size", descriptor(&rt, &[("width", rt.number(1.0))])),
+                ("format", rt.string("r8unorm")),
+                ("usage", rt.number(4.0)),
+            ],
+        );
+        let native = convert_texture_descriptor::<Engine>(cx, value, &arena)
+            .expect("default texture descriptor");
+        assert_eq!((native.mipLevelCount, native.sampleCount), (1, 1));
+        assert_eq!(
+            native.dimension,
+            crate::WGPUTextureDimension_WGPUTextureDimension_2D
+        );
+        assert_eq!(native.viewFormatCount, 0);
+        assert!(native.viewFormats.is_null());
+
+        let invalid = descriptor(
+            &rt,
+            &[
+                ("size", descriptor(&rt, &[("width", rt.number(1.0))])),
+                ("format", rt.string("not-a-format")),
+                ("usage", rt.number(4.0)),
+            ],
+        );
+        assert_eq!(
+            convert_texture_descriptor::<Engine>(cx, invalid, &arena)
+                .expect_err("format rejection"),
+            "TypeError: GPUTextureFormat"
+        );
+    }
+
+    #[test]
+    fn t3_view_descriptor_absence_uses_c_undefined_sentinels() {
+        let rt = runtime();
+        let cx = rt.context();
+        let arena = Arena::new();
+        let native = convert_texture_view_descriptor::<Engine>(cx, rt.undefined(), &arena)
+            .expect("absent view descriptor");
+        assert_eq!(
+            native.format,
+            crate::WGPUTextureFormat_WGPUTextureFormat_Undefined
+        );
+        assert_eq!(
+            native.dimension,
+            crate::WGPUTextureViewDimension_WGPUTextureViewDimension_Undefined
+        );
+        assert_eq!(
+            native.aspect,
+            crate::WGPUTextureAspect_WGPUTextureAspect_Undefined
+        );
+        assert_eq!(native.mipLevelCount, crate::WGPU_MIP_LEVEL_COUNT_UNDEFINED);
+        assert_eq!(
+            native.arrayLayerCount,
+            crate::WGPU_ARRAY_LAYER_COUNT_UNDEFINED
+        );
+        assert_eq!(
+            (native.baseMipLevel, native.baseArrayLayer, native.usage),
+            (0, 0, 0)
+        );
+    }
+
+    #[test]
     fn b4_null_non_nullable_labels_stringify_consistently() {
         let rt = runtime();
         let cx = rt.context();
@@ -2189,6 +2547,107 @@ mod tests {
             );
             assert_eq!(state.sampler_add_refs, 0);
             assert_eq!(state.sampler_releases, 1);
+        });
+    }
+
+    #[test]
+    fn t2_t3_texture_attributes_destroy_view_retention_and_releases_are_balanced() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let desc = descriptor(
+            &rt,
+            &[
+                (
+                    "size",
+                    descriptor(
+                        &rt,
+                        &[
+                            ("width", rt.number(8.0)),
+                            ("height", rt.number(4.0)),
+                            ("depthOrArrayLayers", rt.number(2.0)),
+                        ],
+                    ),
+                ),
+                ("mipLevelCount", rt.number(3.0)),
+                ("format", rt.string("rgba8unorm")),
+                ("usage", rt.number(20.0)),
+            ],
+        );
+        let texture = device_create_texture::<Engine>(cx, device, &[desc]).expect("texture");
+
+        for (value, expected) in [
+            (texture_width_get::<Engine>(cx, texture), 8.0),
+            (texture_height_get::<Engine>(cx, texture), 4.0),
+            (
+                texture_depth_or_array_layers_get::<Engine>(cx, texture),
+                2.0,
+            ),
+            (texture_mip_level_count_get::<Engine>(cx, texture), 3.0),
+            (texture_sample_count_get::<Engine>(cx, texture), 1.0),
+            (texture_usage_get::<Engine>(cx, texture), 20.0),
+        ] {
+            let value = value.expect("numeric texture getter");
+            assert!(matches!(rt.get(value), MockValue::Number(actual) if actual == expected));
+        }
+        let dimension = texture_dimension_get::<Engine>(cx, texture).expect("dimension");
+        assert!(matches!(rt.get(dimension), MockValue::String(value) if value == "2d"));
+        let format = texture_format_get::<Engine>(cx, texture).expect("format");
+        assert!(matches!(rt.get(format), MockValue::String(value) if value == "rgba8unorm"));
+
+        crate::texture_destroy::<Engine>(cx, texture, &[]).expect("destroy");
+        crate::texture_destroy::<Engine>(cx, texture, &[]).expect("idempotent destroy");
+        let view = crate::texture_create_view::<Engine>(cx, texture, &[]).expect("default view");
+        let texture_payload = Engine::payload(cx, texture, crate::GPU_TEXTURE_CLASS)
+            .and_then(|payload| payload.downcast_ref::<TexturePayload>())
+            .expect("texture payload");
+        let view_payload = Engine::payload(cx, view, crate::GPU_TEXTURE_VIEW_CLASS)
+            .and_then(|payload| payload.downcast_ref::<TextureViewPayload>())
+            .expect("view payload");
+        assert_eq!(view_payload.texture, texture_payload.texture);
+
+        finalize_texture(
+            Box::new(TexturePayload {
+                texture: texture_payload.texture,
+                destroyed: AtomicBool::new(true),
+            }),
+            &rt.env,
+        );
+        assert_eq!(rt.queue().drain().expect("texture release"), 1);
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.texture_destroys, 1);
+            assert_eq!(state.texture_add_refs, 1);
+            assert_eq!(state.texture_releases, 1);
+            assert_eq!(state.texture_view_descriptors.len(), 1);
+            let view = &state.texture_view_descriptors[0];
+            assert_eq!(
+                view.format,
+                crate::WGPUTextureFormat_WGPUTextureFormat_Undefined
+            );
+            assert_eq!(
+                view.dimension,
+                crate::WGPUTextureViewDimension_WGPUTextureViewDimension_Undefined
+            );
+            assert_eq!(
+                view.aspect,
+                crate::WGPUTextureAspect_WGPUTextureAspect_Undefined
+            );
+        });
+
+        finalize_texture_view(
+            Box::new(TextureViewPayload {
+                texture_view: view_payload.texture_view,
+                texture: view_payload.texture,
+            }),
+            &rt.env,
+        );
+        assert_eq!(rt.queue().drain().expect("view release"), 1);
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.texture_view_releases, 1);
+            assert_eq!(state.texture_releases, 2);
         });
     }
 

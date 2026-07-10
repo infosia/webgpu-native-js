@@ -1289,3 +1289,12 @@ story is explicitly verification-based: the block 08 suite (62 byte-identical
 lines, growing with the surface) is load-bearing, macOS is the laboratory.
 Standing cautions recorded in CLAUDE.md: F5 (destroy() is the only bounded
 path) and the unmeasured iOS in-process performance (owner-deferred).
+
+**Block 09 slice 1 landed (2026-07-10): textures.** The dict-or-sequence union
+kind (T1) generates Extent3D/Origin3D with per-arm tests; GPUTexture and
+GPUTextureView ride the generated lifecycle (readonly attributes through the
+eight verified `wgpuTextureGet*` getters; view retains its texture per the B8
+derivation). The GPUTextureFormat join: 101 IDL formats all joined, C-only
+`undefined` sentinel policied — the "stress test" enum was a non-event, which
+is the machinery working. Parity 62 → 77 lines, byte-identical. Adapter diff:
+zero. Suites: core 112, quickjs 54, JSC 23+1, codegen 40.

@@ -13,6 +13,8 @@ struct StandardInterface<'a> {
     interface: &'a TypePair,
     create: &'a MemberPair,
     descriptor: &'a DescriptorEntry,
+    creator_interface: String,
+    creator_handle_field: String,
     handle_field: String,
     handle_type: String,
     payload: String,
@@ -24,6 +26,7 @@ struct StandardInterface<'a> {
     release_dispatch: String,
     label: bool,
     stateful_encoder: bool,
+    destroyable: bool,
     retained: Vec<RetainedHandle>,
 }
 
@@ -35,6 +38,7 @@ struct RetainedHandle {
     dispatch: String,
     sequence: bool,
     nullable: bool,
+    from_creator: bool,
 }
 
 pub(super) fn emit_lifecycle(report: &JoinReport, source: &str) -> Result<String, CodegenError> {
@@ -54,6 +58,7 @@ pub(super) fn emit_lifecycle(report: &JoinReport, source: &str) -> Result<String
         if standard.label {
             emit_label_accessors(&mut output, standard);
         }
+        emit_native_attribute_accessors(&mut output, report, standard)?;
         emit_finalizer(&mut output, standard);
     }
     emit_class_specs(&mut output, report, &policy, lifecycle, &standards)?;
@@ -211,8 +216,15 @@ fn validate_lifecycle(
                 IdlMemberKind::Attribute => {
                     let generated_label =
                         selected == "label" && standards.contains(subset.interface.as_str());
+                    let generated_native = standards.contains(subset.interface.as_str())
+                        && selected != "label"
+                        && native_attribute_supported(report, member);
                     let key = (subset.interface.as_str(), selected.as_str());
-                    if usize::from(generated_label) + usize::from(properties.contains(&key)) != 1 {
+                    if usize::from(generated_label)
+                        + usize::from(generated_native)
+                        + usize::from(properties.contains(&key))
+                        != 1
+                    {
                         return Err(CodegenError::Policy(format!(
                             "subset property {}.{selected} must have exactly one generated body or mapping",
                             subset.interface
@@ -289,7 +301,9 @@ fn validate_lifecycle(
                 quirk.interface, quirk.kind
             )));
         }
-        if quirk.kind != "null_descriptor_when_omitted" && quirk.kind != "stateful_encoder_payload"
+        if quirk.kind != "null_descriptor_when_omitted"
+            && quirk.kind != "stateful_encoder_payload"
+            && quirk.kind != "destroyable_resource_payload"
         {
             return Err(CodegenError::Policy(format!(
                 "unknown lifecycle quirk {}.{}",
@@ -347,11 +361,41 @@ fn standard_interfaces<'a>(
             })?;
         let object = object_name(name);
         let handle_field = handle_field(object);
-        let retained = derived_retention(report, policy, name, descriptor, lifecycle)?;
+        let creator_interface = create.owner.clone();
+        let creator_object = object_name(&creator_interface);
+        let creator_handle_field = self::handle_field(creator_object);
+        let mut retained = derived_retention(report, policy, name, descriptor, lifecycle)?;
+        if creator_interface != "GPUDevice" {
+            let creator = report
+                .interfaces
+                .iter()
+                .find(|pair| pair.idl_name.as_deref() == Some(creator_interface.as_str()))
+                .and_then(|pair| pair.c_name.as_deref())
+                .ok_or_else(|| {
+                    CodegenError::Policy(format!(
+                        "standard lifecycle {name} creator {} has no selected C handle",
+                        creator_interface
+                    ))
+                })?;
+            retained.insert(
+                0,
+                RetainedHandle {
+                    field: creator_handle_field.clone(),
+                    source: creator_handle_field.clone(),
+                    handle_type: creator.to_owned(),
+                    dispatch: snake_case(creator_object),
+                    sequence: false,
+                    nullable: false,
+                    from_creator: true,
+                },
+            );
+        }
         result.push(StandardInterface {
             interface,
             create,
             descriptor,
+            creator_interface,
+            creator_handle_field,
             handle_type: interface.c_name.clone().expect("validated C type"),
             payload: format!("{object}Payload"),
             class_id: format!("GPU_{}_CLASS", screaming_snake(object)),
@@ -370,6 +414,9 @@ fn standard_interfaces<'a>(
                 .quirks
                 .iter()
                 .any(|entry| entry.interface == *name && entry.kind == "stateful_encoder_payload"),
+            destroyable: lifecycle.quirks.iter().any(|entry| {
+                entry.interface == *name && entry.kind == "destroyable_resource_payload"
+            }),
             retained,
         });
     }
@@ -431,6 +478,7 @@ fn derived_retention(
                 || descriptor.handle_or_enum_unions.iter().any(|entry| {
                     entry.handle_type == handle && path.ends_with(entry.member.as_str())
                 }),
+            from_creator: false,
         });
     }
     let mut seen = BTreeSet::new();
@@ -489,6 +537,7 @@ fn derived_retention(
             dispatch: snake_case(extension.handle_type.trim_start_matches("WGPU")),
             sequence: extension.handle_type.starts_with("Vec<"),
             nullable: false,
+            from_creator: false,
         });
     }
     Ok(retained)
@@ -641,6 +690,9 @@ fn emit_payloads(output: &mut String, standards: &[StandardInterface<'_>]) {
                 };
                 let _ = writeln!(output, "    pub(super) {}: {type_name},", retained.field);
             }
+            if standard.destroyable {
+                output.push_str("    pub(super) destroyed: AtomicBool,\n");
+            }
             if standard.label {
                 output.push_str("    pub(super) label: Mutex<String>,\n");
             }
@@ -739,7 +791,8 @@ fn emit_release_request(output: &mut String, standards: &[StandardInterface<'_>]
 }
 
 fn emit_create(output: &mut String, standard: &StandardInterface<'_>) -> Result<(), CodegenError> {
-    let function = format!("device_{}", snake_case(&standard.create.member));
+    let creator_base = snake_case(object_name(&standard.creator_interface));
+    let function = format!("{creator_base}_{}", snake_case(&standard.create.member));
     let descriptor_name = &standard.descriptor.dictionary;
     let convert = format!(
         "convert_{}",
@@ -760,12 +813,16 @@ fn emit_create(output: &mut String, standard: &StandardInterface<'_>) -> Result<
     };
     let _ = writeln!(
         output,
-        "/// Implements `GPUDevice.{}`.",
-        standard.create.member
+        "/// Implements `{}.{}`.",
+        standard.creator_interface, standard.create.member
     );
     let _ = writeln!(output, "pub fn {function}<E: JsEngine + 'static>(");
     output.push_str("    cx: E::Context<'_>,\n    this: E::Value,\n    args: &[E::Value],\n) -> Result<E::Value, E::Error> {\n");
-    output.push_str("    let device = device_handle::<E>(cx, this)?;\n");
+    let _ = writeln!(
+        output,
+        "    let {} = {creator_base}_handle::<E>(cx, this)?;",
+        standard.creator_handle_field
+    );
     output.push_str("    let arena = Arena::new();\n");
     if optional && null_optional {
         output.push_str("    let native = match args.first().copied() {\n");
@@ -798,8 +855,8 @@ fn emit_create(output: &mut String, standard: &StandardInterface<'_>) -> Result<
     };
     let _ = writeln!(
         output,
-        "    let {} = unsafe {{ (E::environment(cx).gpu().{dispatch})(device, {descriptor_pointer}) }};",
-        standard.handle_field
+        "    let {} = unsafe {{ (E::environment(cx).gpu().{dispatch})({}, {descriptor_pointer}) }};",
+        standard.handle_field, standard.creator_handle_field
     );
     let _ = writeln!(output, "    if {}.is_null() {{", standard.handle_field);
     let _ = writeln!(
@@ -812,7 +869,13 @@ fn emit_create(output: &mut String, standard: &StandardInterface<'_>) -> Result<
         output.push_str("    let gpu = E::environment(cx).gpu();\n");
         output.push_str("    unsafe {\n");
         for retained in &standard.retained {
-            if retained.sequence {
+            if retained.from_creator {
+                let _ = writeln!(
+                    output,
+                    "        (gpu.{}_add_ref)({});",
+                    retained.dispatch, retained.source
+                );
+            } else if retained.sequence {
                 let _ = writeln!(
                     output,
                     "        for handle in &converted.{} {{ (gpu.{}_add_ref)(*handle); }}",
@@ -842,7 +905,13 @@ fn emit_create(output: &mut String, standard: &StandardInterface<'_>) -> Result<
     emit_cleanup(output, standard, "        ", false);
     output.push_str("        return Err(error);\n    }\n");
     for retained in &standard.retained {
-        if retained.sequence {
+        if retained.from_creator {
+            let _ = writeln!(
+                output,
+                "    let retained_{} = {};",
+                retained.field, retained.source
+            );
+        } else if retained.sequence {
             let _ = writeln!(
                 output,
                 "    let retained_{} = converted.{}.clone();",
@@ -868,11 +937,22 @@ fn emit_create(output: &mut String, standard: &StandardInterface<'_>) -> Result<
     } else {
         let _ = writeln!(output, "        {},", standard.handle_field);
         for retained in &standard.retained {
-            let _ = writeln!(
-                output,
-                "        {}: converted.{},",
-                retained.field, retained.source
-            );
+            if retained.from_creator {
+                if retained.field == retained.source {
+                    let _ = writeln!(output, "        {},", retained.field);
+                } else {
+                    let _ = writeln!(output, "        {}: {},", retained.field, retained.source);
+                }
+            } else {
+                let _ = writeln!(
+                    output,
+                    "        {}: converted.{},",
+                    retained.field, retained.source
+                );
+            }
+        }
+        if standard.destroyable {
+            output.push_str("        destroyed: AtomicBool::new(false),\n");
         }
         if standard.label {
             output.push_str("        label: Mutex::new(label),\n");
@@ -904,6 +984,8 @@ fn emit_cleanup(
     for retained in &standard.retained {
         let source = if retained_locals {
             format!("retained_{}", retained.field)
+        } else if retained.from_creator {
+            retained.source.clone()
         } else {
             format!("converted.{}", retained.source)
         };
@@ -948,6 +1030,92 @@ fn emit_label_accessors(output: &mut String, standard: &StandardInterface<'_>) {
     let _ = writeln!(output, "    let mut label = payload.label.lock().map_err(|_| E::operation_error(cx, \"{interface} label is poisoned\"))?;");
     let _ = writeln!(output, "    unsafe {{ (E::environment(cx).gpu().{}_set_label)(payload.{}, WGPUStringView::from_bytes(new_label.as_bytes())); }}", snake_case(object), standard.handle_field);
     output.push_str("    new_label.clone_into(&mut label);\n    Ok(())\n}\n\n");
+}
+
+fn native_attribute_supported(report: &JoinReport, member: &MemberPair) -> bool {
+    if member.idl.len() != 1
+        || member.idl[0].kind != IdlMemberKind::Attribute
+        || member.idl[0].values.len() != 1
+        || member.c.values.len() != 1
+    {
+        return false;
+    }
+    let idl = &member.idl[0].values[0];
+    let c = &member.c.values[0];
+    c.integer_width.is_some()
+        || report.enums.iter().any(|pair| {
+            pair.idl_name.as_deref() == Some(idl.type_name.as_str())
+                && pair.c_name.as_deref() == Some(c.type_name.as_str())
+                && !pair.enum_values.is_empty()
+        })
+}
+
+fn emit_native_attribute_accessors(
+    output: &mut String,
+    report: &JoinReport,
+    standard: &StandardInterface<'_>,
+) -> Result<(), CodegenError> {
+    let interface = standard.interface.idl_name.as_deref().unwrap_or_default();
+    let base = snake_case(object_name(interface));
+    for member in standard.interface.members.iter().filter(|member| {
+        member.member != "label"
+            && member.idl[0].kind == IdlMemberKind::Attribute
+            && native_attribute_supported(report, member)
+    }) {
+        let idl = &member.idl[0].values[0];
+        let c = &member.c.values[0];
+        let function = format!("{base}_{}_get", snake_case(&member.member));
+        let dispatch = snake_case(member.c.name.trim_start_matches("wgpu"));
+        let _ = writeln!(
+            output,
+            "/// Implements the readonly `{interface}.{}` getter through `{}`.",
+            member.member, member.c.name
+        );
+        let _ = writeln!(
+            output,
+            "pub fn {function}<E: JsEngine + 'static>(cx: E::Context<'_>, this: E::Value) -> Result<E::Value, E::Error> {{"
+        );
+        let _ = writeln!(
+            output,
+            "    let payload = E::payload(cx, this, {}).and_then(|payload| payload.downcast_ref::<{}>()).ok_or_else(|| E::type_error(cx, \"{interface}.{} called on an incompatible object\"))?;",
+            standard.class_id, standard.payload, member.member
+        );
+        let _ = writeln!(
+            output,
+            "    let native = unsafe {{ (E::environment(cx).gpu().{dispatch})(payload.{}) }};",
+            standard.handle_field
+        );
+        if let Some(pair) = report.enums.iter().find(|pair| {
+            pair.idl_name.as_deref() == Some(idl.type_name.as_str())
+                && pair.c_name.as_deref() == Some(c.type_name.as_str())
+                && !pair.enum_values.is_empty()
+        }) {
+            output.push_str("    match native {\n");
+            for value in &pair.enum_values {
+                if let (Some(idl_value), Some(c_value)) = (&value.idl_value, &value.c_value) {
+                    let constant = crate::emission::enum_constant(&c.type_name, c_value);
+                    let _ = writeln!(
+                        output,
+                        "        value if value == {constant} => E::string(cx, \"{idl_value}\"),"
+                    );
+                }
+            }
+            let _ = writeln!(
+                output,
+                "        _ => Err(E::operation_error(cx, \"{} returned an unknown {}\")),",
+                member.c.name, idl.type_name
+            );
+            output.push_str("    }\n}\n\n");
+        } else if c.integer_width.is_some() {
+            output.push_str("    E::number(cx, native as f64)\n}\n\n");
+        } else {
+            return Err(CodegenError::Policy(format!(
+                "unsupported generated native property {interface}.{}",
+                member.member
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn emit_finalizer(output: &mut String, standard: &StandardInterface<'_>) {
@@ -1087,11 +1255,18 @@ fn emit_one_class(
                 .iter()
                 .find(|mapping| mapping.interface == interface && mapping.member == member.member);
             let generated_label = member.member == "label" && standard.is_some();
+            let generated_native =
+                member.member != "label" && standard.is_some() && mapping.is_none();
             let (get, set) = if generated_label {
                 let base = snake_case(object);
                 (
                     format!("{base}_label_get"),
                     Some(format!("{base}_label_set")),
+                )
+            } else if generated_native {
+                (
+                    format!("{}_{}_get", snake_case(object), snake_case(&member.member)),
+                    None,
                 )
             } else {
                 let mapping = mapping.expect("validated property mapping");
@@ -1148,7 +1323,11 @@ fn emit_one_class(
                 .iter()
                 .find(|mapping| mapping.interface == interface && mapping.member == member.member);
             let path = if created.is_some() {
-                format!("device_{}", snake_case(&member.member))
+                format!(
+                    "{}_{}",
+                    snake_case(object_name(interface)),
+                    snake_case(&member.member)
+                )
             } else {
                 mapping.expect("validated method mapping").path.clone()
             };
