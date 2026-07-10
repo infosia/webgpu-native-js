@@ -1,0 +1,25 @@
+objects:
+  - name: device
+    methods:
+      - name: create_sampler
+        returns:
+          type: object.sampler
+          passed_with_ownership: true
+        args:
+          - name: descriptor
+            type: struct.sampler_descriptor
+            pointer: immutable
+            optional: true
+  - name: sampler
+    methods:
+      - name: set_label
+        args:
+          - name: label
+            type: string
+structs:
+  - name: sampler_descriptor
+    type: extensible
+    members:
+      - name: label
+        type: string
+        default: ""

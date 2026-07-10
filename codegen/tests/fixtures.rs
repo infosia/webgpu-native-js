@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 
 use webgpu_native_js_codegen::{
     generate_conversions, generate_conversions_with_policy, generate_core,
-    generate_core_with_policy, join_inputs, join_inputs_with_policy, render_report, CodegenError,
-    JoinReport,
+    generate_core_with_policy, generate_lifecycle_with_policy, join_inputs,
+    join_inputs_with_policy, render_report, CodegenError, JoinReport,
 };
 
 fn fixtures() -> PathBuf {
@@ -44,6 +44,36 @@ fn dispatch_macro_surface(emitted: &str) -> &str {
         .map(|offset| start + offset)
         .expect("hidden FFI callback follows enumerator");
     &emitted[start..end]
+}
+
+fn focused_sampler_lifecycle(emitted: &str) -> String {
+    let payload_end = emitted
+        .find("/// One release request")
+        .expect("release request follows payload");
+    let variant_start = emitted
+        .find("    /// Release a `GPUSampler`")
+        .expect("sampler variant");
+    let variant_end = emitted[variant_start..]
+        .find("    /// Release a command buffer.")
+        .map(|offset| variant_start + offset)
+        .expect("variant end");
+    let arm_start = emitted
+        .find("            Self::Sampler")
+        .expect("sampler release arm");
+    let arm_end = emitted[arm_start..]
+        .find('\n')
+        .map(|offset| arm_start + offset + 1)
+        .expect("arm end");
+    let create_start = emitted
+        .find("/// Implements `GPUDevice.createSampler`.")
+        .expect("create function");
+    format!(
+        "{}\n{}\n{}\n{}",
+        emitted[..payload_end].trim_end(),
+        emitted[variant_start..variant_end].trim_end(),
+        emitted[arm_start..arm_end].trim_end(),
+        emitted[create_start..].trim_end()
+    )
 }
 
 #[test]
@@ -167,6 +197,112 @@ fn generated_dispatch_macro_matches_focused_shape_fixture() {
         fs::read_to_string(fixtures().join("dispatch_surface.rs")).expect("dispatch snapshot");
     assert_eq!(dispatch_macro_surface(&emitted), expected);
     assert_eq!(expected.matches(", unsafe fn(").count(), 51);
+}
+
+#[test]
+fn focused_lifecycle_fixture_matches_end_to_end_shape() {
+    // To regenerate this focused payload/create/release/label/class-spec snapshot:
+    // UPDATE_LIFECYCLE=1 cargo test -p webgpu-native-js-codegen --test fixtures focused_lifecycle_fixture_matches_end_to_end_shape
+    let (idl, yaml, policy) = fixture("lifecycle");
+    let emitted =
+        generate_lifecycle_with_policy(&idl, &yaml, &policy).expect("focused lifecycle generation");
+    let focused = focused_sampler_lifecycle(&emitted);
+    let expectation = fixtures().join("lifecycle.rs");
+    if std::env::var_os("UPDATE_LIFECYCLE").is_some() {
+        fs::write(&expectation, &focused).expect("regenerate lifecycle expectation");
+    }
+    let expected = fs::read_to_string(expectation).expect("lifecycle snapshot");
+    assert_eq!(focused, expected);
+}
+
+#[test]
+fn lifecycle_method_policy_is_checked_in_both_directions() {
+    let (idl, yaml, policy) = pinned_inputs();
+    let dead = policy.replace(
+        "member = \"mapAsync\"\npath = \"buffer_map_async\"",
+        "member = \"mapAsync\"\npath = \"buffer_map_async\"\n\n[[lifecycle.methods]]\ninterface = \"GPUBuffer\"\nmember = \"notMapAsync\"\npath = \"buffer_map_async\"",
+    );
+    let error = generate_core_with_policy(&idl, &yaml, &dead)
+        .expect_err("dead lifecycle mapping must fail");
+    assert!(error.to_string().contains("notMapAsync"), "{error}");
+
+    let uncovered = policy.replace(
+        "[[lifecycle.methods]]\ninterface = \"GPUBuffer\"\nmember = \"mapAsync\"\npath = \"buffer_map_async\"\n\n",
+        "",
+    );
+    let error = generate_core_with_policy(&idl, &yaml, &uncovered)
+        .expect_err("uncovered subset method must fail");
+    assert!(error.to_string().contains("GPUBuffer.mapAsync"), "{error}");
+}
+
+#[test]
+fn generated_lifecycle_covers_every_selected_class_and_retention_set() {
+    let (idl, yaml, policy) = pinned_inputs();
+    let emitted =
+        generate_lifecycle_with_policy(&idl, &yaml, &policy).expect("full lifecycle generation");
+
+    let classes = [
+        "gpu_class",
+        "adapter_class",
+        "device_class",
+        "buffer_class",
+        "queue_class",
+        "shader_module_class",
+        "sampler_class",
+        "bind_group_layout_class",
+        "pipeline_layout_class",
+        "bind_group_class",
+        "compute_pipeline_class",
+        "command_encoder_class",
+        "compute_pass_encoder_class",
+        "command_buffer_class",
+    ];
+    assert_eq!(
+        emitted.matches("_class<E: JsEngine + 'static>").count(),
+        classes.len()
+    );
+    for class in classes {
+        assert!(
+            emitted.contains(&format!("pub(super) fn {class}<")),
+            "missing generated {class}"
+        );
+    }
+
+    assert!(emitted.contains(
+        "pub struct BindGroupPayload {\n    pub(super) bind_group: WGPUBindGroup,\n    pub(super) layout: WGPUBindGroupLayout,\n    pub(super) buffers: Vec<WGPUBuffer>,\n}"
+    ));
+    assert!(emitted.contains(
+        "pub struct ComputePipelinePayload {\n    pub(super) pipeline: WGPUComputePipeline,\n    pub(super) module: WGPUShaderModule,\n    pub(super) layout: WGPUPipelineLayout,\n}"
+    ));
+}
+
+#[test]
+fn lifecycle_retention_is_derived_and_policy_can_only_extend_it() {
+    let (idl, yaml, policy) = pinned_inputs();
+    let shrunk = policy.replace(
+        "[[descriptor.wrapper.captures]]\nfield = \"layout\"\nsource = \"layout\"\n\n[[descriptor.wrapper.sequence_captures]]",
+        "[[descriptor.wrapper.sequence_captures]]",
+    );
+    assert_ne!(shrunk, policy, "bind-group capture fixture must be found");
+    let error = generate_lifecycle_with_policy(&idl, &yaml, &shrunk)
+        .expect_err("removing derived bind-group retention must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("derived retention for GPUBindGroup differs"),
+        "{error}"
+    );
+
+    let extended = policy.replace(
+        "[[lifecycle.quirks]]\ninterface = \"GPUCommandEncoder\"\nkind = \"stateful_encoder_payload\"\nreason = \"B10/B19 keep the encoder handle in shared ended-state and pass null for an omitted optional descriptor\"",
+        "[[lifecycle.quirks]]\ninterface = \"GPUCommandEncoder\"\nkind = \"stateful_encoder_payload\"\nreason = \"B10/B19 keep the encoder handle in shared ended-state and pass null for an omitted optional descriptor\"\n\n[[lifecycle.retention_extensions]]\ninterface = \"GPUComputePipeline\"\nfield = \"extra_module\"\nsource = \"module\"\nhandle_type = \"WGPUShaderModule\"\nreason = \"focused proof that policy extensions are additive\"",
+    );
+    assert_ne!(extended, policy, "lifecycle quirk fixture must be found");
+    let emitted = generate_lifecycle_with_policy(&idl, &yaml, &extended)
+        .expect("reasoned retention extension");
+    assert!(emitted.contains("pub(super) extra_module: WGPUShaderModule,"));
+    assert!(emitted.contains("extra_module: converted.module,"));
+    assert!(emitted.contains("extra_module: payload.extra_module,"));
 }
 
 #[test]

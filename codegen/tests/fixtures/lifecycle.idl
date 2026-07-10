@@ -1,0 +1,11 @@
+interface GPUDevice {
+    GPUSampler createSampler(optional GPUSamplerDescriptor descriptor = {});
+};
+
+interface GPUSampler {
+    attribute USVString label;
+};
+
+dictionary GPUSamplerDescriptor {
+    USVString label = "";
+};

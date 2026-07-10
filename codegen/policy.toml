@@ -128,6 +128,141 @@ members = ["setPipeline", "setBindGroup", "dispatchWorkgroups", "end"]
 interface = "GPUCommandBuffer"
 members = []
 
+# G14/G15: standard create-pattern lifecycles are emitted from the joined
+# creator/descriptor model. All remaining method/property bodies are existing
+# core functions named here; mappings and omissions are checked in both
+# directions. Retention extensions are additive only (none are needed for the
+# current surface).
+[lifecycle]
+standard_interfaces = [
+  "GPUShaderModule",
+  "GPUSampler",
+  "GPUBindGroupLayout",
+  "GPUPipelineLayout",
+  "GPUBindGroup",
+  "GPUComputePipeline",
+  "GPUCommandEncoder",
+]
+extra_class_interfaces = ["GPU", "GPUAdapter"]
+
+[[lifecycle.methods]]
+interface = "GPU"
+member = "requestAdapter"
+path = "gpu_request_adapter"
+
+[[lifecycle.methods]]
+interface = "GPUAdapter"
+member = "requestDevice"
+path = "adapter_request_device"
+
+[[lifecycle.methods]]
+interface = "GPUDevice"
+member = "createBuffer"
+path = "device_create_buffer"
+
+[[lifecycle.methods]]
+interface = "GPUBuffer"
+member = "destroy"
+path = "buffer_destroy"
+
+[[lifecycle.methods]]
+interface = "GPUBuffer"
+member = "mapAsync"
+path = "buffer_map_async"
+
+[[lifecycle.methods]]
+interface = "GPUBuffer"
+member = "getMappedRange"
+path = "buffer_get_mapped_range"
+
+[[lifecycle.methods]]
+interface = "GPUBuffer"
+member = "unmap"
+path = "buffer_unmap"
+
+[[lifecycle.methods]]
+interface = "GPUQueue"
+member = "writeBuffer"
+path = "queue_write_buffer"
+
+[[lifecycle.methods]]
+interface = "GPUQueue"
+member = "submit"
+path = "queue_submit"
+
+[[lifecycle.methods]]
+interface = "GPUQueue"
+member = "onSubmittedWorkDone"
+path = "queue_on_submitted_work_done"
+
+[[lifecycle.methods]]
+interface = "GPUCommandEncoder"
+member = "copyBufferToBuffer"
+path = "command_encoder_copy_buffer_to_buffer"
+length = 5
+reason = "preserved quirk: the shipped class table reports the legacy five-argument overload length"
+
+[[lifecycle.methods]]
+interface = "GPUCommandEncoder"
+member = "beginComputePass"
+path = "command_encoder_begin_compute_pass"
+
+[[lifecycle.methods]]
+interface = "GPUCommandEncoder"
+member = "finish"
+path = "command_encoder_finish"
+
+[[lifecycle.methods]]
+interface = "GPUComputePassEncoder"
+member = "setPipeline"
+path = "compute_pass_set_pipeline"
+
+[[lifecycle.methods]]
+interface = "GPUComputePassEncoder"
+member = "setBindGroup"
+path = "compute_pass_set_bind_group"
+
+[[lifecycle.methods]]
+interface = "GPUComputePassEncoder"
+member = "dispatchWorkgroups"
+path = "compute_pass_dispatch_workgroups"
+
+[[lifecycle.methods]]
+interface = "GPUComputePassEncoder"
+member = "end"
+path = "compute_pass_end"
+
+[[lifecycle.properties]]
+interface = "GPUDevice"
+member = "queue"
+get = "device_queue_get"
+
+[[lifecycle.properties]]
+interface = "GPUBuffer"
+member = "label"
+get = "buffer_label_get"
+set = "buffer_label_set"
+
+[[lifecycle.properties]]
+interface = "GPUBuffer"
+member = "size"
+get = "buffer_size_get"
+
+[[lifecycle.properties]]
+interface = "GPUBuffer"
+member = "usage"
+get = "buffer_usage_get"
+
+[[lifecycle.omitted_methods]]
+interface = "GPUDevice"
+member = "destroy"
+reason = "preserved quirk: GPUDevice.destroy is selected for dispatch accounting but was not exposed by the shipped class table"
+
+[[lifecycle.quirks]]
+interface = "GPUCommandEncoder"
+kind = "stateful_encoder_payload"
+reason = "B10/B19 keep the encoder handle in shared ended-state and pass null for an omitted optional descriptor"
+
 [[descriptor]]
 dictionary = "GPUBufferDescriptor"
 target = "BufferDescriptor"

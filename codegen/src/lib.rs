@@ -5,6 +5,7 @@
 mod dispatch;
 /// Rust source emission from a joined WebIDL and C-ABI model.
 pub mod emission;
+mod lifecycle;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::{self, Write as _};
@@ -301,7 +302,25 @@ pub fn generate_core_with_policy(
         output.push('\n');
         output.push_str(&conversions);
     }
+    let lifecycle = lifecycle::emit_lifecycle(&report, policy)?;
+    if !lifecycle.is_empty() {
+        output.push('\n');
+        output.push_str(&lifecycle);
+    }
     Ok(output)
+}
+
+/// Joins inputs and emits only lifecycle/class-table plumbing with an explicit policy.
+///
+/// This entry point keeps focused lifecycle fixtures independent of dispatch and
+/// descriptor snapshot surfaces.
+pub fn generate_lifecycle_with_policy(
+    idl: &str,
+    yaml: &str,
+    policy: &str,
+) -> Result<String, CodegenError> {
+    let report = join_inputs_with_policy(idl, yaml, policy)?;
+    lifecycle::emit_lifecycle(&report, policy)
 }
 
 /// Renders a deterministic text report suitable for the `report` CLI and reviews.
@@ -379,6 +398,70 @@ pub(crate) struct Policy {
     #[serde(default)]
     pub(crate) enum_value_skip: Vec<EnumValueSkipPolicy>,
     pub(crate) dispatch: Option<DispatchPolicy>,
+    pub(crate) lifecycle: Option<LifecyclePolicy>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LifecyclePolicy {
+    pub(crate) standard_interfaces: Vec<String>,
+    #[serde(default)]
+    pub(crate) extra_class_interfaces: Vec<String>,
+    #[serde(default)]
+    pub(crate) methods: Vec<MethodMappingPolicy>,
+    #[serde(default)]
+    pub(crate) properties: Vec<PropertyMappingPolicy>,
+    #[serde(default)]
+    pub(crate) omitted_methods: Vec<OmittedMethodPolicy>,
+    #[serde(default)]
+    pub(crate) retention_extensions: Vec<RetentionExtensionPolicy>,
+    #[serde(default)]
+    pub(crate) quirks: Vec<LifecycleQuirkPolicy>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MethodMappingPolicy {
+    pub(crate) interface: String,
+    pub(crate) member: String,
+    pub(crate) path: String,
+    pub(crate) length: Option<u8>,
+    pub(crate) reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PropertyMappingPolicy {
+    pub(crate) interface: String,
+    pub(crate) member: String,
+    pub(crate) get: String,
+    pub(crate) set: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct OmittedMethodPolicy {
+    pub(crate) interface: String,
+    pub(crate) member: String,
+    pub(crate) reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RetentionExtensionPolicy {
+    pub(crate) interface: String,
+    pub(crate) field: String,
+    pub(crate) source: String,
+    pub(crate) handle_type: String,
+    pub(crate) reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LifecycleQuirkPolicy {
+    pub(crate) interface: String,
+    pub(crate) kind: String,
+    pub(crate) reason: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -963,6 +1046,59 @@ fn validate_policy(
             return Err(CodegenError::Policy(format!(
                 "dead name-map {}: dictionary is not selected for emission",
                 entry.idl
+            )));
+        }
+    }
+    if let Some(lifecycle) = &policy.lifecycle {
+        let subset: BTreeSet<_> = policy
+            .subset
+            .iter()
+            .map(|entry| entry.interface.as_str())
+            .collect();
+        let mut extras = BTreeSet::new();
+        for interface in &lifecycle.extra_class_interfaces {
+            if !extras.insert(interface.as_str()) {
+                return Err(CodegenError::Policy(format!(
+                    "duplicate extra class interface {interface}"
+                )));
+            }
+            if subset.contains(interface.as_str()) {
+                return Err(CodegenError::Policy(format!(
+                    "dead extra class interface {interface}: already in subset"
+                )));
+            }
+            if !index.interfaces.contains_key(interface) {
+                return Err(CodegenError::Policy(format!(
+                    "unknown extra class interface {interface}"
+                )));
+            }
+            let operations: BTreeSet<_> = index
+                .effective_members(interface)
+                .into_iter()
+                .filter(|member| member.kind == IdlMemberKind::Operation)
+                .map(|member| member.name)
+                .collect();
+            let mapped: BTreeSet<_> = lifecycle
+                .methods
+                .iter()
+                .filter(|mapping| mapping.interface == *interface)
+                .map(|mapping| mapping.member.as_str())
+                .collect();
+            for member in mapped {
+                if !operations.contains(member) {
+                    return Err(CodegenError::Policy(format!(
+                        "dead lifecycle mapping {interface}.{member}"
+                    )));
+                }
+            }
+        }
+        if let Some(mapping) = lifecycle.methods.iter().find(|mapping| {
+            !subset.contains(mapping.interface.as_str())
+                && !extras.contains(mapping.interface.as_str())
+        }) {
+            return Err(CodegenError::Policy(format!(
+                "dead lifecycle mapping {}.{}: interface is neither subset nor extra class",
+                mapping.interface, mapping.member
             )));
         }
     }
@@ -1655,7 +1791,7 @@ fn collect_c_function_roots(function: &YamlFunction, roots: &mut BTreeSet<String
     }
 }
 
-fn type_identifiers(type_name: &str) -> Vec<String> {
+pub(crate) fn type_identifiers(type_name: &str) -> Vec<String> {
     type_name
         .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
         .filter(|token| token.starts_with("GPU"))

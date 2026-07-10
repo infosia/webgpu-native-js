@@ -1147,3 +1147,16 @@ Adding an interface adds zero dispatch lines anywhere (G16's net-negative
 demand met with room to spare). Five exceptional symbols are policy-listed
 with reasons, enforced both directions. All suites unchanged-green; parity
 byte-identical.
+
+**Slice 4b landed (2026-07-10): G14/G15, lifecycle emission.** Seven
+standard-pattern interfaces' payloads, create functions (R13/B16 + cleanup
+symmetry), release variants, label accessors, and ALL fourteen class tables
+are generated; the non-standard method bodies are policy-mapped with
+both-directions enforcement. **B8 retention is derived from the joined model
+and reproduced the hand-written sets exactly** (bind group = layout+buffers;
+compute pipeline = module+nullable layout; others handle-only). Core shrank by
+1,028 lines; the adapter diff is zero (G16). The 217-line per-interface datum
+is now ~0 for standard-pattern interfaces: a new interface is a policy entry.
+One run of this slice died at the 30-minute codex ceiling mid-flight; the
+partial tree was verified green and a resume session finished it — the
+split-heavy-tasks rule now has a codegen-sized data point.
