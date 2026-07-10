@@ -381,3 +381,8 @@ diverges from the pinned spec/header. Nothing here implies an intent to file
 issues against wgpu-native, quickjs-ng, or anything else. (This also closes
 the standing "report quickjs-ng maxByteLength upstream" item as
 won't-do.)
+
+**D11 handed off to yawgpu (2026-07-11)** via the established yawgpu handoff
+flow (spec citation, the wgpu-native rejection message verbatim, suggested fix
+shape + tests, and the question of why a fail=0 CTS run missed it). Nothing on
+the binding side waits on it.
