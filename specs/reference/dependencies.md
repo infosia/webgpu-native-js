@@ -80,3 +80,18 @@ what makes iOS packaging tractable.
 Dawn exists locally as two checkouts, an upstream one and a fork. They pin
 **identical** `webgpu-headers`, so either serves as a header reference. Prefer
 upstream when citing behaviour, since the fork carries local changes.
+
+## gpuweb (webgpu.idl) — Phase 4 input
+
+| | |
+|---|---|
+| Submodule path | `third_party/gpuweb` |
+| Upstream | https://github.com/gpuweb/gpuweb |
+| Commit | `acaf809d9323e72429d2252e372ee4d917fc40eb` |
+| Why this revision | Dawn's `DEPS` pins it for `dawn_node` — the same follow-Dawn policy as the `webgpu-headers` pin. dawn.node's `BUILD.gn` consumes `third_party/gpuweb/webgpu.idl` (repo root). |
+| Consumed file | `webgpu.idl` at the repo root |
+| Fetched | **pending** — submodule add is a network operation and is run by the project owner |
+
+On conflict between the IDL and the pinned `webgpu.h`, the header wins
+(block 05 → G1); divergences are catalogued in
+`specs/tracking/codegen-deltas.md`, never approximated.

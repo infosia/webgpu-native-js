@@ -315,8 +315,12 @@ harden into assumptions.
   (`engine-boundary.md` → Q2); the pin is not.
 - **Full WebIDL coverage vs. a trimmed engine-oriented subset.** Revisit after
   the first codegen pass shows the real effort delta.
-- **Where does `webgpu.idl` come from**, and how is it pinned against the
-  `webgpu.h` version? (Plan §6.4.)
+- ~~**Where does `webgpu.idl` come from**, and how is it pinned against the
+  `webgpu.h` version? (Plan §6.4.)~~ **ANSWERED (2026-07-10, block 05 → G1):**
+  the gpuweb/gpuweb repository, pinned as `third_party/gpuweb` at the revision
+  Dawn's `DEPS` pins for `dawn_node` — the same follow-Dawn policy as
+  `webgpu-headers`. On IDL-vs-header conflict the header wins; skips are
+  catalogued, never approximated.
 - **App Store Review Guidelines** re: bundled custom JS engines (4.7 tightened
   Nov 2025, aimed at remotely-delivered "mini app" content, not engine-bundled
   scripting). Precedent for bundling is strong. **Re-verify immediately before

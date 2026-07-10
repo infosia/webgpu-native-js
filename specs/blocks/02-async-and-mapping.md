@@ -65,7 +65,9 @@ fire anyway.
 Windows is still a first-class target of this block: it is where a second
 word-size and a second linker are exercised. What is deferred is **iOS and
 Android only**, and the old "block 03 = four-platform bring-up" is now
-**block 05**, after the API surface is filled.
+**block 05**, after the API surface is filled. *(Renumbered 2026-07-10:
+block 05 became codegen — mobile bring-up is **block 06**, keeping block files
+in chronological order.)*
 
 ---
 
