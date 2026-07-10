@@ -1201,9 +1201,11 @@ impl<E: JsEngine> BufferState<E> {
 unsafe impl<E: JsEngine> Send for BufferPayload<E> {}
 // SAFETY: `BufferState` carries `WGPUBuffer` and `WGPUDevice` handles plus JS
 // mapped-range bookkeeping. Moving the state between threads is limited to the
-// finalizer path described above; the handles are dereferenced by buffer methods
-// on the engine thread or by `ReleaseRequest::run()` on the `tick()` thread.
-// SAFETY: Buffer state handles are used on the engine thread or by `tick()` drain only.
+// finalizer path described above; native handles and stored mapped-range pointers
+// are only dereferenced by buffer methods on the creating `tick()` thread. Each
+// mapped-range pointer is used strictly before that thread calls native unmap or
+// destroy. `ReleaseRequest::run()` dereferences only the handles during `tick()`.
+// SAFETY: Buffer state handles/pointers are moved only and dereferenced on `tick()`.
 unsafe impl<E: JsEngine> Send for BufferState<E> {}
 
 /// Payload stored by a `GPU` wrapper.
@@ -1383,8 +1385,12 @@ unsafe impl Send for ComputePassState {}
 #[derive(Clone, Copy)]
 struct MappedRange<E: JsEngine> {
     value: E::Value,
-    offset: usize,
+    _offset: usize,
     size: usize,
+    /// The one native pointer requested for this JS range. BufferMapping.md
+    /// guarantees that it remains valid until unmap; every detach/copy-back path
+    /// runs strictly before `wgpuBufferUnmap` or `wgpuBufferDestroy`.
+    native_ptr: *mut c_void,
     strategy: MappedRangeStrategy,
     map_mode: WGPUMapMode,
 }
@@ -1747,8 +1753,9 @@ pub fn buffer_get_mapped_range<E: JsEngine + 'static>(
         let tracked = E::duplicate_value(cx, value);
         state.ranges.push(MappedRange {
             value: tracked,
-            offset,
+            _offset: offset,
             size,
+            native_ptr: ptr,
             strategy: E::MAPPED_RANGE_STRATEGY,
             map_mode: state.map_mode,
         });
@@ -3637,12 +3644,12 @@ fn detach_all_ranges<E: JsEngine>(
             return Err(E::operation_error(cx, "mapped range detach failed"));
         }
         if should_copy_back {
-            let ptr = mapped_range_ptr::<E>(cx, state, range.offset, range.size);
-            if ptr.is_null() {
-                E::release_value(cx, range.value);
-                return Err(E::operation_error(cx, "mapped range is unavailable"));
-            }
-            let dst = unsafe { std::slice::from_raw_parts_mut(ptr.cast::<u8>(), range.size) };
+            // SAFETY: `native_ptr` was returned for `size` bytes when this JS
+            // range was created and remains valid until native unmap/destroy,
+            // both of which run only after `detach_all_ranges` returns.
+            let dst = unsafe {
+                std::slice::from_raw_parts_mut(range.native_ptr.cast::<u8>(), range.size)
+            };
             dst.copy_from_slice(&copy_back);
         }
         E::release_value(cx, range.value);

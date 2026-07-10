@@ -35,6 +35,8 @@ pub type JSClassRef = *mut OpaqueJsClass;
 
 type JSPropertyAttributes = u32;
 type JSClassAttributes = u32;
+type JSTypedArrayType = c_int;
+const TYPED_ARRAY_TYPE_ARRAY_BUFFER: JSTypedArrayType = 9;
 type InitializeCallback = unsafe extern "C" fn(JSContextRef, JSObjectRef);
 type FinalizeCallback = unsafe extern "C" fn(JSObjectRef);
 type HasPropertyCallback = unsafe extern "C" fn(JSContextRef, JSObjectRef, JSStringRef) -> bool;
@@ -168,6 +170,12 @@ unsafe extern "C" {
         value: JSValueRef,
         exception: *mut JSValueRef,
     ) -> JSObjectRef;
+    /// Returns the typed-array kind of a value, including ArrayBuffer.
+    fn JSValueGetTypedArrayType(
+        ctx: JSContextRef,
+        value: JSValueRef,
+        exception: *mut JSValueRef,
+    ) -> JSTypedArrayType;
     /// Protects a value from garbage collection.
     fn JSValueProtect(ctx: JSContextRef, value: JSValueRef);
     /// Removes one garbage-collection protection from a value.
@@ -245,6 +253,18 @@ unsafe extern "C" {
         arguments: *const JSValueRef,
         exception: *mut JSValueRef,
     ) -> JSValueRef;
+    /// Returns an ArrayBuffer's private backing pointer.
+    fn JSObjectGetArrayBufferBytesPtr(
+        ctx: JSContextRef,
+        object: JSObjectRef,
+        exception: *mut JSValueRef,
+    ) -> *mut c_void;
+    /// Returns an ArrayBuffer's byte length without pinning it.
+    fn JSObjectGetArrayBufferByteLength(
+        ctx: JSContextRef,
+        object: JSObjectRef,
+        exception: *mut JSValueRef,
+    ) -> usize;
     /// Returns an object's private pointer.
     fn JSObjectGetPrivate(object: JSObjectRef) -> *mut c_void;
     /// Replaces an object's private pointer.
@@ -417,11 +437,18 @@ struct ObjectPayload {
     spec: &'static core::ClassSpec<Engine>,
     payload: Box<dyn Any + Send>,
     finalizer: Arc<FinalizerState>,
+    cached_methods: Mutex<Vec<CachedMethod>>,
 }
 
 #[derive(Clone, Copy)]
 struct MethodTarget {
     call: core::MethodFn<Engine>,
+}
+
+#[derive(Clone, Copy)]
+struct CachedMethod {
+    name: &'static str,
+    value: ProtectedValue,
 }
 
 /// JavaScriptCore adapter state shared by callbacks for one global context.
@@ -1027,6 +1054,7 @@ impl core::JsEngine for Engine {
             spec,
             payload,
             finalizer: Arc::clone(&state.finalizer),
+            cached_methods: Mutex::new(Vec::new()),
         });
         let raw = Box::into_raw(holder).cast();
         // SAFETY: class is registered and raw is owned by the resulting object.
@@ -1187,30 +1215,119 @@ impl core::JsEngine for Engine {
         _len: usize,
         _owner: core::WGPUBuffer,
     ) -> core::Result<Self::Value, Self::Error> {
-        Err(Self::operation_error(cx, "JSC mapping lands in part 2"))
+        // Honest strategy-gated stub: core calls this primitive only for
+        // ZeroCopyDetach, while JSC advertises CopyInCopyOut (J8/A10).
+        Err(Self::operation_error(
+            cx,
+            "external ArrayBuffers are unavailable under CopyInCopyOut",
+        ))
     }
 
     fn new_arraybuffer_copy(
         cx: Self::Context<'_>,
-        _bytes: &[u8],
+        bytes: &[u8],
     ) -> core::Result<Self::Value, Self::Error> {
-        Err(Self::operation_error(cx, "JSC mapping lands in part 2"))
+        let staging = make_engine_arraybuffer(cx, bytes.len())?;
+        let staging_object = value_to_object(cx, staging)?;
+        if !bytes.is_empty() {
+            let mut exception = ptr::null();
+            // SAFETY: staging is a private, engine-owned ArrayBuffer that has
+            // never reached script. Pinning this staging remnant is permitted
+            // by J8/J9; only its unpinned transfer product is returned.
+            let staging_ptr =
+                unsafe { JSObjectGetArrayBufferBytesPtr(cx.ctx, staging_object, &mut exception) };
+            if !exception.is_null() {
+                return Err(exception);
+            }
+            let Some(staging_ptr) = NonNull::new(staging_ptr.cast::<u8>()) else {
+                return Err(Self::operation_error(
+                    cx,
+                    "private staging ArrayBuffer has no bytes",
+                ));
+            };
+            // SAFETY: the private staging allocation has bytes.len() bytes and
+            // cannot overlap the borrowed foreign source slice.
+            unsafe { ptr::copy_nonoverlapping(bytes.as_ptr(), staging_ptr.as_ptr(), bytes.len()) };
+        }
+        call_own_method(cx, staging, "transfer")
     }
 
     fn detach_arraybuffer(
         cx: Self::Context<'_>,
-        _value: Self::Value,
-        _out: Option<&mut [u8]>,
+        value: Self::Value,
+        out: Option<&mut [u8]>,
     ) -> core::Result<(), Self::Error> {
-        Err(Self::operation_error(cx, "JSC mapping lands in part 2"))
+        // transfer() runs before any bytes-pointer access. On success `value`
+        // is detached and `product` is a private copy (J8/A13).
+        let product = call_own_method(cx, value, "transfer")?;
+        if let Some(out) = out {
+            if Self::arraybuffer_len(cx, product) != Some(out.len()) {
+                return Err(Self::type_error(cx, "ArrayBuffer length mismatch"));
+            }
+            if !out.is_empty() {
+                let product_object = value_to_object(cx, product)?;
+                let mut exception = ptr::null();
+                // SAFETY: product is the private ArrayBuffer returned by
+                // transfer(); script can only see the now-detached `value`.
+                let product_ptr = unsafe {
+                    JSObjectGetArrayBufferBytesPtr(cx.ctx, product_object, &mut exception)
+                };
+                if !exception.is_null() {
+                    return Err(exception);
+                }
+                let Some(product_ptr) = NonNull::new(product_ptr.cast::<u8>()) else {
+                    return Err(Self::operation_error(
+                        cx,
+                        "private transfer product has no bytes",
+                    ));
+                };
+                // SAFETY: product and out have the same checked length and are
+                // disjoint engine-owned and Rust-owned allocations.
+                unsafe {
+                    ptr::copy_nonoverlapping(product_ptr.as_ptr(), out.as_mut_ptr(), out.len())
+                };
+            }
+        }
+        Ok(())
     }
 
-    fn arraybuffer_len(_cx: Self::Context<'_>, _value: Self::Value) -> Option<usize> {
-        None
+    fn arraybuffer_len(cx: Self::Context<'_>, value: Self::Value) -> Option<usize> {
+        let mut exception = ptr::null();
+        // SAFETY: value belongs to cx. This predicate does not expose a bytes
+        // pointer and therefore cannot pin the buffer.
+        let kind = unsafe { JSValueGetTypedArrayType(cx.ctx, value, &mut exception) };
+        if !exception.is_null() || kind != TYPED_ARRAY_TYPE_ARRAY_BUFFER {
+            // JSC reports exceptions through the out parameter; consuming it
+            // here means it is intentionally neither propagated nor pending.
+            return None;
+        }
+        let object = value_to_object(cx, value).ok()?;
+        exception = ptr::null();
+        // SAFETY: the kind check above proved this is an ArrayBuffer. The byte
+        // length accessor is the non-pinning E12 operation.
+        let len = unsafe { JSObjectGetArrayBufferByteLength(cx.ctx, object, &mut exception) };
+        exception.is_null().then_some(len)
     }
 
-    fn arraybuffer_copy(_cx: Self::Context<'_>, _value: Self::Value) -> Option<Vec<u8>> {
-        None
+    fn arraybuffer_copy(cx: Self::Context<'_>, value: Self::Value) -> Option<Vec<u8>> {
+        Self::arraybuffer_len(cx, value)?;
+        let product = call_own_method(cx, value, "slice").ok()?;
+        let len = Self::arraybuffer_len(cx, product)?;
+        if len == 0 {
+            return Some(Vec::new());
+        }
+        let product_object = value_to_object(cx, product).ok()?;
+        let mut exception = ptr::null();
+        // SAFETY: product is the private ArrayBuffer returned by slice(); the
+        // script-reachable input `value` has never had its pointer requested.
+        let product_ptr =
+            unsafe { JSObjectGetArrayBufferBytesPtr(cx.ctx, product_object, &mut exception) };
+        if !exception.is_null() {
+            return None;
+        }
+        let product_ptr = NonNull::new(product_ptr.cast::<u8>())?;
+        // SAFETY: the private slice product contains len initialized bytes.
+        Some(unsafe { std::slice::from_raw_parts(product_ptr.as_ptr(), len).to_vec() })
     }
 
     fn duplicate_value(cx: Self::Context<'_>, value: Self::Value) -> Self::Value {
@@ -1253,6 +1370,50 @@ fn value_to_object(cx: Context<'_>, value: JSValueRef) -> core::Result<JSObjectR
     } else {
         Ok(object)
     }
+}
+
+fn make_engine_arraybuffer(cx: Context<'_>, len: usize) -> core::Result<JSValueRef, JSValueRef> {
+    let global = Engine::global(cx);
+    let constructor = Engine::get_property(cx, global, "ArrayBuffer")?;
+    let constructor_object = value_to_object(cx, constructor)?;
+    let len = Engine::number(cx, len as f64)?;
+    let arguments = [len];
+    let mut exception = ptr::null();
+    // SAFETY: ArrayBuffer is the live built-in constructor from this context;
+    // the numeric length argument belongs to the same call scope.
+    let object = unsafe {
+        JSObjectCallAsConstructor(
+            cx.ctx,
+            constructor_object,
+            arguments.len(),
+            arguments.as_ptr(),
+            &mut exception,
+        )
+    };
+    if !exception.is_null() {
+        Err(exception)
+    } else if object.is_null() {
+        Err(Engine::operation_error(
+            cx,
+            "ArrayBuffer construction failed",
+        ))
+    } else {
+        let value = object.cast_const();
+        cx.scope.track(value);
+        Ok(value)
+    }
+}
+
+fn call_own_method(
+    cx: Context<'_>,
+    receiver: JSValueRef,
+    name: &str,
+) -> core::Result<JSValueRef, JSValueRef> {
+    // Use the J11 engine primitives: two property reads plus one call, matching
+    // the measured spike and avoiding eval for transfer() and slice().
+    let method = Engine::get_property(cx, receiver, name)?;
+    let call = Engine::get_property(cx, method, "call")?;
+    Engine::call(cx, call, method, &[receiver])
 }
 
 fn make_error(cx: Context<'_>, message: &str, type_error: bool) -> JSValueRef {
@@ -1320,7 +1481,20 @@ unsafe extern "C" fn wrapper_get_property(
             .iter()
             .find(|method| method.name == name)
         {
-            return make_method(cx, method.call);
+            let mut cached = holder
+                .cached_methods
+                .lock()
+                .map_err(|_| Engine::operation_error(cx, "wrapper method cache is poisoned"))?;
+            if let Some(cached) = cached.iter().find(|cached| cached.name == method.name) {
+                return Ok(cached.value.0);
+            }
+            let value = make_method(cx, method.call)?;
+            holder.finalizer.protect(cx.ctx, value);
+            cached.push(CachedMethod {
+                name: method.name,
+                value: ProtectedValue(value),
+            });
+            return Ok(value);
         }
         let Some(getter) = holder
             .spec
@@ -1445,12 +1619,24 @@ unsafe extern "C" fn wrapper_finalize(object: JSObjectRef) {
         };
         // SAFETY: this finalizer is the sole owner of the object's private Box.
         let holder = unsafe { Box::from_raw(raw.as_ptr()) };
-        core::release_payload_values::<Engine>(holder.payload.as_ref(), &mut |value| {
-            holder.finalizer.defer_unprotect(value);
+        let ObjectPayload {
+            spec,
+            payload,
+            finalizer,
+            cached_methods,
+        } = *holder;
+        let cached_methods = cached_methods
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for method in cached_methods {
+            finalizer.defer_unprotect(method.value.0);
+        }
+        core::release_payload_values::<Engine>(payload.as_ref(), &mut |value| {
+            finalizer.defer_unprotect(value);
         });
         // Core finalizers only move native handles into Environment's release
         // queue. They call neither a JSC context API nor webgpu.h (J6/J15/J21).
-        (holder.spec.finalizer)(holder.payload, &holder.finalizer.env);
+        (spec.finalizer)(payload, &finalizer.env);
     }));
 }
 
@@ -1869,7 +2055,10 @@ mod tests {
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
 
-    use super::{core, ffi_wgpu as wgpu, Context, Engine, JSValueRef, Runtime, Scope};
+    use super::{
+        core, ffi_wgpu as wgpu, Context, Engine, JSObjectGetArrayBufferBytesPtr, JSValueRef,
+        JSValueToObject, Runtime, Scope,
+    };
     use webgpu_native_js_core::JsEngine;
 
     struct AdapterRequestState {
@@ -2003,6 +2192,52 @@ mod tests {
         });
     }
 
+    fn global_bool(runtime: &Runtime, name: &str) -> bool {
+        let name = super::JsString::new(name).expect("global name");
+        let global = unsafe { super::JSContextGetGlobalObject(runtime.raw_context()) };
+        let mut exception = ptr::null();
+        let value = unsafe {
+            super::JSObjectGetProperty(runtime.raw_context(), global, name.as_raw(), &mut exception)
+        };
+        assert!(exception.is_null(), "global lookup threw");
+        unsafe { super::JSValueToBoolean(runtime.raw_context(), value) }
+    }
+
+    #[test]
+    fn shared_j17_parity_script_matches_expected_output() {
+        const SCRIPT: &str = include_str!("../../../tests/parity/parity.js");
+        const EXPECTED: &str = include_str!("../../../tests/parity/expected.txt");
+
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("JSC runtime");
+        let device = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        let gpu = runtime.wrap_gpu(setup.instance).expect("wrap gpu");
+        runtime
+            .set_global_value("device", device)
+            .expect("set device");
+        runtime.set_global_value("gpu", gpu).expect("set gpu");
+        eval(&runtime, SCRIPT, "tests/parity/parity.js");
+
+        let mut done = false;
+        for _ in 0..32 {
+            unsafe { runtime.tick(setup.instance) }.expect("parity tick");
+            done = global_bool(&runtime, "parityDone");
+            if done {
+                break;
+            }
+        }
+        assert!(done, "parity script did not finish within 32 ticks");
+
+        let joined = runtime
+            .eval("globalThis.parityLog.join('\\n')", "tests/parity/join.js")
+            .expect("join parity log");
+        let actual = format!(
+            "{}\n",
+            super::value_to_string(runtime.raw_context(), joined)
+        );
+        assert_eq!(actual, EXPECTED);
+    }
+
     #[test]
     fn scope_is_non_optional_and_records_values() {
         let runtime = Runtime::new().expect("JSC runtime");
@@ -2017,29 +2252,32 @@ mod tests {
     }
 
     #[test]
-    fn mapping_primitives_are_honest_part_two_stubs() {
+    fn mapping_primitives_stage_copy_detach_and_read_without_pinning_input() {
         let runtime = Runtime::new().expect("JSC runtime");
         super::with_scope(runtime.raw_context(), |cx| {
             assert_eq!(
                 Engine::MAPPED_RANGE_STRATEGY,
                 core::MappedRangeStrategy::CopyInCopyOut
             );
-            let copy_error = Engine::new_arraybuffer_copy(cx, &[1, 2, 3])
-                .expect_err("copy creation must be deferred");
-            assert!(super::value_to_string(runtime.raw_context(), copy_error)
-                .contains("JSC mapping lands in part 2"));
+            let value = Engine::new_arraybuffer_copy(cx, &[1, 2, 3]).expect("staged copy");
+            assert_eq!(Engine::arraybuffer_len(cx, value), Some(3));
+            assert_eq!(Engine::arraybuffer_copy(cx, value), Some(vec![1, 2, 3]));
+            let mut out = [0_u8; 3];
+            Engine::detach_arraybuffer(cx, value, Some(&mut out)).expect("detach and copy");
+            assert_eq!(out, [1, 2, 3]);
+            assert_eq!(Engine::arraybuffer_len(cx, value), Some(0));
+
             let external_error = unsafe {
                 Engine::new_external_arraybuffer(cx, ptr::null_mut(), 0, ptr::null_mut())
             }
-            .expect_err("external creation must be deferred");
+            .expect_err("external creation must remain unavailable");
             assert!(
                 super::value_to_string(runtime.raw_context(), external_error)
-                    .contains("JSC mapping lands in part 2")
+                    .contains("CopyInCopyOut")
             );
-            let value = Engine::undefined(cx);
-            assert!(Engine::detach_arraybuffer(cx, value, None).is_err());
-            assert_eq!(Engine::arraybuffer_len(cx, value), None);
-            assert_eq!(Engine::arraybuffer_copy(cx, value), None);
+            let non_buffer = Engine::undefined(cx);
+            assert_eq!(Engine::arraybuffer_len(cx, non_buffer), None);
+            assert_eq!(Engine::arraybuffer_copy(cx, non_buffer), None);
         });
     }
 
@@ -2076,13 +2314,74 @@ mod tests {
             .expect("set device");
         eval(
             &runtime,
-            "void device.queue; void device.createBuffer({size: 4, usage: 8});",
+            r#"
+                if (device.createBuffer !== device.createBuffer) {
+                    throw new Error('method identity was not stable');
+                }
+                void device.queue;
+                void device.createBuffer({size: 4, usage: 8});
+            "#,
             "protection-balance.js",
         );
         drop(runtime);
         assert_eq!(
             counters.protect_count.load(Ordering::Relaxed),
             counters.unprotect_count.load(Ordering::Relaxed)
+        );
+    }
+
+    fn deliberately_pin_script_visible_arraybuffer(runtime: &Runtime, name: &str) {
+        let value = runtime
+            .eval_unprotected(name, "pin-script-visible-arraybuffer.js")
+            .expect("script-visible ArrayBuffer");
+        let mut exception = ptr::null();
+        // SAFETY: J18 deliberately violates J9 in test code only. Taking the C
+        // bytes pointer of this script-visible mapped range pins it so the A12
+        // detach-verification guard can be observed firing.
+        let object = unsafe { JSValueToObject(runtime.raw_context(), value, &mut exception) };
+        assert!(exception.is_null());
+        assert!(!object.is_null());
+        let bytes = unsafe {
+            JSObjectGetArrayBufferBytesPtr(runtime.raw_context(), object, &mut exception)
+        };
+        assert!(exception.is_null());
+        assert!(!bytes.is_null());
+    }
+
+    #[test]
+    fn a12_red_demo_pinned_script_visible_range_fails_detach_verification() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("JSC runtime");
+        let device = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("device", device)
+            .expect("set device");
+        eval(
+            &runtime,
+            r#"
+                var redMapped = device.createBuffer({
+                    size: 8,
+                    usage: 2,
+                    mappedAtCreation: true
+                });
+                var redRange = redMapped.getMappedRange();
+                new Uint8Array(redRange)[0] = 37;
+            "#,
+            "a12-pinning-setup.js",
+        );
+        deliberately_pin_script_visible_arraybuffer(&runtime, "redRange");
+
+        let error = runtime
+            .eval("redMapped.unmap();", "a12-pinning-unmap.js")
+            .expect_err("pinned range must fail core detach verification");
+        assert!(
+            format!("{error:?}").contains("mapped range detach failed"),
+            "unexpected hard error: {error:?}"
+        );
+        eval(
+            &runtime,
+            "if (redRange.byteLength !== 8) throw new Error('transfer unexpectedly detached');",
+            "a12-pinning-check.js",
         );
     }
 

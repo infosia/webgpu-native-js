@@ -1893,6 +1893,43 @@ mod tests {
     }
 
     #[test]
+    fn shared_j17_parity_script_matches_expected_output() {
+        const SCRIPT: &str = include_str!("../../../tests/parity/parity.js");
+        const EXPECTED: &str = include_str!("../../../tests/parity/expected.txt");
+
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let device = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        let gpu = runtime.wrap_gpu(setup.instance).expect("wrap gpu");
+        runtime
+            .set_global_value("device", device)
+            .expect("set device");
+        runtime.set_global_value("gpu", gpu).expect("set gpu");
+        eval_drop(&runtime, SCRIPT, "tests/parity/parity.js");
+
+        let mut done = false;
+        for _ in 0..32 {
+            unsafe { runtime.tick(setup.instance) }.expect("parity tick");
+            let value = global_value(&runtime, "parityDone");
+            done = unsafe { qjs::JS_ToBool(runtime.raw_context(), value) } != 0;
+            unsafe { qjs::JS_FreeValue(runtime.raw_context(), value) };
+            if done {
+                break;
+            }
+        }
+        assert!(done, "parity script did not finish within 32 ticks");
+
+        let joined = runtime
+            .eval("globalThis.parityLog.join('\\n')", "tests/parity/join.js")
+            .expect("join parity log");
+        let actual = format!(
+            "{}\n",
+            super::exception_or_value(runtime.raw_context(), joined)
+        );
+        assert_eq!(actual, EXPECTED);
+    }
+
+    #[test]
     fn js_engine_global_returns_a_scope_tracked_owned_value() {
         let runtime = Runtime::new().expect("quickjs runtime");
         let scope = super::Scope::new(runtime.raw_context());

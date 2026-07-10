@@ -3,8 +3,8 @@
 Phase 2, part 1. The public host contract, the Promise bridge, and
 `mapAsync`/`getMappedRange`/`unmap`.
 
-Rules in this block are numbered **A1–A31** to keep them distinct from block 01's
-R-rules, which all still apply. (A21–A31 were added by later reviews; the block
+Rules in this block are numbered **A1–A32** to keep them distinct from block 01's
+R-rules, which all still apply. (A21–A32 were added by later reviews; the block
 originally ran A1–A20.)
 
 Every claim below about `webgpu.h` or `quickjs.h` was checked against the pinned
@@ -431,6 +431,28 @@ and `unmap()` copies back only for write mappings.
 A null return here is a **binding bug**, not a validation error. Do not surface it
 to script as an `OperationError` without first checking you asked for the right
 pointer.
+
+**A32 — one native range request per JS range; `core/` retains the pointer.**
+*(Added 2026-07-10; the JSC exit gate's fifth firing, and the first one inside
+the mapping path — exactly where this phase was designed to look.)*
+
+`webgpu-headers/doc/articles/BufferMapping.md`: the mapped-range getters
+**fail on overlapping ranges** exactly as WebGPU's `getMappedRange()` does,
+with one C-only exemption for *const/const* overlaps. `core/`'s
+`CopyInCopyOut` copy-back called `wgpuBufferGetMappedRange` a **second time**
+for the same `(offset, size)` at `unmap()` — a non-const overlap of the range
+taken at `getMappedRange()` — so a conformant backend returns `NULL` and the
+copy-back dies. yawgpu is conformant; the first real `CopyInCopyOut` engine
+found it in its first hour. The mock had allowed the overlap — the A24 mirror
+class, fourth instance.
+
+The rule: the native pointer is requested **once**, when the JS range is
+created, and stored in the range record beside `offset`/`size`/`value`. The
+copy-back writes through the stored pointer. Validity holds because copy-back
+runs strictly before `wgpuBufferUnmap`/`wgpuBufferDestroy` on every path
+(`unmap()`, `destroy()`), and the mapping — per the same article — stays valid
+until unmap. The mock now enforces the canonical overlap rule, so the
+two-requests shape fails a `core/` test with no engine at all.
 
 **A15 — a buffer may have several mapped ranges, and `unmap()` detaches all of
 them.** Track every `ArrayBuffer` handed out. Detaching only the most recent one

@@ -927,6 +927,14 @@ struct MockGpuState {
     null_create_buffer: bool,
     native_order: Vec<&'static str>,
     buffers: BTreeMap<WGPUBuffer, Vec<u8>>,
+    mapped_ranges: BTreeMap<WGPUBuffer, Vec<MockMappedRange>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct MockMappedRange {
+    offset: usize,
+    end: usize,
+    is_const: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1202,12 +1210,27 @@ unsafe fn buffer_set_label(_buffer: WGPUBuffer, label: WGPUStringView) {
     });
 }
 
-unsafe fn buffer_destroy(_buffer: WGPUBuffer) {
+unsafe fn buffer_destroy(buffer: WGPUBuffer) {
     GPU_STATE.with(|state| {
         let mut state = state.borrow_mut();
         state.buffer_destroys += 1;
         state.native_order.push("buffer_destroy");
+        state.mapped_ranges.remove(&buffer);
     });
+}
+
+fn overlaps_outstanding_range(
+    state: &MockGpuState,
+    buffer: WGPUBuffer,
+    offset: usize,
+    end: usize,
+    is_const: bool,
+) -> bool {
+    state.mapped_ranges.get(&buffer).is_some_and(|ranges| {
+        ranges
+            .iter()
+            .any(|range| offset < range.end && range.offset < end && !(is_const && range.is_const))
+    })
 }
 
 unsafe fn buffer_get_mapped_range(
@@ -1232,6 +1255,22 @@ unsafe fn buffer_get_mapped_range(
         if end > bytes.len() {
             return ptr::null_mut();
         }
+        if overlaps_outstanding_range(&state, buffer, offset, end, false) {
+            return ptr::null_mut();
+        }
+        state
+            .mapped_ranges
+            .entry(buffer)
+            .or_default()
+            .push(MockMappedRange {
+                offset,
+                end,
+                is_const: false,
+            });
+        let bytes = state
+            .buffers
+            .get_mut(&buffer)
+            .expect("buffer checked above");
         unsafe { bytes.as_mut_ptr().add(offset).cast() }
     })
 }
@@ -1258,6 +1297,19 @@ unsafe fn buffer_get_const_mapped_range(
         if end > bytes.len() {
             return ptr::null();
         }
+        if overlaps_outstanding_range(&state, buffer, offset, end, true) {
+            return ptr::null();
+        }
+        state
+            .mapped_ranges
+            .entry(buffer)
+            .or_default()
+            .push(MockMappedRange {
+                offset,
+                end,
+                is_const: true,
+            });
+        let bytes = state.buffers.get(&buffer).expect("buffer checked above");
         unsafe { bytes.as_ptr().add(offset).cast() }
     })
 }
@@ -1290,8 +1342,12 @@ unsafe fn buffer_map_async(
     webgpu_native_js_ffi::native::WGPUFuture { id: 3 }
 }
 
-unsafe fn buffer_unmap(_buffer: WGPUBuffer) {
-    GPU_STATE.with(|state| state.borrow_mut().buffer_unmaps += 1);
+unsafe fn buffer_unmap(buffer: WGPUBuffer) {
+    GPU_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        state.buffer_unmaps += 1;
+        state.mapped_ranges.remove(&buffer);
+    });
 }
 
 unsafe fn buffer_release(_buffer: WGPUBuffer) {
@@ -2533,6 +2589,38 @@ mod tests {
             assert_eq!(state.mapped_range_calls, 1);
         });
         let _ = buffer_unmap::<Engine>(cx, buffer, &[]).expect("final unmap");
+    }
+
+    #[test]
+    fn a24_a32_mock_rejects_non_const_overlap_and_allows_const_overlap() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let desc = descriptor(
+            &rt,
+            &[
+                ("size", rt.number(8.0)),
+                ("usage", rt.number(2.0)),
+                ("mappedAtCreation", rt.bool(true)),
+            ],
+        );
+        let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("buffer");
+        let native = Engine::payload(cx, buffer, crate::GPU_BUFFER_CLASS)
+            .and_then(|payload| payload.downcast_ref::<BufferPayload<Engine>>())
+            .and_then(|payload| payload.state().lock().ok().map(|state| state.buffer))
+            .expect("native buffer");
+
+        unsafe {
+            assert!(!super::buffer_get_mapped_range(native, 0, 4).is_null());
+            assert!(super::buffer_get_mapped_range(native, 2, 2).is_null());
+            assert!(super::buffer_get_const_mapped_range(native, 2, 2).is_null());
+
+            super::buffer_unmap(native);
+            assert!(!super::buffer_get_const_mapped_range(native, 0, 4).is_null());
+            assert!(!super::buffer_get_const_mapped_range(native, 2, 2).is_null());
+            assert!(super::buffer_get_mapped_range(native, 2, 2).is_null());
+        }
     }
 
     #[test]

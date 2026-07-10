@@ -1000,3 +1000,28 @@ each read leaks a `MethodTarget` Box until context release, because F5 means
 JSC will not finalize them sooner. Fix: cache the callable per (wrapper, name)
 in the payload holder, protected, released through the deferred-unprotect
 queue at finalize.
+
+**The fifth firing — and it is the one the phase was built to produce.**
+P3b-2's first parity run failed under JSC inside `unmap()`: `core/`'s
+`CopyInCopyOut` copy-back requested the same mutable native range twice, and
+`BufferMapping.md` makes overlapping non-const ranges fail — yawgpu is
+conformant, the mock was not, and QuickJS's zero-copy arm never runs copy-back.
+So the copy arm had been broken against every conformant backend since Phase 2,
+visible only to the engine that actually uses it, in its first hour of use.
+Fixed as **A32**: the native pointer is requested once, stored in the range
+record, and copy-back writes through it; the mock now enforces the canonical
+overlap rule, so the old shape fails a core test with no engine (seen red:
+`a10_a20_copy_in_copy_out_detaches_and_copies_back`, "mapped range is
+unavailable").
+
+**P3b-2 landed (2026-07-10): the parity claim is now a passing test.** The same
+`tests/parity/parity.js` produces byte-identical output under QuickJS and
+JavaScriptCore (`tests/parity/expected.txt`, asserted by one test in each
+adapter): label `null` → `"null"`, one-checkpoint tick ordering,
+`mappedAtCreation` and `writeBuffer` byte round-trips, sequence conformance
+both directions, BigInt rejection, `destroy()`. The carried method-identity
+finding is fixed (per-wrapper cached callables, released through the
+deferred-unprotect queue). J18's pinning red demo violates J9 in marked test
+code and shows core's A12 verification firing. Bytes-pointer audit: staging,
+transfer product, slice product — all private; the one script-visible use is
+the marked demo.
