@@ -1,0 +1,16 @@
+[package]
+name = "javascriptcore-adapter"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+jsc = [
+    "dep:webgpu-native-js-core",
+    "dep:webgpu-native-js-ffi",
+    "webgpu-native-js-ffi/backend-yawgpu",
+]
+
+[dependencies]
+webgpu-native-js-core = { path = "../../core", optional = true }
+webgpu-native-js-ffi = { path = "../../ffi", optional = true }

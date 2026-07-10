@@ -981,3 +981,22 @@ tests drop the runtime for real, assert `Arc::strong_count == 1` on the
 request's queue handle before firing the callback, and assert the release
 counter with **no** hand-drain. Seen red against the enqueue version
 (`left: 0, right: 1`, both tests). Gates re-run by the planner.
+
+**P3b-1 landed (2026-07-10), reviewed and accepted with one carried finding.**
+The adapter exists behind `jsc` (macOS-only, never default); eleven headless
+tests pass from the tree (an rpath `build.rs` revision was needed — the JSC
+test binary, like QuickJS's, must re-emit the backend rpath itself; the first
+delivery passed only in the agent's hand-configured shell). Zero `core/`
+changes — the exit gate did not fire on the adapter itself. The J2 ordering
+test asserts `settle1,settle2,then1,then2` on the engine that can actually
+fail it. Finalizers verified context-API-free (`JSObjectGetPrivate` only);
+engine-value release routes through the deferred-unprotect queue.
+
+**Carried finding (fix in P3b-2): method identity and per-call allocation.**
+`wrapper_get_property` mints a fresh callable per property read, so
+`device.createBuffer !== device.createBuffer` under JSC while QuickJS keeps a
+stable function — a parity divergence J17's script would have to dodge — and
+each read leaks a `MethodTarget` Box until context release, because F5 means
+JSC will not finalize them sooner. Fix: cache the callable per (wrapper, name)
+in the payload holder, protected, released through the deferred-unprotect
+queue at finalize.
