@@ -1,0 +1,4 @@
+interface GPUComputePassEncoder {
+    undefined dispatchWorkgroups(GPUSize32 count);
+};
+typedef [EnforceRange] unsigned long GPUSize32;

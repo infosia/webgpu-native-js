@@ -1,0 +1,7 @@
+interface GPUDevice {
+    GPUBuffer createBuffer(GPUBufferDescriptor descriptor);
+};
+interface GPUBuffer {};
+dictionary GPUBufferDescriptor {
+    required unsigned long long size;
+};

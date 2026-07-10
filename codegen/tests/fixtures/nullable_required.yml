@@ -1,0 +1,19 @@
+structs:
+  - name: example_descriptor
+    type: extensible
+    members:
+      - name: buffer
+        type: object.buffer
+      - name: optional_buffer
+        type: object.buffer
+        optional: true
+objects:
+  - name: device
+    methods:
+      - name: consume
+        args:
+          - name: descriptor
+            type: struct.example_descriptor
+            pointer: immutable
+  - name: buffer
+    methods: []

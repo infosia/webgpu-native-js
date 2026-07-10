@@ -1,0 +1,7 @@
+objects:
+  - name: compute_pass_encoder
+    methods:
+      - name: dispatch_workgroups
+        args:
+          - name: count
+            type: uint32

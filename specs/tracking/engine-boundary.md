@@ -1034,3 +1034,37 @@ finalizer premise is the header's own documented contract, and the settlement
 trampoline costs ≈4 µs/tick. The boundary bet held end to end: zero core logic
 changes for the adapter itself; five exit-gate firings, five core defects landed
 before codegen.
+
+---
+
+## Q10 — Phase 4 slice 1: the parser decision (G9) and the first real join
+
+**Landed 2026-07-10.** weedle2 5.0.0 parses the full pinned `webgpu.idl` with
+one documented gap: **namespace `const` members** (the `GPU{Buffer,Texture,…}Usage`
+flag namespaces) are unsupported; a thin pre-pass rewrites exactly those lines
+(26, each surfaced verbatim in the CLI report) before parsing. 209 definitions,
+zero remaining bytes; `[EnforceRange]`/`[SameObject]`/`[Exposed]` all reach the
+model. New deps (fetched by the project owner): weedle2 5.0.0, serde 1.0.228,
+serde_yaml 0.9.34, toml 1.1.2.
+
+**The join of the pinned inputs (block 01–03 subset): 63 typed member pairs,
+43 mismatches, 50 skips — and the mismatch list is the policy worklist:**
+
+- `GPUBindGroupEntry.resource` (an IDL union) vs C's flattened
+  `buffer/offset/size/sampler/textureView` — the union-flattening policy.
+- IDL-only surface that is deliberately later or out of scope:
+  `importExternalTexture`, `copyExternalImageToTexture`, `onuncapturederror`,
+  `lost` (Phase 6 / out of scope) — policy skips with reasons.
+- "IDL-only type" entries (`GPUProgrammableStage` ⋈ `WGPUComputeState`,
+  `GPUShaderModuleDescriptor.code` ⋈ the WGSL chained struct,
+  `GPUObjectDescriptorBase`/`GPUPipelineDescriptorBase` inlined by C) — name
+  mapping is not always mechanical; these need explicit map entries (B3's
+  chain policy included).
+- C-only enum sentinels (`undefined`, `binding_not_used`) — ABI-only values,
+  never script-visible.
+- C-only functions (`GetConstMappedRange` = A29's second function,
+  `Read/WriteMappedRange`, `HasFeature`, `GetLostFuture`, `WriteTimestamp`) —
+  expected non-findings per G1.
+
+Slice 2 turns this list into `policy.toml` entries and emits the first
+generated conversion behind the G7 oracle.

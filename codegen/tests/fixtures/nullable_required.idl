@@ -1,0 +1,8 @@
+interface GPUDevice {
+    undefined consume(GPUExampleDescriptor descriptor);
+};
+interface GPUBuffer {};
+dictionary GPUExampleDescriptor {
+    required GPUBuffer buffer;
+    GPUBuffer? optionalBuffer;
+};

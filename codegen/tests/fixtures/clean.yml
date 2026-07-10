@@ -1,0 +1,18 @@
+structs:
+  - name: buffer_descriptor
+    type: extensible
+    members:
+      - name: size
+        type: uint64
+objects:
+  - name: device
+    methods:
+      - name: create_buffer
+        returns:
+          type: object.buffer
+        args:
+          - name: descriptor
+            type: struct.buffer_descriptor
+            pointer: immutable
+  - name: buffer
+    methods: []

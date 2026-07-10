@@ -1,0 +1,10 @@
+[package]
+name = "webgpu-native-js-codegen"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+weedle2 = "5.0.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_yaml = "0.9.34"
+toml = "1.1.2"

@@ -1,0 +1,65 @@
+# Codegen policy schema, version 1.
+#
+# `[[subset]]` selects one WebIDL interface and the exact logical WebIDL member
+# names included in this slice. Interface names and member names are checked
+# against the parsed IDL. Unknown or duplicate entries fail the run. Interfaces
+# that join by the GPU -> WGPU naming discipline but have no entry are skipped
+# and reported. Members omitted from a selected interface are likewise skipped
+# and reported when they have a C counterpart; one-sided names remain loud
+# mismatches. Later G5 policy kinds will add tables beside this subset list.
+
+schema_version = 1
+
+[[subset]]
+interface = "GPUDevice"
+members = [
+  "createBuffer",
+  "createShaderModule",
+  "createBindGroupLayout",
+  "createPipelineLayout",
+  "createBindGroup",
+  "createComputePipeline",
+  "createCommandEncoder",
+  "queue",
+  "destroy",
+]
+
+[[subset]]
+interface = "GPUBuffer"
+members = ["mapAsync", "getMappedRange", "unmap", "destroy", "size", "usage", "label"]
+
+[[subset]]
+interface = "GPUQueue"
+members = ["writeBuffer", "submit", "onSubmittedWorkDone"]
+
+[[subset]]
+interface = "GPUShaderModule"
+members = []
+
+[[subset]]
+interface = "GPUBindGroupLayout"
+members = []
+
+[[subset]]
+interface = "GPUPipelineLayout"
+members = []
+
+[[subset]]
+interface = "GPUBindGroup"
+members = []
+
+[[subset]]
+interface = "GPUComputePipeline"
+members = []
+
+[[subset]]
+interface = "GPUCommandEncoder"
+members = ["beginComputePass", "copyBufferToBuffer", "finish"]
+
+[[subset]]
+interface = "GPUComputePassEncoder"
+members = ["setPipeline", "setBindGroup", "dispatchWorkgroups", "end"]
+
+[[subset]]
+interface = "GPUCommandBuffer"
+members = []

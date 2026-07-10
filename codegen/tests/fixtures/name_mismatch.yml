@@ -1,0 +1,4 @@
+objects:
+  - name: device_v2
+    methods:
+      - name: destroy
