@@ -2,11 +2,12 @@
 
 //! JavaScriptCore adapter for `webgpu-native-js`.
 //!
-//! The implementation is opt-in and available only when both the `jsc`
-//! feature and the macOS target are selected.
+//! The `jsc` feature is enabled by default for this Apple-only (macOS/iOS)
+//! Tier 1 adapter. The implementation compiles for macOS and iOS; iOS runtime
+//! verification is deferred to mobile bring-up (block 06).
 
-#[cfg(all(feature = "jsc", target_os = "macos"))]
+#[cfg(all(feature = "jsc", any(target_os = "macos", target_os = "ios")))]
 mod imp;
 
-#[cfg(all(feature = "jsc", target_os = "macos"))]
+#[cfg(all(feature = "jsc", any(target_os = "macos", target_os = "ios")))]
 pub use imp::*;

@@ -140,8 +140,18 @@ The plan's §7 has the full evidence. These are the conclusions that are now
 
 | Tier | Engines | Meaning |
 |---|---|---|
-| **Tier 1 — Supported** | [quickjs-ng](https://github.com/quickjs-ng/quickjs) (MIT), pinned submodule, raw `bindgen` | Primary/first-class. Builds and passes the full test suite on all four platforms. Chosen over Bellard's original for MSVC/CMake support and sanitizer CI; rationale in `specs/tracking/engine-boundary.md` → Q2. |
-| **Tier 2 — Experimental (best-effort)** | JavaScriptCore | Behind opt-in `jsc` cargo feature; never in `default`. **iOS + macOS only** (system framework, dynamic link). Android and Windows are explicitly unsupported (plan §3.2). Exists to validate the `JsEngine` boundary. |
+| **Tier 1 — Supported, all platforms** | [quickjs-ng](https://github.com/quickjs-ng/quickjs) (MIT), pinned submodule, raw `bindgen` | The only cross-platform engine. Builds and passes the full test suite on all four platforms. Chosen over Bellard's original for MSVC/CMake support and sanitizer CI; rationale in `specs/tracking/engine-boundary.md` → Q2. |
+| **Tier 1 — Supported, Apple platforms** | JavaScriptCore (system framework, LGPL-2.1, dynamic link) | **Promoted 2026-07-10 (owner decision).** `jsc` is a **default** feature; the adapter compiles to an empty crate off Apple platforms, so the default costs nothing elsewhere. macOS is fully tested (the JSC suite is part of the standard workspace gate); iOS compiles (`cargo check` verified) with runtime verification deferred to mobile bring-up (block 06). Android and Windows are unsupported by Apple. Using the system framework removes the App Store 4.7 bundled-engine question entirely. |
+
+**What Tier 1 for two engines means:** iOS(JSC)↔Android(QuickJS) parity is
+guaranteed by **verification, not by sharing an engine** — the parity suite
+(`specs/blocks/08-parity-suite.md`; one script, byte-identical output, both
+engines, every test run) is load-bearing and grows with the API surface.
+macOS is the parity laboratory: the one platform where both engines run side
+by side. Two standing JSC cautions remain (both recorded and user-documented):
+finalizers effectively never run before context teardown, so `destroy()` is
+the only bounded release path; and performance claims for in-process JSC on
+iOS stay unwritten until measured (owner-deferred).
 
 **Operational rule (engine-independent core).** `core/` must contain **zero**
 references to QuickJS or JSC types — only `E: JsEngine`. Validation and

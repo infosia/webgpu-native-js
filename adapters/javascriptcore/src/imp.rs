@@ -2368,7 +2368,7 @@ fn value_to_string(ctx: JSContextRef, value: JSValueRef) -> String {
 fn gpu_dispatch() -> core::GpuDispatch {
     core::for_each_gpu_dispatch_entry!(__gpu_dispatch_from_ffi, ffi_wgpu)
 }
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use std::cell::Cell;
     use std::panic::{catch_unwind, AssertUnwindSafe};

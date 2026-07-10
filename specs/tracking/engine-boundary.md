@@ -1278,3 +1278,14 @@ exercised in the suite, `nm` confirms no hard link, the macOS 15 / iOS 18
 deployment floor is gone. Block 08 exit criteria: all four met — 62 lines,
 four divergences found and all fixed at the root, corruption fails both
 adapters, prior suites unchanged.
+
+**JSC promoted to Tier 1 on Apple platforms (2026-07-10, owner decision).**
+`jsc` is a default feature (empty crate off Apple platforms, so the default is
+free elsewhere); the JSC suite is now part of the plain workspace gate on
+macOS; the adapter compiles for iOS (`cargo check --target aarch64-apple-ios`
+verified) with runtime verification deferred to block 06. CLAUDE.md's tier
+table, README, and the workflow gate table updated. The two-engine parity
+story is explicitly verification-based: the block 08 suite (62 byte-identical
+lines, growing with the surface) is load-bearing, macOS is the laboratory.
+Standing cautions recorded in CLAUDE.md: F5 (destroy() is the only bounded
+path) and the unmeasured iOS in-process performance (owner-deferred).

@@ -45,7 +45,7 @@ binding an already-created `WGPUDevice` and pumps one `tick()` per frame.
 ┌─────────────────────────────────────────────────┐
 │ adapters/      engine adapters                    │
 │   quickjs/       Tier 1 — quickjs-ng (pinned)     │
-│   javascriptcore/ Tier 2 — system JSC, macOS/iOS  │
+│   javascriptcore/ Tier 1 — system JSC, macOS/iOS  │
 │                JsEngine impl, class glue,         │
 │                microtask pump, finalizer→queue    │
 ├─────────────────────────────────────────────────┤
@@ -81,9 +81,14 @@ binding an already-created `WGPUDevice` and pumps one `tick()` per frame.
 | Tier | Engine | Notes |
 |---|---|---|
 | **1 — Supported** | [quickjs-ng](https://github.com/quickjs-ng/quickjs) (MIT, pinned submodule at v0.15.1) | Primary engine. JIT-less and portable — dev results on desktop predict behavior on mobile. Built from source with raw `bindgen`. |
-| **2 — Experimental** | JavaScriptCore | Opt-in `jsc` cargo feature, never in default. **macOS and iOS only** (dynamically linked system framework). Exists to validate the engine boundary — and it has: five core defects were found by the JSC exit gate before codegen could multiply them. |
+| **1 — Supported (Apple platforms)** | JavaScriptCore | Default-on (`jsc` feature; compiles to an empty crate off Apple platforms). **macOS and iOS** — dynamically linked system framework, so there is no bundled engine and no binary-size cost, and the App Store bundled-engine question does not arise. macOS is fully tested on every run; iOS compiles, with on-device verification deferred to mobile bring-up. Born as the engine-boundary validator — it earned the promotion by finding five core defects before code generation could multiply them. |
 
-Two engine facts worth knowing before choosing Tier 2 (both measured, both
+Cross-engine parity is not assumed, it is asserted: one conformance script
+runs under both engines on every test run and must produce **byte-identical
+output** — the suite has already caught and retired real divergences (engine
+error-class names, method identity, lone-surrogate string handling).
+
+Two engine facts worth knowing when targeting JavaScriptCore (both measured, both
 recorded in `specs/`): JavaScriptCore's public C API offers **no way to force
 garbage collection to run finalizers** — an unreferenced object is typically
 finalized only at context teardown — and no microtask pump; the binding
@@ -201,8 +206,8 @@ cargo test -p webgpu-native-js-core
 # the full workspace against yawgpu (QuickJS engine), headless
 cargo test --workspace --features webgpu-native-js-ffi/backend-yawgpu
 
-# the JavaScriptCore adapter (macOS only, opt-in)
-cargo test -p javascriptcore-adapter --features jsc
+# the JavaScriptCore adapter (macOS; default-on)
+cargo test -p javascriptcore-adapter
 ```
 
 Every gate is **headless-first**: the entire suite passes with no GPU and no
@@ -245,4 +250,5 @@ Not yet decided — this repository currently ships no license, so all rights
 are reserved in the interim. Third-party components keep their own licenses:
 quickjs-ng is MIT, `webgpu-headers` is BSD-3-Clause, and JavaScriptCore
 (LGPL-2.1) is only ever **dynamically linked** as an Apple system framework
-behind the opt-in `jsc` feature.
+(the `jsc` feature, default-on, compiles to an empty crate off Apple
+platforms).

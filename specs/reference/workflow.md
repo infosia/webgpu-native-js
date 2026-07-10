@@ -72,7 +72,8 @@ A slice is the smallest unit of dispatchable work. Depending on the phase:
 | Test | `cargo test --workspace --features webgpu-native-js-ffi/backend-yawgpu` | Claude (backstop); agent runs targeted subsets |
 | Lint | `cargo clippy --workspace --all-targets --features webgpu-native-js-ffi/backend-yawgpu -- -D warnings` | both |
 | Engine-agnostic | `cargo test -p webgpu-native-js-core` with **no** backend feature and `WEBGPU_NATIVE_JS_BACKEND_LIB_DIR` **unset** | both |
-| Dual-engine | the slice's `.js` conformance script under **both** engines, identical expected output | Claude |
+| JSC (Tier 1, Apple) | `cargo test -p javascriptcore-adapter` (no feature flag — `jsc` is default since the 2026-07-10 promotion; also runs inside the workspace gate on macOS) | both |
+| Dual-engine | the slice's `.js` conformance script under **both** engines, identical expected output — concretely, the parity suite (`tests/parity/`, block 08): byte-identical, both adapters, every run | Claude |
 
 **The engine-agnostic gate is not optional.** `core/` depends on
 `webgpu-native-js-ffi` for its `bindgen` types (block 01 → R1a) but must compile
