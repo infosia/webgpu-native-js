@@ -2381,6 +2381,7 @@ mod tests {
     use std::rc::Rc;
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     use super::{
         core, ffi_wgpu as wgpu, Context, Engine, JSObjectGetArrayBufferBytesPtr, JSValueRef,
@@ -2547,6 +2548,28 @@ mod tests {
         unsafe { super::JSValueToBoolean(runtime.raw_context(), value) }
     }
 
+    fn tick_until<F>(
+        runtime: &Runtime,
+        instance: wgpu::WGPUInstance,
+        deadline_ms: u64,
+        mut condition: F,
+    ) where
+        F: FnMut() -> bool,
+    {
+        let deadline = Instant::now() + Duration::from_millis(deadline_ms);
+        loop {
+            unsafe { runtime.tick(instance) }.expect("tick while waiting for async completion");
+            if condition() {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "async condition was not met within {deadline_ms}ms while ticking the runtime"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
     fn assert_shared_j17_parity_script_matches_expected_output(force_bigint_fallback: bool) {
         const SCRIPT: &str = include_str!("../../../tests/parity/parity.js");
         const EXPECTED: &str = include_str!("../../../tests/parity/expected.txt");
@@ -2577,15 +2600,9 @@ mod tests {
             )
             .expect("forward parity loss");
 
-        let mut done = false;
-        for _ in 0..32 {
-            unsafe { runtime.tick(setup.instance) }.expect("parity tick");
-            done = global_bool(&runtime, "parityDone");
-            if done {
-                break;
-            }
-        }
-        assert!(done, "parity script did not finish within 32 ticks");
+        tick_until(&runtime, setup.instance, 5000, || {
+            global_bool(&runtime, "parityDone")
+        });
 
         let joined = runtime
             .eval("globalThis.parityLog.join('\\n')", "tests/parity/join.js")
@@ -2972,10 +2989,12 @@ mod tests {
         runtime.set_global_value("gpu", gpu).expect("set gpu");
         eval(
             &runtime,
-            "var firstAdapter; gpu.requestAdapter().then(a => { firstAdapter = a; });",
+            "var firstAdapter; var firstAdapterReady = false; gpu.requestAdapter().then(a => { firstAdapter = a; firstAdapterReady = true; });",
             "settle-prototype.js",
         );
-        unsafe { runtime.tick(setup.instance) }.expect("prototype tick");
+        tick_until(&runtime, setup.instance, 5000, || {
+            global_bool(&runtime, "firstAdapterReady")
+        });
         eval(
             &runtime,
             r#"
@@ -2990,7 +3009,12 @@ mod tests {
             "#,
             "settle-order.js",
         );
-        unsafe { runtime.tick(setup.instance) }.expect("ordered tick");
+        tick_until(&runtime, setup.instance, 5000, || {
+            let value = runtime
+                .eval("order.length === 4", "settle-order-poll.js")
+                .expect("poll settlement order");
+            unsafe { super::JSValueToBoolean(runtime.raw_context(), value) }
+        });
         eval(
             &runtime,
             r#"
@@ -3281,8 +3305,9 @@ mod tests {
             include_str!("../../../tests/error-rejection.js"),
             "error-rejection.js",
         );
-        unsafe { runtime.tick(setup.instance) }.expect("tick empty pop");
-        assert!(global_bool(&runtime, "errorRejectionDone"));
+        tick_until(&runtime, setup.instance, 5000, || {
+            global_bool(&runtime, "errorRejectionDone")
+        });
     }
 
     #[test]
@@ -3319,7 +3344,10 @@ mod tests {
         })
         .join()
         .expect("forward thread");
-        unsafe { runtime.tick(setup.instance) }.expect("device event tick");
+        tick_until(&runtime, setup.instance, 5000, || {
+            global_bool(&runtime, "uncapturedEventPassed")
+                && global_bool(&runtime, "deviceLostPassed")
+        });
         eval(
             &runtime,
             "if (!uncapturedEventPassed || !deviceLostPassed) throw new Error('device event callback did not run');",
@@ -3357,7 +3385,9 @@ mod tests {
             "var reentered = false; gpu.requestAdapter().then(() => { device.createBuffer({size: 4, usage: 8}).destroy(); reentered = true; });",
             "promise-reentry.js",
         );
-        unsafe { runtime.tick(setup.instance) }.expect("reentrant tick");
+        tick_until(&runtime, setup.instance, 5000, || {
+            global_bool(&runtime, "reentered")
+        });
         eval(
             &runtime,
             "if (!reentered) throw new Error('promise continuation did not re-enter');",

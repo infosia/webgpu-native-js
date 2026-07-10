@@ -25,6 +25,12 @@ const BACKENDS: &[Backend] = &[
         library: "wgpu_native",
         pkg_config_names: &["wgpu-native", "wgpu_native"],
     },
+    Backend {
+        feature_env: "CARGO_FEATURE_BACKEND_DAWN",
+        cargo_feature: "backend-dawn",
+        library: "webgpu_dawn",
+        pkg_config_names: &[],
+    },
 ];
 
 fn main() {
@@ -54,19 +60,17 @@ fn main() {
         .write_to_file(out_dir.join("webgpu_bindings.rs"))
         .expect("generated bindings can be written to OUT_DIR");
 
-    let enabled_non_dawn_backends: Vec<Backend> = BACKENDS
+    let enabled_backends: Vec<Backend> = BACKENDS
         .iter()
         .copied()
         .filter(|backend| env::var_os(backend.feature_env).is_some())
         .collect();
-    let enabled_backend_count = enabled_non_dawn_backends.len()
-        + usize::from(env::var_os("CARGO_FEATURE_BACKEND_DAWN").is_some());
 
-    if enabled_backend_count != 1 || env::var_os("CARGO_FEATURE_BACKEND_DAWN").is_some() {
+    if enabled_backends.len() != 1 {
         return;
     }
 
-    let backend = enabled_non_dawn_backends[0];
+    let backend = enabled_backends[0];
     let lib_dir = resolve_backend_lib_dir(backend);
 
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
@@ -82,9 +86,9 @@ fn resolve_backend_lib_dir(backend: Backend) -> PathBuf {
         }
 
         panic!(
-            "{BACKEND_LIB_DIR_ENV} was set to '{}', but it does not contain the expected dynamic library for feature '{}' (library name '{}')",
-            dir.display(),
+            "could not locate the backend dynamic library for feature '{}': {BACKEND_LIB_DIR_ENV} was set to '{}', but it does not contain the expected dynamic library (library name '{}')",
             backend.cargo_feature,
+            dir.display(),
             backend.library
         );
     }
@@ -93,11 +97,17 @@ fn resolve_backend_lib_dir(backend: Backend) -> PathBuf {
         return dir;
     }
 
-    panic!(
-        "could not locate the backend dynamic library for feature '{}'. Set {BACKEND_LIB_DIR_ENV} to the directory containing the expected dynamic library '{}', or install a pkg-config file for the backend.",
-        backend.cargo_feature,
-        backend.library
-    );
+    if backend.pkg_config_names.is_empty() {
+        panic!(
+            "could not locate the backend dynamic library for feature '{}'. Set {BACKEND_LIB_DIR_ENV} to the directory containing the expected dynamic library '{}'.",
+            backend.cargo_feature, backend.library
+        );
+    } else {
+        panic!(
+            "could not locate the backend dynamic library for feature '{}'. Set {BACKEND_LIB_DIR_ENV} to the directory containing the expected dynamic library '{}', or install a pkg-config file for the backend.",
+            backend.cargo_feature, backend.library
+        );
+    }
 }
 
 fn has_dynamic_library(dir: &Path, library: &str) -> bool {

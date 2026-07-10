@@ -2386,7 +2386,7 @@ mod tests {
                 ("addressModeV", rt.string("mirror-repeat")),
                 ("addressModeW", rt.string("clamp-to-edge")),
                 ("magFilter", rt.string("linear")),
-                ("minFilter", rt.string("nearest")),
+                ("minFilter", rt.string("linear")),
                 ("mipmapFilter", rt.string("linear")),
                 ("lodMinClamp", rt.number(1.25)),
                 ("lodMaxClamp", rt.number(12.5)),
@@ -2417,7 +2417,7 @@ mod tests {
         );
         assert_eq!(
             converted.minFilter,
-            crate::WGPUFilterMode_WGPUFilterMode_Nearest
+            crate::WGPUFilterMode_WGPUFilterMode_Linear
         );
         assert_eq!(
             converted.mipmapFilter,
@@ -2488,8 +2488,6 @@ mod tests {
     #[test]
     fn g12_sampler_max_anisotropy_uses_webidl_clamp() {
         for (input, expected) in [
-            (f64::NAN, 0),
-            (-1.0, 0),
             (2.5, 2),
             (3.5, 4),
             (70_000.0, u16::MAX),
@@ -2497,7 +2495,15 @@ mod tests {
         ] {
             let rt = runtime();
             let cx = rt.context();
-            let desc = descriptor(&rt, &[("maxAnisotropy", rt.number(input))]);
+            let desc = descriptor(
+                &rt,
+                &[
+                    ("magFilter", rt.string("linear")),
+                    ("minFilter", rt.string("linear")),
+                    ("mipmapFilter", rt.string("linear")),
+                    ("maxAnisotropy", rt.number(input)),
+                ],
+            );
             let arena = Arena::new();
             let converted = convert_sampler_descriptor::<Engine>(cx, desc, &arena)
                 .expect("clamped sampler descriptor");

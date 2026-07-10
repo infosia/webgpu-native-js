@@ -4,15 +4,18 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = ["jsc"]
+default = ["jsc", "backend-yawgpu"]
 jsc = [
     "dep:webgpu-native-js-core",
     "dep:webgpu-native-js-ffi",
 ]
+backend-yawgpu = ["webgpu-native-js-ffi/backend-yawgpu"]
+backend-wgpu-native = ["webgpu-native-js-ffi/backend-wgpu-native"]
+backend-dawn = ["webgpu-native-js-ffi/backend-dawn"]
 
 [dependencies]
 webgpu-native-js-core = { path = "../../core", optional = true }
 webgpu-native-js-ffi = { path = "../../ffi", optional = true }
 
 [dev-dependencies]
-webgpu-native-js-ffi = { path = "../../ffi", features = ["backend-yawgpu"] }
+webgpu-native-js-ffi = { path = "../../ffi" }

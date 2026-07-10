@@ -1719,7 +1719,7 @@ mod tests {
     use std::rc::Rc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use super::{
         c_int, core, ffi_wgpu as wgpu, qjs, usv_string_from_wtf8, CallbackKind, Context, Engine,
@@ -1874,6 +1874,35 @@ mod tests {
         value
     }
 
+    fn global_bool(runtime: &Runtime, name: &str) -> bool {
+        let value = global_value(runtime, name);
+        let result = unsafe { qjs::JS_ToBool(runtime.raw_context(), value) } != 0;
+        unsafe { qjs::JS_FreeValue(runtime.raw_context(), value) };
+        result
+    }
+
+    fn tick_until<F>(
+        runtime: &Runtime,
+        instance: wgpu::WGPUInstance,
+        deadline_ms: u64,
+        mut condition: F,
+    ) where
+        F: FnMut() -> bool,
+    {
+        let deadline = Instant::now() + Duration::from_millis(deadline_ms);
+        loop {
+            unsafe { runtime.tick(instance) }.expect("tick while waiting for async completion");
+            if condition() {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "async condition was not met within {deadline_ms}ms while ticking the runtime"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
     #[test]
     fn shared_j17_parity_script_matches_expected_output() {
         const SCRIPT: &str = include_str!("../../../tests/parity/parity.js");
@@ -1896,17 +1925,9 @@ mod tests {
             )
             .expect("forward parity loss");
 
-        let mut done = false;
-        for _ in 0..32 {
-            unsafe { runtime.tick(setup.instance) }.expect("parity tick");
-            let value = global_value(&runtime, "parityDone");
-            done = unsafe { qjs::JS_ToBool(runtime.raw_context(), value) } != 0;
-            unsafe { qjs::JS_FreeValue(runtime.raw_context(), value) };
-            if done {
-                break;
-            }
-        }
-        assert!(done, "parity script did not finish within 32 ticks");
+        tick_until(&runtime, setup.instance, 5000, || {
+            global_bool(&runtime, "parityDone")
+        });
 
         let joined = runtime
             .eval("globalThis.parityLog.join('\\n')", "tests/parity/join.js")
@@ -2363,7 +2384,7 @@ mod tests {
                     addressModeV: "mirror-repeat",
                     addressModeW: "clamp-to-edge",
                     magFilter: "linear",
-                    minFilter: "nearest",
+                    minFilter: "linear",
                     mipmapFilter: "linear",
                     lodMinClamp: 1.5,
                     lodMaxClamp: 12.5,
@@ -2479,7 +2500,9 @@ mod tests {
             "#,
             "async-owned-error.js",
         );
-        unsafe { runtime.tick(setup.instance) }.expect("tick rejection handler");
+        tick_until(&runtime, setup.instance, 5000, || {
+            global_bool(&runtime, "asyncReasonOk")
+        });
         eval_drop(
             &runtime,
             "if (!asyncReasonOk) throw new Error('rejection reason was not the owned error');",
@@ -2519,10 +2542,9 @@ mod tests {
             include_str!("../../../tests/error-rejection.js"),
             "error-rejection.js",
         );
-        unsafe { runtime.tick(setup.instance) }.expect("tick empty pop");
-        let done = global_value(&runtime, "errorRejectionDone");
-        assert!(unsafe { qjs::JS_ToBool(runtime.raw_context(), done) } != 0);
-        unsafe { qjs::JS_FreeValue(runtime.raw_context(), done) };
+        tick_until(&runtime, setup.instance, 5000, || {
+            global_bool(&runtime, "errorRejectionDone")
+        });
     }
 
     #[test]
@@ -2559,7 +2581,10 @@ mod tests {
         })
         .join()
         .expect("forward thread");
-        unsafe { runtime.tick(setup.instance) }.expect("device event tick");
+        tick_until(&runtime, setup.instance, 5000, || {
+            global_bool(&runtime, "uncapturedEventPassed")
+                && global_bool(&runtime, "deviceLostPassed")
+        });
         eval_drop(
             &runtime,
             "if (!uncapturedEventPassed || !deviceLostPassed) throw new Error('device event callback did not run');",
@@ -3059,7 +3084,9 @@ mod tests {
             "#,
             "map-async.js",
         );
-        unsafe { runtime.tick(setup.instance) }.expect("tick");
+        tick_until(&runtime, setup.instance, 5000, || {
+            global_bool(&runtime, "asyncDone")
+        });
         eval_drop(
             &runtime,
             "if (!asyncDone) throw new Error('mapAsync continuation did not run');",
@@ -3115,8 +3142,9 @@ mod tests {
             "#,
             "copy-round-trip.js",
         );
-        unsafe { runtime.tick(setup.instance) }.expect("tick");
-        unsafe { runtime.tick(setup.instance) }.expect("second tick");
+        tick_until(&runtime, setup.instance, 5000, || {
+            global_bool(&runtime, "copyDone")
+        });
         eval_drop(
             &runtime,
             "if (!copyDone) throw new Error('copy round trip did not finish');",
@@ -3174,8 +3202,9 @@ mod tests {
                 "#,
             "mapping.js",
         );
-        unsafe { runtime.tick(setup.instance) }.expect("work-done tick");
-        unsafe { runtime.tick(setup.instance) }.expect("map tick");
+        tick_until(&runtime, setup.instance, 5000, || {
+            global_bool(&runtime, "mappedBytesReachedBackend")
+        });
         eval_drop(
             &runtime,
             "if (!mappedBytesReachedBackend) throw new Error('mappedAtCreation bytes were not observed');",
@@ -3792,8 +3821,9 @@ mod tests {
             "var gotDevice = false; gpu.requestAdapter().then(function (a) { return a.requestDevice(); }).then(function (d) { gotDevice = !!d; });",
             "request_path.js",
         );
-        unsafe { runtime.tick(setup.instance) }.expect("adapter tick");
-        unsafe { runtime.tick(setup.instance) }.expect("device tick");
+        tick_until(&runtime, setup.instance, 5000, || {
+            global_bool(&runtime, "gotDevice")
+        });
         eval_drop(
             &runtime,
             "if (!gotDevice) throw new Error('device promise did not resolve');",
@@ -3815,11 +3845,17 @@ mod tests {
             &runtime,
             r#"
                 var firstAdapter;
-                gpu.requestAdapter().then(function (adapter) { firstAdapter = adapter; });
+                var firstAdapterReady = false;
+                gpu.requestAdapter().then(function (adapter) {
+                    firstAdapter = adapter;
+                    firstAdapterReady = true;
+                });
             "#,
             "adapter-prototype-source.js",
         );
-        unsafe { runtime.tick(setup.instance) }.expect("prototype adapter tick");
+        tick_until(&runtime, setup.instance, 5000, || {
+            global_bool(&runtime, "firstAdapterReady")
+        });
         eval_drop(
             &runtime,
             r#"
@@ -3837,7 +3873,14 @@ mod tests {
             "#,
             "adapter-settle-order.js",
         );
-        unsafe { runtime.tick(setup.instance) }.expect("ordered adapter tick");
+        tick_until(&runtime, setup.instance, 5000, || {
+            let value = runtime
+                .eval("order.length === 4", "adapter-settle-order-poll.js")
+                .expect("poll adapter settlement order");
+            let done = unsafe { qjs::JS_ToBool(runtime.raw_context(), value) } != 0;
+            unsafe { qjs::JS_FreeValue(runtime.raw_context(), value) };
+            done
+        });
         eval_drop(
             &runtime,
             r#"
@@ -3856,6 +3899,7 @@ mod tests {
             r#"
                 delete Object.getPrototypeOf(firstAdapter).then;
                 firstAdapter = undefined;
+                firstAdapterReady = undefined;
                 order = undefined;
             "#,
             "adapter-settle-order-cleanup.js",
@@ -3880,7 +3924,14 @@ mod tests {
             "#,
             "concurrent-adapters.js",
         );
-        unsafe { runtime.tick(setup.instance) }.expect("adapter tick");
+        tick_until(&runtime, setup.instance, 5000, || {
+            let value = runtime
+                .eval("adapters.length === 2", "concurrent-adapters-poll.js")
+                .expect("poll concurrent adapters");
+            let done = unsafe { qjs::JS_ToBool(runtime.raw_context(), value) } != 0;
+            unsafe { qjs::JS_FreeValue(runtime.raw_context(), value) };
+            done
+        });
         eval_drop(
             &runtime,
             "if (adapters.join(',') !== 'first,second') throw new Error('concurrent adapters settled incorrectly: ' + adapters.join(','));",

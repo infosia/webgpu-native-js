@@ -9,9 +9,6 @@
 ))]
 compile_error!("enable at most one backend feature");
 
-#[cfg(feature = "backend-dawn")]
-compile_error!("not yet supported");
-
 /// Raw WebGPU C ABI declarations generated from `webgpu.h`.
 pub mod native {
     #![allow(missing_docs)]
@@ -23,7 +20,14 @@ pub mod native {
     include!(concat!(env!("OUT_DIR"), "/webgpu_bindings.rs"));
 }
 
-#[cfg(all(test, any(feature = "backend-yawgpu", feature = "backend-wgpu-native")))]
+#[cfg(all(
+    test,
+    any(
+        feature = "backend-yawgpu",
+        feature = "backend-wgpu-native",
+        feature = "backend-dawn"
+    )
+))]
 mod tests {
     #[test]
     fn create_instance_and_release_roundtrip() {

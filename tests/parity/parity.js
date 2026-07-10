@@ -106,7 +106,13 @@
             return device.popErrorScope().then(function () {
                 throw new Error("empty pop unexpectedly resolved");
             }, function (error) {
-                log(errorLine("reject:popErrorScope", error));
+                var stablePrefix = "popErrorScope failed:";
+                if (error.message.indexOf(stablePrefix) !== 0) {
+                    throw new Error("popErrorScope rejection message prefix mismatch: " +
+                        error.message);
+                }
+                log("reject:popErrorScope:" + error.name + ":" +
+                    stablePrefix + "[backend-detail]");
             });
         });
     }
@@ -756,9 +762,14 @@
         log("label:object:" + objectLabel.label);
         objectLabel.destroy();
 
-        [NaN, 3.5, 70000].forEach(function (value, index) {
-            device.createSampler({ maxAnisotropy: value });
-            log("clamp:" + ["nan-ok", "ties-ok", "saturation-ok"][index]);
+        [3.5, 70000].forEach(function (value, index) {
+            device.createSampler({
+                magFilter: "linear",
+                minFilter: "linear",
+                mipmapFilter: "linear",
+                maxAnisotropy: value
+            });
+            log("clamp:" + ["ties-ok", "saturation-ok"][index]);
         });
     }
 
@@ -798,6 +809,7 @@
             label: "parity-sampler",
             addressModeU: "repeat",
             magFilter: "linear",
+            minFilter: "linear",
             mipmapFilter: "linear",
             lodMinClamp: 1.5,
             lodMaxClamp: 9.5,

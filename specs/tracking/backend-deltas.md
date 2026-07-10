@@ -319,3 +319,56 @@ Recorded in yawgpu's `HANDOFF.md` alongside D2.
 GN + depot_tools. Per plan §4 Phase 0.2, Dawn linkage is deferred to Phase 7 CI
 unless it turns out to be cheap. Its header is the canonical reference in the
 meantime (see above).
+
+---
+
+## Tier 2 backend verification — 2026-07-11 (gated real-GPU runs, Metal)
+
+The backend-swap claim is now empirical. Same binding, same test suites, same
+94-line parity script; backends selected only by cargo feature +
+`WEBGPU_NATIVE_JS_BACKEND_LIB_DIR`. Runs are **gated real-GPU** (not CI): the
+sandbox blocks Metal (adapter enumeration returns Unavailable inside it), so
+these runs execute unsandboxed by design.
+
+**Results:**
+
+| Backend | QuickJS suite | JSC suite | Parity (94 lines) |
+|---|---|---|---|
+| yawgpu (Noop, headless) | 53/53 | 24/24 (+1 ignored) | byte-identical |
+| Dawn (Metal, real GPU) | **53/53** | **24/24 (+1)** | **byte-identical** |
+| wgpu-native (Metal, real GPU) | 50/50 (3 skips, all traced below) | 20/20 (4 skips, same causes) | blocked by D8 |
+
+**The parity script is byte-identical across two engines × two backends**
+(yawgpu, Dawn) — including real-GPU mapping byte round-trips under Dawn.
+
+### New deltas (wgpu-native, catalogued not worked around)
+
+- **D7 — request callbacks fire synchronously inside the call and
+  `callback_info.mode` is unread** (wgpu-native `src/lib.rs`,
+  `wgpuInstanceRequestAdapter`). Benign for this binding (J1: pure-Rust
+  callbacks), recorded because invariant 2 reasons from the mode contract.
+- **D8 — `wgpuDevicePopErrorScope` on an empty stack panics**
+  (`error_sink.scopes.pop().unwrap()`) — a **process abort** where the header
+  defines a status. Upstream-report candidate. Blocks any test that pops an
+  empty scope (the parity script does, deliberately).
+- **D9 — the `wgpu*SetLabel` family, `wgpuDeviceGetLostFuture`,
+  `wgpuInstanceWaitAny`, `wgpuShaderModuleGetCompilationInfo` are
+  `unimplemented!()`** (non-unwinding panic → SIGABRT across the C boundary).
+  A script assigning `.label` aborts the process on wgpu-native. Two adapter
+  tests skip on this backend for exactly this reason.
+- **D10 — bounded-tick async tests were Noop-tuned** — a binding-side test
+  assumption, fixed for all backends with deadline-based `tick_until` helpers
+  (5s ceiling; Noop still completes on the first round).
+- **D11 — sampler validation divergence, and yawgpu is the outlier**:
+  `maxAnisotropy > 1` with any non-linear filter must fail createSampler per
+  the pinned spec (gpuweb `index.html`, createSampler validation); wgpu-native
+  enforces it; **yawgpu accepts the invalid descriptor**. Test inputs were made
+  spec-valid everywhere (that is input correctness, not a workaround). yawgpu
+  upstream finding for the project owner.
+- **D5 (standing, re-confirmed):** wgpu-native's dylib install_name is an
+  absolute path into its own build tree — non-relocatable; runs resolve only
+  on the machine that built it. Dawn's is `@rpath`-clean.
+- **Dawn message texts differ from yawgpu's** (e.g. the empty-pop
+  diagnostic) — never a contract; the one parity line that had pinned backend
+  prose now pins the binding-owned prefix and asserts the backend detail's
+  presence without pinning its text.

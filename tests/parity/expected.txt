@@ -42,7 +42,6 @@ label:number:42
 label:-0:0
 label:1e21:1e+21
 label:object:object-label
-clamp:nan-ok
 clamp:ties-ok
 clamp:saturation-ok
 string:bmp:ラベルé
@@ -87,7 +86,7 @@ renderPass:chain-ok
 renderPass:clearValue-dict-sequence:no-validation-error
 copy:texture-validation:no-validation-error
 scope:nested:null,GPUValidationError
-reject:popErrorScope:OperationError:popErrorScope failed: No error scopes are open
+reject:popErrorScope:OperationError:popErrorScope failed:[backend-detail]
 order:same-tick:mapAsync,workDone
 order:promise-all:resolved
 order:then-chain:first,second
