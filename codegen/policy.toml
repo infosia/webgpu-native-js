@@ -250,6 +250,17 @@ member = "queue"
 get = "device_queue_get"
 
 [[lifecycle.properties]]
+interface = "GPUDevice"
+member = "lost"
+get = "device_lost_get"
+
+[[lifecycle.properties]]
+interface = "GPUDevice"
+member = "onuncapturederror"
+get = "device_on_uncaptured_error_get"
+set = "device_on_uncaptured_error_set"
+
+[[lifecycle.properties]]
 interface = "GPUBuffer"
 member = "label"
 get = "buffer_label_get"

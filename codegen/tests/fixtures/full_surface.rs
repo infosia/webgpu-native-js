@@ -1384,6 +1384,8 @@ pub(super) fn device_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
         constructor: None,
         properties: Box::leak(Box::new([
             PropertySpec { name: "queue", get: Some(device_queue_get::<E>), set: None },
+            PropertySpec { name: "lost", get: Some(device_lost_get::<E>), set: None },
+            PropertySpec { name: "onuncapturederror", get: Some(device_on_uncaptured_error_get::<E>), set: Some(device_on_uncaptured_error_set::<E>) },
         ])),
         methods: Box::leak(Box::new([
             MethodSpec { name: "createBuffer", length: 1, call: device_create_buffer::<E> },

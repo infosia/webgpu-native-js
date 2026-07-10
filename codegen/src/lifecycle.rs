@@ -245,6 +245,12 @@ fn validate_lifecycle(
                         .map(|mapping| (mapping.interface.as_str(), mapping.member.as_str()))
                 }),
         )
+        .chain(
+            lifecycle
+                .properties
+                .iter()
+                .map(|mapping| (mapping.interface.as_str(), mapping.member.as_str())),
+        )
         .collect();
     for key in methods
         .iter()
@@ -1066,7 +1072,12 @@ fn emit_one_class(
             .position(|mapping| mapping.interface == interface && mapping.member == member.member)
             .unwrap_or(usize::MAX)
     });
-    if properties.is_empty() {
+    let extra_properties: Vec<_> = lifecycle
+        .properties
+        .iter()
+        .filter(|mapping| mapping.interface == interface && !selected.contains(&mapping.member))
+        .collect();
+    if properties.is_empty() && extra_properties.is_empty() {
         output.push_str("        properties: &[],\n");
     } else {
         output.push_str("        properties: Box::leak(Box::new([\n");
@@ -1091,6 +1102,18 @@ fn emit_one_class(
                 "            PropertySpec {{ name: \"{}\", get: Some({get}::<E>), set: {} }},",
                 member.member,
                 set.map_or_else(|| "None".to_owned(), |path| format!("Some({path}::<E>)"))
+            );
+        }
+        for mapping in extra_properties {
+            let _ = writeln!(
+                output,
+                "            PropertySpec {{ name: \"{}\", get: Some({}::<E>), set: {} }},",
+                mapping.member,
+                mapping.get,
+                mapping
+                    .set
+                    .as_ref()
+                    .map_or_else(|| "None".to_owned(), |path| format!("Some({path}::<E>)"))
             );
         }
         output.push_str("        ])),\n");

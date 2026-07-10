@@ -1187,3 +1187,24 @@ validation test, not assumed. Negative demo seen red (wrong class mapping →
 ClassId mismatch). Suites: core 93, quickjs 48, JSC 19+1, parity byte-identical.
 S6 (uncaptured, host-forwarded) and S7 (device.lost, header reading first)
 remain for P6b.
+
+**P6b landed (2026-07-10): S6 + S7.** `onuncapturederror` (writable attribute;
+EventTarget absence recorded at the code site) and `device.lost` (cached
+per-device promise, at-most-once, A28-clean teardown) both follow the
+two-producers-one-queue shape: binding-created devices install pure-Rust
+creation-time callbacks (the uncaptured one written for any-thread/any-time
+delivery: copy the message inside the callback, enqueue, nothing else);
+adopted devices get thread-safe `forward_uncaptured_error` /
+`forward_device_lost`. Dispatch is tick step 2b — after the ONE batched
+settlement, before microtasks — so A30's one-frame property holds and a
+throwing handler exits through `TickError::Engine` like a throwing microtask.
+Cross-thread forwarding is tested from a spawned thread. Parity gains
+`lostReason:destroyed` via the forwarder (deterministic by construction).
+Suites: core 97, quickjs 49, JSC 20+1. Both P6 slices ran ahead of the block's
+own "review before P6b" sequencing — recorded deviation; one Phase 6 review
+covers both.
+
+Operational note: this slice hit the codex 30-minute ceiling again; the
+timed-out session had in fact FINISHED the work, and the resume session's job
+was pure audit + gates. The ceiling loses reports, not work — check the tree
+before assuming loss.

@@ -58,6 +58,36 @@ pub struct Runtime {
     state: Rc<State>,
 }
 
+/// Send + Sync producer handle for events on adopted devices.
+#[derive(Clone)]
+pub struct DeviceEventForwarder {
+    inner: core::DeviceEventForwarder,
+}
+
+impl DeviceEventForwarder {
+    /// Enqueues an adopted device's uncaptured error without touching QuickJS.
+    pub fn forward_uncaptured_error(
+        &self,
+        device: ffi_wgpu::WGPUDevice,
+        type_: ffi_wgpu::WGPUErrorType,
+        message: impl Into<String>,
+    ) -> std::result::Result<(), core::QueueError> {
+        self.inner
+            .forward_uncaptured_error::<Engine>(device, type_, message)
+    }
+
+    /// Enqueues adopted-device loss without touching QuickJS.
+    pub fn forward_device_lost(
+        &self,
+        device: ffi_wgpu::WGPUDevice,
+        reason: ffi_wgpu::WGPUDeviceLostReason,
+        message: impl Into<String>,
+    ) -> std::result::Result<(), core::QueueError> {
+        self.inner
+            .forward_device_lost::<Engine>(device, reason, message)
+    }
+}
+
 impl Runtime {
     /// Creates a QuickJS runtime configured with the WebGPU binding environment.
     pub fn new() -> Result<Self> {
@@ -114,6 +144,36 @@ impl Runtime {
     #[must_use]
     pub fn raw_context(&self) -> *mut qjs::JSContext {
         self.ctx.as_ptr()
+    }
+
+    /// Returns a thread-safe adopted-device event producer.
+    #[must_use]
+    pub fn device_event_forwarder(&self) -> DeviceEventForwarder {
+        DeviceEventForwarder {
+            inner: self.state.env.device_event_forwarder(),
+        }
+    }
+
+    /// Enqueues an uncaptured error for an adopted device.
+    pub fn forward_uncaptured_error(
+        &self,
+        device: ffi_wgpu::WGPUDevice,
+        type_: ffi_wgpu::WGPUErrorType,
+        message: impl Into<String>,
+    ) -> std::result::Result<(), core::QueueError> {
+        self.device_event_forwarder()
+            .forward_uncaptured_error(device, type_, message)
+    }
+
+    /// Enqueues loss for an adopted device.
+    pub fn forward_device_lost(
+        &self,
+        device: ffi_wgpu::WGPUDevice,
+        reason: ffi_wgpu::WGPUDeviceLostReason,
+        message: impl Into<String>,
+    ) -> std::result::Result<(), core::QueueError> {
+        self.device_event_forwarder()
+            .forward_device_lost(device, reason, message)
     }
 
     /// Wraps an adopted WebGPU device.
@@ -266,6 +326,7 @@ impl Drop for Runtime {
                 state.release_outstanding_deferreds(self.ctx.as_ptr());
                 with_scope(self.ctx.as_ptr(), |cx| {
                     state.env.settlements().release_pending::<Engine>(cx);
+                    state.env.release_device_event_values::<Engine>(cx);
                 });
                 if let Some(trampoline) = state.take_settle_trampoline() {
                     qjs::JS_FreeValue(self.ctx.as_ptr(), trampoline);
@@ -1697,6 +1758,13 @@ mod tests {
             .expect("set device");
         runtime.set_global_value("gpu", gpu).expect("set gpu");
         eval_drop(&runtime, SCRIPT, "tests/parity/parity.js");
+        runtime
+            .forward_device_lost(
+                setup.device,
+                wgpu::WGPUDeviceLostReason_WGPUDeviceLostReason_Destroyed,
+                "parity loss",
+            )
+            .expect("forward parity loss");
 
         let mut done = false;
         for _ in 0..32 {
@@ -2295,6 +2363,48 @@ mod tests {
         let done = global_value(&runtime, "errorRejectionDone");
         assert!(unsafe { qjs::JS_ToBool(runtime.raw_context(), done) } != 0);
         unsafe { qjs::JS_FreeValue(runtime.raw_context(), done) };
+    }
+
+    #[test]
+    fn shared_device_event_script_passes() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let device = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("device", device)
+            .expect("set device");
+        eval_drop(
+            &runtime,
+            include_str!("../../../tests/device-events.js"),
+            "device-events.js",
+        );
+        let forwarder = runtime.device_event_forwarder();
+        let device_bits = setup.device as usize;
+        std::thread::spawn(move || {
+            let device = device_bits as wgpu::WGPUDevice;
+            forwarder
+                .forward_uncaptured_error(
+                    device,
+                    wgpu::WGPUErrorType_WGPUErrorType_Validation,
+                    "script uncaptured",
+                )
+                .expect("forward uncaptured");
+            forwarder
+                .forward_device_lost(
+                    device,
+                    wgpu::WGPUDeviceLostReason_WGPUDeviceLostReason_Destroyed,
+                    "script lost",
+                )
+                .expect("forward lost");
+        })
+        .join()
+        .expect("forward thread");
+        unsafe { runtime.tick(setup.instance) }.expect("device event tick");
+        eval_drop(
+            &runtime,
+            "if (!uncapturedEventPassed || !deviceLostPassed) throw new Error('device event callback did not run');",
+            "device-events-check.js",
+        );
     }
 
     #[test]

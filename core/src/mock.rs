@@ -17,10 +17,11 @@ use crate::{
     WGPUBindGroup, WGPUBindGroupDescriptor, WGPUBindGroupLayout, WGPUBindGroupLayoutDescriptor,
     WGPUCommandBuffer, WGPUCommandBufferDescriptor, WGPUCommandEncoder,
     WGPUCommandEncoderDescriptor, WGPUComputePassDescriptor, WGPUComputePassEncoder,
-    WGPUComputePipeline, WGPUComputePipelineDescriptor, WGPUErrorFilter, WGPUErrorType, WGPUFuture,
-    WGPUPipelineLayout, WGPUPipelineLayoutDescriptor, WGPUPopErrorScopeCallbackInfo,
-    WGPUPopErrorScopeStatus, WGPUQueue, WGPUQueueWorkDoneCallbackInfo, WGPUSampler,
-    WGPUSamplerDescriptor, WGPUShaderModule, WGPUShaderModuleDescriptor,
+    WGPUComputePipeline, WGPUComputePipelineDescriptor, WGPUDeviceLostCallbackInfo,
+    WGPUErrorFilter, WGPUErrorType, WGPUFuture, WGPUPipelineLayout, WGPUPipelineLayoutDescriptor,
+    WGPUPopErrorScopeCallbackInfo, WGPUPopErrorScopeStatus, WGPUQueue,
+    WGPUQueueWorkDoneCallbackInfo, WGPUSampler, WGPUSamplerDescriptor, WGPUShaderModule,
+    WGPUShaderModuleDescriptor, WGPUUncapturedErrorCallbackInfo,
 };
 
 /// Mock JavaScript value handle.
@@ -57,6 +58,7 @@ pub struct Runtime {
     call_errors: RefCell<BTreeMap<Value, String>>,
     property_value_calls: Cell<usize>,
     calls: Cell<usize>,
+    call_args: RefCell<Vec<Value>>,
     coercion_unmap: Cell<Option<Value>>,
     settle_calls: Cell<usize>,
     settlement_batch_sizes: RefCell<Vec<usize>>,
@@ -95,6 +97,7 @@ impl Runtime {
             call_errors: RefCell::new(BTreeMap::new()),
             property_value_calls: Cell::new(0),
             calls: Cell::new(0),
+            call_args: RefCell::new(Vec::new()),
             coercion_unmap: Cell::new(None),
             settle_calls: Cell::new(0),
             settlement_batch_sizes: RefCell::new(Vec::new()),
@@ -353,6 +356,7 @@ impl Runtime {
 impl Drop for Runtime {
     fn drop(&mut self) {
         if !std::thread::panicking() {
+            self.with_scope(|cx| self.env.release_device_event_values::<Engine>(cx));
             let duplicated = self.duplicated_values.borrow();
             assert!(
                 duplicated.is_empty(),
@@ -449,6 +453,7 @@ enum MockValue {
 enum MockCallable {
     Iterator,
     Next,
+    Handler,
 }
 
 /// Mock engine marker type parameterized by mapped-range behavior.
@@ -534,9 +539,13 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
         cx: Self::Context<'_>,
         f: Self::Value,
         this: Self::Value,
-        _args: &[Self::Value],
+        args: &[Self::Value],
     ) -> Result<Self::Value, Self::Error> {
         cx.runtime.calls.set(cx.runtime.calls.get() + 1);
+        *cx.runtime.call_args.borrow_mut() = args
+            .iter()
+            .map(|value| cx.runtime.canonical(*value))
+            .collect();
         let f = cx.runtime.canonical(f);
         if let Some(error) = cx.runtime.call_errors.borrow().get(&f).cloned() {
             return Err(error);
@@ -582,6 +591,7 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
                 let done = cx.runtime.bool(done);
                 cx.runtime.object(&[("done", done), ("value", value)])
             }
+            MockValue::Callable(MockCallable::Handler) => cx.runtime.undefined(),
             _ => return Err("TypeError: value is not callable".to_owned()),
         };
         Ok(cx.runtime.tracked_alias(cx.scope, result))
@@ -957,6 +967,8 @@ struct MockGpuState {
     error_scope_stack: Vec<WGPUErrorFilter>,
     pushed_error_filters: Vec<WGPUErrorFilter>,
     next_pop_error: Option<MockPopError>,
+    device_lost_callback: Option<WGPUDeviceLostCallbackInfo>,
+    uncaptured_error_callback: Option<WGPUUncapturedErrorCallbackInfo>,
 }
 
 struct MockPopError {
@@ -1080,9 +1092,16 @@ unsafe fn instance_request_adapter(
 
 unsafe fn adapter_request_device(
     _adapter: WGPUAdapter,
-    _descriptor: *const webgpu_native_js_ffi::native::WGPUDeviceDescriptor,
+    descriptor: *const webgpu_native_js_ffi::native::WGPUDeviceDescriptor,
     info: WGPURequestDeviceCallbackInfo,
 ) -> webgpu_native_js_ffi::native::WGPUFuture {
+    if let Some(descriptor) = unsafe { descriptor.as_ref() } {
+        GPU_STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            state.device_lost_callback = Some(descriptor.deviceLostCallbackInfo);
+            state.uncaptured_error_callback = Some(descriptor.uncapturedErrorCallbackInfo);
+        });
+    }
     if let Some(callback) = info.callback {
         unsafe {
             callback(
@@ -1619,23 +1638,25 @@ fn read_view(view: WGPUStringView) -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::{
-        buffer_destroy, buffer_get_mapped_range, buffer_label_get, buffer_label_set,
-        buffer_map_async, buffer_size_get, buffer_unmap, buffer_usage_get, command_encoder_finish,
-        convert_bind_group_descriptor, convert_bind_group_layout_descriptor,
-        convert_buffer_binding_layout, convert_buffer_descriptor,
-        convert_command_buffer_descriptor, convert_command_encoder_descriptor,
-        convert_compute_pass_descriptor, convert_compute_pipeline_descriptor,
-        convert_pipeline_layout_descriptor, convert_sampler_descriptor,
-        convert_shader_module_descriptor, device_create_bind_group, device_create_buffer,
-        device_create_command_encoder, device_create_compute_pipeline, device_create_sampler,
-        device_pop_error_scope, device_push_error_scope, device_queue_get, finalize_bind_group,
-        finalize_buffer, finalize_compute_pipeline, finalize_device, finalize_queue,
-        finalize_sampler, queue_submit, queue_work_done_callback, queue_write_buffer,
-        request_adapter_callback, request_device_callback, wrap_device, AdapterRequest,
+        adapter_request_device, buffer_destroy, buffer_get_mapped_range, buffer_label_get,
+        buffer_label_set, buffer_map_async, buffer_size_get, buffer_unmap, buffer_usage_get,
+        command_encoder_finish, convert_bind_group_descriptor,
+        convert_bind_group_layout_descriptor, convert_buffer_binding_layout,
+        convert_buffer_descriptor, convert_command_buffer_descriptor,
+        convert_command_encoder_descriptor, convert_compute_pass_descriptor,
+        convert_compute_pipeline_descriptor, convert_pipeline_layout_descriptor,
+        convert_sampler_descriptor, convert_shader_module_descriptor, device_create_bind_group,
+        device_create_buffer, device_create_command_encoder, device_create_compute_pipeline,
+        device_create_sampler, device_lost_get, device_lost_info_message_get,
+        device_lost_info_reason_get, device_on_uncaptured_error_set, device_pop_error_scope,
+        device_push_error_scope, device_queue_get, finalize_bind_group, finalize_buffer,
+        finalize_compute_pipeline, finalize_device, finalize_queue, finalize_sampler, queue_submit,
+        queue_work_done_callback, queue_write_buffer, request_adapter_callback,
+        request_device_callback, wrap_device, AdapterPayload, AdapterRequest,
         BindGroupLayoutPayload, BindGroupPayload, BufferPayload, ComputePipelinePayload,
-        DevicePayload, DeviceRequest, ErrorPayload, JsEngine, PendingNative, PendingNativeHandle,
-        PipelineLayoutPayload, QueueError, QueuePayload, QueueWorkDoneRequest, SamplerPayload,
-        SettlementRequest, ShaderModulePayload,
+        DeviceEventState, DevicePayload, DeviceRequest, ErrorPayload, JsEngine, PendingNative,
+        PendingNativeHandle, PipelineLayoutPayload, QueueError, QueuePayload, QueueWorkDoneRequest,
+        SamplerPayload, SettlementRequest, ShaderModulePayload,
     };
     use std::sync::Mutex;
 
@@ -2924,14 +2945,22 @@ mod tests {
             .expect("device payload");
         let mut traced = Vec::new();
         crate::trace_payload_values::<Engine>(payload, &mut |value| traced.push(value));
-        assert_eq!(traced, [first]);
+        let lost = payload
+            .events
+            .js
+            .lock()
+            .expect("event state")
+            .as_ref()
+            .and_then(|state| state.lost_promise.get())
+            .expect("lost promise");
+        assert_eq!(traced, [first, lost]);
         let mut released = 0;
         crate::release_payload_values::<Engine>(payload, &mut |value| {
             released += 1;
             Engine::release_value(cx, value);
         });
         crate::release_payload_values::<Engine>(payload, &mut |_| released += 1);
-        assert_eq!(released, 1);
+        assert_eq!(released, 2);
         assert!(rt.duplicated_values.borrow().is_empty());
 
         finalize_queue(
@@ -3505,6 +3534,7 @@ mod tests {
                 settlements: Arc::clone(rt.env.settlements()),
                 release_queue: Arc::clone(rt.queue()),
                 gpu: dispatch(),
+                events: DeviceEventState::new(Arc::clone(rt.env.settlements())),
                 _registration: None,
             });
             Engine::register_deferred(cx, std::ptr::NonNull::from(&mut request.deferred));
@@ -3559,6 +3589,7 @@ mod tests {
                     queue: Arc::clone(rt.queue()),
                     gpu: dispatch(),
                 },
+                events: DeviceEventState::new(Arc::clone(rt.env.settlements())),
             })
             .expect("enqueue device");
         assert_eq!(
@@ -3847,6 +3878,7 @@ mod tests {
             [1, 2, 3, 4, 5, 6, 7, 8],
             "script writes through mapped ranges must reach native memory"
         );
+        rt.env.release_device_event_values::<MockEngine<COPY>>(cx);
     }
 
     #[test]
@@ -3900,6 +3932,7 @@ mod tests {
             traced_after_release.push(value)
         });
         assert!(traced_after_release.is_empty());
+        rt.env.release_device_event_values::<Engine>(cx);
         assert!(rt.duplicated_values.borrow().is_empty());
     }
 
@@ -4041,6 +4074,7 @@ mod tests {
         assert_eq!(MockEngine::<true>::arraybuffer_len(cx, first), Some(0));
         assert_eq!(MockEngine::<true>::arraybuffer_len(cx, middle), Some(4));
         assert_eq!(MockEngine::<true>::arraybuffer_len(cx, last), Some(0));
+        rt.env.release_device_event_values::<MockEngine<true>>(cx);
         assert!(
             rt.duplicated_values.borrow().is_empty(),
             "every mapped-range value must be released even after an earlier failure"
@@ -4107,6 +4141,7 @@ mod tests {
             [0, 0, 0, 0],
             "destroy detaches ranges but discards script-side mapped bytes"
         );
+        rt.env.release_device_event_values::<MockEngine<true>>(cx);
     }
 
     #[test]
@@ -4230,7 +4265,10 @@ mod tests {
             .and_then(|payload| payload.downcast_ref::<DevicePayload<Engine>>())
             .expect("payload");
         finalize_device::<Engine>(
-            Box::new(DevicePayload::<Engine>::new(device_payload.device())),
+            Box::new(DevicePayload::<Engine>::new(
+                device_payload.device(),
+                Arc::clone(&device_payload.events),
+            )),
             Engine::environment(cx),
         );
 
@@ -4299,5 +4337,193 @@ mod tests {
             .expect("enqueue");
 
         assert_eq!(queue.drain().expect("drain"), 1);
+    }
+
+    fn binding_created_device(rt: &Runtime, cx: Context<'_>) -> Value {
+        let adapter = Engine::new_instance(
+            cx,
+            crate::GPU_ADAPTER_CLASS,
+            Box::new(AdapterPayload {
+                adapter: fake_handle(700),
+            }),
+        )
+        .expect("adapter");
+        let promise = adapter_request_device::<Engine>(cx, adapter, &[]).expect("requestDevice");
+        unsafe { crate::tick::<Engine>(cx, fake_handle(701)) }.expect("requestDevice tick");
+        rt.promise_result(promise)
+            .expect("requestDevice settled")
+            .expect("requestDevice resolved")
+    }
+
+    #[test]
+    fn s6_native_and_thread_forwarded_uncaptured_errors_dispatch_and_throw_through_tick() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = binding_created_device(&rt, cx);
+        let handler = rt.insert(MockValue::Callable(MockCallable::Handler));
+        device_on_uncaptured_error_set::<Engine>(cx, device, handler).expect("set handler");
+
+        let info = GPU_STATE.with(|state| {
+            state
+                .borrow()
+                .uncaptured_error_callback
+                .expect("binding callback installed")
+        });
+        let native_device = fake_device();
+        unsafe {
+            info.callback.expect("callback")(
+                ptr::from_ref(&native_device),
+                crate::WGPUErrorType_WGPUErrorType_Validation,
+                WGPUStringView::from_bytes(b"native validation"),
+                info.userdata1,
+                info.userdata2,
+            );
+            crate::tick::<Engine>(cx, fake_handle(702)).expect("uncaptured tick");
+        }
+        let error = rt.call_args.borrow()[0];
+        assert!(Engine::payload(cx, error, crate::GPU_VALIDATION_ERROR_CLASS).is_some());
+        let message = crate::gpu_error_message_get::<Engine>(cx, error).expect("message");
+        assert!(
+            matches!(rt.get(message), MockValue::String(value) if value == "native validation")
+        );
+
+        rt.set_call_error(handler, "handler exploded");
+        let forwarder = rt.env.device_event_forwarder();
+        let device_bits = fake_device() as usize;
+        std::thread::spawn(move || {
+            forwarder
+                .forward_uncaptured_error::<Engine>(
+                    device_bits as WGPUDevice,
+                    crate::WGPUErrorType_WGPUErrorType_OutOfMemory,
+                    "thread error",
+                )
+                .expect("thread enqueue");
+        })
+        .join()
+        .expect("thread join");
+        assert_eq!(
+            unsafe { crate::tick::<Engine>(cx, fake_handle(703)) },
+            Err(crate::TickError::Engine("handler exploded".to_owned()))
+        );
+    }
+
+    #[test]
+    fn s7_lost_is_cached_maps_every_c_reason_and_settles_once() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let reasons = [
+            (
+                crate::WGPUDeviceLostReason_WGPUDeviceLostReason_Unknown,
+                "unknown",
+            ),
+            (
+                crate::WGPUDeviceLostReason_WGPUDeviceLostReason_Destroyed,
+                "destroyed",
+            ),
+            (
+                crate::WGPUDeviceLostReason_WGPUDeviceLostReason_CallbackCancelled,
+                "unknown",
+            ),
+            (
+                crate::WGPUDeviceLostReason_WGPUDeviceLostReason_FailedCreation,
+                "unknown",
+            ),
+        ];
+        for (index, (reason, expected)) in reasons.into_iter().enumerate() {
+            let native = fake_handle(800 + index);
+            let device = unsafe { wrap_device::<Engine>(cx, native) }.expect("device");
+            let first = device_lost_get::<Engine>(cx, device).expect("lost");
+            let second = device_lost_get::<Engine>(cx, device).expect("lost again");
+            assert_eq!(first, second);
+
+            let forwarder = rt.env.device_event_forwarder();
+            if index == 0 {
+                let native_bits = native as usize;
+                std::thread::spawn(move || {
+                    forwarder
+                        .forward_device_lost::<Engine>(
+                            native_bits as WGPUDevice,
+                            reason,
+                            "lost message",
+                        )
+                        .expect("thread lost enqueue");
+                })
+                .join()
+                .expect("thread join");
+            } else {
+                forwarder
+                    .forward_device_lost::<Engine>(native, reason, "lost message")
+                    .expect("lost enqueue");
+            }
+            unsafe { crate::tick::<Engine>(cx, fake_handle(900 + index)) }.expect("lost tick");
+            let info = rt
+                .promise_result(first)
+                .expect("lost settled")
+                .expect("lost resolved");
+            let mapped = device_lost_info_reason_get::<Engine>(cx, info).expect("reason");
+            let message = device_lost_info_message_get::<Engine>(cx, info).expect("message");
+            assert!(matches!(rt.get(mapped), MockValue::String(value) if value == expected));
+            assert!(matches!(rt.get(message), MockValue::String(value) if value == "lost message"));
+
+            rt.env
+                .device_event_forwarder()
+                .forward_device_lost::<Engine>(
+                    native,
+                    crate::WGPUDeviceLostReason_WGPUDeviceLostReason_Destroyed,
+                    "late loss",
+                )
+                .expect("late enqueue");
+            unsafe { crate::tick::<Engine>(cx, fake_handle(950 + index)) }.expect("late tick");
+            assert_eq!(rt.promise_result(first), Some(Ok(info)));
+        }
+    }
+
+    #[test]
+    fn s7_binding_created_device_lost_callback_resolves_cached_promise() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = binding_created_device(&rt, cx);
+        let promise = device_lost_get::<Engine>(cx, device).expect("lost");
+        let info = GPU_STATE.with(|state| {
+            state
+                .borrow()
+                .device_lost_callback
+                .expect("binding lost callback installed")
+        });
+        assert_eq!(
+            info.mode,
+            crate::WGPUCallbackMode_WGPUCallbackMode_AllowProcessEvents
+        );
+        let native_device = fake_device();
+        unsafe {
+            info.callback.expect("callback")(
+                ptr::from_ref(&native_device),
+                crate::WGPUDeviceLostReason_WGPUDeviceLostReason_Destroyed,
+                WGPUStringView::from_bytes(b"native lost"),
+                info.userdata1,
+                info.userdata2,
+            );
+            crate::tick::<Engine>(cx, fake_handle(980)).expect("lost tick");
+        }
+        let lost = rt
+            .promise_result(promise)
+            .expect("settled")
+            .expect("resolved");
+        let reason = device_lost_info_reason_get::<Engine>(cx, lost).expect("reason");
+        let message = device_lost_info_message_get::<Engine>(cx, lost).expect("message");
+        assert!(matches!(rt.get(reason), MockValue::String(value) if value == "destroyed"));
+        assert!(matches!(rt.get(message), MockValue::String(value) if value == "native lost"));
+    }
+
+    #[test]
+    fn s7_teardown_with_pending_lost_is_clean() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_handle(999)) }.expect("device");
+        let _ = device_lost_get::<Engine>(cx, device).expect("pending lost");
     }
 }

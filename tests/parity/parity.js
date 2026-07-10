@@ -153,6 +153,10 @@
         paritySampler.label = "sampler-round-trip";
         log("sampler:" + paritySampler.label);
 
+        device.lost.then(function (info) {
+            log("lostReason:" + info.reason);
+        }).catch(fail);
+
         gpu.requestAdapter().then(function (firstAdapter) {
             var order = [];
             var settleIndex = 0;

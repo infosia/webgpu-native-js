@@ -8,10 +8,12 @@
 
 use std::any::Any;
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::ptr;
 use std::ptr::NonNull;
+use std::sync::Weak;
 use std::sync::{Arc, Mutex, OnceLock};
 
 pub use webgpu_native_js_ffi::native::*;
@@ -46,6 +48,7 @@ const GPU_ERROR_CLASS: ClassId = ClassId(15);
 const GPU_VALIDATION_ERROR_CLASS: ClassId = ClassId(16);
 const GPU_OUT_OF_MEMORY_ERROR_CLASS: ClassId = ClassId(17);
 const GPU_INTERNAL_ERROR_CLASS: ClassId = ClassId(18);
+const GPU_DEVICE_LOST_INFO_CLASS: ClassId = ClassId(19);
 const WEBIDL_U32_MAX: u64 = u32::MAX as u64;
 
 /// A JavaScript class identifier scoped to an engine context.
@@ -103,6 +106,18 @@ pub struct Environment {
     gpu: GpuDispatch,
     queue: Arc<ReleaseQueue>,
     settlements: Arc<SettlementQueue>,
+    device_events: Arc<DeviceEventRegistry>,
+}
+
+#[derive(Default)]
+struct DeviceEventRegistry {
+    states: Mutex<BTreeMap<usize, Vec<Arc<dyn Any + Send + Sync>>>>,
+}
+
+/// Cloneable, thread-safe producer handle for adopted-device events.
+#[derive(Clone)]
+pub struct DeviceEventForwarder {
+    registry: Arc<DeviceEventRegistry>,
 }
 
 impl Environment {
@@ -113,6 +128,7 @@ impl Environment {
             gpu,
             queue,
             settlements: Arc::new(SettlementQueue::new()),
+            device_events: Arc::new(DeviceEventRegistry::default()),
         }
     }
 
@@ -132,6 +148,109 @@ impl Environment {
     #[must_use]
     pub fn settlements(&self) -> &Arc<SettlementQueue> {
         &self.settlements
+    }
+
+    /// Returns a Send + Sync producer handle for adopted-device events.
+    #[must_use]
+    pub fn device_event_forwarder(&self) -> DeviceEventForwarder {
+        DeviceEventForwarder {
+            registry: Arc::clone(&self.device_events),
+        }
+    }
+
+    /// Releases engine values retained by registered device event states.
+    pub fn release_device_event_values<E: JsEngine + 'static>(&self, cx: E::Context<'_>) {
+        let states = self
+            .device_events
+            .states
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .flatten()
+            .filter_map(|events| Arc::clone(events).downcast::<DeviceEventState<E>>().ok())
+            .collect::<Vec<_>>();
+        for state in states {
+            let state = state
+                .js
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(state) = state.as_ref() else {
+                continue;
+            };
+            if let Some(handler) = state.handler.take() {
+                E::release_value(cx, handler);
+            }
+            if let Some(promise) = state.lost_promise.take() {
+                E::release_value(cx, promise);
+            }
+        }
+    }
+
+    fn register_device_events<E: JsEngine + 'static>(
+        &self,
+        device: WGPUDevice,
+        events: Arc<DeviceEventState<E>>,
+    ) {
+        self.device_events
+            .states
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(device as usize)
+            .or_default()
+            .push(events);
+    }
+}
+
+impl DeviceEventForwarder {
+    fn device_events<E: JsEngine + 'static>(
+        &self,
+        device: WGPUDevice,
+    ) -> Vec<Arc<DeviceEventState<E>>> {
+        self.registry
+            .states
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&(device as usize))
+            .into_iter()
+            .flatten()
+            .filter_map(|events| Arc::clone(events).downcast::<DeviceEventState<E>>().ok())
+            .collect()
+    }
+
+    /// Enqueues an uncaptured error for every wrapper of an adopted device.
+    pub fn forward_uncaptured_error<E: JsEngine + 'static>(
+        &self,
+        device: WGPUDevice,
+        type_: WGPUErrorType,
+        message: impl Into<String>,
+    ) -> std::result::Result<(), QueueError> {
+        let states = self.device_events::<E>(device);
+        if states.is_empty() {
+            return Err(QueueError::UnknownDevice);
+        }
+        let message = message.into();
+        for state in states {
+            state.enqueue_uncaptured(type_, message.clone())?;
+        }
+        Ok(())
+    }
+
+    /// Enqueues device loss for every wrapper of an adopted device.
+    pub fn forward_device_lost<E: JsEngine + 'static>(
+        &self,
+        device: WGPUDevice,
+        reason: WGPUDeviceLostReason,
+        message: impl Into<String>,
+    ) -> std::result::Result<(), QueueError> {
+        let states = self.device_events::<E>(device);
+        if states.is_empty() {
+            return Err(QueueError::UnknownDevice);
+        }
+        let message = message.into();
+        for state in states {
+            state.enqueue_lost(reason, message.clone())?;
+        }
+        Ok(())
     }
 }
 
@@ -404,6 +523,7 @@ enum SettlementRequest<E: JsEngine + 'static> {
     Device {
         deferred: Deferred<E>,
         native: PendingNative,
+        events: Arc<DeviceEventState<E>>,
     },
     Success {
         deferred: Deferred<E>,
@@ -419,16 +539,38 @@ enum SettlementRequest<E: JsEngine + 'static> {
         type_: WGPUErrorType,
         message: String,
     },
+    UncapturedError {
+        state: Arc<DeviceEventState<E>>,
+        type_: WGPUErrorType,
+        message: String,
+    },
+    DeviceLost {
+        state: Arc<DeviceEventState<E>>,
+        reason: WGPUDeviceLostReason,
+        message: String,
+    },
 }
 
-// SAFETY: settlement requests are created by `AllowProcessEvents` callbacks and
-// are only drained by the engine-thread `tick()` after `wgpuInstanceProcessEvents`
-// returns. Engine values inside `Deferred` are moved through this queue but are
-// never dereferenced off the tick thread.
+// SAFETY: settlement requests are created by pure-Rust callbacks and are only
+// drained by the engine-thread `tick()`. Engine values inside `Deferred` and
+// `DeviceEventState` are moved as opaque tokens and never dereferenced off that
+// thread. Every callback copies its WGPUStringView into an owned message String
+// before enqueueing; the queue records therefore own all cross-thread text, and
+// the C callbacks never touch an engine or call any webgpu.h function.
 unsafe impl<E: JsEngine + 'static> Send for SettlementRequest<E> {}
 
+enum SettlementOutcome<E: JsEngine + 'static> {
+    Deferred(DeferredSettlement<E>),
+    UncapturedError {
+        state: Arc<DeviceEventState<E>>,
+        type_: WGPUErrorType,
+        message: String,
+    },
+    None,
+}
+
 impl<E: JsEngine + 'static> SettlementRequest<E> {
-    fn settle(mut self, cx: E::Context<'_>) -> DeferredSettlement<E> {
+    fn prepare(mut self, cx: E::Context<'_>) -> SettlementOutcome<E> {
         match self {
             Self::Adapter {
                 deferred,
@@ -437,7 +579,7 @@ impl<E: JsEngine + 'static> SettlementRequest<E> {
                 let adapter = native.take_adapter();
                 let value =
                     E::new_instance(cx, GPU_ADAPTER_CLASS, Box::new(AdapterPayload { adapter }));
-                match value {
+                SettlementOutcome::Deferred(match value {
                     Ok(value) => (deferred, Ok(value)),
                     Err(error) => {
                         let _ = native.queue.enqueue(ReleaseRequest::Adapter {
@@ -446,30 +588,47 @@ impl<E: JsEngine + 'static> SettlementRequest<E> {
                         });
                         (deferred, Err(E::error_value_from_error(cx, error)))
                     }
-                }
+                })
             }
             Self::Device {
                 deferred,
                 ref mut native,
+                events,
             } => {
                 let device = native.take_device();
+                if let Err(error) = events.initialize(cx) {
+                    let _ = native.queue.enqueue(ReleaseRequest::Device {
+                        device,
+                        gpu: native.gpu,
+                    });
+                    return SettlementOutcome::Deferred((
+                        deferred,
+                        Err(E::error_value_from_error(cx, error)),
+                    ));
+                }
                 let value = E::new_instance(
                     cx,
                     GPU_DEVICE_CLASS,
-                    Box::new(DevicePayload::<E>::new(device)),
+                    Box::new(DevicePayload::<E>::new(device, Arc::clone(&events))),
                 );
-                match value {
-                    Ok(value) => (deferred, Ok(value)),
+                SettlementOutcome::Deferred(match value {
+                    Ok(value) => {
+                        E::environment(cx).register_device_events(device, events);
+                        (deferred, Ok(value))
+                    }
                     Err(error) => {
+                        events.release_after_failed_wrap(cx);
                         let _ = native.queue.enqueue(ReleaseRequest::Device {
                             device,
                             gpu: native.gpu,
                         });
                         (deferred, Err(E::error_value_from_error(cx, error)))
                     }
-                }
+                })
             }
-            Self::Success { deferred } => (deferred, Ok(E::undefined(cx))),
+            Self::Success { deferred } => {
+                SettlementOutcome::Deferred((deferred, Ok(E::undefined(cx))))
+            }
             Self::Error {
                 deferred,
                 name,
@@ -477,7 +636,13 @@ impl<E: JsEngine + 'static> SettlementRequest<E> {
             } => {
                 // S8: OperationError/AbortError are specified as DOMExceptions;
                 // this binding records the deviation and creates a named Error.
-                (deferred, Err(E::async_error_value(cx, name, &message)))
+                // S8 companion deviation: GPUDevice exposes only the writable
+                // onuncapturederror callback attribute; full EventTarget and
+                // GPUUncapturedErrorEvent are intentionally outside this slice.
+                SettlementOutcome::Deferred((
+                    deferred,
+                    Err(E::async_error_value(cx, name, &message)),
+                ))
             }
             Self::PopErrorScope {
                 deferred,
@@ -493,18 +658,48 @@ impl<E: JsEngine + 'static> SettlementRequest<E> {
                     } else {
                         format!("popErrorScope failed: {message}")
                     };
-                    return (
+                    return SettlementOutcome::Deferred((
                         deferred,
                         Err(E::async_error_value(cx, "OperationError", &message)),
-                    );
+                    ));
                 }
                 if type_ == WGPUErrorType_WGPUErrorType_NoError {
-                    return (deferred, Ok(E::null(cx)));
+                    return SettlementOutcome::Deferred((deferred, Ok(E::null(cx))));
                 }
-                match new_gpu_error::<E>(cx, type_, message) {
+                SettlementOutcome::Deferred(match new_gpu_error::<E>(cx, type_, message) {
                     Ok(value) => (deferred, Ok(value)),
                     Err(error) => (deferred, Err(E::error_value_from_error(cx, error))),
-                }
+                })
+            }
+            Self::UncapturedError {
+                state,
+                type_,
+                message,
+            } => SettlementOutcome::UncapturedError {
+                state,
+                type_,
+                message,
+            },
+            Self::DeviceLost {
+                state,
+                reason,
+                message,
+            } => {
+                let mut state = state
+                    .js
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let Some(js) = state.as_mut() else {
+                    return SettlementOutcome::None;
+                };
+                let Some(deferred) = js.lost_deferred.take() else {
+                    return SettlementOutcome::None;
+                };
+                js.lost_registration.take();
+                drop(state);
+                let value = new_device_lost_info::<E>(cx, reason, message)
+                    .map_err(|error| E::error_value_from_error(cx, error));
+                SettlementOutcome::Deferred((deferred, value))
             }
         }
     }
@@ -545,6 +740,7 @@ impl SettlementQueue {
         cx: E::Context<'_>,
     ) -> std::result::Result<usize, TickError<E::Error>> {
         let mut requests = Vec::new();
+        let mut uncaptured = Vec::new();
         loop {
             let request = {
                 let mut queued = self
@@ -559,11 +755,27 @@ impl SettlementQueue {
             let request = request
                 .downcast::<SettlementRequest<E>>()
                 .map_err(|_| TickError::Queue(QueueError::UnexpectedSettlementType))?;
-            requests.push(request.settle(cx));
+            match request.prepare(cx) {
+                SettlementOutcome::Deferred(request) => requests.push(request),
+                SettlementOutcome::UncapturedError {
+                    state,
+                    type_,
+                    message,
+                } => uncaptured.push((state, type_, message)),
+                SettlementOutcome::None => {}
+            }
         }
         let count = requests.len();
         if !requests.is_empty() {
             E::settle_deferreds(cx, requests).map_err(TickError::Engine)?;
+        }
+        // A30 step 2b: event-handler dispatch follows the single batched promise
+        // settlement frame and precedes step 3's microtask drain. This keeps the
+        // one-JS-frame settlement property while surfacing handler throws through
+        // the same TickError::Engine path as a throwing microtask.
+        for (state, type_, message) in uncaptured {
+            dispatch_uncaptured_error::<E>(cx, &state, type_, message)
+                .map_err(TickError::Engine)?;
         }
         Ok(count)
     }
@@ -585,6 +797,8 @@ impl SettlementQueue {
                     | SettlementRequest::PopErrorScope { deferred, .. } => {
                         E::release_deferred(cx, deferred)
                     }
+                    SettlementRequest::UncapturedError { .. }
+                    | SettlementRequest::DeviceLost { .. } => {}
                 }
             }
         }
@@ -729,6 +943,8 @@ pub enum QueueError {
     Poisoned(&'static str),
     /// A settlement queued for a different engine was encountered.
     UnexpectedSettlementType,
+    /// No wrapper is registered for an adopted native device.
+    UnknownDevice,
 }
 
 /// Failure from the engine-neutral four-step tick skeleton.
@@ -763,16 +979,18 @@ pub unsafe fn tick<E: JsEngine + 'static>(
 }
 
 /// Payload stored by a `GPUDevice` wrapper.
-pub struct DevicePayload<E: JsEngine> {
+pub struct DevicePayload<E: JsEngine + 'static> {
     device: WGPUDevice,
     queue: HeldValue<E>,
+    events: Arc<DeviceEventState<E>>,
 }
 
-impl<E: JsEngine> DevicePayload<E> {
-    fn new(device: WGPUDevice) -> Self {
+impl<E: JsEngine + 'static> DevicePayload<E> {
+    fn new(device: WGPUDevice, events: Arc<DeviceEventState<E>>) -> Self {
         Self {
             device,
             queue: HeldValue::empty(),
+            events,
         }
     }
 
@@ -791,13 +1009,117 @@ impl<E: JsEngine> DevicePayload<E> {
     }
 }
 
-// SAFETY: `DevicePayload` stores an adopted `WGPUDevice` plus a cached engine
-// value in `HeldValue`. A finalizer may move the payload to another thread, but
-// it only copies the native handle into `ReleaseRequest::Device` and passes the
-// opaque cached value to the adapter-provided release closure. Neither value is
-// dereferenced as a native/engine object off-thread; actual native release runs
-// when the queue drains on the creating `tick()` thread.
-unsafe impl<E: JsEngine> Send for DevicePayload<E> {}
+struct DeviceEventJs<E: JsEngine + 'static> {
+    handler: HeldValue<E>,
+    lost_promise: HeldValue<E>,
+    lost_deferred: Option<Deferred<E>>,
+    lost_registration: Option<E::DeferredRegistration>,
+}
+
+struct DeviceEventState<E: JsEngine + 'static> {
+    settlements: Arc<SettlementQueue>,
+    self_weak: OnceLock<Weak<Self>>,
+    js: Mutex<Option<Box<DeviceEventJs<E>>>>,
+}
+
+impl<E: JsEngine + 'static> DeviceEventState<E> {
+    fn new(settlements: Arc<SettlementQueue>) -> Arc<Self> {
+        let state = Arc::new(Self {
+            settlements,
+            self_weak: OnceLock::new(),
+            js: Mutex::new(None),
+        });
+        let _ = state.self_weak.set(Arc::downgrade(&state));
+        state
+    }
+
+    fn initialize(&self, cx: E::Context<'_>) -> Result<(), E::Error> {
+        let (promise, deferred) = E::new_promise(cx)?;
+        let mut js = Box::new(DeviceEventJs {
+            handler: HeldValue::empty(),
+            lost_promise: HeldValue::empty(),
+            lost_deferred: Some(deferred),
+            lost_registration: None,
+        });
+        js.lost_promise.set(E::duplicate_value(cx, promise));
+        js.lost_registration = Some(E::register_deferred(
+            cx,
+            NonNull::from(&mut js.lost_deferred),
+        ));
+        *self
+            .js
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(js);
+        Ok(())
+    }
+
+    fn enqueue_uncaptured(
+        &self,
+        type_: WGPUErrorType,
+        message: String,
+    ) -> std::result::Result<(), QueueError> {
+        let Some(state) = self.self_weak.get().and_then(Weak::upgrade) else {
+            return Ok(());
+        };
+        self.settlements
+            .enqueue::<E>(SettlementRequest::UncapturedError {
+                state,
+                type_,
+                message,
+            })
+    }
+
+    fn enqueue_lost(
+        &self,
+        reason: WGPUDeviceLostReason,
+        message: String,
+    ) -> std::result::Result<(), QueueError> {
+        let Some(state) = self.self_weak.get().and_then(Weak::upgrade) else {
+            return Ok(());
+        };
+        self.settlements
+            .enqueue::<E>(SettlementRequest::DeviceLost {
+                state,
+                reason,
+                message,
+            })
+    }
+
+    fn release_after_failed_wrap(&self, cx: E::Context<'_>) {
+        let Some(mut js) = self
+            .js
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        else {
+            return;
+        };
+        js.lost_registration.take();
+        if let Some(deferred) = js.lost_deferred.take() {
+            E::release_deferred(cx, deferred);
+        }
+        if let Some(promise) = js.lost_promise.take() {
+            E::release_value(cx, promise);
+        }
+    }
+}
+
+// SAFETY: engine values and the lost deferred are opaque tokens protected by
+// the existing HeldValue/deferred-registration machinery. Arbitrary-thread C
+// callbacks only upgrade `self_weak`, lock the settlement queue, and enqueue C
+// scalars plus an owned copied message String; they never inspect an engine
+// token or call an engine or webgpu.h function. All token access and settlement
+// happen later on the designated JavaScript `tick()` thread.
+unsafe impl<E: JsEngine + 'static> Send for DeviceEventState<E> {}
+// SAFETY: the same argument as Send applies; all shared fields are synchronized,
+// and callbacks use only the pure-Rust enqueue path described above.
+unsafe impl<E: JsEngine + 'static> Sync for DeviceEventState<E> {}
+
+// SAFETY: `DevicePayload` stores an adopted `WGPUDevice`, cached engine values,
+// and synchronized event state. A finalizer only copies the native handle into
+// `ReleaseRequest::Device` and passes opaque values to adapter release closures;
+// native release and all engine access run on the creating `tick()` thread.
+unsafe impl<E: JsEngine + 'static> Send for DevicePayload<E> {}
 
 struct HeldValue<E: JsEngine> {
     value: Mutex<Option<E::Value>>,
@@ -881,6 +1203,20 @@ pub fn trace_payload_values<E: JsEngine + 'static>(
         if let Some(queue) = device.cached_queue() {
             visit(queue);
         }
+        if let Some(js) = device
+            .events
+            .js
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            if let Some(handler) = js.handler.get() {
+                visit(handler);
+            }
+            if let Some(promise) = js.lost_promise.get() {
+                visit(promise);
+            }
+        }
     }
 }
 
@@ -895,6 +1231,20 @@ pub fn release_payload_values<E: JsEngine + 'static>(
     if let Some(device) = payload.downcast_ref::<DevicePayload<E>>() {
         if let Some(queue) = device.queue.take() {
             release(queue);
+        }
+        if let Some(js) = device
+            .events
+            .js
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            if let Some(handler) = js.handler.take() {
+                release(handler);
+            }
+            if let Some(promise) = js.lost_promise.take() {
+                release(promise);
+            }
         }
     }
 }
@@ -1141,6 +1491,13 @@ pub fn register_error_classes<E: JsEngine + 'static>(cx: E::Context<'_>) -> Resu
     Ok(())
 }
 
+/// Registers the script-visible `GPUDeviceLostInfo` class.
+pub fn register_device_lost_info_class<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+) -> Result<ClassId, E::Error> {
+    E::register_class(cx, gpu_device_lost_info_class::<E>())
+}
+
 /// Wraps a native instance as a JavaScript `GPU`.
 pub fn wrap_gpu<E: JsEngine + 'static>(
     cx: E::Context<'_>,
@@ -1157,6 +1514,7 @@ pub fn wrap_gpu<E: JsEngine + 'static>(
     let _ = register_device_class::<E>(cx)?;
     let _ = register_buffer_class::<E>(cx)?;
     register_error_classes::<E>(cx)?;
+    let _ = register_device_lost_info_class::<E>(cx)?;
     E::new_instance(cx, GPU_CLASS, Box::new(GpuPayload { instance }))
 }
 
@@ -1185,15 +1543,112 @@ pub unsafe fn wrap_device<E: JsEngine + 'static>(
     let _ = register_device_class::<E>(cx)?;
     let _ = register_buffer_class::<E>(cx)?;
     register_error_classes::<E>(cx)?;
-    E::new_instance(
+    let _ = register_device_lost_info_class::<E>(cx)?;
+    let events = DeviceEventState::new(Arc::clone(env.settlements()));
+    if let Err(error) = events.initialize(cx) {
+        let _ = env.queue().enqueue(ReleaseRequest::Device {
+            device,
+            gpu: env.gpu(),
+        });
+        return Err(error);
+    }
+    let value = E::new_instance(
         cx,
         GPU_DEVICE_CLASS,
-        Box::new(DevicePayload::<E>::new(device)),
-    )
+        Box::new(DevicePayload::<E>::new(device, Arc::clone(&events))),
+    );
+    match value {
+        Ok(value) => {
+            env.register_device_events(device, events);
+            Ok(value)
+        }
+        Err(error) => {
+            events.release_after_failed_wrap(cx);
+            let _ = env.queue().enqueue(ReleaseRequest::Device {
+                device,
+                gpu: env.gpu(),
+            });
+            Err(error)
+        }
+    }
 }
 
 struct ErrorPayload {
     message: String,
+}
+
+struct DeviceLostInfoPayload {
+    message: String,
+    reason: &'static str,
+}
+
+fn new_device_lost_info<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    reason: WGPUDeviceLostReason,
+    message: String,
+) -> Result<E::Value, E::Error> {
+    let reason = if reason == WGPUDeviceLostReason_WGPUDeviceLostReason_Destroyed {
+        "destroyed"
+    } else {
+        "unknown"
+    };
+    E::new_instance(
+        cx,
+        GPU_DEVICE_LOST_INFO_CLASS,
+        Box::new(DeviceLostInfoPayload { message, reason }),
+    )
+}
+
+fn device_lost_info_message_get<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+) -> Result<E::Value, E::Error> {
+    let payload = E::payload(cx, this, GPU_DEVICE_LOST_INFO_CLASS)
+        .and_then(|payload| payload.downcast_ref::<DeviceLostInfoPayload>())
+        .ok_or_else(|| {
+            E::type_error(
+                cx,
+                "GPUDeviceLostInfo.message called on an incompatible object",
+            )
+        })?;
+    E::string(cx, &payload.message)
+}
+
+fn device_lost_info_reason_get<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+) -> Result<E::Value, E::Error> {
+    let payload = E::payload(cx, this, GPU_DEVICE_LOST_INFO_CLASS)
+        .and_then(|payload| payload.downcast_ref::<DeviceLostInfoPayload>())
+        .ok_or_else(|| {
+            E::type_error(
+                cx,
+                "GPUDeviceLostInfo.reason called on an incompatible object",
+            )
+        })?;
+    E::string(cx, payload.reason)
+}
+
+fn gpu_device_lost_info_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
+    class_spec_once::<E, _>(GPU_DEVICE_LOST_INFO_CLASS, || ClassSpec {
+        name: "GPUDeviceLostInfo",
+        id: GPU_DEVICE_LOST_INFO_CLASS,
+        constructor: None,
+        properties: Box::leak(Box::new([
+            PropertySpec {
+                name: "reason",
+                get: Some(device_lost_info_reason_get::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "message",
+                get: Some(device_lost_info_message_get::<E>),
+                set: None,
+            },
+        ])),
+        methods: &[],
+        finalizer: |_payload, _env| {},
+    })
 }
 
 fn new_gpu_error<E: JsEngine + 'static>(
@@ -1344,6 +1799,105 @@ fn error_subclass<E: JsEngine + 'static>(
         methods: &[],
         finalizer: |_payload, _env| {},
     })
+}
+
+/// Implements the cached `GPUDevice.lost` getter.
+pub fn device_lost_get<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+) -> Result<E::Value, E::Error> {
+    let payload = E::payload(cx, this, GPU_DEVICE_CLASS)
+        .and_then(|payload| payload.downcast_ref::<DevicePayload<E>>())
+        .ok_or_else(|| E::type_error(cx, "GPUDevice.lost called on an incompatible object"))?;
+    let state = payload
+        .events
+        .js
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let promise = state
+        .as_ref()
+        .and_then(|state| state.lost_promise.get())
+        .ok_or_else(|| E::operation_error(cx, "GPUDevice.lost promise is unavailable"))?;
+    Ok(E::return_held_value(cx, promise))
+}
+
+/// Implements the `GPUDevice.onuncapturederror` getter.
+pub fn device_on_uncaptured_error_get<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+) -> Result<E::Value, E::Error> {
+    let payload = E::payload(cx, this, GPU_DEVICE_CLASS)
+        .and_then(|payload| payload.downcast_ref::<DevicePayload<E>>())
+        .ok_or_else(|| {
+            E::type_error(
+                cx,
+                "GPUDevice.onuncapturederror called on an incompatible object",
+            )
+        })?;
+    let state = payload
+        .events
+        .js
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    Ok(state
+        .as_ref()
+        .and_then(|state| state.handler.get())
+        .map_or_else(|| E::null(cx), |handler| E::return_held_value(cx, handler)))
+}
+
+/// Implements the `GPUDevice.onuncapturederror` setter.
+pub fn device_on_uncaptured_error_set<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    value: E::Value,
+) -> Result<(), E::Error> {
+    let payload = E::payload(cx, this, GPU_DEVICE_CLASS)
+        .and_then(|payload| payload.downcast_ref::<DevicePayload<E>>())
+        .ok_or_else(|| {
+            E::type_error(
+                cx,
+                "GPUDevice.onuncapturederror called on an incompatible object",
+            )
+        })?;
+    let state = payload
+        .events
+        .js
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(state) = state.as_ref() else {
+        return Err(E::operation_error(
+            cx,
+            "GPUDevice event state is unavailable",
+        ));
+    };
+    let old = state.handler.take();
+    if !E::is_null(cx, value) && !E::is_undefined(cx, value) {
+        state.handler.set(E::duplicate_value(cx, value));
+    }
+    if let Some(old) = old {
+        E::release_value(cx, old);
+    }
+    Ok(())
+}
+
+fn dispatch_uncaptured_error<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    state: &DeviceEventState<E>,
+    type_: WGPUErrorType,
+    message: String,
+) -> Result<(), E::Error> {
+    let handler = state
+        .js
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .and_then(|state| state.handler.get());
+    let Some(handler) = handler else {
+        return Ok(());
+    };
+    let error = new_gpu_error::<E>(cx, type_, message)?;
+    let _ = E::call(cx, handler, E::global(cx), &[error])?;
+    Ok(())
 }
 
 /// Implements `GPUDevice.pushErrorScope`.
@@ -1541,11 +2095,13 @@ pub fn adapter_request_device<E: JsEngine + 'static>(
         ));
     };
     let (promise, deferred) = E::new_promise(cx)?;
+    let events = DeviceEventState::<E>::new(Arc::clone(E::environment(cx).settlements()));
     let mut request = Box::new(DeviceRequest::<E> {
         deferred: Some(deferred),
         settlements: Arc::clone(E::environment(cx).settlements()),
         release_queue: Arc::clone(E::environment(cx).queue()),
         gpu: E::environment(cx).gpu(),
+        events: Arc::clone(&events),
         _registration: None,
     });
     request._registration = Some(E::register_deferred(
@@ -1559,8 +2115,37 @@ pub fn adapter_request_device<E: JsEngine + 'static>(
         userdata1: Box::into_raw(request).cast(),
         userdata2: ptr::null_mut(),
     };
+    let event_userdata = Arc::as_ptr(&events).cast_mut().cast::<c_void>();
+    let descriptor = WGPUDeviceDescriptor {
+        nextInChain: ptr::null_mut(),
+        label: WGPUStringView::from_bytes(b""),
+        requiredFeatureCount: 0,
+        requiredFeatures: ptr::null(),
+        requiredLimits: ptr::null(),
+        defaultQueue: WGPUQueueDescriptor {
+            nextInChain: ptr::null_mut(),
+            label: WGPUStringView::from_bytes(b""),
+        },
+        deviceLostCallbackInfo: WGPUDeviceLostCallbackInfo {
+            nextInChain: ptr::null_mut(),
+            mode: WGPUCallbackMode_WGPUCallbackMode_AllowProcessEvents,
+            callback: Some(device_lost_callback::<E>),
+            userdata1: event_userdata,
+            userdata2: ptr::null_mut(),
+        },
+        uncapturedErrorCallbackInfo: WGPUUncapturedErrorCallbackInfo {
+            nextInChain: ptr::null_mut(),
+            callback: Some(uncaptured_error_callback::<E>),
+            userdata1: event_userdata,
+            userdata2: ptr::null_mut(),
+        },
+    };
     unsafe {
-        (E::environment(cx).gpu().adapter_request_device)(payload.adapter, ptr::null(), info);
+        (E::environment(cx).gpu().adapter_request_device)(
+            payload.adapter,
+            ptr::from_ref(&descriptor),
+            info,
+        );
     }
     Ok(promise)
 }
@@ -2386,6 +2971,7 @@ struct DeviceRequest<E: JsEngine + 'static> {
     settlements: Arc<SettlementQueue>,
     release_queue: Arc<ReleaseQueue>,
     gpu: GpuDispatch,
+    events: Arc<DeviceEventState<E>>,
     _registration: Option<E::DeferredRegistration>,
 }
 
@@ -2525,6 +3111,7 @@ unsafe extern "C" fn request_device_callback<E: JsEngine + 'static>(
                     queue: Arc::clone(&request.release_queue),
                     gpu: request.gpu,
                 },
+                events: Arc::clone(&request.events),
             }
         } else {
             if !device.is_null() {
@@ -2607,6 +3194,40 @@ unsafe extern "C" fn queue_work_done_callback<E: JsEngine + 'static>(
             }
         };
         let _ = request.settlements.enqueue::<E>(settlement);
+    }));
+}
+
+unsafe extern "C" fn uncaptured_error_callback<E: JsEngine + 'static>(
+    _device: *const WGPUDevice,
+    type_: WGPUErrorType,
+    message: WGPUStringView,
+    userdata1: *mut c_void,
+    _userdata2: *mut c_void,
+) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let Some(state) = (unsafe { userdata1.cast::<DeviceEventState<E>>().as_ref() }) else {
+            return;
+        };
+        // The view is callback-borrowed, so copy it before returning. From this
+        // point onward the record is fully Rust-owned and Send.
+        let message = unsafe { callback_string(message) };
+        let _ = state.enqueue_uncaptured(type_, message);
+    }));
+}
+
+unsafe extern "C" fn device_lost_callback<E: JsEngine + 'static>(
+    _device: *const WGPUDevice,
+    reason: WGPUDeviceLostReason,
+    message: WGPUStringView,
+    userdata1: *mut c_void,
+    _userdata2: *mut c_void,
+) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let Some(state) = (unsafe { userdata1.cast::<DeviceEventState<E>>().as_ref() }) else {
+            return;
+        };
+        let message = unsafe { callback_string(message) };
+        let _ = state.enqueue_lost(reason, message);
     }));
 }
 
