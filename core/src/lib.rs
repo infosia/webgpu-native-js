@@ -1536,35 +1536,131 @@ pub fn queue_write_buffer<E: JsEngine + 'static>(
         .get(2)
         .copied()
         .ok_or_else(|| E::type_error(cx, "data"))?;
-    let data =
-        E::arraybuffer_copy(cx, data_value).ok_or_else(|| E::type_error(cx, "ArrayBuffer"))?;
-    let data_offset = optional_gpu_size_to_usize::<E>(cx, args.get(3).copied(), "dataOffset", 0)?;
-    let size = match args.get(4).copied() {
+    let source = convert_buffer_source::<E>(cx, data_value)?;
+    let data_offset = optional_gpu_size_to_u64::<E>(cx, args.get(3).copied(), "dataOffset", 0)?;
+    let byte_offset = data_offset
+        .checked_mul(source.bytes_per_element)
+        .ok_or_else(|| E::type_error(cx, "dataOffset"))?;
+    if byte_offset > source.byte_length {
+        return Err(E::type_error(cx, "dataOffset"));
+    }
+    let byte_size = match args.get(4).copied() {
         Some(value) if !E::is_undefined(cx, value) => {
-            optional_gpu_size_to_usize::<E>(cx, Some(value), "size", 0)?
+            let size = optional_gpu_size_to_u64::<E>(cx, Some(value), "size", 0)?;
+            size.checked_mul(source.bytes_per_element)
+                .ok_or_else(|| E::type_error(cx, "size"))?
         }
-        _ => data
-            .len()
-            .checked_sub(data_offset)
-            .ok_or_else(|| E::type_error(cx, "size"))?,
+        _ => source.byte_length - byte_offset,
     };
-    let end = data_offset
-        .checked_add(size)
+    let relative_end = byte_offset
+        .checked_add(byte_size)
         .ok_or_else(|| E::type_error(cx, "size"))?;
-    if end > data.len() {
+    if relative_end > source.byte_length || byte_size > WEBIDL_U32_MAX {
         return Err(E::type_error(cx, "size"));
     }
+    let start = source
+        .byte_offset
+        .checked_add(byte_offset)
+        .ok_or_else(|| E::type_error(cx, "dataOffset"))?;
+    if start > WEBIDL_U32_MAX {
+        return Err(E::type_error(cx, "dataOffset"));
+    }
+    let end = start
+        .checked_add(byte_size)
+        .ok_or_else(|| E::type_error(cx, "size"))?;
+    if end > WEBIDL_U32_MAX {
+        return Err(E::type_error(cx, "size"));
+    }
+    let start = usize::try_from(start).map_err(|_| E::type_error(cx, "dataOffset"))?;
+    let end = usize::try_from(end).map_err(|_| E::type_error(cx, "size"))?;
+    let size = usize::try_from(byte_size).map_err(|_| E::type_error(cx, "size"))?;
     let buffer = buffer_handle::<E>(cx, buffer_value)?;
     unsafe {
         (E::environment(cx).gpu().queue_write_buffer)(
             queue_payload.queue,
             buffer,
             offset,
-            data[data_offset..end].as_ptr().cast(),
+            source.bytes[start..end].as_ptr().cast(),
             size,
         );
     }
     Ok(E::undefined(cx))
+}
+
+struct ConvertedBufferSource {
+    bytes: Vec<u8>,
+    byte_offset: u64,
+    byte_length: u64,
+    bytes_per_element: u64,
+}
+
+fn convert_buffer_source<E: JsEngine>(
+    cx: E::Context<'_>,
+    value: E::Value,
+) -> Result<ConvertedBufferSource, E::Error> {
+    if E::arraybuffer_len(cx, value).is_some() {
+        let bytes = E::arraybuffer_copy(cx, value)
+            .ok_or_else(|| E::type_error(cx, "data must be an ArrayBuffer or ArrayBufferView"))?;
+        let byte_length = u64::try_from(bytes.len()).map_err(|_| E::type_error(cx, "data"))?;
+        return Ok(ConvertedBufferSource {
+            bytes,
+            byte_offset: 0,
+            byte_length,
+            bytes_per_element: 1,
+        });
+    }
+
+    let backing = E::get_property(cx, value, "buffer")?;
+    let Some(backing_length) = E::arraybuffer_len(cx, backing) else {
+        return Err(E::type_error(
+            cx,
+            "data must be an ArrayBuffer or ArrayBufferView (or pass data.buffer)",
+        ));
+    };
+    let byte_offset = enforce_u64::<E>(
+        cx,
+        required_member::<E>(cx, value, "byteOffset")?,
+        "data.byteOffset",
+    )?;
+    let byte_length = enforce_u64::<E>(
+        cx,
+        required_member::<E>(cx, value, "byteLength")?,
+        "data.byteLength",
+    )?;
+    let constructor = E::get_property(cx, value, "constructor")?;
+    let bytes_per_element = if E::is_undefined(cx, constructor) || E::is_null(cx, constructor) {
+        1
+    } else {
+        let value = E::get_property(cx, constructor, "BYTES_PER_ELEMENT")?;
+        if E::is_undefined(cx, value) {
+            1
+        } else {
+            let value = enforce_u64::<E>(cx, value, "data.constructor.BYTES_PER_ELEMENT")?;
+            if value == 0 {
+                return Err(E::type_error(cx, "data.constructor.BYTES_PER_ELEMENT"));
+            }
+            value
+        }
+    };
+    let backing_length = u64::try_from(backing_length).map_err(|_| E::type_error(cx, "data"))?;
+    let view_end = byte_offset
+        .checked_add(byte_length)
+        .ok_or_else(|| E::type_error(cx, "data.byteLength"))?;
+    if view_end > backing_length {
+        return Err(E::type_error(cx, "data.byteLength"));
+    }
+    let bytes = E::arraybuffer_copy(cx, backing)
+        .ok_or_else(|| E::type_error(cx, "data must reference an attached ArrayBuffer"))?;
+    let copied_length = u64::try_from(bytes.len()).map_err(|_| E::type_error(cx, "data"))?;
+    if view_end > copied_length {
+        return Err(E::type_error(cx, "data.byteLength"));
+    }
+    Ok(ConvertedBufferSource {
+        bytes,
+        byte_offset,
+        byte_length,
+        bytes_per_element,
+    })
 }
 
 /// Implements `GPUQueue.submit`.
@@ -2289,12 +2385,12 @@ fn required_member<E: JsEngine>(
     }
 }
 
-fn optional_gpu_size_to_usize<E: JsEngine>(
+fn optional_gpu_size_to_u64<E: JsEngine>(
     cx: E::Context<'_>,
     value: Option<E::Value>,
     name: &'static str,
-    default: usize,
-) -> Result<usize, E::Error> {
+    default: u64,
+) -> Result<u64, E::Error> {
     let Some(value) = value else {
         return Ok(default);
     };
@@ -2305,6 +2401,17 @@ fn optional_gpu_size_to_usize<E: JsEngine>(
     if value > WEBIDL_U32_MAX {
         return Err(E::type_error(cx, name));
     }
+    Ok(value)
+}
+
+fn optional_gpu_size_to_usize<E: JsEngine>(
+    cx: E::Context<'_>,
+    value: Option<E::Value>,
+    name: &'static str,
+    default: usize,
+) -> Result<usize, E::Error> {
+    let default = u64::try_from(default).map_err(|_| E::type_error(cx, name))?;
+    let value = optional_gpu_size_to_u64::<E>(cx, value, name, default)?;
     usize::try_from(value).map_err(|_| E::type_error(cx, name))
 }
 

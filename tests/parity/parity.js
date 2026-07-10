@@ -24,6 +24,10 @@
         return Array.prototype.join.call(new Uint8Array(range), ",");
     }
 
+    function bytesOfView(view) {
+        return Array.prototype.join.call(view, ",");
+    }
+
     function finishConformance() {
         try {
             var setEncoder = device.createCommandEncoder();
@@ -62,20 +66,25 @@
 
     function runWriteBufferRoundTrip() {
         try {
-            var source = device.createBuffer({ size: 8, usage: 12 });
-            var destination = device.createBuffer({ size: 8, usage: 9 });
+            var source = device.createBuffer({ size: 12, usage: 12 });
+            var destination = device.createBuffer({ size: 12, usage: 9 });
             var bytes = new ArrayBuffer(8);
             new Uint8Array(bytes).set([3, 1, 4, 1, 5, 9, 2, 6]);
             device.queue.writeBuffer(source, 0, bytes, 0, 8);
+            var viewBacking = new ArrayBuffer(8);
+            new Uint8Array(viewBacking).set([99, 98, 8, 5, 3, 0, 97, 96]);
+            device.queue.writeBuffer(source, 8, new Uint8Array(viewBacking, 2, 4));
 
             var encoder = device.createCommandEncoder();
-            encoder.copyBufferToBuffer(source, 0, destination, 0, 8);
+            encoder.copyBufferToBuffer(source, 0, destination, 0, 12);
             device.queue.submit([encoder.finish()]);
             device.queue.onSubmittedWorkDone().then(function () {
-                return destination.mapAsync(1, 0, 8);
+                return destination.mapAsync(1, 0, 12);
             }).then(function () {
                 var range = destination.getMappedRange();
-                log("writeBuffer:" + bytesOf(range));
+                var result = new Uint8Array(range);
+                log("writeBuffer:" + bytesOfView(result.subarray(0, 8)));
+                log("writeBuffer view:" + bytesOfView(result.subarray(8, 12)));
                 destination.unmap();
                 source.destroy();
                 destination.destroy();

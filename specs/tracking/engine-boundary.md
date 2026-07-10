@@ -1160,3 +1160,14 @@ is now ~0 for standard-pattern interfaces: a new interface is a policy entry.
 One run of this slice died at the 30-minute codex ceiling mid-flight; the
 partial tree was verified green and a resume session finished it — the
 split-heavy-tasks rule now has a codegen-sized data point.
+
+**B22 closed (2026-07-10, owner-approved order item 3).** `writeBuffer` accepts
+the full `AllowSharedBufferSource` (verified against the pinned IDL) — whole
+`ArrayBuffer`s and `ArrayBufferView` windows — with **zero new `JsEngine`
+primitives**: `.buffer`/`.byteOffset`/`.byteLength`/`BYTES_PER_ELEMENT` are
+standard properties readable through `get_property`, so the JSC pinning hazard
+is never approached (the backing buffer still flows through `arraybuffer_copy`'s
+J19-safe slice path). The two optional args landed with the element-vs-byte
+distinction, red-first proven (removing the multiplications: `left: [11,20,0,0]`
+vs `right: [20,21,30,31]`). Bounds reject before narrowing (B7/A21). Parity
+gains `writeBuffer view:8,5,3,0`, byte-identical both engines. Core 89.

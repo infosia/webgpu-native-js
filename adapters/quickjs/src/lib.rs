@@ -2636,10 +2636,11 @@ mod tests {
             r#"
                 var src = device.createBuffer({ size: 8, usage: 12 });
                 var dst = device.createBuffer({ size: 8, usage: 9 });
-                var bytes = new ArrayBuffer(8);
-                var write = new Uint8Array(bytes);
+                var bytes = new ArrayBuffer(12);
+                new Uint8Array(bytes).set([90, 91, 3, 1, 4, 1, 5, 9, 2, 6, 92, 93]);
+                var write = new Uint8Array(bytes, 2, 8);
                 write.set([3, 1, 4, 1, 5, 9, 2, 6]);
-                device.queue.writeBuffer(src, 0, bytes, 0, 8);
+                device.queue.writeBuffer(src, 0, write);
                 var encoder = device.createCommandEncoder();
                 encoder.copyBufferToBuffer(src, 0, dst, 0, 8);
                 var command = encoder.finish();

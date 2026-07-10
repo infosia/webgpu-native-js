@@ -273,7 +273,7 @@ impl Runtime {
     /// Reads a copy of an ArrayBuffer's bytes while it is attached.
     #[must_use]
     pub fn read_arraybuffer(&self, value: Value) -> Option<Vec<u8>> {
-        self.with_value(value, |stored| match stored {
+        self.with_value(self.canonical(value), |stored| match stored {
             MockValue::ArrayBuffer {
                 bytes,
                 detached: false,
@@ -1581,6 +1581,25 @@ mod tests {
         rt.object(fields)
     }
 
+    fn array_buffer_view(
+        rt: &Runtime,
+        backing: Value,
+        byte_offset: f64,
+        byte_length: f64,
+        bytes_per_element: Option<f64>,
+    ) -> Value {
+        let constructor = match bytes_per_element {
+            Some(value) => rt.object(&[("BYTES_PER_ELEMENT", rt.number(value))]),
+            None => rt.object(&[]),
+        };
+        rt.object(&[
+            ("buffer", backing),
+            ("byteOffset", rt.number(byte_offset)),
+            ("byteLength", rt.number(byte_length)),
+            ("constructor", constructor),
+        ])
+    }
+
     #[test]
     fn js_engine_global_returns_a_scope_tracked_global_object() {
         let rt = runtime();
@@ -2660,6 +2679,162 @@ mod tests {
         .expect_err("oversized size must fail before narrowing");
 
         assert_eq!(error, "TypeError: size");
+        release_device_held_values(&rt, cx, device);
+    }
+
+    #[test]
+    fn b22_write_buffer_keeps_arraybuffer_whole_buffer_behavior() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let queue = device_queue_get::<Engine>(cx, device).expect("queue");
+        let desc = descriptor(&rt, &[("size", rt.number(4.0)), ("usage", rt.number(8.0))]);
+        let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("buffer");
+        let native = crate::buffer_handle::<Engine>(cx, buffer).expect("native buffer");
+        let data = Engine::new_arraybuffer_copy(cx, &[1, 2, 3, 4]).expect("arraybuffer");
+
+        queue_write_buffer::<Engine>(cx, queue, &[buffer, rt.number(0.0), data])
+            .expect("whole ArrayBuffer write");
+
+        assert_eq!(buffer_bytes(native).expect("bytes"), [1, 2, 3, 4]);
+        release_device_held_values(&rt, cx, device);
+    }
+
+    #[test]
+    fn b22_write_buffer_respects_uint8array_view_window() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let queue = device_queue_get::<Engine>(cx, device).expect("queue");
+        let desc = descriptor(&rt, &[("size", rt.number(4.0)), ("usage", rt.number(8.0))]);
+        let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("buffer");
+        let native = crate::buffer_handle::<Engine>(cx, buffer).expect("native buffer");
+        let backing =
+            Engine::new_arraybuffer_copy(cx, &[90, 91, 1, 2, 3, 4, 92, 93]).expect("arraybuffer");
+        let view = array_buffer_view(&rt, backing, 2.0, 4.0, Some(1.0));
+
+        queue_write_buffer::<Engine>(cx, queue, &[buffer, rt.number(0.0), view])
+            .expect("Uint8Array write");
+
+        assert_eq!(buffer_bytes(native).expect("bytes"), [1, 2, 3, 4]);
+        release_device_held_values(&rt, cx, device);
+    }
+
+    #[test]
+    fn b22_write_buffer_uses_elements_for_uint16array_data_offset_and_size() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let queue = device_queue_get::<Engine>(cx, device).expect("queue");
+        let desc = descriptor(&rt, &[("size", rt.number(4.0)), ("usage", rt.number(8.0))]);
+        let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("buffer");
+        let native = crate::buffer_handle::<Engine>(cx, buffer).expect("native buffer");
+        let backing =
+            Engine::new_arraybuffer_copy(cx, &[99, 98, 10, 11, 20, 21, 30, 31, 40, 41, 97, 96])
+                .expect("arraybuffer");
+        let view = array_buffer_view(&rt, backing, 2.0, 8.0, Some(2.0));
+
+        queue_write_buffer::<Engine>(
+            cx,
+            queue,
+            &[buffer, rt.number(0.0), view, rt.number(1.0), rt.number(2.0)],
+        )
+        .expect("Uint16Array element write");
+
+        assert_eq!(buffer_bytes(native).expect("bytes"), [20, 21, 30, 31]);
+        release_device_held_values(&rt, cx, device);
+    }
+
+    #[test]
+    fn b22_write_buffer_uses_bytes_for_dataview_data_offset_and_size() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let queue = device_queue_get::<Engine>(cx, device).expect("queue");
+        let desc = descriptor(&rt, &[("size", rt.number(4.0)), ("usage", rt.number(8.0))]);
+        let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("buffer");
+        let native = crate::buffer_handle::<Engine>(cx, buffer).expect("native buffer");
+        let backing =
+            Engine::new_arraybuffer_copy(cx, &[0, 1, 2, 3, 4, 5, 6]).expect("arraybuffer");
+        let view = array_buffer_view(&rt, backing, 1.0, 5.0, None);
+
+        queue_write_buffer::<Engine>(
+            cx,
+            queue,
+            &[buffer, rt.number(0.0), view, rt.number(2.0), rt.number(2.0)],
+        )
+        .expect("DataView byte write");
+
+        assert_eq!(buffer_bytes(native).expect("bytes"), [3, 4, 0, 0]);
+        release_device_held_values(&rt, cx, device);
+    }
+
+    #[test]
+    fn b22_write_buffer_rejects_non_buffer_source() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let queue = device_queue_get::<Engine>(cx, device).expect("queue");
+        let desc = descriptor(&rt, &[("size", rt.number(4.0)), ("usage", rt.number(8.0))]);
+        let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("buffer");
+
+        let error =
+            queue_write_buffer::<Engine>(cx, queue, &[buffer, rt.number(0.0), rt.object(&[])])
+                .expect_err("non-BufferSource must fail");
+
+        assert_eq!(
+            error,
+            "TypeError: data must be an ArrayBuffer or ArrayBufferView (or pass data.buffer)"
+        );
+        release_device_held_values(&rt, cx, device);
+    }
+
+    #[test]
+    fn b22_write_buffer_rejects_bounds_violations_before_narrowing() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let queue = device_queue_get::<Engine>(cx, device).expect("queue");
+        let desc = descriptor(&rt, &[("size", rt.number(8.0)), ("usage", rt.number(8.0))]);
+        let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("buffer");
+        let data = Engine::new_arraybuffer_copy(cx, &[0; 8]).expect("arraybuffer");
+
+        for (args, expected) in [
+            (
+                vec![buffer, rt.number(0.0), data, rt.number(9.0)],
+                "TypeError: dataOffset",
+            ),
+            (
+                vec![buffer, rt.number(0.0), data, rt.number(4.0), rt.number(5.0)],
+                "TypeError: size",
+            ),
+            (
+                vec![buffer, rt.number(0.0), data, rt.number(4_294_967_296.0)],
+                "TypeError: dataOffset",
+            ),
+            (
+                vec![
+                    buffer,
+                    rt.number(0.0),
+                    data,
+                    rt.number(0.0),
+                    rt.number(4_294_967_296.0),
+                ],
+                "TypeError: size",
+            ),
+        ] {
+            assert_eq!(
+                queue_write_buffer::<Engine>(cx, queue, &args)
+                    .expect_err("bounds violation must fail"),
+                expected
+            );
+        }
         release_device_held_values(&rt, cx, device);
     }
 
