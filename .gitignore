@@ -1,3 +1,6 @@
+/HANDOFF.md
+/REPORT.md
+
 # Rust build artifacts (any depth — spikes/ and future workspace members)
 target/
 **/*.rs.bk
