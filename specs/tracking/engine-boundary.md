@@ -1252,3 +1252,17 @@ surrogate (data loss); the USVString answer is a single U+FFFD → JSC converts
 via UTF-16 lossy, QuickJS gains a WTF-8 ill-sequence collapser. Landed safe
 lines meanwhile: typeof function, shared prototypes, string-as-sequence
 rejection identity, -0 → "0", 1e21 → "1e+21".
+
+**Block 08 part 3 landed (2026-07-10): both divergences fixed at the root; 62
+lines byte-identical.** (1) JSC method objects are now per-class (created once,
+shared by every instance, protected in a dedicated ledger set released at
+teardown; the per-wrapper cache and its deferred-unprotect plumbing removed;
+the zero-forced-mop assertion keeps meaning via separate class-method
+accounting) — `b1.mapAsync === b2.mapAsync` is now true on both engines, as
+WebIDL says. (2) USVString conversion is spec-correct on both engines: JSC
+converts through the UTF-16 view (`JSStringGetCharactersPtr` +
+`from_utf16_lossy` — SDK-cited) instead of the truncating UTF8CString path;
+QuickJS gains a WTF-8 sanitizer (quickjs.c's surrogate-preserving
+`utf8_encode` verified at source) collapsing each ill-formed sequence to one
+U+FFFD. `string:lone-surrogate:a\u{FFFD}b` (bytes 61 EF BF BD 62) pinned.
+Suites: quickjs 54, JSC 21+1, core 104.

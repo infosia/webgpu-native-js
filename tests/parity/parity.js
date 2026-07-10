@@ -316,6 +316,14 @@
         log("string:pair:" + pair.label);
         pair.destroy();
 
+        var loneSurrogate = device.createBuffer({
+            size: 4,
+            usage: 8,
+            label: "a\uD800b"
+        });
+        log("string:lone-surrogate:" + loneSurrogate.label);
+        loneSurrogate.destroy();
+
         var empty = device.createBuffer({ size: 4, usage: 8, label: "" });
         log("string:empty:" + empty.label.length);
         empty.destroy();
@@ -424,6 +432,8 @@
         log("identity:cross-instance-prototype:" +
             (Object.getPrototypeOf(labelBuffer) ===
                 Object.getPrototypeOf(prototypeBuffer)));
+        log("identity:cross-instance-method:" +
+            (labelBuffer.mapAsync === prototypeBuffer.mapAsync));
         prototypeBuffer.destroy();
 
         var paritySampler = device.createSampler({

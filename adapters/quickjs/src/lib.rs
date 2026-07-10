@@ -31,6 +31,53 @@ thread_local! {
     static DETACHING_ARRAYBUFFER: Cell<bool> = const { Cell::new(false) };
 }
 
+fn usv_string_from_wtf8(bytes: &[u8]) -> String {
+    const REPLACEMENT_UTF8: &[u8; 3] = b"\xef\xbf\xbd";
+
+    let mut sanitized = Vec::with_capacity(bytes.len());
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        // QuickJS's JS_ToCStringLen keeps an unmatched UTF-16 surrogate and
+        // passes its code point to utf8_encode, yielding this three-byte WTF-8
+        // range. WebIDL USVString replaces that whole surrogate with one U+FFFD.
+        if bytes.get(cursor) == Some(&0xed)
+            && bytes
+                .get(cursor + 1)
+                .is_some_and(|byte| (0xa0..=0xbf).contains(byte))
+            && bytes
+                .get(cursor + 2)
+                .is_some_and(|byte| (0x80..=0xbf).contains(byte))
+        {
+            sanitized.extend_from_slice(REPLACEMENT_UTF8);
+            cursor += 3;
+            continue;
+        }
+
+        match std::str::from_utf8(&bytes[cursor..]) {
+            Ok(valid) => {
+                sanitized.extend_from_slice(valid.as_bytes());
+                break;
+            }
+            Err(error) if error.valid_up_to() > 0 => {
+                let valid_end = cursor + error.valid_up_to();
+                sanitized.extend_from_slice(&bytes[cursor..valid_end]);
+                cursor = valid_end;
+            }
+            Err(error) => {
+                // JS_ToCStringLen is expected to produce UTF-8 plus the WTF-8
+                // surrogate form above. Keep a safe lossy fallback if that C
+                // contract ever changes or returns another malformed sequence.
+                sanitized.extend_from_slice(REPLACEMENT_UTF8);
+                cursor += error.error_len().unwrap_or(bytes.len() - cursor).max(1);
+            }
+        }
+    }
+
+    // SAFETY: valid spans are copied only after `from_utf8` accepts them, and
+    // every replacement span is the UTF-8 encoding of U+FFFD.
+    unsafe { String::from_utf8_unchecked(sanitized) }
+}
+
 /// Adapter result type.
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -709,7 +756,7 @@ impl core::JsEngine for Engine {
             return Err(take_exception_value(cx));
         }
         let bytes = unsafe { std::slice::from_raw_parts(raw.cast::<u8>(), len) };
-        let owned = String::from_utf8_lossy(bytes).into_owned();
+        let owned = usv_string_from_wtf8(bytes);
         unsafe { qjs::JS_FreeCString(cx.ctx, raw) };
         Ok(arena.alloc_str(&owned))
     }
@@ -1670,13 +1717,31 @@ mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
 
-    use super::{c_int, core, ffi_wgpu as wgpu, qjs, CallbackKind, Context, Engine, Runtime};
+    use super::{
+        c_int, core, ffi_wgpu as wgpu, qjs, usv_string_from_wtf8, CallbackKind, Context, Engine,
+        Runtime,
+    };
     use webgpu_native_js_core::JsEngine;
 
     static COUNTED_BUFFER_RELEASES: AtomicUsize = AtomicUsize::new(0);
     static COUNTED_SAMPLER_RELEASES: AtomicUsize = AtomicUsize::new(0);
     thread_local! {
         static RECORDED_ENTRY_POINTS: RefCell<Vec<Option<Vec<u8>>>> = const { RefCell::new(Vec::new()) };
+    }
+
+    #[test]
+    fn wtf8_sanitizer_preserves_unicode_and_replaces_each_lone_surrogate_once() {
+        assert_eq!(usv_string_from_wtf8(b"plain ASCII"), "plain ASCII");
+        assert_eq!(usv_string_from_wtf8("ラベルé".as_bytes()), "ラベルé");
+        assert_eq!(usv_string_from_wtf8("🎮".as_bytes()), "🎮");
+        assert_eq!(usv_string_from_wtf8(&[b'a', 0xed, 0xa0, 0x80, b'b']), "a�b");
+        assert_eq!(usv_string_from_wtf8(&[b'a', 0xed, 0xb0, 0x80, b'b']), "a�b");
+
+        let mut mixed = "日🎮".as_bytes().to_vec();
+        mixed.extend_from_slice(&[0xed, 0xa0, 0x80]);
+        mixed.extend_from_slice("é".as_bytes());
+        mixed.extend_from_slice(&[0xed, 0xb0, 0x80]);
+        assert_eq!(usv_string_from_wtf8(&mixed), "日🎮�é�");
     }
 
     struct SendPtr<T>(*mut T);
@@ -2312,6 +2377,36 @@ mod tests {
         unsafe { runtime.tick(setup.instance) }.expect("sampler release tick");
         assert_eq!(COUNTED_SAMPLER_RELEASES.load(Ordering::SeqCst), 1);
 
+        runtime.clear_global("device").expect("clear device");
+        runtime.run_gc();
+        let _ = runtime.drain_releases().expect("device drain");
+    }
+
+    #[test]
+    fn buffer_label_converts_a_lone_surrogate_to_one_replacement_character() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let device = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("device", device)
+            .expect("set device");
+        eval_drop(
+            &runtime,
+            r#"
+                var surrogateBuffer = device.createBuffer({
+                    size: 4,
+                    usage: 8,
+                    label: "a\uD800b"
+                });
+                if (surrogateBuffer.label !== "a\uFFFDb" ||
+                    surrogateBuffer.label.length !== 3) {
+                    throw new Error("lone surrogate was not converted once");
+                }
+                surrogateBuffer.destroy();
+                surrogateBuffer = null;
+            "#,
+            "lone-surrogate-label.js",
+        );
         runtime.clear_global("device").expect("clear device");
         runtime.run_gc();
         let _ = runtime.drain_releases().expect("device drain");

@@ -34,6 +34,7 @@ pub type JSStringRef = *mut OpaqueJsString;
 /// JavaScriptCore class handle.
 pub type JSClassRef = *mut OpaqueJsClass;
 
+type JSChar = u16;
 type JSPropertyAttributes = u32;
 type JSClassAttributes = u32;
 type JSTypedArrayType = c_int;
@@ -130,6 +131,10 @@ unsafe extern "C" {
     fn JSContextGetGlobalObject(ctx: JSContextRef) -> JSObjectRef;
     /// Creates a JavaScript string by copying a nul-terminated UTF-8 string.
     fn JSStringCreateWithUTF8CString(string: *const c_char) -> JSStringRef;
+    /// Returns the number of UTF-16 code units in a JavaScript string.
+    fn JSStringGetLength(string: JSStringRef) -> usize;
+    /// Returns the UTF-16 backing store, live while the string is live.
+    fn JSStringGetCharactersPtr(string: JSStringRef) -> *const JSChar;
     /// Returns the maximum UTF-8 buffer size needed for a JavaScript string.
     fn JSStringGetMaximumUTF8CStringSize(string: JSStringRef) -> usize;
     /// Copies a JavaScript string to a nul-terminated UTF-8 buffer.
@@ -328,17 +333,19 @@ impl JsString {
     }
 
     fn to_string_lossy(&self) -> String {
-        // SAFETY: the string is live for this method.
-        let size = unsafe { JSStringGetMaximumUTF8CStringSize(self.as_raw()) };
-        let mut bytes = vec![0_u8; size];
-        // SAFETY: the destination has the exact maximum capacity JSC requested.
-        let written = unsafe {
-            JSStringGetUTF8CString(self.as_raw(), bytes.as_mut_ptr().cast(), bytes.len())
-        };
-        if written == 0 {
+        // The SDK defines JSChar as a UTF-16 code unit and keeps this backing
+        // store live until the JSString is released. Reading UTF-16 directly
+        // preserves lone surrogates for Rust's USVString-style lossy conversion.
+        let len = unsafe { JSStringGetLength(self.as_raw()) };
+        if len == 0 {
             String::new()
         } else {
-            String::from_utf8_lossy(&bytes[..written.saturating_sub(1)]).into_owned()
+            // SAFETY: the string is live, and the SDK promises len UTF-16 code
+            // units in the returned backing store.
+            let characters = unsafe { JSStringGetCharactersPtr(self.as_raw()) };
+            debug_assert!(!characters.is_null());
+            let utf16 = unsafe { std::slice::from_raw_parts(characters, len) };
+            String::from_utf16_lossy(utf16)
         }
     }
 }
@@ -369,10 +376,13 @@ struct FinalizerState {
     env: core::Environment,
     deferred_unprotects: Mutex<Vec<ProtectedValue>>,
     protected: Mutex<Vec<ProtectedValue>>,
+    class_method_protected: Mutex<Vec<ProtectedValue>>,
     tearing_down: AtomicBool,
     protect_count: AtomicUsize,
     unprotect_count: AtomicUsize,
     teardown_mop_up_unprotect_count: AtomicUsize,
+    class_method_protect_count: AtomicUsize,
+    class_method_teardown_unprotect_count: AtomicUsize,
 }
 
 impl FinalizerState {
@@ -381,10 +391,13 @@ impl FinalizerState {
             env: core::Environment::new(gpu, Arc::new(core::ReleaseQueue::new())),
             deferred_unprotects: Mutex::new(Vec::new()),
             protected: Mutex::new(Vec::new()),
+            class_method_protected: Mutex::new(Vec::new()),
             tearing_down: AtomicBool::new(false),
             protect_count: AtomicUsize::new(0),
             unprotect_count: AtomicUsize::new(0),
             teardown_mop_up_unprotect_count: AtomicUsize::new(0),
+            class_method_protect_count: AtomicUsize::new(0),
+            class_method_teardown_unprotect_count: AtomicUsize::new(0),
         }
     }
 
@@ -396,6 +409,20 @@ impl FinalizerState {
         unsafe { JSValueProtect(ctx, value) };
         self.protect_count.fetch_add(1, Ordering::Relaxed);
         if let Ok(mut protected) = self.protected.lock() {
+            protected.push(ProtectedValue(value));
+        }
+    }
+
+    fn protect_class_method(&self, ctx: JSContextRef, value: JSValueRef) {
+        if ctx.is_null() || value.is_null() {
+            return;
+        }
+        // SAFETY: class registration runs on the live context's engine thread.
+        unsafe { JSValueProtect(ctx, value) };
+        self.protect_count.fetch_add(1, Ordering::Relaxed);
+        self.class_method_protect_count
+            .fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut protected) = self.class_method_protected.lock() {
             protected.push(ProtectedValue(value));
         }
     }
@@ -454,12 +481,28 @@ impl FinalizerState {
             self.teardown_mop_up_unprotect_count
                 .fetch_add(1, Ordering::Relaxed);
         }
+        // Per-class method objects intentionally remain protected until runtime
+        // teardown. Account for them separately so `teardown_mop_up` continues
+        // to mean an unexpectedly live owner/scope protection (the M2 oracle).
+        let class_methods = self
+            .class_method_protected
+            .lock()
+            .map(|mut values| std::mem::take(&mut *values))
+            .unwrap_or_default();
+        for value in class_methods {
+            // SAFETY: teardown runs on the engine thread before context release.
+            unsafe { JSValueUnprotect(ctx, value.0) };
+            self.unprotect_count.fetch_add(1, Ordering::Relaxed);
+            self.class_method_teardown_unprotect_count
+                .fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 
 struct ClassEntry {
     class: JSClassRef,
     spec: &'static core::ClassSpec<Engine>,
+    methods: Vec<ClassMethod>,
     _name: CString,
 }
 
@@ -467,7 +510,6 @@ struct ObjectPayload {
     spec: &'static core::ClassSpec<Engine>,
     payload: Box<dyn Any + Send>,
     finalizer: Arc<FinalizerState>,
-    cached_methods: Mutex<Vec<CachedMethod>>,
 }
 
 #[derive(Clone, Copy)]
@@ -476,7 +518,7 @@ struct MethodTarget {
 }
 
 #[derive(Clone, Copy)]
-struct CachedMethod {
+struct ClassMethod {
     name: &'static str,
     value: ProtectedValue,
 }
@@ -1156,6 +1198,15 @@ impl core::JsEngine for Engine {
         if class.is_null() {
             return Err(Self::operation_error(cx, "JSClassCreate failed"));
         }
+        let mut methods = Vec::with_capacity(spec.methods.len());
+        for method in spec.methods {
+            let value = make_method(cx, method.call)?;
+            state.finalizer.protect_class_method(cx.ctx, value);
+            methods.push(ClassMethod {
+                name: method.name,
+                value: ProtectedValue(value),
+            });
+        }
         state
             .classes
             .lock()
@@ -1165,6 +1216,7 @@ impl core::JsEngine for Engine {
                 ClassEntry {
                     class,
                     spec,
+                    methods,
                     _name: name,
                 },
             );
@@ -1325,7 +1377,6 @@ impl core::JsEngine for Engine {
             spec,
             payload,
             finalizer: Arc::clone(&state.finalizer),
-            cached_methods: Mutex::new(Vec::new()),
         });
         let raw = Box::into_raw(holder).cast();
         // SAFETY: class is registered and raw is owned by the resulting object.
@@ -1851,20 +1902,20 @@ unsafe extern "C" fn wrapper_get_property(
             .iter()
             .find(|method| method.name == name)
         {
-            let mut cached = holder
-                .cached_methods
+            let classes = state_from_context(ctx)
+                .classes
                 .lock()
-                .map_err(|_| Engine::operation_error(cx, "wrapper method cache is poisoned"))?;
-            if let Some(cached) = cached.iter().find(|cached| cached.name == method.name) {
-                return Ok(cached.value.0);
-            }
-            let value = make_method(cx, method.call)?;
-            holder.finalizer.protect(cx.ctx, value);
-            cached.push(CachedMethod {
-                name: method.name,
-                value: ProtectedValue(value),
-            });
-            return Ok(value);
+                .map_err(|_| Engine::operation_error(cx, "class registry is poisoned"))?;
+            return classes
+                .get(&holder.spec.id)
+                .and_then(|entry| {
+                    entry
+                        .methods
+                        .iter()
+                        .find(|cached| cached.name == method.name)
+                })
+                .map(|cached| cached.value.0)
+                .ok_or_else(|| Engine::operation_error(cx, "class method is not registered"));
         }
         let Some(getter) = holder
             .spec
@@ -2076,14 +2127,7 @@ unsafe extern "C" fn wrapper_finalize(object: JSObjectRef) {
             spec,
             payload,
             finalizer,
-            cached_methods,
         } = *holder;
-        let cached_methods = cached_methods
-            .into_inner()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for method in cached_methods {
-            finalizer.defer_unprotect(method.value.0);
-        }
         core::release_payload_values::<Engine>(payload.as_ref(), &mut |value| {
             finalizer.defer_unprotect(value);
         });
@@ -2487,6 +2531,33 @@ mod tests {
     }
 
     #[test]
+    fn buffer_label_converts_a_lone_surrogate_to_one_replacement_character() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("JSC runtime");
+        let device = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("device", device)
+            .expect("set device");
+        eval(
+            &runtime,
+            r#"
+                const surrogateBuffer = device.createBuffer({
+                    size: 4,
+                    usage: 8,
+                    label: "a\uD800b"
+                });
+                if (surrogateBuffer.label !== "a\uFFFDb" ||
+                    surrogateBuffer.label.length !== 3) {
+                    throw new Error("lone surrogate was not converted once");
+                }
+                surrogateBuffer.destroy();
+            "#,
+            "lone-surrogate-label.js",
+        );
+        runtime.clear_global("device").expect("clear device");
+    }
+
+    #[test]
     fn detached_device_method_rejects_every_incompatible_receiver_with_type_error() {
         let setup = native_setup();
         let runtime = Runtime::new().expect("JSC runtime");
@@ -2544,6 +2615,11 @@ mod tests {
         unsafe { super::wrapper_finalize(device.cast_mut()) };
         assert!(unsafe { super::JSObjectSetPrivate(device.cast_mut(), ptr::null_mut()) });
         let _ = runtime.drain_releases().expect("owner release drain");
+        let class_method_count = counters.class_method_protect_count.load(Ordering::Relaxed);
+        assert!(
+            class_method_count > 0,
+            "registered class methods must have their own teardown lifetime"
+        );
         drop(runtime);
         assert_eq!(
             counters
@@ -2553,13 +2629,20 @@ mod tests {
             "clean teardown must not force-unprotect an owner's value"
         );
         assert_eq!(
+            counters
+                .class_method_teardown_unprotect_count
+                .load(Ordering::Relaxed),
+            class_method_count,
+            "intentional class-level protections are released and counted separately"
+        );
+        assert_eq!(
             counters.protect_count.load(Ordering::Relaxed),
             counters.unprotect_count.load(Ordering::Relaxed)
         );
     }
 
     #[test]
-    fn real_wrapper_finalize_defers_cached_method_and_payload_unprotects_until_tick() {
+    fn real_wrapper_finalize_defers_payload_unprotects_until_tick() {
         let setup = native_setup();
         let runtime = Runtime::new().expect("JSC runtime");
         let device = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
@@ -2571,7 +2654,15 @@ mod tests {
                 "void device.createBuffer; void device.queue;",
                 "real-wrapper-finalize-setup.js",
             )
-            .expect("cache method and payload value");
+            .expect("read class method and cache payload value");
+        let class_methods = runtime
+            .state
+            .classes
+            .lock()
+            .expect("class registry")
+            .values()
+            .flat_map(|entry| entry.methods.iter().map(|method| method.value))
+            .collect::<Vec<_>>();
         runtime.clear_global("device").expect("clear device");
         assert!(runtime
             .state
@@ -2583,17 +2674,21 @@ mod tests {
 
         unsafe { super::wrapper_finalize(device.cast_mut()) };
         assert!(unsafe { super::JSObjectSetPrivate(device.cast_mut(), ptr::null_mut()) });
+        let deferred = runtime
+            .state
+            .finalizer
+            .deferred_unprotects
+            .lock()
+            .expect("deferred queue");
         assert!(
-            runtime
-                .state
-                .finalizer
-                .deferred_unprotects
-                .lock()
-                .expect("deferred queue")
-                .len()
-                >= 2,
-            "the production finalizer must defer both cached method and payload value"
+            !deferred.is_empty(),
+            "the production finalizer must defer the payload value"
         );
+        assert!(
+            deferred.iter().all(|value| !class_methods.contains(value)),
+            "class methods must never enter a wrapper finalizer's deferred queue"
+        );
+        drop(deferred);
 
         unsafe { runtime.tick(setup.instance) }.expect("tick drains deferred unprotects");
         assert!(runtime

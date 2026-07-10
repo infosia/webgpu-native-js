@@ -3,6 +3,7 @@ identity:queue:true
 identity:lost:true
 typeof:device.createBuffer:function
 identity:cross-instance-prototype:true
+identity:cross-instance-method:true
 sampler:sampler-round-trip
 coerce:size-0:ok
 coerce:size-u32-max:ok
@@ -25,6 +26,7 @@ clamp:ties-ok
 clamp:saturation-ok
 string:bmp:ラベルé
 string:pair:🎮
+string:lone-surrogate:a�b
 string:empty:0
 string:absent:0
 required:entries:TypeError:entries
