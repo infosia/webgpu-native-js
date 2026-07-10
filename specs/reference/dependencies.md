@@ -90,8 +90,15 @@ upstream when citing behaviour, since the fork carries local changes.
 | Commit | `acaf809d9323e72429d2252e372ee4d917fc40eb` |
 | Why this revision | Dawn's `DEPS` pins it for `dawn_node` — the same follow-Dawn policy as the `webgpu-headers` pin. dawn.node's `BUILD.gn` consumes `third_party/gpuweb/webgpu.idl` (repo root). |
 | Consumed file | `webgpu.idl` at the repo root |
-| Fetched | **pending** — submodule add is a network operation and is run by the project owner |
+| Fetched | 2026-07-10, by the project owner |
 
 On conflict between the IDL and the pinned `webgpu.h`, the header wins
 (block 05 → G1); divergences are catalogued in
 `specs/tracking/codegen-deltas.md`, never approximated.
+
+**The pinned commit is a gh-pages deployment commit** ("Deploying to gh-pages
+from @ gpuweb/gpuweb@6bf9e4611a95afe51a519132b31e025217507d3d") — Dawn pins the
+gpuweb repository's *generated-artifacts* branch, which is why `webgpu.idl`
+(1,383 lines, "auto-generated, do not edit", W3C Software License) sits at the
+repo root. The corresponding source revision is recorded in the deploy message.
+Verified on fetch: the file exists and parses as WebIDL prose.
