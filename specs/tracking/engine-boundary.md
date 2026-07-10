@@ -958,3 +958,26 @@ non-null handles (callbacks stay pure Rust — enqueue only); two direct core
 tests, both seen red first (`Ok(0)` against expected `Ok(1)`). Map/work-done
 callbacks audited: they own no handles. Three gate firings, three core defects
 caught before an adapter existed to hide them.
+
+**And a fourth firing, same day, same path — this one caught the planner.** The
+re-dispatched P3b-1 agent refused the tree again: the authorized fix enqueued
+the late handle into a queue whose **last `Arc` owner is the callback itself** —
+`Runtime::drop` had already dropped every other owner — so the queued release
+died un-drained the moment the callback returned. The leak had moved, not
+closed. Worse, the regression tests I accepted kept the queue alive and drained
+it by hand, which is precisely the shape that hides this hole. Planner decision
+(A8 amendment, 2026-07-10): on the post-teardown path only, the callback
+releases the handle **directly** — the header exempts the `ProcessEvents`
+callstack from the re-entrancy prohibition and `AllowProcessEvents` confines it
+to the owning thread. Rejected alternatives, recorded: `ReleaseQueue::Drop`
+self-drain (a JSC any-thread finalizer can be the last `Arc` owner via
+`ArrayBufferOwner` — UB), and a host-owned queue (the right long-term shape,
+but it is the open "who owns the GPU-release thread" question and needs a host
+crate to answer it; this firing is evidence for it).
+
+**Fix landed and verified (2026-07-10):** the `None`-deferred arms release
+directly through the gpu dispatch with the A8-citing comment; the rewritten
+tests drop the runtime for real, assert `Arc::strong_count == 1` on the
+request's queue handle before firing the callback, and assert the release
+counter with **no** hand-drain. Seen red against the enqueue version
+(`left: 0, right: 1`, both tests). Gates re-run by the planner.

@@ -169,6 +169,25 @@ promise. Test it. The failure mode is a single-slot "pending request" field.
 *legal* — the header exempts that callstack from its re-entrancy prohibition —
 but the release queue exists so we never depend on that; enqueue instead.
 
+*(One documented exception, added 2026-07-10 after the JSC exit gate fired on it
+twice.)* On the **post-teardown path only** — the callback finds
+`deferred == None`, which happens only after A28's teardown took it — the
+request `Box` is the **last** owner of the release queue's `Arc`. Enqueueing
+there moves the leak into a queue that dies un-drained when the callback
+returns; the first fix did exactly that, and its test kept the queue alive and
+hand-drained it, hiding the hole. On that path the callback releases the
+non-null handle **directly**, and that is sound for exactly the reasons already
+written here: the header permits release on the `ProcessEvents` callstack, and
+`AllowProcessEvents` (A3) confines that callstack to the owning thread. Both
+legs of the justification are load-bearing; a callback mode change would
+invalidate the second. This is the single place a WebGPU callback may call
+`webgpu.h`, the code comment must cite this paragraph, and the test must
+simulate the dead queue (drop every other `Arc`) — not drain it by hand.
+
+This is also recorded evidence for the open design question "who owns the
+GPU-release thread": a host-owned release queue that outlives the script
+runtime would dissolve this exception. Decide when a host crate exists.
+
 **A9 — a rejected `Promise` carries a `GPUError`-shaped reason.** `mapAsync`
 failing yields `WGPUMapAsyncStatus_Error` / `_Aborted` / `_CallbackCancelled`.
 Map each to a rejection; do not collapse them. `_CallbackCancelled` is not an

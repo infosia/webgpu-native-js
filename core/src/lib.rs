@@ -2779,10 +2779,11 @@ unsafe extern "C" fn request_adapter_callback<E: JsEngine + 'static>(
         let mut request = unsafe { Box::from_raw(raw.as_ptr()) };
         let Some(deferred) = request.deferred.take() else {
             if !adapter.is_null() {
-                let _ = request.release_queue.enqueue(ReleaseRequest::Adapter {
-                    adapter,
-                    gpu: request.gpu,
-                });
+                // A8's documented post-teardown exception: this is the single place a
+                // WebGPU callback may call webgpu.h. The header exempts the ProcessEvents
+                // callstack from its re-entrancy prohibition, and AllowProcessEvents
+                // confines that callstack to the owning thread.
+                unsafe { (request.gpu.adapter_release)(adapter) };
             }
             return;
         };
@@ -2827,10 +2828,11 @@ unsafe extern "C" fn request_device_callback<E: JsEngine + 'static>(
         let mut request = unsafe { Box::from_raw(raw.as_ptr()) };
         let Some(deferred) = request.deferred.take() else {
             if !device.is_null() {
-                let _ = request.release_queue.enqueue(ReleaseRequest::Device {
-                    device,
-                    gpu: request.gpu,
-                });
+                // A8's documented post-teardown exception: this is the single place a
+                // WebGPU callback may call webgpu.h. The header exempts the ProcessEvents
+                // callstack from its re-entrancy prohibition, and AllowProcessEvents
+                // confines that callstack to the owning thread.
+                unsafe { (request.gpu.device_release)(device) };
             }
             return;
         };

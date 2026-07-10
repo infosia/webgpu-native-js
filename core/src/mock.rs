@@ -2392,20 +2392,25 @@ mod tests {
     #[test]
     fn a28_late_adapter_callback_releases_success_handle_after_teardown() {
         reset_gpu();
-        let rt = runtime();
-        let cx = rt.context();
-        let (_, deferred) = Engine::new_promise(cx).expect("promise");
-        let mut request = Box::new(AdapterRequest::<Engine> {
-            deferred: Some(deferred),
-            settlements: Arc::clone(rt.env.settlements()),
-            release_queue: Arc::clone(rt.queue()),
-            gpu: dispatch(),
-            _registration: None,
-        });
-        Engine::register_deferred(cx, std::ptr::NonNull::from(&mut request.deferred));
-        request._registration = Some(());
-        let deferred = request.deferred.take().expect("registered deferred");
-        Engine::release_deferred(cx, deferred);
+        let request = {
+            let rt = runtime();
+            let cx = rt.context();
+            let (_, deferred) = Engine::new_promise(cx).expect("promise");
+            let mut request = Box::new(AdapterRequest::<Engine> {
+                deferred: Some(deferred),
+                settlements: Arc::clone(rt.env.settlements()),
+                release_queue: Arc::clone(rt.queue()),
+                gpu: dispatch(),
+                _registration: None,
+            });
+            Engine::register_deferred(cx, std::ptr::NonNull::from(&mut request.deferred));
+            request._registration = Some(());
+            let deferred = request.deferred.take().expect("registered deferred");
+            Engine::release_deferred(cx, deferred);
+            assert_eq!(Arc::strong_count(&request.release_queue), 2);
+            request
+        };
+        assert_eq!(Arc::strong_count(&request.release_queue), 1);
 
         unsafe {
             request_adapter_callback::<Engine>(
@@ -2417,27 +2422,31 @@ mod tests {
             );
         }
 
-        assert_eq!(rt.queue().drain(), Ok(1));
         GPU_STATE.with(|state| assert_eq!(state.borrow().adapter_releases, 1));
     }
 
     #[test]
     fn a28_late_device_callback_releases_success_handle_after_teardown() {
         reset_gpu();
-        let rt = runtime();
-        let cx = rt.context();
-        let (_, deferred) = Engine::new_promise(cx).expect("promise");
-        let mut request = Box::new(DeviceRequest::<Engine> {
-            deferred: Some(deferred),
-            settlements: Arc::clone(rt.env.settlements()),
-            release_queue: Arc::clone(rt.queue()),
-            gpu: dispatch(),
-            _registration: None,
-        });
-        Engine::register_deferred(cx, std::ptr::NonNull::from(&mut request.deferred));
-        request._registration = Some(());
-        let deferred = request.deferred.take().expect("registered deferred");
-        Engine::release_deferred(cx, deferred);
+        let request = {
+            let rt = runtime();
+            let cx = rt.context();
+            let (_, deferred) = Engine::new_promise(cx).expect("promise");
+            let mut request = Box::new(DeviceRequest::<Engine> {
+                deferred: Some(deferred),
+                settlements: Arc::clone(rt.env.settlements()),
+                release_queue: Arc::clone(rt.queue()),
+                gpu: dispatch(),
+                _registration: None,
+            });
+            Engine::register_deferred(cx, std::ptr::NonNull::from(&mut request.deferred));
+            request._registration = Some(());
+            let deferred = request.deferred.take().expect("registered deferred");
+            Engine::release_deferred(cx, deferred);
+            assert_eq!(Arc::strong_count(&request.release_queue), 2);
+            request
+        };
+        assert_eq!(Arc::strong_count(&request.release_queue), 1);
 
         unsafe {
             request_device_callback::<Engine>(
@@ -2449,7 +2458,6 @@ mod tests {
             );
         }
 
-        assert_eq!(rt.queue().drain(), Ok(1));
         GPU_STATE.with(|state| assert_eq!(state.borrow().device_releases, 1));
     }
 
