@@ -1377,3 +1377,15 @@ parity's creation sections now run under validation scopes and log the pop
 result, so "created ok" finally means VALID, not just non-null. Parity
 103 → 116, byte-identical on yawgpu AND Dawn (gated run). Suites: core 130,
 workspace 271.
+
+**A-4 landed (2026-07-11): GPURenderBundle(Encoder).** Nullable colorFormats
+elements (null → the Undefined hole), the mixin-derived method subset (no
+viewport/scissor/blend-constant/occlusion on bundles, per the IDL's mixin
+split), finish() mirroring the command encoder's state machine, and bundles
+REUSABLE per the spec's own words ("without expiring after use like typical
+command buffers") — unlike command buffers, no consumed flag. executeBundles
+through convert_sequence, retention mirroring the pass's set* discipline
+(none wrapper-side). Parity 116 → 119, byte-identical on yawgpu AND Dawn
+(gated). Owner plan item A is COMPLETE: introspection, getBindGroupLayout,
+querySet, renderBundle, and validity-observing parity all landed. Suites:
+workspace 272.

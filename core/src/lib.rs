@@ -66,6 +66,8 @@ const GPU_RENDER_PASS_ENCODER_CLASS: ClassId = ClassId(23);
 const GPU_SUPPORTED_LIMITS_CLASS: ClassId = ClassId(24);
 const GPU_ADAPTER_INFO_CLASS: ClassId = ClassId(25);
 const GPU_QUERY_SET_CLASS: ClassId = ClassId(26);
+const GPU_RENDER_BUNDLE_ENCODER_CLASS: ClassId = ClassId(27);
+const GPU_RENDER_BUNDLE_CLASS: ClassId = ClassId(28);
 const WEBIDL_U32_MAX: u64 = u32::MAX as u64;
 const WGPU_DEPTH_CLEAR_VALUE_UNDEFINED: f32 = f32::NAN;
 
@@ -113,17 +115,18 @@ impl WGPUStringViewExt for WGPUStringView {
 pub use generated::{
     device_create_bind_group, device_create_bind_group_layout, device_create_command_encoder,
     device_create_compute_pipeline, device_create_pipeline_layout, device_create_query_set,
-    device_create_render_pipeline, device_create_sampler, device_create_shader_module,
-    device_create_texture, finalize_bind_group, finalize_bind_group_layout,
-    finalize_command_encoder, finalize_compute_pipeline, finalize_pipeline_layout,
-    finalize_query_set, finalize_render_pipeline, finalize_sampler, finalize_shader_module,
-    finalize_texture, finalize_texture_view, query_set_count_get, query_set_label_get,
-    query_set_label_set, query_set_type_get, sampler_label_get, sampler_label_set,
-    texture_create_view, texture_depth_or_array_layers_get, texture_dimension_get,
-    texture_format_get, texture_height_get, texture_mip_level_count_get, texture_sample_count_get,
-    texture_usage_get, texture_width_get, BindGroupLayoutPayload, BindGroupPayload,
-    CommandEncoderPayload, ComputePipelinePayload, GpuDispatch, PipelineLayoutPayload,
-    QuerySetPayload, ReleaseRequest, RenderPipelinePayload, SamplerPayload, ShaderModulePayload,
+    device_create_render_bundle_encoder, device_create_render_pipeline, device_create_sampler,
+    device_create_shader_module, device_create_texture, finalize_bind_group,
+    finalize_bind_group_layout, finalize_command_encoder, finalize_compute_pipeline,
+    finalize_pipeline_layout, finalize_query_set, finalize_render_bundle_encoder,
+    finalize_render_pipeline, finalize_sampler, finalize_shader_module, finalize_texture,
+    finalize_texture_view, query_set_count_get, query_set_label_get, query_set_label_set,
+    query_set_type_get, sampler_label_get, sampler_label_set, texture_create_view,
+    texture_depth_or_array_layers_get, texture_dimension_get, texture_format_get,
+    texture_height_get, texture_mip_level_count_get, texture_sample_count_get, texture_usage_get,
+    texture_width_get, BindGroupLayoutPayload, BindGroupPayload, CommandEncoderPayload,
+    ComputePipelinePayload, GpuDispatch, PipelineLayoutPayload, QuerySetPayload, ReleaseRequest,
+    RenderBundleEncoderPayload, RenderPipelinePayload, SamplerPayload, ShaderModulePayload,
     TexturePayload, TextureViewPayload,
 };
 /// A per-context environment shared by wrapper callbacks.
@@ -1856,6 +1859,15 @@ pub struct RenderPassEncoderPayload {
 // copied into the release queue by finalization, matching the compute pass.
 unsafe impl Send for RenderPassEncoderPayload {}
 
+/// Payload stored by a reusable `GPURenderBundle` wrapper.
+pub struct RenderBundlePayload {
+    render_bundle: WGPURenderBundle,
+}
+
+// SAFETY: the native bundle handle is only copied into the release queue by
+// finalization and passed to native render-pass recording on the engine thread.
+unsafe impl Send for RenderBundlePayload {}
+
 struct CommandEncoderState {
     encoder: WGPUCommandEncoder,
     ended: bool,
@@ -1868,6 +1880,141 @@ struct CommandEncoderState {
 // `tick()`-thread drain.
 // SAFETY: The `WGPUCommandEncoder` is copied by finalizers and dereferenced in engine/`tick()`.
 unsafe impl Send for CommandEncoderState {}
+
+struct RenderBundleEncoderState {
+    render_bundle_encoder: WGPURenderBundleEncoder,
+    ended: bool,
+}
+
+// SAFETY: the non-thread-safe native encoder is dereferenced only by JS methods
+// on the engine thread; finalization copies it into the tick-thread release queue.
+unsafe impl Send for RenderBundleEncoderState {}
+
+#[derive(Clone, Copy)]
+enum LiveRenderCommands {
+    Pass(WGPURenderPassEncoder),
+    Bundle(WGPURenderBundleEncoder),
+}
+
+impl LiveRenderCommands {
+    unsafe fn set_pipeline(self, gpu: GpuDispatch, pipeline: WGPURenderPipeline) {
+        match self {
+            Self::Pass(pass) => unsafe { (gpu.render_pass_encoder_set_pipeline)(pass, pipeline) },
+            Self::Bundle(bundle) => unsafe {
+                (gpu.render_bundle_encoder_set_pipeline)(bundle, pipeline)
+            },
+        }
+    }
+
+    unsafe fn set_vertex_buffer(
+        self,
+        gpu: GpuDispatch,
+        slot: u32,
+        buffer: WGPUBuffer,
+        offset: u64,
+        size: u64,
+    ) {
+        match self {
+            Self::Pass(pass) => unsafe {
+                (gpu.render_pass_encoder_set_vertex_buffer)(pass, slot, buffer, offset, size)
+            },
+            Self::Bundle(bundle) => unsafe {
+                (gpu.render_bundle_encoder_set_vertex_buffer)(bundle, slot, buffer, offset, size)
+            },
+        }
+    }
+
+    unsafe fn set_index_buffer(
+        self,
+        gpu: GpuDispatch,
+        buffer: WGPUBuffer,
+        format: WGPUIndexFormat,
+        offset: u64,
+        size: u64,
+    ) {
+        match self {
+            Self::Pass(pass) => unsafe {
+                (gpu.render_pass_encoder_set_index_buffer)(pass, buffer, format, offset, size)
+            },
+            Self::Bundle(bundle) => unsafe {
+                (gpu.render_bundle_encoder_set_index_buffer)(bundle, buffer, format, offset, size)
+            },
+        }
+    }
+
+    unsafe fn set_bind_group(self, gpu: GpuDispatch, index: u32, bind_group: WGPUBindGroup) {
+        match self {
+            Self::Pass(pass) => unsafe {
+                (gpu.render_pass_encoder_set_bind_group)(pass, index, bind_group, 0, ptr::null())
+            },
+            Self::Bundle(bundle) => unsafe {
+                (gpu.render_bundle_encoder_set_bind_group)(
+                    bundle,
+                    index,
+                    bind_group,
+                    0,
+                    ptr::null(),
+                )
+            },
+        }
+    }
+
+    unsafe fn draw(
+        self,
+        gpu: GpuDispatch,
+        vertex_count: u32,
+        instance_count: u32,
+        first_vertex: u32,
+        first_instance: u32,
+    ) {
+        match self {
+            Self::Pass(pass) => unsafe {
+                (gpu.render_pass_encoder_draw)(
+                    pass,
+                    vertex_count,
+                    instance_count,
+                    first_vertex,
+                    first_instance,
+                )
+            },
+            Self::Bundle(bundle) => unsafe {
+                (gpu.render_bundle_encoder_draw)(
+                    bundle,
+                    vertex_count,
+                    instance_count,
+                    first_vertex,
+                    first_instance,
+                )
+            },
+        }
+    }
+
+    unsafe fn draw_indexed(self, gpu: GpuDispatch, args: (u32, u32, u32, i32, u32)) {
+        let (index_count, instance_count, first_index, base_vertex, first_instance) = args;
+        match self {
+            Self::Pass(pass) => unsafe {
+                (gpu.render_pass_encoder_draw_indexed)(
+                    pass,
+                    index_count,
+                    instance_count,
+                    first_index,
+                    base_vertex,
+                    first_instance,
+                )
+            },
+            Self::Bundle(bundle) => unsafe {
+                (gpu.render_bundle_encoder_draw_indexed)(
+                    bundle,
+                    index_count,
+                    instance_count,
+                    first_index,
+                    base_vertex,
+                    first_instance,
+                )
+            },
+        }
+    }
+}
 
 struct ComputePassState {
     pass: WGPUComputePassEncoder,
@@ -4201,6 +4348,62 @@ pub fn command_encoder_finish<E: JsEngine + 'static>(
     }
 }
 
+/// Implements `GPURenderBundleEncoder.finish` with the B10 encoder discipline.
+pub fn render_bundle_encoder_finish<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let payload = E::payload(cx, this, GPU_RENDER_BUNDLE_ENCODER_CLASS)
+        .and_then(|payload| payload.downcast_ref::<RenderBundleEncoderPayload>())
+        .ok_or_else(|| E::type_error(cx, "GPURenderBundleEncoder is required"))?;
+    let arena = Arena::new();
+    let native = match args.first().copied() {
+        Some(value) if !E::is_undefined(cx, value) => {
+            Some(convert_render_bundle_descriptor::<E>(cx, value, &arena)?)
+        }
+        _ => None,
+    };
+    let encoder = {
+        let mut state = payload
+            .state
+            .lock()
+            .map_err(|_| E::operation_error(cx, "GPURenderBundleEncoder state is poisoned"))?;
+        if state.ended {
+            return Err(E::operation_error(cx, "GPURenderBundleEncoder is finished"));
+        }
+        state.ended = true;
+        state.render_bundle_encoder
+    };
+    let render_bundle = unsafe {
+        (E::environment(cx).gpu().render_bundle_encoder_finish)(
+            encoder,
+            native.as_ref().map_or(ptr::null(), ptr::from_ref),
+        )
+    };
+    if render_bundle.is_null() {
+        return Err(E::operation_error(
+            cx,
+            "wgpuRenderBundleEncoderFinish returned null",
+        ));
+    }
+    if let Err(error) = E::register_class(cx, render_bundle_class::<E>()) {
+        unsafe { (E::environment(cx).gpu().render_bundle_release)(render_bundle) };
+        return Err(error);
+    }
+    match E::new_instance(
+        cx,
+        GPU_RENDER_BUNDLE_CLASS,
+        Box::new(RenderBundlePayload { render_bundle }),
+    ) {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            unsafe { (E::environment(cx).gpu().render_bundle_release)(render_bundle) };
+            Err(error)
+        }
+    }
+}
+
 /// Implements `GPUComputePassEncoder.setPipeline`.
 pub fn compute_pass_set_pipeline<E: JsEngine + 'static>(
     cx: E::Context<'_>,
@@ -4308,26 +4511,26 @@ pub fn compute_pass_end<E: JsEngine + 'static>(
     Ok(E::undefined(cx))
 }
 
-/// Implements `GPURenderPassEncoder.setPipeline`.
+/// Implements the shared `GPURenderCommandsMixin.setPipeline` body.
 pub fn render_pass_set_pipeline<E: JsEngine + 'static>(
     cx: E::Context<'_>,
     this: E::Value,
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
-    let pass = live_render_pass::<E>(cx, this)?;
+    let encoder = live_render_commands::<E>(cx, this)?;
     let pipeline =
         render_pipeline_handle::<E>(cx, required_argument::<E>(cx, args, 0, "pipeline")?)?;
-    unsafe { (E::environment(cx).gpu().render_pass_encoder_set_pipeline)(pass, pipeline) };
+    unsafe { encoder.set_pipeline(E::environment(cx).gpu(), pipeline) };
     Ok(E::undefined(cx))
 }
 
-/// Implements `GPURenderPassEncoder.setVertexBuffer`.
+/// Implements the shared `GPURenderCommandsMixin.setVertexBuffer` body.
 pub fn render_pass_set_vertex_buffer<E: JsEngine + 'static>(
     cx: E::Context<'_>,
     this: E::Value,
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
-    let pass = live_render_pass::<E>(cx, this)?;
+    let encoder = live_render_commands::<E>(cx, this)?;
     let slot = enforce_u32::<E>(cx, required_argument::<E>(cx, args, 0, "slot")?, "slot")?;
     let buffer_value = required_argument::<E>(cx, args, 1, "buffer")?;
     let buffer = if E::is_null(cx, buffer_value) {
@@ -4337,62 +4540,46 @@ pub fn render_pass_set_vertex_buffer<E: JsEngine + 'static>(
     };
     let offset = optional_gpu_size64_to_u64::<E>(cx, args.get(2).copied(), "offset", 0)?;
     let size = optional_gpu_size64_to_u64::<E>(cx, args.get(3).copied(), "size", u64::MAX)?;
-    unsafe {
-        (E::environment(cx)
-            .gpu()
-            .render_pass_encoder_set_vertex_buffer)(pass, slot, buffer, offset, size)
-    };
+    unsafe { encoder.set_vertex_buffer(E::environment(cx).gpu(), slot, buffer, offset, size) };
     Ok(E::undefined(cx))
 }
 
-/// Implements `GPURenderPassEncoder.setIndexBuffer`.
+/// Implements the shared `GPURenderCommandsMixin.setIndexBuffer` body.
 pub fn render_pass_set_index_buffer<E: JsEngine + 'static>(
     cx: E::Context<'_>,
     this: E::Value,
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
-    let pass = live_render_pass::<E>(cx, this)?;
+    let encoder = live_render_commands::<E>(cx, this)?;
     let buffer = buffer_handle::<E>(cx, required_argument::<E>(cx, args, 0, "buffer")?)?;
     let format =
         convert_gpu_index_format::<E>(cx, required_argument::<E>(cx, args, 1, "indexFormat")?)?;
     let offset = optional_gpu_size64_to_u64::<E>(cx, args.get(2).copied(), "offset", 0)?;
     let size = optional_gpu_size64_to_u64::<E>(cx, args.get(3).copied(), "size", u64::MAX)?;
-    unsafe {
-        (E::environment(cx)
-            .gpu()
-            .render_pass_encoder_set_index_buffer)(pass, buffer, format, offset, size)
-    };
+    unsafe { encoder.set_index_buffer(E::environment(cx).gpu(), buffer, format, offset, size) };
     Ok(E::undefined(cx))
 }
 
-/// Implements `GPURenderPassEncoder.setBindGroup` with the compute-pass subset's empty dynamic offsets.
+/// Implements the shared `GPUBindingCommandsMixin.setBindGroup` body.
 pub fn render_pass_set_bind_group<E: JsEngine + 'static>(
     cx: E::Context<'_>,
     this: E::Value,
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
-    let pass = live_render_pass::<E>(cx, this)?;
+    let encoder = live_render_commands::<E>(cx, this)?;
     let index = enforce_u32::<E>(cx, required_argument::<E>(cx, args, 0, "index")?, "index")?;
     let bind_group = bind_group_handle::<E>(cx, required_argument::<E>(cx, args, 1, "bindGroup")?)?;
-    unsafe {
-        (E::environment(cx).gpu().render_pass_encoder_set_bind_group)(
-            pass,
-            index,
-            bind_group,
-            0,
-            ptr::null(),
-        )
-    };
+    unsafe { encoder.set_bind_group(E::environment(cx).gpu(), index, bind_group) };
     Ok(E::undefined(cx))
 }
 
-/// Implements `GPURenderPassEncoder.draw`.
+/// Implements the shared `GPURenderCommandsMixin.draw` body.
 pub fn render_pass_draw<E: JsEngine + 'static>(
     cx: E::Context<'_>,
     this: E::Value,
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
-    let pass = live_render_pass::<E>(cx, this)?;
+    let encoder = live_render_commands::<E>(cx, this)?;
     let vertex_count = enforce_u32::<E>(
         cx,
         required_argument::<E>(cx, args, 0, "vertexCount")?,
@@ -4402,8 +4589,8 @@ pub fn render_pass_draw<E: JsEngine + 'static>(
     let first_vertex = optional_u32::<E>(cx, args.get(2).copied(), "firstVertex", 0)?;
     let first_instance = optional_u32::<E>(cx, args.get(3).copied(), "firstInstance", 0)?;
     unsafe {
-        (E::environment(cx).gpu().render_pass_encoder_draw)(
-            pass,
+        encoder.draw(
+            E::environment(cx).gpu(),
             vertex_count,
             instance_count,
             first_vertex,
@@ -4413,13 +4600,13 @@ pub fn render_pass_draw<E: JsEngine + 'static>(
     Ok(E::undefined(cx))
 }
 
-/// Implements `GPURenderPassEncoder.drawIndexed`.
+/// Implements the shared `GPURenderCommandsMixin.drawIndexed` body.
 pub fn render_pass_draw_indexed<E: JsEngine + 'static>(
     cx: E::Context<'_>,
     this: E::Value,
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
-    let pass = live_render_pass::<E>(cx, this)?;
+    let encoder = live_render_commands::<E>(cx, this)?;
     let index_count = enforce_u32::<E>(
         cx,
         required_argument::<E>(cx, args, 0, "indexCount")?,
@@ -4433,13 +4620,15 @@ pub fn render_pass_draw_indexed<E: JsEngine + 'static>(
     };
     let first_instance = optional_u32::<E>(cx, args.get(4).copied(), "firstInstance", 0)?;
     unsafe {
-        (E::environment(cx).gpu().render_pass_encoder_draw_indexed)(
-            pass,
-            index_count,
-            instance_count,
-            first_index,
-            base_vertex,
-            first_instance,
+        encoder.draw_indexed(
+            E::environment(cx).gpu(),
+            (
+                index_count,
+                instance_count,
+                first_index,
+                base_vertex,
+                first_instance,
+            ),
         )
     };
     Ok(E::undefined(cx))
@@ -4528,6 +4717,29 @@ pub fn render_pass_end_occlusion_query<E: JsEngine + 'static>(
     Ok(E::undefined(cx))
 }
 
+/// Implements `GPURenderPassEncoder.executeBundles` without wrapper-side retention.
+pub fn render_pass_execute_bundles<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let pass = live_render_pass::<E>(cx, this)?;
+    let value = required_argument::<E>(cx, args, 0, "bundles")?;
+    let bundles = convert_render_bundle_sequence::<E>(cx, value)?;
+    unsafe {
+        (E::environment(cx).gpu().render_pass_encoder_execute_bundles)(
+            pass,
+            bundles.len(),
+            if bundles.is_empty() {
+                ptr::null()
+            } else {
+                bundles.as_ptr()
+            },
+        )
+    };
+    Ok(E::undefined(cx))
+}
+
 /// Implements `GPURenderPassEncoder.end`.
 pub fn render_pass_end<E: JsEngine + 'static>(
     cx: E::Context<'_>,
@@ -4583,6 +4795,17 @@ pub fn finalize_command_buffer(payload: Box<dyn Any + Send>, env: &Environment) 
     };
     let _ = env.queue().enqueue(ReleaseRequest::CommandBuffer {
         command_buffer: state.command_buffer,
+        gpu: env.gpu(),
+    });
+}
+
+/// Finalizes a reusable `GPURenderBundle` payload by enqueuing its release.
+pub fn finalize_render_bundle(payload: Box<dyn Any + Send>, env: &Environment) {
+    let Ok(payload) = payload.downcast::<RenderBundlePayload>() else {
+        return;
+    };
+    let _ = env.queue().enqueue(ReleaseRequest::RenderBundle {
+        render_bundle: payload.render_bundle,
         gpu: env.gpu(),
     });
 }
@@ -5051,6 +5274,18 @@ fn convert_command_buffer_sequence<E: JsEngine + 'static>(
     })
 }
 
+fn convert_render_bundle_sequence<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    value: E::Value,
+) -> Result<Vec<WGPURenderBundle>, E::Error> {
+    convert_sequence::<E, _>(cx, value, "bundles", |item| {
+        E::payload(cx, item, GPU_RENDER_BUNDLE_CLASS)
+            .and_then(|payload| payload.downcast_ref::<RenderBundlePayload>())
+            .map(|payload| payload.render_bundle)
+            .ok_or_else(|| E::type_error(cx, "GPURenderBundle is required"))
+    })
+}
+
 fn required_member<E: JsEngine>(
     cx: E::Context<'_>,
     obj: E::Value,
@@ -5349,6 +5584,29 @@ fn live_render_pass<E: JsEngine + 'static>(
         return Err(E::operation_error(cx, "GPUCommandEncoder is finished"));
     }
     Ok(state.pass)
+}
+
+fn live_render_commands<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    value: E::Value,
+) -> Result<LiveRenderCommands, E::Error> {
+    if E::payload(cx, value, GPU_RENDER_PASS_ENCODER_CLASS)
+        .and_then(|payload| payload.downcast_ref::<RenderPassEncoderPayload>())
+        .is_some()
+    {
+        return live_render_pass::<E>(cx, value).map(LiveRenderCommands::Pass);
+    }
+    let payload = E::payload(cx, value, GPU_RENDER_BUNDLE_ENCODER_CLASS)
+        .and_then(|payload| payload.downcast_ref::<RenderBundleEncoderPayload>())
+        .ok_or_else(|| E::type_error(cx, "render command encoder is required"))?;
+    let state = payload
+        .state
+        .lock()
+        .map_err(|_| E::operation_error(cx, "GPURenderBundleEncoder state is poisoned"))?;
+    if state.ended {
+        return Err(E::operation_error(cx, "GPURenderBundleEncoder is finished"));
+    }
+    Ok(LiveRenderCommands::Bundle(state.render_bundle_encoder))
 }
 
 fn enforce_u64<E: JsEngine>(

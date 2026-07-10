@@ -58,6 +58,8 @@ no_add_ref = [
   { interface = "GPUCommandEncoder", reason = "the single-use encoder is adopted and never retained" },
   { interface = "GPUComputePassEncoder", reason = "the pass encoder is single-use and never retained" },
   { interface = "GPURenderPassEncoder", reason = "the pass encoder is single-use and never retained" },
+  { interface = "GPURenderBundleEncoder", reason = "the single-use bundle encoder is adopted and never retained" },
+  { interface = "GPURenderBundle", reason = "the reusable finished bundle is adopted and not retained by wrapper-side command recording" },
   { interface = "GPUCommandBuffer", reason = "the finished command buffer is adopted and consumed by submit" },
 ]
 extra_symbols = [
@@ -103,6 +105,7 @@ members = [
   "createRenderPipeline",
   "createQuerySet",
   "createCommandEncoder",
+  "createRenderBundleEncoder",
   "queue",
   "destroy",
   "pushErrorScope",
@@ -197,8 +200,25 @@ members = [
   "setScissorRect",
   "beginOcclusionQuery",
   "endOcclusionQuery",
+  "executeBundles",
   "end",
 ]
+
+[[subset]]
+interface = "GPURenderBundleEncoder"
+members = [
+  "setPipeline",
+  "setVertexBuffer",
+  "setIndexBuffer",
+  "setBindGroup",
+  "draw",
+  "drawIndexed",
+  "finish",
+]
+
+[[subset]]
+interface = "GPURenderBundle"
+members = []
 
 [[subset]]
 interface = "GPUCommandBuffer"
@@ -222,6 +242,7 @@ standard_interfaces = [
   "GPURenderPipeline",
   "GPUQuerySet",
   "GPUCommandEncoder",
+  "GPURenderBundleEncoder",
 ]
 extra_class_interfaces = ["GPU", "GPUAdapter"]
 
@@ -421,8 +442,54 @@ path = "render_pass_end_occlusion_query"
 
 [[lifecycle.methods]]
 interface = "GPURenderPassEncoder"
+member = "executeBundles"
+path = "render_pass_execute_bundles"
+
+[[lifecycle.methods]]
+interface = "GPURenderPassEncoder"
 member = "end"
 path = "render_pass_end"
+
+[[lifecycle.methods]]
+interface = "GPURenderBundleEncoder"
+member = "setPipeline"
+path = "render_pass_set_pipeline"
+reason = "GPURenderCommandsMixin reuses the render-command body with bundle-specific dispatch"
+
+[[lifecycle.methods]]
+interface = "GPURenderBundleEncoder"
+member = "setVertexBuffer"
+path = "render_pass_set_vertex_buffer"
+reason = "GPURenderCommandsMixin reuses the render-command body with bundle-specific dispatch"
+
+[[lifecycle.methods]]
+interface = "GPURenderBundleEncoder"
+member = "setIndexBuffer"
+path = "render_pass_set_index_buffer"
+reason = "GPURenderCommandsMixin reuses the render-command body with bundle-specific dispatch"
+
+[[lifecycle.methods]]
+interface = "GPURenderBundleEncoder"
+member = "setBindGroup"
+path = "render_pass_set_bind_group"
+reason = "GPUBindingCommandsMixin reuses the binding-command body with bundle-specific dispatch"
+
+[[lifecycle.methods]]
+interface = "GPURenderBundleEncoder"
+member = "draw"
+path = "render_pass_draw"
+reason = "GPURenderCommandsMixin reuses the render-command body with bundle-specific dispatch"
+
+[[lifecycle.methods]]
+interface = "GPURenderBundleEncoder"
+member = "drawIndexed"
+path = "render_pass_draw_indexed"
+reason = "GPURenderCommandsMixin reuses the render-command body with bundle-specific dispatch"
+
+[[lifecycle.methods]]
+interface = "GPURenderBundleEncoder"
+member = "finish"
+path = "render_bundle_encoder_finish"
 
 [[lifecycle.properties]]
 interface = "GPUAdapter"
@@ -497,6 +564,11 @@ kind = "stateful_encoder_payload"
 reason = "B10/B19 keep the encoder handle in shared ended-state and pass null for an omitted optional descriptor"
 
 [[lifecycle.quirks]]
+interface = "GPURenderBundleEncoder"
+kind = "stateful_encoder_payload"
+reason = "B10 keeps the bundle encoder handle in shared ended-state; finish adopts a reusable render bundle"
+
+[[lifecycle.quirks]]
 interface = "GPUTexture"
 kind = "destroyable_resource_payload"
 reason = "T2/R14 keeps destroy idempotent while finalization remains a distinct release"
@@ -549,6 +621,20 @@ nullable = false
 
 [[descriptor]]
 dictionary = "GPUQuerySetDescriptor"
+
+[[descriptor.strings]]
+member = "label"
+nullable = false
+
+[[descriptor]]
+dictionary = "GPURenderBundleEncoderDescriptor"
+
+[[descriptor.strings]]
+member = "label"
+nullable = false
+
+[[descriptor]]
+dictionary = "GPURenderBundleDescriptor"
 
 [[descriptor.strings]]
 member = "label"

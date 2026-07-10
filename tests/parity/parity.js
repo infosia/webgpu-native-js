@@ -721,6 +721,58 @@
         });
     }
 
+    function runRenderBundles() {
+        var formatError = caught(function () {
+            device.createRenderBundleEncoder({ colorFormats: ["bad"] });
+        });
+        log(errorLine("renderBundle:format-rejection", formatError));
+
+        device.pushErrorScope("validation");
+        var module = device.createShaderModule({
+            code: "@vertex fn main(@builtin(vertex_index) i: u32) -> " +
+                "@builtin(position) vec4f { var p = array(vec2f(-1,-1), " +
+                "vec2f(3,-1), vec2f(-1,3)); return vec4f(p[i],0,1); } " +
+                "@fragment fn fragment_main() -> @location(0) vec4f { " +
+                "return vec4f(0,1,0,1); }"
+        });
+        var pipeline = device.createRenderPipeline({
+            layout: "auto",
+            vertex: { module: module, entryPoint: "main" },
+            fragment: {
+                module: module,
+                entryPoint: "fragment_main",
+                targets: [{ format: "rgba8unorm" }]
+            }
+        });
+        var texture = device.createTexture({
+            size: [4, 4], format: "rgba8unorm", usage: 16
+        });
+        var bundleEncoder = device.createRenderBundleEncoder({
+            colorFormats: ["rgba8unorm"]
+        });
+        bundleEncoder.setPipeline(pipeline);
+        bundleEncoder.draw(3);
+        var bundle = bundleEncoder.finish();
+        var useAfterFinish = caught(function () { bundleEncoder.draw(3); });
+        log(errorLine("renderBundle:use-after-finish", useAfterFinish));
+
+        var encoder = device.createCommandEncoder();
+        var pass = encoder.beginRenderPass({
+            colorAttachments: [{
+                view: texture.createView(),
+                loadOp: "clear",
+                storeOp: "store"
+            }]
+        });
+        pass.executeBundles([bundle, bundle]);
+        pass.end();
+        device.queue.submit([encoder.finish()]);
+        return device.popErrorScope().then(function (error) {
+            log("renderBundle:chain:" +
+                (error === null ? "null" : error.constructor.name));
+        });
+    }
+
     function runRequiredMembers() {
         var entriesError = caught(function () {
             device.createBindGroupLayout({});
@@ -858,6 +910,7 @@
             .then(runBindGroupRetention)
             .then(runRenderPipelineValidation)
             .then(runRenderPassAndCopyValidation)
+            .then(runRenderBundles)
             .then(runErrorScopes)
             .then(runOrdering)
             .then(function () {

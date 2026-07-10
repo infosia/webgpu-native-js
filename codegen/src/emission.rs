@@ -2450,6 +2450,13 @@ fn emit_sequence_local(
         let c_type = pair.c_name.as_deref().ok_or_else(|| {
             unsupported_shape(dictionary, name, &format!("enum {element} has no C type"))
         })?;
+        if element_nullable {
+            output.push_str("            // Nullable enum elements use the C enum's Undefined sentinel as holes.\n");
+            output.push_str("            if E::is_null(cx, item) {\n");
+            let undefined = enum_constant(c_type, "undefined");
+            let _ = writeln!(output, "                Ok({undefined})");
+            output.push_str("            } else {\n");
+        }
         output.push_str("            let enum_arena = Arena::new();\n");
         output.push_str("            match E::to_str(cx, item, &enum_arena)? {\n");
         for enum_value in &pair.enum_values {
@@ -2463,6 +2470,9 @@ fn emit_sequence_local(
             "                _ => Err(E::type_error(cx, \"{element}\")),"
         );
         output.push_str("            }\n");
+        if element_nullable {
+            output.push_str("            }\n");
+        }
     } else {
         return Err(unsupported_shape(
             dictionary,

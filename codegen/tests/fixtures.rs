@@ -167,7 +167,7 @@ fn full_pinned_inputs_parse_and_subset_join_offline() {
     let report = join_inputs(&idl, &yaml).expect("full pinned join");
     assert_eq!(report.parser.remaining_bytes, 0);
     assert_eq!(report.parser.definitions, 209);
-    assert_eq!(report.interfaces.len(), 17);
+    assert_eq!(report.interfaces.len(), 19);
     assert!(report.parser.saw_enforce_range);
     assert!(report.parser.saw_same_object);
     assert!(report.parser.saw_exposed);
@@ -200,7 +200,7 @@ fn generated_dispatch_macro_matches_focused_shape_fixture() {
     let expected =
         fs::read_to_string(fixtures().join("dispatch_surface.rs")).expect("dispatch snapshot");
     assert_eq!(dispatch_macro_surface(&emitted), expected);
-    assert_eq!(expected.matches(", unsafe fn(").count(), 105);
+    assert_eq!(expected.matches(", unsafe fn(").count(), 116);
 }
 
 #[test]
@@ -264,6 +264,8 @@ fn generated_lifecycle_covers_every_selected_class_and_retention_set() {
         "command_encoder_class",
         "compute_pass_encoder_class",
         "render_pass_encoder_class",
+        "render_bundle_encoder_class",
+        "render_bundle_class",
         "command_buffer_class",
     ];
     assert_eq!(
@@ -285,6 +287,28 @@ fn generated_lifecycle_covers_every_selected_class_and_retention_set() {
     assert!(emitted.contains(
         "MethodSpec { name: \"getBindGroupLayout\", length: 1, call: render_pipeline_get_bind_group_layout::<E> }"
     ));
+    assert!(emitted.contains(
+        "MethodSpec { name: \"executeBundles\", length: 1, call: render_pass_execute_bundles::<E> }"
+    ));
+    assert!(emitted.contains(
+        "MethodSpec { name: \"setPipeline\", length: 1, call: render_pass_set_pipeline::<E> }"
+    ));
+    let bundle_class = emitted
+        .split("pub(super) fn render_bundle_encoder_class")
+        .nth(1)
+        .and_then(|tail| tail.split("pub(super) fn render_bundle_class").next())
+        .expect("render-bundle encoder class section");
+    for absent in [
+        "setViewport",
+        "setScissorRect",
+        "beginOcclusionQuery",
+        "endOcclusionQuery",
+    ] {
+        assert!(
+            !bundle_class.contains(absent),
+            "bundle class exposed {absent}"
+        );
+    }
 
     assert!(emitted.contains(
         "pub struct BindGroupPayload {\n    pub(super) bind_group: WGPUBindGroup,\n    pub(super) layout: WGPUBindGroupLayout,\n    pub(super) buffers: Vec<WGPUBuffer>,\n    pub(super) samplers: Vec<WGPUSampler>,\n    pub(super) texture_views: Vec<WGPUTextureView>,\n}"

@@ -22,12 +22,13 @@ use crate::{
     WGPUErrorFilter, WGPUErrorType, WGPUExtent3D, WGPUFuture, WGPUIndexFormat, WGPUPipelineLayout,
     WGPUPipelineLayoutDescriptor, WGPUPopErrorScopeCallbackInfo, WGPUPopErrorScopeStatus,
     WGPUQuerySet, WGPUQuerySetDescriptor, WGPUQueryType, WGPUQueue, WGPUQueueWorkDoneCallbackInfo,
-    WGPURenderPassDescriptor, WGPURenderPassEncoder, WGPURenderPipeline,
-    WGPURenderPipelineDescriptor, WGPUSampler, WGPUSamplerDescriptor, WGPUShaderModule,
-    WGPUShaderModuleDescriptor, WGPUTexelCopyBufferInfo, WGPUTexelCopyBufferLayout,
-    WGPUTexelCopyTextureInfo, WGPUTexture, WGPUTextureDescriptor, WGPUTextureDimension,
-    WGPUTextureFormat, WGPUTextureUsage, WGPUTextureView, WGPUTextureViewDescriptor,
-    WGPUUncapturedErrorCallbackInfo,
+    WGPURenderBundle, WGPURenderBundleDescriptor, WGPURenderBundleEncoder,
+    WGPURenderBundleEncoderDescriptor, WGPURenderPassDescriptor, WGPURenderPassEncoder,
+    WGPURenderPipeline, WGPURenderPipelineDescriptor, WGPUSampler, WGPUSamplerDescriptor,
+    WGPUShaderModule, WGPUShaderModuleDescriptor, WGPUTexelCopyBufferInfo,
+    WGPUTexelCopyBufferLayout, WGPUTexelCopyTextureInfo, WGPUTexture, WGPUTextureDescriptor,
+    WGPUTextureDimension, WGPUTextureFormat, WGPUTextureUsage, WGPUTextureView,
+    WGPUTextureViewDescriptor, WGPUUncapturedErrorCallbackInfo,
 };
 
 /// Mock JavaScript value handle.
@@ -1091,6 +1092,8 @@ struct MockGpuState {
     command_buffer_releases: usize,
     compute_pass_encoder_releases: usize,
     render_pass_encoder_releases: usize,
+    render_bundle_encoder_releases: usize,
+    render_bundle_releases: usize,
     query_set_add_refs: usize,
     query_set_releases: usize,
     query_set_destroys: usize,
@@ -1105,6 +1108,7 @@ struct MockGpuState {
     texture_descriptors: Vec<RecordedTextureDescriptor>,
     texture_view_descriptors: Vec<RecordedTextureViewDescriptor>,
     query_set_descriptors: Vec<RecordedQuerySetDescriptor>,
+    render_bundle_encoder_descriptors: Vec<RecordedRenderBundleEncoderDescriptor>,
     query_sets: BTreeMap<WGPUQuerySet, RecordedQuerySetDescriptor>,
     textures: BTreeMap<WGPUTexture, RecordedTextureDescriptor>,
     null_create_buffer: bool,
@@ -1189,6 +1193,16 @@ struct RecordedQuerySetDescriptor {
     label: Vec<u8>,
     type_: WGPUQueryType,
     count: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RecordedRenderBundleEncoderDescriptor {
+    label: Vec<u8>,
+    color_formats: Vec<WGPUTextureFormat>,
+    depth_stencil_format: WGPUTextureFormat,
+    sample_count: u32,
+    depth_read_only: u32,
+    stencil_read_only: u32,
 }
 
 /// Resets the mock GPU call log.
@@ -1796,6 +1810,39 @@ unsafe fn device_create_command_encoder(
         let mut state = state.borrow_mut();
         state.next += 1;
         fake_handle(7000 + state.next)
+    })
+}
+
+unsafe fn device_create_render_bundle_encoder(
+    _device: WGPUDevice,
+    descriptor: *const WGPURenderBundleEncoderDescriptor,
+) -> WGPURenderBundleEncoder {
+    if descriptor.is_null() {
+        return ptr::null_mut();
+    }
+    let descriptor = unsafe { &*descriptor };
+    let color_formats = if descriptor.colorFormatCount == 0 {
+        Vec::new()
+    } else {
+        unsafe {
+            std::slice::from_raw_parts(descriptor.colorFormats, descriptor.colorFormatCount)
+                .to_vec()
+        }
+    };
+    GPU_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        state
+            .render_bundle_encoder_descriptors
+            .push(RecordedRenderBundleEncoderDescriptor {
+                label: read_view(descriptor.label),
+                color_formats,
+                depth_stencil_format: descriptor.depthStencilFormat,
+                sample_count: descriptor.sampleCount,
+                depth_read_only: descriptor.depthReadOnly,
+                stencil_read_only: descriptor.stencilReadOnly,
+            });
+        state.next += 1;
+        fake_handle(12_000 + state.next)
     })
 }
 
@@ -2418,6 +2465,20 @@ unsafe fn render_pass_encoder_end_occlusion_query(_pass: WGPURenderPassEncoder) 
             .or_default() += 1;
     });
 }
+unsafe fn render_pass_encoder_execute_bundles(
+    _pass: WGPURenderPassEncoder,
+    bundle_count: usize,
+    bundles: *const WGPURenderBundle,
+) {
+    assert!(bundle_count == 0 || !bundles.is_null());
+    GPU_STATE.with(|state| {
+        *state
+            .borrow_mut()
+            .recording_calls
+            .entry("execute_bundles")
+            .or_default() += 1;
+    });
+}
 unsafe fn render_pass_encoder_end(_pass: WGPURenderPassEncoder) {
     GPU_STATE.with(|state| {
         *state
@@ -2426,6 +2487,107 @@ unsafe fn render_pass_encoder_end(_pass: WGPURenderPassEncoder) {
             .entry("render_end")
             .or_default() += 1;
     });
+}
+
+unsafe fn render_bundle_encoder_release(_encoder: WGPURenderBundleEncoder) {
+    GPU_STATE.with(|state| state.borrow_mut().render_bundle_encoder_releases += 1);
+}
+unsafe fn render_bundle_encoder_set_pipeline(
+    _encoder: WGPURenderBundleEncoder,
+    _pipeline: WGPURenderPipeline,
+) {
+    GPU_STATE.with(|state| {
+        *state
+            .borrow_mut()
+            .recording_calls
+            .entry("bundle_set_pipeline")
+            .or_default() += 1;
+    });
+}
+unsafe fn render_bundle_encoder_set_vertex_buffer(
+    _encoder: WGPURenderBundleEncoder,
+    _slot: u32,
+    _buffer: WGPUBuffer,
+    _offset: u64,
+    _size: u64,
+) {
+    GPU_STATE.with(|state| {
+        *state
+            .borrow_mut()
+            .recording_calls
+            .entry("bundle_set_vertex_buffer")
+            .or_default() += 1;
+    });
+}
+unsafe fn render_bundle_encoder_set_index_buffer(
+    _encoder: WGPURenderBundleEncoder,
+    _buffer: WGPUBuffer,
+    _format: WGPUIndexFormat,
+    _offset: u64,
+    _size: u64,
+) {
+    GPU_STATE.with(|state| {
+        *state
+            .borrow_mut()
+            .recording_calls
+            .entry("bundle_set_index_buffer")
+            .or_default() += 1;
+    });
+}
+unsafe fn render_bundle_encoder_set_bind_group(
+    _encoder: WGPURenderBundleEncoder,
+    _index: u32,
+    _bind_group: WGPUBindGroup,
+    _offset_count: usize,
+    _offsets: *const u32,
+) {
+    GPU_STATE.with(|state| {
+        *state
+            .borrow_mut()
+            .recording_calls
+            .entry("bundle_set_bind_group")
+            .or_default() += 1;
+    });
+}
+unsafe fn render_bundle_encoder_draw(
+    _encoder: WGPURenderBundleEncoder,
+    _vertex_count: u32,
+    _instance_count: u32,
+    _first_vertex: u32,
+    _first_instance: u32,
+) {
+    GPU_STATE.with(|state| {
+        *state
+            .borrow_mut()
+            .recording_calls
+            .entry("bundle_draw")
+            .or_default() += 1;
+    });
+}
+unsafe fn render_bundle_encoder_draw_indexed(
+    _encoder: WGPURenderBundleEncoder,
+    _index_count: u32,
+    _instance_count: u32,
+    _first_index: u32,
+    _base_vertex: i32,
+    _first_instance: u32,
+) {
+    GPU_STATE.with(|state| {
+        *state
+            .borrow_mut()
+            .recording_calls
+            .entry("bundle_draw_indexed")
+            .or_default() += 1;
+    });
+}
+unsafe fn render_bundle_encoder_finish(
+    _encoder: WGPURenderBundleEncoder,
+    _descriptor: *const WGPURenderBundleDescriptor,
+) -> WGPURenderBundle {
+    fake_handle(13_001)
+}
+unsafe fn render_bundle_release(_bundle: WGPURenderBundle) {
+    GPU_STATE.with(|state| state.borrow_mut().render_bundle_releases += 1);
 }
 
 fn read_view(view: WGPUStringView) -> Vec<u8> {
@@ -7629,6 +7791,198 @@ mod tests {
             ] {
                 assert_eq!(state.recording_calls.get(name), Some(&expected), "{name}");
             }
+        });
+        release_device_held_values(&rt, cx, device);
+    }
+
+    #[test]
+    fn a4_render_bundle_descriptor_state_execution_reuse_and_release_balance() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let encoder_descriptor = descriptor(
+            &rt,
+            &[
+                ("label", rt.string("bundle encoder")),
+                (
+                    "colorFormats",
+                    rt.set_like(&[rt.string("rgba8unorm"), rt.null()]),
+                ),
+                ("depthStencilFormat", rt.string("depth24plus-stencil8")),
+                ("sampleCount", rt.number(4.0)),
+                ("depthReadOnly", rt.bool(true)),
+                ("stencilReadOnly", rt.bool(true)),
+            ],
+        );
+        let bundle_encoder =
+            crate::device_create_render_bundle_encoder::<Engine>(cx, device, &[encoder_descriptor])
+                .expect("bundle encoder");
+        GPU_STATE.with(|state| {
+            assert_eq!(
+                state.borrow().render_bundle_encoder_descriptors,
+                vec![RecordedRenderBundleEncoderDescriptor {
+                    label: b"bundle encoder".to_vec(),
+                    color_formats: vec![
+                        crate::WGPUTextureFormat_WGPUTextureFormat_RGBA8Unorm,
+                        crate::WGPUTextureFormat_WGPUTextureFormat_Undefined,
+                    ],
+                    depth_stencil_format:
+                        crate::WGPUTextureFormat_WGPUTextureFormat_Depth24PlusStencil8,
+                    sample_count: 4,
+                    depth_read_only: 1,
+                    stencil_read_only: 1,
+                }]
+            );
+        });
+
+        let methods: Vec<_> = crate::render_bundle_encoder_class::<Engine>()
+            .methods
+            .iter()
+            .map(|method| method.name)
+            .collect();
+        assert_eq!(
+            methods,
+            [
+                "setPipeline",
+                "setVertexBuffer",
+                "setIndexBuffer",
+                "setBindGroup",
+                "draw",
+                "drawIndexed",
+                "finish",
+            ]
+        );
+        assert!(!methods.contains(&"setViewport"));
+        assert!(!methods.contains(&"setScissorRect"));
+        assert!(!methods.contains(&"beginOcclusionQuery"));
+
+        let pipeline = Engine::new_instance(
+            cx,
+            crate::GPU_RENDER_PIPELINE_CLASS,
+            Box::new(RenderPipelinePayload {
+                render_pipeline: fake_handle(14_001),
+                vertex_module: ptr::null_mut(),
+                fragment_module: ptr::null_mut(),
+                layout: ptr::null_mut(),
+            }),
+        )
+        .expect("render pipeline");
+        let buffer = device_create_buffer::<Engine>(
+            cx,
+            device,
+            &[descriptor(
+                &rt,
+                &[("size", rt.number(16.0)), ("usage", rt.number(48.0))],
+            )],
+        )
+        .expect("buffer");
+        let bind_group = Engine::new_instance(
+            cx,
+            crate::GPU_BIND_GROUP_CLASS,
+            Box::new(BindGroupPayload {
+                bind_group: fake_handle(14_002),
+                layout: ptr::null_mut(),
+                buffers: Vec::new(),
+                samplers: Vec::new(),
+                texture_views: Vec::new(),
+            }),
+        )
+        .expect("bind group");
+        crate::render_pass_set_pipeline::<Engine>(cx, bundle_encoder, &[pipeline])
+            .expect("shared pipeline body");
+        crate::render_pass_set_vertex_buffer::<Engine>(
+            cx,
+            bundle_encoder,
+            &[rt.number(0.0), buffer],
+        )
+        .expect("shared vertex-buffer body");
+        crate::render_pass_set_index_buffer::<Engine>(
+            cx,
+            bundle_encoder,
+            &[buffer, rt.string("uint16")],
+        )
+        .expect("shared index-buffer body");
+        crate::render_pass_set_bind_group::<Engine>(
+            cx,
+            bundle_encoder,
+            &[rt.number(0.0), bind_group],
+        )
+        .expect("shared bind-group body");
+        crate::render_pass_draw::<Engine>(cx, bundle_encoder, &[rt.number(3.0)])
+            .expect("shared draw body");
+        crate::render_pass_draw_indexed::<Engine>(cx, bundle_encoder, &[rt.number(3.0)])
+            .expect("shared indexed-draw body");
+
+        let bundle = crate::render_bundle_encoder_finish::<Engine>(
+            cx,
+            bundle_encoder,
+            &[descriptor(&rt, &[("label", rt.string("finished bundle"))])],
+        )
+        .expect("finish bundle");
+        assert_eq!(
+            crate::render_pass_draw::<Engine>(cx, bundle_encoder, &[rt.number(3.0)])
+                .expect_err("use after finish"),
+            "OperationError: GPURenderBundleEncoder is finished"
+        );
+        assert_eq!(
+            crate::render_bundle_encoder_finish::<Engine>(cx, bundle_encoder, &[])
+                .expect_err("double finish"),
+            "OperationError: GPURenderBundleEncoder is finished"
+        );
+
+        let command_encoder =
+            device_create_command_encoder::<Engine>(cx, device, &[]).expect("command encoder");
+        let pass_descriptor = descriptor(&rt, &[("colorAttachments", rt.set_like(&[]))]);
+        let pass = crate::command_encoder_begin_render_pass::<Engine>(
+            cx,
+            command_encoder,
+            &[pass_descriptor],
+        )
+        .expect("render pass");
+        let bundles = rt.set_like(&[bundle]);
+        crate::render_pass_execute_bundles::<Engine>(cx, pass, &[bundles])
+            .expect("first bundle execution");
+        crate::render_pass_execute_bundles::<Engine>(cx, pass, &[bundles])
+            .expect("bundle is reusable");
+        let wrong = rt.set_like(&[pipeline]);
+        assert_eq!(
+            crate::render_pass_execute_bundles::<Engine>(cx, pass, &[wrong])
+                .expect_err("non-bundle element"),
+            "TypeError: GPURenderBundle is required"
+        );
+
+        crate::finalize_render_bundle_encoder(
+            Box::new(crate::RenderBundleEncoderPayload {
+                state: Arc::new(Mutex::new(crate::RenderBundleEncoderState {
+                    render_bundle_encoder: fake_handle(15_001),
+                    ended: true,
+                })),
+            }),
+            &rt.env,
+        );
+        crate::finalize_render_bundle(
+            Box::new(crate::RenderBundlePayload {
+                render_bundle: fake_handle(15_002),
+            }),
+            &rt.env,
+        );
+        assert_eq!(rt.queue().drain(), Ok(2));
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            for name in [
+                "bundle_set_pipeline",
+                "bundle_set_vertex_buffer",
+                "bundle_set_index_buffer",
+                "bundle_set_bind_group",
+                "bundle_draw",
+                "bundle_draw_indexed",
+            ] {
+                assert_eq!(state.recording_calls.get(name), Some(&1), "{name}");
+            }
+            assert_eq!(state.recording_calls.get("execute_bundles"), Some(&2));
+            assert_eq!(state.render_bundle_encoder_releases, 1);
+            assert_eq!(state.render_bundle_releases, 1);
         });
         release_device_held_values(&rt, cx, device);
     }

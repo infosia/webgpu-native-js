@@ -107,6 +107,9 @@ copy:missing-texture:TypeError
 renderPass:chain-ok
 renderPass:clearValue-dict-sequence:no-validation-error
 copy:texture-validation:no-validation-error
+renderBundle:format-rejection:TypeError:GPUTextureFormat
+renderBundle:use-after-finish:OperationError:GPURenderBundleEncoder is finished
+renderBundle:chain:null
 scope:nested:null,GPUValidationError
 reject:popErrorScope:OperationError:popErrorScope failed:[backend-detail]
 order:same-tick:mapAsync,workDone

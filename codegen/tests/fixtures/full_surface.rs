@@ -53,6 +53,8 @@ pub struct GpuDispatch {
     pub device_create_query_set: unsafe fn(WGPUDevice, *const WGPUQuerySetDescriptor) -> WGPUQuerySet,
     /// `wgpuDeviceCreateCommandEncoder`.
     pub device_create_command_encoder: unsafe fn(WGPUDevice, *const WGPUCommandEncoderDescriptor) -> WGPUCommandEncoder,
+    /// `wgpuDeviceCreateRenderBundleEncoder`.
+    pub device_create_render_bundle_encoder: unsafe fn(WGPUDevice, *const WGPURenderBundleEncoderDescriptor) -> WGPURenderBundleEncoder,
     /// `wgpuDeviceGetQueue`.
     pub device_get_queue: unsafe fn(WGPUDevice) -> WGPUQueue,
     /// `wgpuDevicePushErrorScope`.
@@ -207,8 +209,28 @@ pub struct GpuDispatch {
     pub render_pass_encoder_begin_occlusion_query: unsafe fn(WGPURenderPassEncoder, u32),
     /// `wgpuRenderPassEncoderEndOcclusionQuery`.
     pub render_pass_encoder_end_occlusion_query: unsafe fn(WGPURenderPassEncoder),
+    /// `wgpuRenderPassEncoderExecuteBundles`.
+    pub render_pass_encoder_execute_bundles: unsafe fn(WGPURenderPassEncoder, usize, *const WGPURenderBundle),
     /// `wgpuRenderPassEncoderEnd`.
     pub render_pass_encoder_end: unsafe fn(WGPURenderPassEncoder),
+    /// `wgpuRenderBundleEncoderRelease`.
+    pub render_bundle_encoder_release: unsafe fn(WGPURenderBundleEncoder),
+    /// `wgpuRenderBundleEncoderSetPipeline`.
+    pub render_bundle_encoder_set_pipeline: unsafe fn(WGPURenderBundleEncoder, WGPURenderPipeline),
+    /// `wgpuRenderBundleEncoderSetVertexBuffer`.
+    pub render_bundle_encoder_set_vertex_buffer: unsafe fn(WGPURenderBundleEncoder, u32, WGPUBuffer, u64, u64),
+    /// `wgpuRenderBundleEncoderSetIndexBuffer`.
+    pub render_bundle_encoder_set_index_buffer: unsafe fn(WGPURenderBundleEncoder, WGPUBuffer, WGPUIndexFormat, u64, u64),
+    /// `wgpuRenderBundleEncoderSetBindGroup`.
+    pub render_bundle_encoder_set_bind_group: unsafe fn(WGPURenderBundleEncoder, u32, WGPUBindGroup, usize, *const u32),
+    /// `wgpuRenderBundleEncoderDraw`.
+    pub render_bundle_encoder_draw: unsafe fn(WGPURenderBundleEncoder, u32, u32, u32, u32),
+    /// `wgpuRenderBundleEncoderDrawIndexed`.
+    pub render_bundle_encoder_draw_indexed: unsafe fn(WGPURenderBundleEncoder, u32, u32, u32, i32, u32),
+    /// `wgpuRenderBundleEncoderFinish`.
+    pub render_bundle_encoder_finish: unsafe fn(WGPURenderBundleEncoder, *const WGPURenderBundleDescriptor) -> WGPURenderBundle,
+    /// `wgpuRenderBundleRelease`.
+    pub render_bundle_release: unsafe fn(WGPURenderBundle),
     /// `wgpuCommandBufferRelease`.
     pub command_buffer_release: unsafe fn(WGPUCommandBuffer),
 }
@@ -245,6 +267,7 @@ macro_rules! for_each_gpu_dispatch_entry {
             (device_create_render_pipeline, wgpuDeviceCreateRenderPipeline, unsafe fn(device: $crate::WGPUDevice, descriptor: *const $crate::WGPURenderPipelineDescriptor) -> $crate::WGPURenderPipeline),
             (device_create_query_set, wgpuDeviceCreateQuerySet, unsafe fn(device: $crate::WGPUDevice, descriptor: *const $crate::WGPUQuerySetDescriptor) -> $crate::WGPUQuerySet),
             (device_create_command_encoder, wgpuDeviceCreateCommandEncoder, unsafe fn(device: $crate::WGPUDevice, descriptor: *const $crate::WGPUCommandEncoderDescriptor) -> $crate::WGPUCommandEncoder),
+            (device_create_render_bundle_encoder, wgpuDeviceCreateRenderBundleEncoder, unsafe fn(device: $crate::WGPUDevice, descriptor: *const $crate::WGPURenderBundleEncoderDescriptor) -> $crate::WGPURenderBundleEncoder),
             (device_get_queue, wgpuDeviceGetQueue, unsafe fn(device: $crate::WGPUDevice) -> $crate::WGPUQueue),
             (device_push_error_scope, wgpuDevicePushErrorScope, unsafe fn(device: $crate::WGPUDevice, filter: $crate::WGPUErrorFilter)),
             (device_pop_error_scope, wgpuDevicePopErrorScope, unsafe fn(device: $crate::WGPUDevice, callback_info: $crate::WGPUPopErrorScopeCallbackInfo) -> $crate::WGPUFuture),
@@ -322,7 +345,17 @@ macro_rules! for_each_gpu_dispatch_entry {
             (render_pass_encoder_set_scissor_rect, wgpuRenderPassEncoderSetScissorRect, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder, x: u32, y: u32, width: u32, height: u32)),
             (render_pass_encoder_begin_occlusion_query, wgpuRenderPassEncoderBeginOcclusionQuery, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder, query_index: u32)),
             (render_pass_encoder_end_occlusion_query, wgpuRenderPassEncoderEndOcclusionQuery, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder)),
+            (render_pass_encoder_execute_bundles, wgpuRenderPassEncoderExecuteBundles, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder, bundles_count: usize, bundles: *const $crate::WGPURenderBundle)),
             (render_pass_encoder_end, wgpuRenderPassEncoderEnd, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder)),
+            (render_bundle_encoder_release, wgpuRenderBundleEncoderRelease, unsafe fn(render_bundle_encoder: $crate::WGPURenderBundleEncoder)),
+            (render_bundle_encoder_set_pipeline, wgpuRenderBundleEncoderSetPipeline, unsafe fn(render_bundle_encoder: $crate::WGPURenderBundleEncoder, pipeline: $crate::WGPURenderPipeline)),
+            (render_bundle_encoder_set_vertex_buffer, wgpuRenderBundleEncoderSetVertexBuffer, unsafe fn(render_bundle_encoder: $crate::WGPURenderBundleEncoder, slot: u32, buffer: $crate::WGPUBuffer, offset: u64, size: u64)),
+            (render_bundle_encoder_set_index_buffer, wgpuRenderBundleEncoderSetIndexBuffer, unsafe fn(render_bundle_encoder: $crate::WGPURenderBundleEncoder, buffer: $crate::WGPUBuffer, format: $crate::WGPUIndexFormat, offset: u64, size: u64)),
+            (render_bundle_encoder_set_bind_group, wgpuRenderBundleEncoderSetBindGroup, unsafe fn(render_bundle_encoder: $crate::WGPURenderBundleEncoder, group_index: u32, group: $crate::WGPUBindGroup, dynamic_offsets_count: usize, dynamic_offsets: *const u32)),
+            (render_bundle_encoder_draw, wgpuRenderBundleEncoderDraw, unsafe fn(render_bundle_encoder: $crate::WGPURenderBundleEncoder, vertex_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32)),
+            (render_bundle_encoder_draw_indexed, wgpuRenderBundleEncoderDrawIndexed, unsafe fn(render_bundle_encoder: $crate::WGPURenderBundleEncoder, index_count: u32, instance_count: u32, first_index: u32, base_vertex: i32, first_instance: u32)),
+            (render_bundle_encoder_finish, wgpuRenderBundleEncoderFinish, unsafe fn(render_bundle_encoder: $crate::WGPURenderBundleEncoder, descriptor: *const $crate::WGPURenderBundleDescriptor) -> $crate::WGPURenderBundle),
+            (render_bundle_release, wgpuRenderBundleRelease, unsafe fn(render_bundle: $crate::WGPURenderBundle)),
             (command_buffer_release, wgpuCommandBufferRelease, unsafe fn(command_buffer: $crate::WGPUCommandBuffer)),
         }
     };
@@ -402,6 +435,300 @@ pub(super) fn convert_query_set_descriptor<E: JsEngine>(
         type_,
         // R8: `[EnforceRange]` GPUSize32 is checked at the 32-bit boundary.
         count: enforce_u32::<E>(cx, count_value, "count")?,
+    })
+}
+
+/// Converts a JavaScript `GPURenderBundleEncoderDescriptor` into `WGPURenderBundleEncoderDescriptor`.
+pub(super) fn convert_render_bundle_encoder_descriptor<E: JsEngine>(
+    cx: E::Context<'_>,
+    value: E::Value,
+    arena: &Arena,
+) -> Result<WGPURenderBundleEncoderDescriptor, E::Error> {
+    let label_value = dictionary_member::<E>(cx, value, "label")?;
+    // DR-M3: required dictionary members reject undefined.
+    let color_formats_value = required_member::<E>(cx, value, "colorFormats")?;
+    let depth_stencil_format_value = dictionary_member::<E>(cx, value, "depthStencilFormat")?;
+    let sample_count_value = dictionary_member::<E>(cx, value, "sampleCount")?;
+    let depth_read_only_value = dictionary_member::<E>(cx, value, "depthReadOnly")?;
+    let stencil_read_only_value = dictionary_member::<E>(cx, value, "stencilReadOnly")?;
+    // B4: non-nullable strings default only for undefined; null is stringified.
+    let label = if E::is_undefined(cx, label_value) {
+        ""
+    } else {
+        E::to_str(cx, label_value, arena)?
+    };
+    let color_formats = {
+        let converted = convert_sequence::<E, _>(cx, color_formats_value, "colorFormats", |item| {
+            // Nullable enum elements use the C enum's Undefined sentinel as holes.
+            if E::is_null(cx, item) {
+                Ok(WGPUTextureFormat_WGPUTextureFormat_Undefined)
+            } else {
+            let enum_arena = Arena::new();
+            match E::to_str(cx, item, &enum_arena)? {
+                "r8unorm" => Ok(WGPUTextureFormat_WGPUTextureFormat_R8Unorm),
+                "r8snorm" => Ok(WGPUTextureFormat_WGPUTextureFormat_R8Snorm),
+                "r8uint" => Ok(WGPUTextureFormat_WGPUTextureFormat_R8Uint),
+                "r8sint" => Ok(WGPUTextureFormat_WGPUTextureFormat_R8Sint),
+                "r16unorm" => Ok(WGPUTextureFormat_WGPUTextureFormat_R16Unorm),
+                "r16snorm" => Ok(WGPUTextureFormat_WGPUTextureFormat_R16Snorm),
+                "r16uint" => Ok(WGPUTextureFormat_WGPUTextureFormat_R16Uint),
+                "r16sint" => Ok(WGPUTextureFormat_WGPUTextureFormat_R16Sint),
+                "r16float" => Ok(WGPUTextureFormat_WGPUTextureFormat_R16Float),
+                "rg8unorm" => Ok(WGPUTextureFormat_WGPUTextureFormat_RG8Unorm),
+                "rg8snorm" => Ok(WGPUTextureFormat_WGPUTextureFormat_RG8Snorm),
+                "rg8uint" => Ok(WGPUTextureFormat_WGPUTextureFormat_RG8Uint),
+                "rg8sint" => Ok(WGPUTextureFormat_WGPUTextureFormat_RG8Sint),
+                "r32uint" => Ok(WGPUTextureFormat_WGPUTextureFormat_R32Uint),
+                "r32sint" => Ok(WGPUTextureFormat_WGPUTextureFormat_R32Sint),
+                "r32float" => Ok(WGPUTextureFormat_WGPUTextureFormat_R32Float),
+                "rg16unorm" => Ok(WGPUTextureFormat_WGPUTextureFormat_RG16Unorm),
+                "rg16snorm" => Ok(WGPUTextureFormat_WGPUTextureFormat_RG16Snorm),
+                "rg16uint" => Ok(WGPUTextureFormat_WGPUTextureFormat_RG16Uint),
+                "rg16sint" => Ok(WGPUTextureFormat_WGPUTextureFormat_RG16Sint),
+                "rg16float" => Ok(WGPUTextureFormat_WGPUTextureFormat_RG16Float),
+                "rgba8unorm" => Ok(WGPUTextureFormat_WGPUTextureFormat_RGBA8Unorm),
+                "rgba8unorm-srgb" => Ok(WGPUTextureFormat_WGPUTextureFormat_RGBA8UnormSrgb),
+                "rgba8snorm" => Ok(WGPUTextureFormat_WGPUTextureFormat_RGBA8Snorm),
+                "rgba8uint" => Ok(WGPUTextureFormat_WGPUTextureFormat_RGBA8Uint),
+                "rgba8sint" => Ok(WGPUTextureFormat_WGPUTextureFormat_RGBA8Sint),
+                "bgra8unorm" => Ok(WGPUTextureFormat_WGPUTextureFormat_BGRA8Unorm),
+                "bgra8unorm-srgb" => Ok(WGPUTextureFormat_WGPUTextureFormat_BGRA8UnormSrgb),
+                "rgb9e5ufloat" => Ok(WGPUTextureFormat_WGPUTextureFormat_RGB9E5Ufloat),
+                "rgb10a2uint" => Ok(WGPUTextureFormat_WGPUTextureFormat_RGB10A2Uint),
+                "rgb10a2unorm" => Ok(WGPUTextureFormat_WGPUTextureFormat_RGB10A2Unorm),
+                "rg11b10ufloat" => Ok(WGPUTextureFormat_WGPUTextureFormat_RG11B10Ufloat),
+                "rg32uint" => Ok(WGPUTextureFormat_WGPUTextureFormat_RG32Uint),
+                "rg32sint" => Ok(WGPUTextureFormat_WGPUTextureFormat_RG32Sint),
+                "rg32float" => Ok(WGPUTextureFormat_WGPUTextureFormat_RG32Float),
+                "rgba16unorm" => Ok(WGPUTextureFormat_WGPUTextureFormat_RGBA16Unorm),
+                "rgba16snorm" => Ok(WGPUTextureFormat_WGPUTextureFormat_RGBA16Snorm),
+                "rgba16uint" => Ok(WGPUTextureFormat_WGPUTextureFormat_RGBA16Uint),
+                "rgba16sint" => Ok(WGPUTextureFormat_WGPUTextureFormat_RGBA16Sint),
+                "rgba16float" => Ok(WGPUTextureFormat_WGPUTextureFormat_RGBA16Float),
+                "rgba32uint" => Ok(WGPUTextureFormat_WGPUTextureFormat_RGBA32Uint),
+                "rgba32sint" => Ok(WGPUTextureFormat_WGPUTextureFormat_RGBA32Sint),
+                "rgba32float" => Ok(WGPUTextureFormat_WGPUTextureFormat_RGBA32Float),
+                "stencil8" => Ok(WGPUTextureFormat_WGPUTextureFormat_Stencil8),
+                "depth16unorm" => Ok(WGPUTextureFormat_WGPUTextureFormat_Depth16Unorm),
+                "depth24plus" => Ok(WGPUTextureFormat_WGPUTextureFormat_Depth24Plus),
+                "depth24plus-stencil8" => Ok(WGPUTextureFormat_WGPUTextureFormat_Depth24PlusStencil8),
+                "depth32float" => Ok(WGPUTextureFormat_WGPUTextureFormat_Depth32Float),
+                "depth32float-stencil8" => Ok(WGPUTextureFormat_WGPUTextureFormat_Depth32FloatStencil8),
+                "bc1-rgba-unorm" => Ok(WGPUTextureFormat_WGPUTextureFormat_BC1RGBAUnorm),
+                "bc1-rgba-unorm-srgb" => Ok(WGPUTextureFormat_WGPUTextureFormat_BC1RGBAUnormSrgb),
+                "bc2-rgba-unorm" => Ok(WGPUTextureFormat_WGPUTextureFormat_BC2RGBAUnorm),
+                "bc2-rgba-unorm-srgb" => Ok(WGPUTextureFormat_WGPUTextureFormat_BC2RGBAUnormSrgb),
+                "bc3-rgba-unorm" => Ok(WGPUTextureFormat_WGPUTextureFormat_BC3RGBAUnorm),
+                "bc3-rgba-unorm-srgb" => Ok(WGPUTextureFormat_WGPUTextureFormat_BC3RGBAUnormSrgb),
+                "bc4-r-unorm" => Ok(WGPUTextureFormat_WGPUTextureFormat_BC4RUnorm),
+                "bc4-r-snorm" => Ok(WGPUTextureFormat_WGPUTextureFormat_BC4RSnorm),
+                "bc5-rg-unorm" => Ok(WGPUTextureFormat_WGPUTextureFormat_BC5RGUnorm),
+                "bc5-rg-snorm" => Ok(WGPUTextureFormat_WGPUTextureFormat_BC5RGSnorm),
+                "bc6h-rgb-ufloat" => Ok(WGPUTextureFormat_WGPUTextureFormat_BC6HRGBUfloat),
+                "bc6h-rgb-float" => Ok(WGPUTextureFormat_WGPUTextureFormat_BC6HRGBFloat),
+                "bc7-rgba-unorm" => Ok(WGPUTextureFormat_WGPUTextureFormat_BC7RGBAUnorm),
+                "bc7-rgba-unorm-srgb" => Ok(WGPUTextureFormat_WGPUTextureFormat_BC7RGBAUnormSrgb),
+                "etc2-rgb8unorm" => Ok(WGPUTextureFormat_WGPUTextureFormat_ETC2RGB8Unorm),
+                "etc2-rgb8unorm-srgb" => Ok(WGPUTextureFormat_WGPUTextureFormat_ETC2RGB8UnormSrgb),
+                "etc2-rgb8a1unorm" => Ok(WGPUTextureFormat_WGPUTextureFormat_ETC2RGB8A1Unorm),
+                "etc2-rgb8a1unorm-srgb" => Ok(WGPUTextureFormat_WGPUTextureFormat_ETC2RGB8A1UnormSrgb),
+                "etc2-rgba8unorm" => Ok(WGPUTextureFormat_WGPUTextureFormat_ETC2RGBA8Unorm),
+                "etc2-rgba8unorm-srgb" => Ok(WGPUTextureFormat_WGPUTextureFormat_ETC2RGBA8UnormSrgb),
+                "eac-r11unorm" => Ok(WGPUTextureFormat_WGPUTextureFormat_EACR11Unorm),
+                "eac-r11snorm" => Ok(WGPUTextureFormat_WGPUTextureFormat_EACR11Snorm),
+                "eac-rg11unorm" => Ok(WGPUTextureFormat_WGPUTextureFormat_EACRG11Unorm),
+                "eac-rg11snorm" => Ok(WGPUTextureFormat_WGPUTextureFormat_EACRG11Snorm),
+                "astc-4x4-unorm" => Ok(WGPUTextureFormat_WGPUTextureFormat_ASTC4x4Unorm),
+                "astc-4x4-unorm-srgb" => Ok(WGPUTextureFormat_WGPUTextureFormat_ASTC4x4UnormSrgb),
+                "astc-5x4-unorm" => Ok(WGPUTextureFormat_WGPUTextureFormat_ASTC5x4Unorm),
+                "astc-5x4-unorm-srgb" => Ok(WGPUTextureFormat_WGPUTextureFormat_ASTC5x4UnormSrgb),
+                "astc-5x5-unorm" => Ok(WGPUTextureFormat_WGPUTextureFormat_ASTC5x5Unorm),
+                "astc-5x5-unorm-srgb" => Ok(WGPUTextureFormat_WGPUTextureFormat_ASTC5x5UnormSrgb),
+                "astc-6x5-unorm" => Ok(WGPUTextureFormat_WGPUTextureFormat_ASTC6x5Unorm),
+                "astc-6x5-unorm-srgb" => Ok(WGPUTextureFormat_WGPUTextureFormat_ASTC6x5UnormSrgb),
+                "astc-6x6-unorm" => Ok(WGPUTextureFormat_WGPUTextureFormat_ASTC6x6Unorm),
+                "astc-6x6-unorm-srgb" => Ok(WGPUTextureFormat_WGPUTextureFormat_ASTC6x6UnormSrgb),
+                "astc-8x5-unorm" => Ok(WGPUTextureFormat_WGPUTextureFormat_ASTC8x5Unorm),
+                "astc-8x5-unorm-srgb" => Ok(WGPUTextureFormat_WGPUTextureFormat_ASTC8x5UnormSrgb),
+                "astc-8x6-unorm" => Ok(WGPUTextureFormat_WGPUTextureFormat_ASTC8x6Unorm),
+                "astc-8x6-unorm-srgb" => Ok(WGPUTextureFormat_WGPUTextureFormat_ASTC8x6UnormSrgb),
+                "astc-8x8-unorm" => Ok(WGPUTextureFormat_WGPUTextureFormat_ASTC8x8Unorm),
+                "astc-8x8-unorm-srgb" => Ok(WGPUTextureFormat_WGPUTextureFormat_ASTC8x8UnormSrgb),
+                "astc-10x5-unorm" => Ok(WGPUTextureFormat_WGPUTextureFormat_ASTC10x5Unorm),
+                "astc-10x5-unorm-srgb" => Ok(WGPUTextureFormat_WGPUTextureFormat_ASTC10x5UnormSrgb),
+                "astc-10x6-unorm" => Ok(WGPUTextureFormat_WGPUTextureFormat_ASTC10x6Unorm),
+                "astc-10x6-unorm-srgb" => Ok(WGPUTextureFormat_WGPUTextureFormat_ASTC10x6UnormSrgb),
+                "astc-10x8-unorm" => Ok(WGPUTextureFormat_WGPUTextureFormat_ASTC10x8Unorm),
+                "astc-10x8-unorm-srgb" => Ok(WGPUTextureFormat_WGPUTextureFormat_ASTC10x8UnormSrgb),
+                "astc-10x10-unorm" => Ok(WGPUTextureFormat_WGPUTextureFormat_ASTC10x10Unorm),
+                "astc-10x10-unorm-srgb" => Ok(WGPUTextureFormat_WGPUTextureFormat_ASTC10x10UnormSrgb),
+                "astc-12x10-unorm" => Ok(WGPUTextureFormat_WGPUTextureFormat_ASTC12x10Unorm),
+                "astc-12x10-unorm-srgb" => Ok(WGPUTextureFormat_WGPUTextureFormat_ASTC12x10UnormSrgb),
+                "astc-12x12-unorm" => Ok(WGPUTextureFormat_WGPUTextureFormat_ASTC12x12Unorm),
+                "astc-12x12-unorm-srgb" => Ok(WGPUTextureFormat_WGPUTextureFormat_ASTC12x12UnormSrgb),
+                _ => Err(E::type_error(cx, "GPUTextureFormat")),
+            }
+            }
+        })?;
+        arena.alloc_slice(converted)
+    };
+    // B6: string enums are joined to C values; absence uses the IDL default or C sentinel.
+    let depth_stencil_format = if E::is_undefined(cx, depth_stencil_format_value) {
+        WGPUTextureFormat_WGPUTextureFormat_Undefined
+    } else {
+        let enum_arena = Arena::new();
+        match E::to_str(cx, depth_stencil_format_value, &enum_arena)? {
+            "r8unorm" => WGPUTextureFormat_WGPUTextureFormat_R8Unorm,
+            "r8snorm" => WGPUTextureFormat_WGPUTextureFormat_R8Snorm,
+            "r8uint" => WGPUTextureFormat_WGPUTextureFormat_R8Uint,
+            "r8sint" => WGPUTextureFormat_WGPUTextureFormat_R8Sint,
+            "r16unorm" => WGPUTextureFormat_WGPUTextureFormat_R16Unorm,
+            "r16snorm" => WGPUTextureFormat_WGPUTextureFormat_R16Snorm,
+            "r16uint" => WGPUTextureFormat_WGPUTextureFormat_R16Uint,
+            "r16sint" => WGPUTextureFormat_WGPUTextureFormat_R16Sint,
+            "r16float" => WGPUTextureFormat_WGPUTextureFormat_R16Float,
+            "rg8unorm" => WGPUTextureFormat_WGPUTextureFormat_RG8Unorm,
+            "rg8snorm" => WGPUTextureFormat_WGPUTextureFormat_RG8Snorm,
+            "rg8uint" => WGPUTextureFormat_WGPUTextureFormat_RG8Uint,
+            "rg8sint" => WGPUTextureFormat_WGPUTextureFormat_RG8Sint,
+            "r32uint" => WGPUTextureFormat_WGPUTextureFormat_R32Uint,
+            "r32sint" => WGPUTextureFormat_WGPUTextureFormat_R32Sint,
+            "r32float" => WGPUTextureFormat_WGPUTextureFormat_R32Float,
+            "rg16unorm" => WGPUTextureFormat_WGPUTextureFormat_RG16Unorm,
+            "rg16snorm" => WGPUTextureFormat_WGPUTextureFormat_RG16Snorm,
+            "rg16uint" => WGPUTextureFormat_WGPUTextureFormat_RG16Uint,
+            "rg16sint" => WGPUTextureFormat_WGPUTextureFormat_RG16Sint,
+            "rg16float" => WGPUTextureFormat_WGPUTextureFormat_RG16Float,
+            "rgba8unorm" => WGPUTextureFormat_WGPUTextureFormat_RGBA8Unorm,
+            "rgba8unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_RGBA8UnormSrgb,
+            "rgba8snorm" => WGPUTextureFormat_WGPUTextureFormat_RGBA8Snorm,
+            "rgba8uint" => WGPUTextureFormat_WGPUTextureFormat_RGBA8Uint,
+            "rgba8sint" => WGPUTextureFormat_WGPUTextureFormat_RGBA8Sint,
+            "bgra8unorm" => WGPUTextureFormat_WGPUTextureFormat_BGRA8Unorm,
+            "bgra8unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_BGRA8UnormSrgb,
+            "rgb9e5ufloat" => WGPUTextureFormat_WGPUTextureFormat_RGB9E5Ufloat,
+            "rgb10a2uint" => WGPUTextureFormat_WGPUTextureFormat_RGB10A2Uint,
+            "rgb10a2unorm" => WGPUTextureFormat_WGPUTextureFormat_RGB10A2Unorm,
+            "rg11b10ufloat" => WGPUTextureFormat_WGPUTextureFormat_RG11B10Ufloat,
+            "rg32uint" => WGPUTextureFormat_WGPUTextureFormat_RG32Uint,
+            "rg32sint" => WGPUTextureFormat_WGPUTextureFormat_RG32Sint,
+            "rg32float" => WGPUTextureFormat_WGPUTextureFormat_RG32Float,
+            "rgba16unorm" => WGPUTextureFormat_WGPUTextureFormat_RGBA16Unorm,
+            "rgba16snorm" => WGPUTextureFormat_WGPUTextureFormat_RGBA16Snorm,
+            "rgba16uint" => WGPUTextureFormat_WGPUTextureFormat_RGBA16Uint,
+            "rgba16sint" => WGPUTextureFormat_WGPUTextureFormat_RGBA16Sint,
+            "rgba16float" => WGPUTextureFormat_WGPUTextureFormat_RGBA16Float,
+            "rgba32uint" => WGPUTextureFormat_WGPUTextureFormat_RGBA32Uint,
+            "rgba32sint" => WGPUTextureFormat_WGPUTextureFormat_RGBA32Sint,
+            "rgba32float" => WGPUTextureFormat_WGPUTextureFormat_RGBA32Float,
+            "stencil8" => WGPUTextureFormat_WGPUTextureFormat_Stencil8,
+            "depth16unorm" => WGPUTextureFormat_WGPUTextureFormat_Depth16Unorm,
+            "depth24plus" => WGPUTextureFormat_WGPUTextureFormat_Depth24Plus,
+            "depth24plus-stencil8" => WGPUTextureFormat_WGPUTextureFormat_Depth24PlusStencil8,
+            "depth32float" => WGPUTextureFormat_WGPUTextureFormat_Depth32Float,
+            "depth32float-stencil8" => WGPUTextureFormat_WGPUTextureFormat_Depth32FloatStencil8,
+            "bc1-rgba-unorm" => WGPUTextureFormat_WGPUTextureFormat_BC1RGBAUnorm,
+            "bc1-rgba-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_BC1RGBAUnormSrgb,
+            "bc2-rgba-unorm" => WGPUTextureFormat_WGPUTextureFormat_BC2RGBAUnorm,
+            "bc2-rgba-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_BC2RGBAUnormSrgb,
+            "bc3-rgba-unorm" => WGPUTextureFormat_WGPUTextureFormat_BC3RGBAUnorm,
+            "bc3-rgba-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_BC3RGBAUnormSrgb,
+            "bc4-r-unorm" => WGPUTextureFormat_WGPUTextureFormat_BC4RUnorm,
+            "bc4-r-snorm" => WGPUTextureFormat_WGPUTextureFormat_BC4RSnorm,
+            "bc5-rg-unorm" => WGPUTextureFormat_WGPUTextureFormat_BC5RGUnorm,
+            "bc5-rg-snorm" => WGPUTextureFormat_WGPUTextureFormat_BC5RGSnorm,
+            "bc6h-rgb-ufloat" => WGPUTextureFormat_WGPUTextureFormat_BC6HRGBUfloat,
+            "bc6h-rgb-float" => WGPUTextureFormat_WGPUTextureFormat_BC6HRGBFloat,
+            "bc7-rgba-unorm" => WGPUTextureFormat_WGPUTextureFormat_BC7RGBAUnorm,
+            "bc7-rgba-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_BC7RGBAUnormSrgb,
+            "etc2-rgb8unorm" => WGPUTextureFormat_WGPUTextureFormat_ETC2RGB8Unorm,
+            "etc2-rgb8unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ETC2RGB8UnormSrgb,
+            "etc2-rgb8a1unorm" => WGPUTextureFormat_WGPUTextureFormat_ETC2RGB8A1Unorm,
+            "etc2-rgb8a1unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ETC2RGB8A1UnormSrgb,
+            "etc2-rgba8unorm" => WGPUTextureFormat_WGPUTextureFormat_ETC2RGBA8Unorm,
+            "etc2-rgba8unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ETC2RGBA8UnormSrgb,
+            "eac-r11unorm" => WGPUTextureFormat_WGPUTextureFormat_EACR11Unorm,
+            "eac-r11snorm" => WGPUTextureFormat_WGPUTextureFormat_EACR11Snorm,
+            "eac-rg11unorm" => WGPUTextureFormat_WGPUTextureFormat_EACRG11Unorm,
+            "eac-rg11snorm" => WGPUTextureFormat_WGPUTextureFormat_EACRG11Snorm,
+            "astc-4x4-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC4x4Unorm,
+            "astc-4x4-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC4x4UnormSrgb,
+            "astc-5x4-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC5x4Unorm,
+            "astc-5x4-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC5x4UnormSrgb,
+            "astc-5x5-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC5x5Unorm,
+            "astc-5x5-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC5x5UnormSrgb,
+            "astc-6x5-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC6x5Unorm,
+            "astc-6x5-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC6x5UnormSrgb,
+            "astc-6x6-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC6x6Unorm,
+            "astc-6x6-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC6x6UnormSrgb,
+            "astc-8x5-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC8x5Unorm,
+            "astc-8x5-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC8x5UnormSrgb,
+            "astc-8x6-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC8x6Unorm,
+            "astc-8x6-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC8x6UnormSrgb,
+            "astc-8x8-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC8x8Unorm,
+            "astc-8x8-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC8x8UnormSrgb,
+            "astc-10x5-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC10x5Unorm,
+            "astc-10x5-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC10x5UnormSrgb,
+            "astc-10x6-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC10x6Unorm,
+            "astc-10x6-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC10x6UnormSrgb,
+            "astc-10x8-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC10x8Unorm,
+            "astc-10x8-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC10x8UnormSrgb,
+            "astc-10x10-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC10x10Unorm,
+            "astc-10x10-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC10x10UnormSrgb,
+            "astc-12x10-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC12x10Unorm,
+            "astc-12x10-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC12x10UnormSrgb,
+            "astc-12x12-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC12x12Unorm,
+            "astc-12x12-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC12x12UnormSrgb,
+            _ => return Err(E::type_error(cx, "GPUTextureFormat")),
+        }
+    };
+    Ok(WGPURenderBundleEncoderDescriptor {
+        nextInChain: ptr::null_mut(),
+        label: WGPUStringView::from_bytes(label.as_bytes()),
+        colorFormatCount: color_formats.len(),
+        colorFormats: if color_formats.is_empty() {
+            ptr::null()
+        } else {
+            color_formats.as_ptr()
+        },
+        depthStencilFormat: depth_stencil_format,
+        // R8: `[EnforceRange]` GPUSize32 is checked at the 32-bit boundary.
+        sampleCount: if E::is_undefined(cx, sample_count_value) {
+            1
+        } else {
+            enforce_u32::<E>(cx, sample_count_value, "sampleCount")?
+        },
+        // R8: an optional boolean defaults to false and otherwise uses `ToBoolean`.
+        depthReadOnly: if E::is_undefined(cx, depth_read_only_value) {
+            0
+        } else {
+            u32::from(E::to_bool(cx, depth_read_only_value))
+        },
+        // R8: an optional boolean defaults to false and otherwise uses `ToBoolean`.
+        stencilReadOnly: if E::is_undefined(cx, stencil_read_only_value) {
+            0
+        } else {
+            u32::from(E::to_bool(cx, stencil_read_only_value))
+        },
+    })
+}
+
+/// Converts a JavaScript `GPURenderBundleDescriptor` into `WGPURenderBundleDescriptor`.
+pub(super) fn convert_render_bundle_descriptor<E: JsEngine>(
+    cx: E::Context<'_>,
+    value: E::Value,
+    arena: &Arena,
+) -> Result<WGPURenderBundleDescriptor, E::Error> {
+    let label_value = dictionary_member::<E>(cx, value, "label")?;
+    // B4: non-nullable strings default only for undefined; null is stringified.
+    let label = if E::is_undefined(cx, label_value) {
+        ""
+    } else {
+        E::to_str(cx, label_value, arena)?
+    };
+    Ok(WGPURenderBundleDescriptor {
+        nextInChain: ptr::null_mut(),
+        label: WGPUStringView::from_bytes(label.as_bytes()),
     })
 }
 
@@ -3270,6 +3597,16 @@ pub struct CommandEncoderPayload {
 // `ReleaseRequest::run()` during release-queue drain on the creating `tick()` thread.
 unsafe impl Send for CommandEncoderPayload {}
 
+/// Payload stored by a `GPURenderBundleEncoder` wrapper.
+pub struct RenderBundleEncoderPayload {
+    pub(super) state: Arc<Mutex<RenderBundleEncoderState>>,
+}
+
+// SAFETY: `RenderBundleEncoderPayload` stores WGPU handle values. Finalization only moves those values
+// into `ReleaseRequest`; native handles are dereferenced only by
+// `ReleaseRequest::run()` during release-queue drain on the creating `tick()` thread.
+unsafe impl Send for RenderBundleEncoderPayload {}
+
 /// One release request enqueued by finalizers and drained by the host tick.
 pub enum ReleaseRequest {
     /// Release an adapter.
@@ -3392,6 +3729,13 @@ pub enum ReleaseRequest {
         /// Dispatch table used on the drain thread.
         gpu: GpuDispatch,
     },
+    /// Release a `GPURenderBundleEncoder` and its retained descriptor handles.
+    RenderBundleEncoder {
+        /// Created native handle.
+        render_bundle_encoder: WGPURenderBundleEncoder,
+        /// Dispatch table used on the drain thread.
+        gpu: GpuDispatch,
+    },
     /// Release a command buffer.
     CommandBuffer { /// Command-buffer handle.
         command_buffer: WGPUCommandBuffer, /// Dispatch table.
@@ -3403,6 +3747,10 @@ pub enum ReleaseRequest {
     /// Release a render-pass encoder.
     RenderPassEncoder { /// Pass handle.
         pass: WGPURenderPassEncoder, /// Dispatch table.
+        gpu: GpuDispatch },
+    /// Release a reusable render bundle.
+    RenderBundle { /// Render-bundle handle.
+        render_bundle: WGPURenderBundle, /// Dispatch table.
         gpu: GpuDispatch },
 }
 
@@ -3465,9 +3813,13 @@ impl ReleaseRequest {
             Self::CommandEncoder { encoder, gpu } => unsafe {
                 (gpu.command_encoder_release)(encoder);
             },
+            Self::RenderBundleEncoder { render_bundle_encoder, gpu } => unsafe {
+                (gpu.render_bundle_encoder_release)(render_bundle_encoder);
+            },
             Self::CommandBuffer { command_buffer, gpu } => unsafe { (gpu.command_buffer_release)(command_buffer) },
             Self::ComputePassEncoder { pass, gpu } => unsafe { (gpu.compute_pass_encoder_release)(pass) },
             Self::RenderPassEncoder { pass, gpu } => unsafe { (gpu.render_pass_encoder_release)(pass) },
+            Self::RenderBundle { render_bundle, gpu } => unsafe { (gpu.render_bundle_release)(render_bundle) },
         }
     }
 }
@@ -4235,6 +4587,49 @@ pub fn finalize_command_encoder(payload: Box<dyn Any + Send>, env: &Environment)
     let _ = env.queue().enqueue(ReleaseRequest::CommandEncoder { encoder: state.encoder, gpu: env.gpu() });
 }
 
+/// Implements `GPUDevice.createRenderBundleEncoder`.
+pub fn device_create_render_bundle_encoder<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let device = device_handle::<E>(cx, this)?;
+    let arena = Arena::new();
+    let descriptor = args.first().copied().ok_or_else(|| E::type_error(cx, "GPURenderBundleEncoderDescriptor"))?;
+    let native = convert_render_bundle_encoder_descriptor::<E>(cx, descriptor, &arena)?;
+    let render_bundle_encoder = unsafe { (E::environment(cx).gpu().device_create_render_bundle_encoder)(device, ptr::from_ref(&native)) };
+    if render_bundle_encoder.is_null() {
+        return Err(E::operation_error(cx, "wgpuDeviceCreateRenderBundleEncoder returned null"));
+    }
+    if let Err(error) = E::register_class(cx, render_bundle_encoder_class::<E>()) {
+        unsafe {
+            (E::environment(cx).gpu().render_bundle_encoder_release)(render_bundle_encoder);
+        }
+        return Err(error);
+    }
+    match E::new_instance(cx, GPU_RENDER_BUNDLE_ENCODER_CLASS, Box::new(RenderBundleEncoderPayload {
+        state: Arc::new(Mutex::new(RenderBundleEncoderState {
+            render_bundle_encoder,
+            ended: false,
+        })),
+    })) {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            unsafe {
+                (E::environment(cx).gpu().render_bundle_encoder_release)(render_bundle_encoder);
+            }
+            Err(error)
+        }
+    }
+}
+
+/// Finalizes a `GPURenderBundleEncoder` payload by enqueuing its release.
+pub fn finalize_render_bundle_encoder(payload: Box<dyn Any + Send>, env: &Environment) {
+    let Ok(payload) = payload.downcast::<RenderBundleEncoderPayload>() else { return; };
+    let Ok(state) = payload.state.lock() else { return; };
+    let _ = env.queue().enqueue(ReleaseRequest::RenderBundleEncoder { render_bundle_encoder: state.render_bundle_encoder, gpu: env.gpu() });
+}
+
 pub(super) fn gpu_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
     class_spec_once::<E, _>(GPU_CLASS, || ClassSpec {
         name: "GPU",
@@ -4292,6 +4687,7 @@ pub(super) fn device_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
             MethodSpec { name: "createRenderPipeline", length: 1, call: device_create_render_pipeline::<E> },
             MethodSpec { name: "createQuerySet", length: 1, call: device_create_query_set::<E> },
             MethodSpec { name: "createCommandEncoder", length: 0, call: device_create_command_encoder::<E> },
+            MethodSpec { name: "createRenderBundleEncoder", length: 1, call: device_create_render_bundle_encoder::<E> },
         ])),
         finalizer: finalize_device::<E>,
     })
@@ -4519,9 +4915,40 @@ pub(super) fn render_pass_encoder_class<E: JsEngine + 'static>() -> &'static Cla
             MethodSpec { name: "setScissorRect", length: 4, call: render_pass_set_scissor_rect::<E> },
             MethodSpec { name: "beginOcclusionQuery", length: 1, call: render_pass_begin_occlusion_query::<E> },
             MethodSpec { name: "endOcclusionQuery", length: 0, call: render_pass_end_occlusion_query::<E> },
+            MethodSpec { name: "executeBundles", length: 1, call: render_pass_execute_bundles::<E> },
             MethodSpec { name: "end", length: 0, call: render_pass_end::<E> },
         ])),
         finalizer: finalize_render_pass_encoder,
+    })
+}
+
+pub(super) fn render_bundle_encoder_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
+    class_spec_once::<E, _>(GPU_RENDER_BUNDLE_ENCODER_CLASS, || ClassSpec {
+        name: "GPURenderBundleEncoder",
+        id: GPU_RENDER_BUNDLE_ENCODER_CLASS,
+        constructor: None,
+        properties: &[],
+        methods: Box::leak(Box::new([
+            MethodSpec { name: "setPipeline", length: 1, call: render_pass_set_pipeline::<E> },
+            MethodSpec { name: "setVertexBuffer", length: 2, call: render_pass_set_vertex_buffer::<E> },
+            MethodSpec { name: "setIndexBuffer", length: 2, call: render_pass_set_index_buffer::<E> },
+            MethodSpec { name: "setBindGroup", length: 2, call: render_pass_set_bind_group::<E> },
+            MethodSpec { name: "draw", length: 1, call: render_pass_draw::<E> },
+            MethodSpec { name: "drawIndexed", length: 1, call: render_pass_draw_indexed::<E> },
+            MethodSpec { name: "finish", length: 0, call: render_bundle_encoder_finish::<E> },
+        ])),
+        finalizer: finalize_render_bundle_encoder,
+    })
+}
+
+pub(super) fn render_bundle_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
+    class_spec_once::<E, _>(GPU_RENDER_BUNDLE_CLASS, || ClassSpec {
+        name: "GPURenderBundle",
+        id: GPU_RENDER_BUNDLE_CLASS,
+        constructor: None,
+        properties: &[],
+        methods: &[],
+        finalizer: finalize_render_bundle,
     })
 }
 

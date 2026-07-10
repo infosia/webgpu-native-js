@@ -762,7 +762,8 @@ fn emit_payloads(output: &mut String, standards: &[StandardInterface<'_>]) {
         let _ = writeln!(output, "/// Payload stored by a `{interface}` wrapper.");
         let _ = writeln!(output, "pub struct {} {{", standard.payload);
         if standard.stateful_encoder {
-            output.push_str("    pub(super) state: Arc<Mutex<CommandEncoderState>>,\n");
+            let state = format!("{}State", object_name(interface));
+            let _ = writeln!(output, "    pub(super) state: Arc<Mutex<{state}>>,");
         } else {
             let _ = writeln!(
                 output,
@@ -1035,7 +1036,11 @@ fn emit_create(output: &mut String, standard: &StandardInterface<'_>) -> Result<
         standard.class_id, standard.payload
     );
     if standard.stateful_encoder {
-        output.push_str("        state: Arc::new(Mutex::new(CommandEncoderState {\n");
+        let state = format!(
+            "{}State",
+            object_name(standard.interface.idl_name.as_deref().unwrap_or_default())
+        );
+        let _ = writeln!(output, "        state: Arc::new(Mutex::new({state} {{");
         let _ = writeln!(output, "            {},", standard.handle_field);
         output.push_str("            ended: false,\n        })),\n");
     } else {
@@ -1243,7 +1248,11 @@ fn emit_finalizer(output: &mut String, standard: &StandardInterface<'_>) {
     );
     if standard.stateful_encoder {
         output.push_str("    let Ok(state) = payload.state.lock() else { return; };\n");
-        output.push_str("    let _ = env.queue().enqueue(ReleaseRequest::CommandEncoder { encoder: state.encoder, gpu: env.gpu() });\n");
+        let _ = writeln!(
+            output,
+            "    let _ = env.queue().enqueue(ReleaseRequest::{} {{ {}: state.{}, gpu: env.gpu() }});",
+            standard.release_variant, standard.release_field, standard.handle_field
+        );
     } else {
         let _ = writeln!(
             output,
@@ -1589,6 +1598,10 @@ const NONSTANDARD_RELEASE_VARIANTS_SUFFIX: &str = r#"    /// Release a command b
     RenderPassEncoder { /// Pass handle.
         pass: WGPURenderPassEncoder, /// Dispatch table.
         gpu: GpuDispatch },
+    /// Release a reusable render bundle.
+    RenderBundle { /// Render-bundle handle.
+        render_bundle: WGPURenderBundle, /// Dispatch table.
+        gpu: GpuDispatch },
 "#;
 
 const NONSTANDARD_RELEASE_ARMS_PREFIX: &str = r#"            Self::Adapter { adapter, gpu } => unsafe { (gpu.adapter_release)(adapter) },
@@ -1601,4 +1614,5 @@ const NONSTANDARD_RELEASE_ARMS_PREFIX: &str = r#"            Self::Adapter { ada
 const NONSTANDARD_RELEASE_ARMS_SUFFIX: &str = r#"            Self::CommandBuffer { command_buffer, gpu } => unsafe { (gpu.command_buffer_release)(command_buffer) },
             Self::ComputePassEncoder { pass, gpu } => unsafe { (gpu.compute_pass_encoder_release)(pass) },
             Self::RenderPassEncoder { pass, gpu } => unsafe { (gpu.render_pass_encoder_release)(pass) },
+            Self::RenderBundle { render_bundle, gpu } => unsafe { (gpu.render_bundle_release)(render_bundle) },
 "#;
