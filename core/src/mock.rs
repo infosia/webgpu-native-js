@@ -2009,7 +2009,14 @@ mod tests {
         )
         .expect("module");
         let compute = descriptor(&rt, &[("module", module)]);
-        let compute_pipeline_desc = descriptor(&rt, &[("label", rt.null()), ("compute", compute)]);
+        let compute_pipeline_desc = descriptor(
+            &rt,
+            &[
+                ("label", rt.null()),
+                ("layout", rt.string("auto")),
+                ("compute", compute),
+            ],
+        );
         let compute_pipeline =
             convert_compute_pipeline_descriptor::<Engine>(cx, compute_pipeline_desc, &arena)
                 .expect("compute pipeline descriptor");
@@ -2102,7 +2109,11 @@ mod tests {
         let cx = rt.context();
         let desc = descriptor(&rt, &[("usage", rt.number(8.0))]);
         let arena = Arena::new();
-        assert!(convert_buffer_descriptor::<Engine>(cx, desc, &arena).is_err());
+        assert_eq!(
+            convert_buffer_descriptor::<Engine>(cx, desc, &arena)
+                .expect_err("missing size must fail"),
+            "TypeError: size"
+        );
     }
 
     #[test]
@@ -2111,7 +2122,11 @@ mod tests {
         let cx = rt.context();
         let desc = descriptor(&rt, &[("size", rt.number(256.0))]);
         let arena = Arena::new();
-        assert!(convert_buffer_descriptor::<Engine>(cx, desc, &arena).is_err());
+        assert_eq!(
+            convert_buffer_descriptor::<Engine>(cx, desc, &arena)
+                .expect_err("missing usage must fail"),
+            "TypeError: usage"
+        );
     }
 
     #[test]
@@ -2265,7 +2280,10 @@ mod tests {
         assert_eq!(read_view(shader.label), b"null");
 
         let absent_compute = descriptor(&rt, &[("module", module)]);
-        let absent_desc = descriptor(&rt, &[("compute", absent_compute)]);
+        let absent_desc = descriptor(
+            &rt,
+            &[("layout", rt.string("auto")), ("compute", absent_compute)],
+        );
         let absent = convert_compute_pipeline_descriptor::<Engine>(cx, absent_desc, &arena)
             .expect("pipeline descriptor");
         assert!(absent.native.compute.entryPoint.data.is_null());
@@ -2275,14 +2293,20 @@ mod tests {
         );
 
         let null_compute = descriptor(&rt, &[("module", module), ("entryPoint", rt.null())]);
-        let null_desc = descriptor(&rt, &[("compute", null_compute)]);
+        let null_desc = descriptor(
+            &rt,
+            &[("layout", rt.string("auto")), ("compute", null_compute)],
+        );
         let null = convert_compute_pipeline_descriptor::<Engine>(cx, null_desc, &arena)
             .expect("pipeline descriptor");
         assert!(!null.native.compute.entryPoint.data.is_null());
         assert_eq!(read_view(null.native.compute.entryPoint), b"null");
 
         let empty_compute = descriptor(&rt, &[("module", module), ("entryPoint", rt.string(""))]);
-        let empty_desc = descriptor(&rt, &[("compute", empty_compute)]);
+        let empty_desc = descriptor(
+            &rt,
+            &[("layout", rt.string("auto")), ("compute", empty_compute)],
+        );
         let empty = convert_compute_pipeline_descriptor::<Engine>(cx, empty_desc, &arena)
             .expect("pipeline descriptor");
         assert!(!empty.native.compute.entryPoint.data.is_null());
@@ -2310,6 +2334,85 @@ mod tests {
 
         assert!(converted.native.layout.is_null());
         assert!(converted.layout.is_null());
+    }
+
+    #[test]
+    fn compute_pipeline_layout_is_required_and_non_null() {
+        let rt = runtime();
+        let cx = rt.context();
+        let module = Engine::new_instance(
+            cx,
+            crate::GPU_SHADER_MODULE_CLASS,
+            Box::new(ShaderModulePayload {
+                module: fake_handle(42),
+            }),
+        )
+        .expect("shader module");
+        let compute = descriptor(&rt, &[("module", module)]);
+        let arena = Arena::new();
+
+        for layout in [None, Some(rt.null())] {
+            let desc = match layout {
+                Some(layout) => descriptor(&rt, &[("layout", layout), ("compute", compute)]),
+                None => descriptor(&rt, &[("compute", compute)]),
+            };
+            assert_eq!(
+                convert_compute_pipeline_descriptor::<Engine>(cx, desc, &arena)
+                    .err()
+                    .expect("missing or null layout must fail"),
+                "TypeError: layout"
+            );
+        }
+    }
+
+    #[test]
+    fn present_skip_policied_descriptor_members_are_rejected() {
+        let rt = runtime();
+        let cx = rt.context();
+        let arena = Arena::new();
+
+        let shader = descriptor(
+            &rt,
+            &[
+                (
+                    "code",
+                    rt.string("@compute @workgroup_size(1) fn main() {}"),
+                ),
+                ("compilationHints", descriptor(&rt, &[])),
+            ],
+        );
+        assert_eq!(
+            convert_shader_module_descriptor::<Engine>(cx, shader, &arena)
+                .expect_err("present compilationHints must fail"),
+            "TypeError: compilationHints are not supported yet"
+        );
+
+        let module = Engine::new_instance(
+            cx,
+            crate::GPU_SHADER_MODULE_CLASS,
+            Box::new(ShaderModulePayload {
+                module: fake_handle(42),
+            }),
+        )
+        .expect("shader module");
+        let stage = descriptor(
+            &rt,
+            &[("module", module), ("constants", descriptor(&rt, &[]))],
+        );
+        let pipeline = descriptor(&rt, &[("layout", rt.string("auto")), ("compute", stage)]);
+        assert_eq!(
+            convert_compute_pipeline_descriptor::<Engine>(cx, pipeline, &arena)
+                .err()
+                .expect("present constants must fail"),
+            "TypeError: constants are not supported yet"
+        );
+
+        let pass = descriptor(&rt, &[("timestampWrites", descriptor(&rt, &[]))]);
+        assert_eq!(
+            convert_compute_pass_descriptor::<Engine>(cx, pass, &arena)
+                .expect_err("present timestampWrites must fail"),
+            "TypeError: timestampWrites are not supported yet"
+        );
     }
 
     #[test]
@@ -2449,13 +2552,23 @@ mod tests {
         let rt = runtime();
         let cx = rt.context();
         let arena = Arena::new();
-        for entry in [
-            descriptor(&rt, &[("visibility", rt.number(1.0))]),
-            descriptor(&rt, &[("binding", rt.number(0.0))]),
+        for (entry, message) in [
+            (
+                descriptor(&rt, &[("visibility", rt.number(1.0))]),
+                "TypeError: binding",
+            ),
+            (
+                descriptor(&rt, &[("binding", rt.number(0.0))]),
+                "TypeError: visibility",
+            ),
         ] {
             let entries = rt.set_like(&[entry]);
             let desc = descriptor(&rt, &[("entries", entries)]);
-            assert!(convert_bind_group_layout_descriptor::<Engine>(cx, desc, &arena).is_err());
+            assert_eq!(
+                convert_bind_group_layout_descriptor::<Engine>(cx, desc, &arena)
+                    .expect_err("missing required layout entry member"),
+                message
+            );
         }
 
         let entry = descriptor(
@@ -2668,9 +2781,18 @@ mod tests {
         let desc = descriptor(&rt, &[("layout", layout), ("entries", entries)]);
         let arena = Arena::new();
 
-        assert!(convert_bind_group_descriptor::<Engine>(cx, desc, &arena).is_err());
+        assert_eq!(
+            convert_bind_group_descriptor::<Engine>(cx, desc, &arena)
+                .err()
+                .expect("missing resource must fail"),
+            "TypeError: resource"
+        );
         assert_eq!(arena.allocations.borrow().len(), 0);
-        assert!(device_create_bind_group::<Engine>(cx, device, &[desc]).is_err());
+        assert_eq!(
+            device_create_bind_group::<Engine>(cx, device, &[desc])
+                .expect_err("createBindGroup must preserve the member error"),
+            "TypeError: resource"
+        );
         GPU_STATE.with(|state| {
             assert_eq!(state.borrow().buffer_add_refs, 0);
         });
@@ -2701,6 +2823,48 @@ mod tests {
                 .err()
                 .expect("absent binding must be rejected"),
             "TypeError: binding"
+        );
+    }
+
+    #[test]
+    fn bind_group_entry_requires_resource() {
+        let rt = runtime();
+        let cx = rt.context();
+        let layout = Engine::new_instance(
+            cx,
+            crate::GPU_BIND_GROUP_LAYOUT_CLASS,
+            Box::new(BindGroupLayoutPayload {
+                layout: fake_handle(77),
+            }),
+        )
+        .expect("layout");
+        let entry = descriptor(&rt, &[("binding", rt.number(0.0))]);
+        let desc = descriptor(
+            &rt,
+            &[("layout", layout), ("entries", rt.set_like(&[entry]))],
+        );
+        let arena = Arena::new();
+
+        assert_eq!(
+            convert_bind_group_descriptor::<Engine>(cx, desc, &arena)
+                .err()
+                .expect("absent resource must be rejected"),
+            "TypeError: resource"
+        );
+    }
+
+    #[test]
+    fn bind_group_descriptor_requires_layout() {
+        let rt = runtime();
+        let cx = rt.context();
+        let desc = descriptor(&rt, &[("entries", rt.set_like(&[]))]);
+        let arena = Arena::new();
+
+        assert_eq!(
+            convert_bind_group_descriptor::<Engine>(cx, desc, &arena)
+                .err()
+                .expect("absent layout must be rejected"),
+            "TypeError: layout"
         );
     }
 

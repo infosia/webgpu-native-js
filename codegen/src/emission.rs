@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 
 use crate::{
     ChainPolicy, CodegenError, DescriptorEntry, HandleOrEnumUnionPolicy, JoinReport, MemberPair,
-    Policy, TypePair, UnionFlattenPolicy, ValueModel,
+    Policy, SkipPolicy, TypePair, UnionFlattenPolicy, ValueModel,
 };
 
 /// Emits all descriptor conversions selected by `policy` from `report`.
@@ -43,6 +43,7 @@ pub(crate) fn validate_policy(report: &JoinReport, policy: &Policy) -> Result<()
         let pair = descriptor_pair(report, &descriptor.dictionary)?;
         validate_descriptor_policy(report, pair, descriptor, &selected)?;
     }
+    validate_enum_value_skips(report, policy)?;
     for interface in &report.interfaces {
         for member in &interface.members {
             for overload in &member.idl {
@@ -60,6 +61,89 @@ pub(crate) fn validate_policy(report: &JoinReport, policy: &Policy) -> Result<()
                             member.owner, member.member
                         )));
                     }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_enum_value_skips(report: &JoinReport, policy: &Policy) -> Result<(), CodegenError> {
+    let mut generated_enums = BTreeSet::new();
+    for descriptor in &policy.descriptor {
+        let pair = descriptor_pair(report, &descriptor.dictionary)?;
+        for value in pair
+            .members
+            .iter()
+            .flat_map(|member| member.idl.iter())
+            .flat_map(|member| member.values.iter())
+            .chain(
+                pair.idl_only_members
+                    .iter()
+                    .flat_map(|member| member.values.iter()),
+            )
+        {
+            let name = value.type_name.trim_end_matches('?');
+            if enum_pair(report, name).is_some() {
+                generated_enums.insert(name);
+            }
+        }
+        generated_enums.extend(
+            descriptor
+                .handle_or_enum_unions
+                .iter()
+                .map(|entry| entry.enum_type.as_str()),
+        );
+    }
+
+    let mut covered = BTreeSet::new();
+    for skip in &policy.enum_value_skip {
+        if skip.reason.trim().is_empty() {
+            return Err(CodegenError::Policy(format!(
+                "enum-value skip {}.{} has an empty reason",
+                skip.r#enum, skip.value
+            )));
+        }
+        if !covered.insert((skip.r#enum.as_str(), skip.value.as_str())) {
+            return Err(CodegenError::Policy(format!(
+                "duplicate enum-value skip {}.{}",
+                skip.r#enum, skip.value
+            )));
+        }
+        if !generated_enums.contains(skip.r#enum.as_str()) {
+            return Err(CodegenError::Policy(format!(
+                "dead enum-value skip {}.{}: enum is not generated",
+                skip.r#enum, skip.value
+            )));
+        }
+        let pair = enum_pair(report, &skip.r#enum).ok_or_else(|| {
+            CodegenError::Policy(format!(
+                "dead enum-value skip {}.{}: enum is not joined",
+                skip.r#enum, skip.value
+            ))
+        })?;
+        if !pair.enum_values.iter().any(|value| {
+            value.idl_value.as_deref() == Some(skip.value.as_str()) && value.c_value.is_none()
+        }) {
+            return Err(CodegenError::Policy(format!(
+                "dead enum-value skip {}.{}: value is not IDL-only",
+                skip.r#enum, skip.value
+            )));
+        }
+    }
+
+    for name in generated_enums {
+        let pair = enum_pair(report, name).ok_or_else(|| {
+            CodegenError::Policy(format!(
+                "generated enum {name} disappeared before validation"
+            ))
+        })?;
+        for value in &pair.enum_values {
+            if let (Some(idl_value), None) = (&value.idl_value, &value.c_value) {
+                if !covered.contains(&(name, idl_value.as_str())) {
+                    return Err(CodegenError::Policy(format!(
+                        "unpoliced IDL-only value on generated enum {name}: {idl_value}"
+                    )));
                 }
             }
         }
@@ -106,6 +190,20 @@ fn validate_descriptor_policy(
             descriptor.dictionary
         )));
     }
+    if let Some(target) = &descriptor.target {
+        validate_identifier(
+            &descriptor.dictionary,
+            "target",
+            target,
+            "descriptor target",
+        )?;
+    }
+    if descriptor.zero.as_ref().is_some_and(Vec::is_empty) {
+        return Err(CodegenError::Policy(format!(
+            "dead zero policy {}: entry is empty",
+            descriptor.dictionary
+        )));
+    }
 
     let strings = unique_entries(
         &descriptor.dictionary,
@@ -120,7 +218,7 @@ fn validate_descriptor_policy(
     let zero = unique_entries(
         &descriptor.dictionary,
         "zero",
-        descriptor.zero.iter().map(String::as_str),
+        descriptor.zero.iter().flatten().map(String::as_str),
     )?;
     let default_empty = unique_entries(
         &descriptor.dictionary,
@@ -595,6 +693,12 @@ fn validate_chain_policy(
     validate_identifier(
         &descriptor.dictionary,
         &chain.member,
+        &chain.target,
+        "chain target",
+    )?;
+    validate_identifier(
+        &descriptor.dictionary,
+        &chain.member,
         &chain.s_type,
         "sType",
     )?;
@@ -799,6 +903,12 @@ fn validate_handle_or_enum_union(
             descriptor.dictionary, policy.member, idl.type_name
         )));
     }
+    if !idl.required || idl.nullable {
+        return Err(CodegenError::Policy(format!(
+            "handle-or-enum union policy {}.{} requires a required, non-null WebIDL member",
+            descriptor.dictionary, policy.member
+        )));
+    }
     let enum_pair = enum_pair(report, &policy.enum_type).ok_or_else(|| {
         CodegenError::Policy(format!(
             "dead handle-or-enum union policy {}.{}: enum {} is not joined",
@@ -845,10 +955,10 @@ fn emit_descriptor(
         .map(|entry| (entry.member.as_str(), entry.nullable))
         .collect();
     let unsupported: BTreeSet<&str> = descriptor.unsupported.iter().map(String::as_str).collect();
-    let skips: BTreeMap<&str, &str> = descriptor
+    let skips: BTreeMap<&str, &SkipPolicy> = descriptor
         .skips
         .iter()
-        .map(|entry| (entry.member.as_str(), entry.reason.as_str()))
+        .map(|entry| (entry.member.as_str(), entry))
         .collect();
     let handles: BTreeMap<&str, &str> = descriptor
         .handles
@@ -885,14 +995,7 @@ fn emit_descriptor(
         .iter()
         .map(String::as_str)
         .collect();
-    let needs_arena = pair.members.iter().any(|member| {
-        let idl = &member.idl[0].values[0];
-        !unsupported.contains(member.member.as_str())
-            && !skips.contains_key(member.member.as_str())
-            && (is_idl_string(idl) || is_sequence(&idl.type_name))
-    }) || !descriptor.chains.is_empty()
-        || !descriptor.handle_sequences.is_empty()
-        || !descriptor.handle_or_enum_unions.is_empty();
+    let needs_arena = descriptor_needs_arena(pair, descriptor);
     let needs_static = descriptor_needs_static(report, pair, descriptor, descriptors);
 
     let mut members: Vec<&MemberPair> = pair.members.iter().collect();
@@ -930,13 +1033,19 @@ fn emit_descriptor(
     for member in &members {
         let (idl, _) = member_values(member, dictionary)?;
         let name = &member.member;
-        if skips.contains_key(name.as_str()) {
+        if let Some(skip) = skips.get(name.as_str()) {
+            if skip.reject_if_present {
+                let value_name = format!("{}_value", snake_case(name));
+                let _ = writeln!(
+                    output,
+                    "    let {value_name} = E::get_property(cx, value, \"{name}\")?;"
+                );
+                emit_rejected_skip_check(&mut output, name, &value_name);
+            }
             continue;
         }
         let value_name = format!("{}_value", snake_case(name));
-        if handle_or_enum.contains_key(name.as_str())
-            || required_defaults.contains_key(name.as_str())
-        {
+        if required_defaults.contains_key(name.as_str()) {
             let _ = writeln!(
                 output,
                 "    let {value_name} = E::get_property(cx, value, \"{name}\")?;"
@@ -962,7 +1071,15 @@ fn emit_descriptor(
     }
     for member in &pair.idl_only_members {
         let name = &member.name;
-        if skips.contains_key(name.as_str()) {
+        if let Some(skip) = skips.get(name.as_str()) {
+            if skip.reject_if_present {
+                let value_name = format!("{}_value", snake_case(name));
+                let _ = writeln!(
+                    output,
+                    "    let {value_name} = E::get_property(cx, value, \"{name}\")?;"
+                );
+                emit_rejected_skip_check(&mut output, name, &value_name);
+            }
             continue;
         }
         let value_name = format!("{}_value", snake_case(name));
@@ -1006,7 +1123,7 @@ fn emit_descriptor(
         if let Some(helper) = handles.get(name.as_str()) {
             let _ = writeln!(output, "    let {local} = {helper}::<E>(cx, {value})?;");
         } else if let Some(helper) = handle_sequences.get(name.as_str()) {
-            emit_handle_sequence_local(&mut output, name, &local, &value, helper);
+            emit_handle_sequence_local(&mut output, name, &local, &value, helper, idl.required);
         } else if let Some(policy) = handle_or_enum.get(name.as_str()) {
             emit_handle_or_enum_local(&mut output, name, &local, &value, policy);
         } else if is_idl_string(idl) {
@@ -1016,7 +1133,11 @@ fn emit_descriptor(
                 name,
                 &local,
                 &value,
-                string_policy[name.as_str()],
+                string_policy.get(name.as_str()).copied().ok_or_else(|| {
+                    CodegenError::Policy(format!(
+                        "missing string policy during emission for {dictionary}.{name}"
+                    ))
+                })?,
                 idl,
             )?;
         } else if is_enum(report, &idl.type_name) {
@@ -1103,7 +1224,12 @@ fn emit_descriptor(
         )?;
     }
     if raw_c {
-        let zero: BTreeSet<&str> = descriptor.zero.iter().map(String::as_str).collect();
+        let zero: BTreeSet<&str> = descriptor
+            .zero
+            .iter()
+            .flatten()
+            .map(String::as_str)
+            .collect();
         for member in &pair.c_only_members {
             if zero.contains(member.name.as_str()) {
                 let field = rust_field_name(&member.name, true);
@@ -1155,18 +1281,33 @@ fn emit_unsupported_check(output: &mut String, name: &str, value: &str) {
     output.push_str("    }\n");
 }
 
+fn emit_rejected_skip_check(output: &mut String, name: &str, value: &str) {
+    output.push_str("    // Policy skip: reject present unsupported API instead of ignoring it.\n");
+    let _ = writeln!(output, "    if !E::is_undefined(cx, {value}) {{");
+    let _ = writeln!(
+        output,
+        "        return Err(E::type_error(cx, \"{name} are not supported yet\"));"
+    );
+    output.push_str("    }\n");
+}
+
 fn emit_handle_sequence_local(
     output: &mut String,
     name: &str,
     local: &str,
     value: &str,
     helper: &str,
+    required: bool,
 ) {
-    let _ = writeln!(
-        output,
-        "    let {local} = if E::is_undefined(cx, {value}) {{"
-    );
-    output.push_str("        &[][..]\n    } else {\n");
+    if required {
+        let _ = writeln!(output, "    let {local} = {{");
+    } else {
+        let _ = writeln!(
+            output,
+            "    let {local} = if E::is_undefined(cx, {value}) {{"
+        );
+        output.push_str("        &[][..]\n    } else {\n");
+    }
     output
         .push_str("        // B8: conversion extracts handles only; create paths own retention.\n");
     let _ = writeln!(
@@ -1179,7 +1320,7 @@ fn emit_handle_sequence_local(
 
 fn emit_handle_or_enum_local(
     output: &mut String,
-    _name: &str,
+    name: &str,
     local: &str,
     value: &str,
     policy: &HandleOrEnumUnionPolicy,
@@ -1187,11 +1328,8 @@ fn emit_handle_or_enum_local(
     output.push_str(
         "    // Policy: the handle-or-enum union preserves explicit handles and auto layout.\n",
     );
-    let _ = writeln!(
-        output,
-        "    let {local} = if E::is_undefined(cx, {value}) || E::is_null(cx, {value}) {{"
-    );
-    output.push_str("        ptr::null_mut()\n");
+    let _ = writeln!(output, "    let {local} = if E::is_null(cx, {value}) {{");
+    let _ = writeln!(output, "        return Err(E::type_error(cx, \"{name}\"));");
     let _ = writeln!(
         output,
         "    }} else if let Ok(handle) = {}::<E>(cx, {value}) {{",
@@ -1593,7 +1731,7 @@ fn emit_field(
     raw_c: bool,
     string_policy: &BTreeMap<&str, bool>,
     unsupported: &BTreeSet<&str>,
-    skips: &BTreeMap<&str, &str>,
+    skips: &BTreeMap<&str, &SkipPolicy>,
     handles: &BTreeMap<&str, &str>,
     handle_sequences: &BTreeMap<&str, &str>,
     handle_or_enum: &BTreeMap<&str, &HandleOrEnumUnionPolicy>,
@@ -1611,8 +1749,8 @@ fn emit_field(
         let _ = writeln!(output, "        {field}: unsafe {{ std::mem::zeroed() }},");
         return Ok(());
     }
-    if let Some(reason) = skips.get(name.as_str()) {
-        let _ = writeln!(output, "        // Policy skip: {reason}.");
+    if let Some(skip) = skips.get(name.as_str()) {
+        let _ = writeln!(output, "        // Policy skip: {}.", skip.reason);
         if c.count_and_pointer {
             let count = count_field_name(&c.name);
             let _ = writeln!(output, "        {count}: 0,");
@@ -1838,13 +1976,18 @@ fn emit_field(
 
 fn descriptor_needs_arena(pair: &TypePair, descriptor: &DescriptorEntry) -> bool {
     let unsupported: BTreeSet<&str> = descriptor.unsupported.iter().map(String::as_str).collect();
+    let skips: BTreeSet<&str> = descriptor
+        .skips
+        .iter()
+        .map(|entry| entry.member.as_str())
+        .collect();
     pair.members.iter().any(|member| {
         let idl = &member.idl[0].values[0];
         !unsupported.contains(member.member.as_str())
+            && !skips.contains(member.member.as_str())
             && (is_idl_string(idl) || is_sequence(&idl.type_name))
     }) || !descriptor.chains.is_empty()
         || !descriptor.handle_sequences.is_empty()
-        || !descriptor.handle_or_enum_unions.is_empty()
 }
 
 fn descriptor_needs_static(
@@ -2097,5 +2240,70 @@ mod tests {
         assert!(
             matches!(error, CodegenError::Policy(message) if message.contains("dead descriptor"))
         );
+    }
+
+    #[test]
+    fn required_handle_or_enum_only_descriptor_has_no_unused_arena_parameter() {
+        let mut idl = value("layout", "(GPUPipelineLayout or GPUAutoLayoutMode)");
+        idl.required = true;
+        let c = value("layout", "WGPUPipelineLayout");
+        let report = JoinReport {
+            dictionaries: vec![TypePair {
+                idl_name: Some("GPUExampleDescriptor".to_owned()),
+                c_name: Some("WGPUExampleDescriptor".to_owned()),
+                c_chained: false,
+                members: vec![MemberPair {
+                    owner: "GPUExampleDescriptor".to_owned(),
+                    member: "layout".to_owned(),
+                    idl: vec![IdlMemberModel {
+                        name: "layout".to_owned(),
+                        kind: IdlMemberKind::DictionaryField,
+                        values: vec![idl],
+                        same_object: false,
+                    }],
+                    c: CMemberModel {
+                        name: "layout".to_owned(),
+                        values: vec![c],
+                        callback: None,
+                    },
+                }],
+                idl_only_members: Vec::new(),
+                c_only_members: Vec::new(),
+                enum_values: Vec::new(),
+            }],
+            enums: vec![TypePair {
+                idl_name: Some("GPUAutoLayoutMode".to_owned()),
+                c_name: Some("WGPUAutoLayoutMode".to_owned()),
+                c_chained: false,
+                members: Vec::new(),
+                idl_only_members: Vec::new(),
+                c_only_members: Vec::new(),
+                enum_values: vec![crate::EnumValuePair {
+                    idl_value: Some("auto".to_owned()),
+                    c_value: Some("auto".to_owned()),
+                }],
+            }],
+            ..JoinReport::default()
+        };
+        let policy = r#"
+            schema_version = 1
+            subset = []
+            [[descriptor]]
+            dictionary = "GPUExampleDescriptor"
+            [[descriptor.handle_or_enum_unions]]
+            member = "layout"
+            union_type = "(GPUPipelineLayout or GPUAutoLayoutMode)"
+            handle_type = "GPUPipelineLayout"
+            handle_helper = "pipeline_layout_handle"
+            enum_type = "GPUAutoLayoutMode"
+            enum_value = "auto"
+            reason = "fixture union"
+        "#;
+
+        let emitted = emit_conversions(&report, policy).expect("handle-or-enum emission");
+        assert!(emitted.contains("value: E::Value,\n) -> Result<WGPUExampleDescriptor, E::Error>"));
+        assert!(emitted.contains("required_member::<E>(cx, value, \"layout\")?"));
+        assert!(emitted.contains("if E::is_null(cx, layout_value)"));
+        assert!(!emitted.contains("E::is_undefined(cx, layout_value)"));
     }
 }

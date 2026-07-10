@@ -55,9 +55,7 @@ pub(super) fn convert_pipeline_layout_descriptor<E: JsEngine + 'static>(
     } else {
         E::to_str(cx, label_value, arena)?
     };
-    let bind_group_layouts = if E::is_undefined(cx, bind_group_layouts_value) {
-        &[][..]
-    } else {
+    let bind_group_layouts = {
         // B8: conversion extracts handles only; create paths own retention.
         let converted = convert_sequence::<E, _>(cx, bind_group_layouts_value, "bindGroupLayouts", |item| {
             bind_group_layout_handle::<E>(cx, item)
@@ -91,6 +89,11 @@ pub(super) fn convert_shader_module_descriptor<E: JsEngine>(
     let label_value = E::get_property(cx, value, "label")?;
     // DR-M3: required dictionary members reject undefined.
     let code_value = required_member::<E>(cx, value, "code")?;
+    let compilation_hints_value = E::get_property(cx, value, "compilationHints")?;
+    // Policy skip: reject present unsupported API instead of ignoring it.
+    if !E::is_undefined(cx, compilation_hints_value) {
+        return Err(E::type_error(cx, "compilationHints are not supported yet"));
+    }
     // B4: non-nullable strings default only for undefined; null is stringified.
     let label = if E::is_undefined(cx, label_value) {
         ""
@@ -123,6 +126,11 @@ pub(super) fn convert_programmable_stage<E: JsEngine + 'static>(
     // DR-M3: required dictionary members reject undefined.
     let module_value = required_member::<E>(cx, value, "module")?;
     let entry_point_value = E::get_property(cx, value, "entryPoint")?;
+    let constants_value = E::get_property(cx, value, "constants")?;
+    // Policy skip: reject present unsupported API instead of ignoring it.
+    if !E::is_undefined(cx, constants_value) {
+        return Err(E::type_error(cx, "constants are not supported yet"));
+    }
     let module = shader_module_handle::<E>(cx, module_value)?;
     // B4: optional non-nullable strings preserve absence; present null is stringified.
     let entry_point = if E::is_undefined(cx, entry_point_value) {

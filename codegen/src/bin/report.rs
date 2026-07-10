@@ -24,8 +24,7 @@ fn run() -> Result<String, Box<dyn std::error::Error>> {
         .ok_or("codegen crate has no repository parent")?;
     let idl = fs::read_to_string(root.join("third_party/gpuweb/webgpu.idl"))?;
     let yaml = fs::read_to_string(root.join("third_party/webgpu-headers/webgpu.yml"))?;
-    let policy = fs::read_to_string(root.join("codegen/policy.toml"))?;
-    Ok(render_report(&join_inputs(&idl, &yaml, &policy)?))
+    Ok(render_report(&join_inputs(&idl, &yaml)?))
 }
 
 #[cfg(test)]

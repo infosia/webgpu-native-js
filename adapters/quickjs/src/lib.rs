@@ -1812,7 +1812,7 @@ fn release_arraybuffer_owner(owner: &mut ArrayBufferOwner) {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::ptr;
     use std::rc::Rc;
@@ -1823,6 +1823,9 @@ mod tests {
 
     static COUNTED_BUFFER_RELEASES: AtomicUsize = AtomicUsize::new(0);
     static COUNTED_SAMPLER_RELEASES: AtomicUsize = AtomicUsize::new(0);
+    thread_local! {
+        static RECORDED_ENTRY_POINTS: RefCell<Vec<Option<Vec<u8>>>> = const { RefCell::new(Vec::new()) };
+    }
 
     struct AdapterRequestState {
         status: Cell<wgpu::WGPURequestAdapterStatus>,
@@ -2266,6 +2269,31 @@ mod tests {
         gpu
     }
 
+    fn entry_point_recording_dispatch() -> core::GpuDispatch {
+        let mut gpu = super::gpu_dispatch();
+        gpu.device_create_compute_pipeline = record_compute_pipeline_entry_point;
+        gpu.compute_pipeline_release = release_recorded_compute_pipeline;
+        gpu
+    }
+
+    unsafe fn record_compute_pipeline_entry_point(
+        _device: core::WGPUDevice,
+        descriptor: *const core::WGPUComputePipelineDescriptor,
+    ) -> core::WGPUComputePipeline {
+        let view = unsafe { (*descriptor).compute.entryPoint };
+        let entry_point = if view.data.is_null() && view.length == core::wgpu_strlen() {
+            None
+        } else {
+            Some(
+                unsafe { std::slice::from_raw_parts(view.data.cast::<u8>(), view.length) }.to_vec(),
+            )
+        };
+        RECORDED_ENTRY_POINTS.with(|values| values.borrow_mut().push(entry_point));
+        1usize as core::WGPUComputePipeline
+    }
+
+    unsafe fn release_recorded_compute_pipeline(_pipeline: core::WGPUComputePipeline) {}
+
     unsafe fn counted_buffer_release(buffer: core::WGPUBuffer) {
         COUNTED_BUFFER_RELEASES.fetch_add(1, Ordering::SeqCst);
         unsafe { wgpu::wgpuBufferRelease(buffer) };
@@ -2561,6 +2589,21 @@ mod tests {
                     missingEntriesError.message !== 'entries') {
                     throw new Error('absent entries error was not named: ' + missingEntriesError);
                 }
+                let missingLayoutsError;
+                try { device.createPipelineLayout({}); }
+                catch (error) { missingLayoutsError = error; }
+                if (!(missingLayoutsError instanceof TypeError) ||
+                    missingLayoutsError.message !== 'bindGroupLayouts') {
+                    throw new Error('absent bindGroupLayouts error was not named: ' + missingLayoutsError);
+                }
+                const emptyLayout = device.createBindGroupLayout({ entries: [] });
+                let missingBindGroupEntriesError;
+                try { device.createBindGroup({ layout: emptyLayout }); }
+                catch (error) { missingBindGroupEntriesError = error; }
+                if (!(missingBindGroupEntriesError instanceof TypeError) ||
+                    missingBindGroupEntriesError.message !== 'entries') {
+                    throw new Error('absent bind-group entries error was not named: ' + missingBindGroupEntriesError);
+                }
                 for (const entry of [{ visibility: 1 }, { binding: 0 }]) {
                     var threw = false;
                     try { device.createBindGroupLayout({ entries: [entry] }); }
@@ -2572,6 +2615,104 @@ mod tests {
             "#,
             "required-layout-members.js",
         );
+        runtime.clear_global("device").expect("clear device");
+        runtime.run_gc();
+        let _ = runtime.drain_releases().expect("drain");
+    }
+
+    #[test]
+    fn compute_pipeline_layout_and_present_unsupported_members_throw_named_type_errors() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let wrapped = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("device", wrapped)
+            .expect("set device");
+        eval_drop(
+            &runtime,
+            r#"
+                const source = '@compute @workgroup_size(1) fn main() {}';
+                let error;
+                try { device.createShaderModule({ code: source, compilationHints: [] }); }
+                catch (caught) { error = caught; }
+                if (!(error instanceof TypeError) ||
+                    error.message !== 'compilationHints are not supported yet') {
+                    throw new Error('compilationHints error was not named: ' + error);
+                }
+
+                const module = device.createShaderModule({ code: source });
+                for (const layout of [undefined, null]) {
+                    error = undefined;
+                    const descriptor = { compute: { module } };
+                    if (layout === null) descriptor.layout = null;
+                    try { device.createComputePipeline(descriptor); }
+                    catch (caught) { error = caught; }
+                    if (!(error instanceof TypeError) || error.message !== 'layout') {
+                        throw new Error('required layout error was not named: ' + error);
+                    }
+                }
+
+                error = undefined;
+                try {
+                    device.createComputePipeline({
+                        layout: 'auto',
+                        compute: { module, constants: {} }
+                    });
+                } catch (caught) { error = caught; }
+                if (!(error instanceof TypeError) ||
+                    error.message !== 'constants are not supported yet') {
+                    throw new Error('constants error was not named: ' + error);
+                }
+
+                const encoder = device.createCommandEncoder();
+                error = undefined;
+                try { encoder.beginComputePass({ timestampWrites: {} }); }
+                catch (caught) { error = caught; }
+                if (!(error instanceof TypeError) ||
+                    error.message !== 'timestampWrites are not supported yet') {
+                    throw new Error('timestampWrites error was not named: ' + error);
+                }
+
+            "#,
+            "required-layout-and-unsupported-members.js",
+        );
+        runtime.clear_global("device").expect("clear device");
+        runtime.run_gc();
+        let _ = runtime.drain_releases().expect("drain");
+    }
+
+    #[test]
+    fn entry_point_null_reaches_c_as_the_string_null_from_script() {
+        let setup = native_setup();
+        RECORDED_ENTRY_POINTS.with(|values| values.borrow_mut().clear());
+        let runtime =
+            Runtime::new_with_dispatch(entry_point_recording_dispatch()).expect("quickjs runtime");
+        let wrapped = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("device", wrapped)
+            .expect("set device");
+        eval_drop(
+            &runtime,
+            r#"
+                const entryPointModule = device.createShaderModule({
+                    code: '@compute @workgroup_size(1) fn main() {}'
+                });
+                device.createComputePipeline({
+                    layout: 'auto', compute: { module: entryPointModule }
+                });
+                device.createComputePipeline({
+                    layout: 'auto', compute: { module: entryPointModule, entryPoint: null }
+                });
+            "#,
+            "entry-point-null.js",
+        );
+        RECORDED_ENTRY_POINTS.with(|values| {
+            assert_eq!(
+                values.borrow().as_slice(),
+                &[None, Some(b"null".to_vec())],
+                "script omission and present null must reach distinct C string views"
+            );
+        });
         runtime.clear_global("device").expect("clear device");
         runtime.run_gc();
         let _ = runtime.drain_releases().expect("drain");

@@ -28,18 +28,13 @@ fn generate_descriptor_conversions() {
         .expect("core is below repository root");
     let idl_path = repository.join("third_party/gpuweb/webgpu.idl");
     let yaml_path = repository.join("third_party/webgpu-headers/webgpu.yml");
-    let policy_path = repository.join("codegen/policy.toml");
 
-    for path in [&idl_path, &yaml_path, &policy_path] {
+    for path in [&idl_path, &yaml_path] {
         println!("cargo:rerun-if-changed={}", path.display());
     }
 
-    let emitted = generate_conversions(
-        &read_input(&idl_path),
-        &read_input(&yaml_path),
-        &read_input(&policy_path),
-    )
-    .expect("pinned WebGPU conversion inputs must generate");
+    let emitted = generate_conversions(&read_input(&idl_path), &read_input(&yaml_path))
+        .expect("pinned WebGPU conversion inputs must generate");
     let output = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo sets OUT_DIR"))
         .join("generated_conversions.rs");
     fs::write(output, emitted).expect("write generated descriptor conversions");

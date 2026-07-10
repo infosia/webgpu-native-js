@@ -806,3 +806,84 @@ engine the same trait obligation happens to be discharged by refcounting.
 Everywhere a `JsEngine` method can be "trivially" implemented, ask what the
 trait's *caller* is relying on the method to guarantee, and write the test
 against the guarantee, not the implementation.
+
+---
+
+## Phase 4 Phase Review — 2026-07-10 ("Clean Review Then Fix")
+
+Three no-context lenses over the codegen phase (`f3d0aba..9b8c84c` + slices):
+**emission correctness** (every emitted enum list, default, width, and sentinel
+hand-checked against both pins — zero wrong emissions found), **rule
+compliance** (G1–G12 audited; zero tautologies in the new tests), **deletion
+experiments** (10 run; 2 survived fully green, several survived one net).
+
+**CRITICAL: none, from all three lenses.**
+
+### MAJOR findings, all fixed (consolidated from the three lenses)
+
+1. **The union path bypassed required-ness — a sixth unretired deviation** after
+   slice 2c claimed five. `layout` is `required` and non-null in the pinned IDL
+   (webgpu.idl:676); emitted code silently mapped undefined/null → auto.
+   Retired per the slice-2c precedent: member-named TypeError, core + script
+   tests, mock construction sites now say `"auto"` explicitly. The union
+   validator now checks `idl.required` generally.
+2. **Enum-value join mismatches gated nothing** — an IDL-only value on a
+   generated enum now hard-fails generation unless a reasoned `enum_value_skip`
+   covers it (first customer: `GPUAutoLayoutMode.auto` → null C handle), and
+   the per-class report lines are themselves tested (deletion experiment E6 had
+   dropped a whole class with every suite green).
+3. **The full-artifact snapshot** — deletion experiments proved an
+   enum-constant swap and a G11-citation removal survived all 149 tests
+   (snapshots covered 4 of ~12 conversions; script suites can never see C
+   constants). The entire emitted artifact is now snapshotted against the pins;
+   regeneration is explicit and documented.
+4. **`policy.toml` staleness was structurally undetectable** (experiment E7:
+   with the rerun-if-changed line lost, a policy edit produced a 0.02s no-op
+   build and 79 green tests against stale output — and no test CAN catch it,
+   because editing build.rs forces the rerun that hides it). Structural fix:
+   the policy is `include_str!`-embedded in the codegen crate, making it a
+   cargo-fingerprinted source file.
+5. **Required-member tests settled for `is_err()`** — demoting `required_member`
+   to `get_property` stayed behaviorally green because something downstream
+   errored anyway. All required-member tests now assert the member-named
+   message.
+6. **The pre-pass narrowness test contained nothing out-of-namespace** — 
+   widening the rewrite to any const-bearing line survived it; caught in the
+   pinned input only by luck (an enum string without `=`). The fixture now
+   contains interface consts, comments, and enum strings that must survive
+   unrewritten.
+7. **Present-but-unsupported members were silently dropped** (`constants`,
+   `timestampWrites`, `compilationHints`) — the slice-2b precedent applied:
+   `reject_if_present` policy flag, member-named TypeErrors, core + script
+   tests.
+8. **Script-level coverage for the five retired deviations was overclaimed in
+   this tracking doc** (2 of 5 existed). The three missing QuickJS assertions
+   were added; the entryPoint test proves via a recording dispatch that
+   omission reaches C as the absent sentinel while `null` reaches C as
+   `b"null"`. Correction noted here: the slice-2c sentence "core + script
+   level" was written before the script half fully existed.
+9. **`specs/tracking/codegen-deltas.md` did not exist** though block 05 names
+   it twice — created, from the policy reasons and the review's recorded
+   divergences (including `enforce_u64`'s 2^53 divergence and the
+   read-order/element-nullability items, each with a deferral rationale).
+
+### MINOR: emitter panic-instead-of-Policy-error, identifier-validation
+inconsistency, `needs_arena` asymmetry (latent no-compile), vacuous `zero = []`
+undetected, a dead emitted fallback branch — all fixed in the same handoff.
+Parser-decision record location (engine-boundary Q10 vs the codegen.md G9
+names) — accepted with this pointer serving as the cross-reference.
+
+### Gate — PASSED. Phase 4 (block 05) is COMPLETE.
+
+Final gates re-run directly by the planner: codegen 31 (8 unit + 1 report + 22
+fixtures incl. the full-surface snapshot), core 83 (backend env var truly
+unset), quickjs 46, JSC 17+1 ignored, workspace all green, both clippys
+`-D warnings`, fmt clean, parity byte-identical on both engines.
+
+Exit criteria: all seven met. The follow-on work is recorded, not lost:
+class-spec/lifecycle emission is the next leverage (block 05 §8), and method
+emission will answer the remaining Promise question. The deletion lens's
+cross-cutting observation deserves preserving verbatim: **the adapter script
+suites detected none of the ten emitter mutations — conversion correctness
+lives entirely in core mock asserts plus codegen snapshots. "Both adapters
+pass" validates plumbing, never conversion values.**

@@ -1,7 +1,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use webgpu_native_js_codegen::{generate_conversions, join_inputs, CodegenError, JoinReport};
+use webgpu_native_js_codegen::{
+    generate_conversions, generate_conversions_with_policy, join_inputs, join_inputs_with_policy,
+    render_report, CodegenError, JoinReport,
+};
 
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
@@ -17,7 +20,7 @@ fn fixture(name: &str) -> (String, String, String) {
 
 fn joined_fixture(name: &str) -> JoinReport {
     let (idl, yaml, policy) = fixture(name);
-    join_inputs(&idl, &yaml, &policy).expect("fixture joins")
+    join_inputs_with_policy(&idl, &yaml, &policy).expect("fixture joins")
 }
 
 fn pinned_inputs() -> (String, String, String) {
@@ -48,7 +51,7 @@ fn name_mismatch_fixture_is_loud() {
 #[test]
 fn unknown_interface_policy_fixture_fails() {
     let (idl, yaml, policy) = fixture("unknown_interface");
-    let error = join_inputs(&idl, &yaml, &policy).expect_err("dead policy must fail");
+    let error = join_inputs_with_policy(&idl, &yaml, &policy).expect_err("dead policy must fail");
     assert!(matches!(error, CodegenError::Policy(message) if message.contains("GPUUnknown")));
 }
 
@@ -69,16 +72,18 @@ fn clamp_fixture_is_distinct_from_enforce_range_and_matches_snapshot() {
     assert!(!member.enforce_range);
 
     let (idl, yaml, policy) = fixture("clamp");
-    let emitted = generate_conversions(&idl, &yaml, &policy).expect("Clamp emission");
+    let emitted = generate_conversions_with_policy(&idl, &yaml, &policy).expect("Clamp emission");
     let expected = fs::read_to_string(fixtures().join("clamp.rs")).expect("Clamp snapshot");
     assert_eq!(emitted, expected);
 
     let missing = idl.replace("[Clamp] ", "");
-    let error = generate_conversions(&missing, &yaml, &policy).expect_err("missing Clamp kind");
+    let error =
+        generate_conversions_with_policy(&missing, &yaml, &policy).expect_err("missing Clamp kind");
     assert!(error.to_string().contains("unsigned short"));
 
     let wrong_width = idl.replace("unsigned short", "unsigned long");
-    let error = generate_conversions(&wrong_width, &yaml, &policy).expect_err("dead Clamp shape");
+    let error = generate_conversions_with_policy(&wrong_width, &yaml, &policy)
+        .expect_err("dead Clamp shape");
     assert!(error.to_string().contains("unsupported Clamp shape"));
 }
 
@@ -112,8 +117,8 @@ fn nullable_and_required_dictionary_members_remain_distinct() {
 
 #[test]
 fn full_pinned_inputs_parse_and_subset_join_offline() {
-    let (idl, yaml, policy) = pinned_inputs();
-    let report = join_inputs(&idl, &yaml, &policy).expect("full pinned join");
+    let (idl, yaml, _policy) = pinned_inputs();
+    let report = join_inputs(&idl, &yaml).expect("full pinned join");
     assert_eq!(report.parser.remaining_bytes, 0);
     assert_eq!(report.parser.definitions, 209);
     assert_eq!(report.interfaces.len(), 12);
@@ -123,10 +128,24 @@ fn full_pinned_inputs_parse_and_subset_join_offline() {
 }
 
 #[test]
+fn full_pinned_surface_matches_committed_artifact() {
+    // To accept an intentional full-surface change, run:
+    // UPDATE_FULL_SURFACE=1 cargo test -p webgpu-native-js-codegen --test fixtures full_pinned_surface_matches_committed_artifact
+    let (idl, yaml, _policy) = pinned_inputs();
+    let emitted = generate_conversions(&idl, &yaml).expect("full pinned generation");
+    let expectation = fixtures().join("full_surface.rs");
+    if std::env::var_os("UPDATE_FULL_SURFACE").is_some() {
+        fs::write(&expectation, &emitted).expect("regenerate full-surface expectation");
+    }
+    let expected = fs::read_to_string(expectation).expect("full-surface expectation");
+    assert_eq!(emitted, expected);
+}
+
+#[test]
 fn new_descriptor_policy_reasons_are_surfaced_in_the_report() {
-    let (idl, yaml, policy) = pinned_inputs();
+    let (idl, yaml, _policy) = pinned_inputs();
     let report = webgpu_native_js_codegen::render_report(
-        &join_inputs(&idl, &yaml, &policy).expect("full pinned join"),
+        &join_inputs(&idl, &yaml).expect("full pinned join"),
     );
     for reason in [
         "recorded deferral: block 03 section 7",
@@ -172,7 +191,8 @@ fn new_descriptor_policy_kinds_reject_missing_and_dead_entries() {
         ),
     ];
     for (bad_policy, needle) in cases {
-        let error = generate_conversions(&idl, &yaml, &bad_policy).expect_err("policy must fail");
+        let error = generate_conversions_with_policy(&idl, &yaml, &bad_policy)
+            .expect_err("policy must fail");
         assert!(error.to_string().contains(needle), "{error}");
     }
 }
@@ -181,21 +201,21 @@ fn new_descriptor_policy_kinds_reject_missing_and_dead_entries() {
 fn sampler_subset_and_descriptor_policy_are_checked_in_both_directions() {
     let (idl, yaml, policy) = pinned_inputs();
     let missing_subset_member = policy.replace("  \"createSampler\",\n", "");
-    let error = generate_conversions(&idl, &yaml, &missing_subset_member)
+    let error = generate_conversions_with_policy(&idl, &yaml, &missing_subset_member)
         .expect_err("dead sampler descriptor policy");
     assert!(error.to_string().contains("GPUSamplerDescriptor"));
 
     let sampler_descriptor = "[[descriptor]]\ndictionary = \"GPUSamplerDescriptor\"\n\n[[descriptor.strings]]\nmember = \"label\"\nnullable = false\n\n";
     let missing_descriptor = policy.replace(sampler_descriptor, "");
-    let error = generate_conversions(&idl, &yaml, &missing_descriptor)
+    let error = generate_conversions_with_policy(&idl, &yaml, &missing_descriptor)
         .expect_err("unpoliced createSampler descriptor");
     assert!(error.to_string().contains("GPUDevice.createSampler"));
 }
 
 #[test]
 fn new_descriptor_emission_shapes_match_snapshot() {
-    let (idl, yaml, policy) = pinned_inputs();
-    let emitted = generate_conversions(&idl, &yaml, &policy).expect("full descriptor emission");
+    let (idl, yaml, _policy) = pinned_inputs();
+    let emitted = generate_conversions(&idl, &yaml).expect("full descriptor emission");
     let mut selected = String::new();
     for name in [
         "convert_bind_group_entry",
@@ -225,7 +245,7 @@ fn new_descriptor_emission_shapes_match_snapshot() {
 #[test]
 fn emitted_descriptor_matches_snapshot() {
     let (idl, yaml, policy) = fixture("emission");
-    let emitted = generate_conversions(&idl, &yaml, &policy).expect("fixture emission");
+    let emitted = generate_conversions_with_policy(&idl, &yaml, &policy).expect("fixture emission");
     let expected = fs::read_to_string(fixtures().join("emission.rs")).expect("snapshot");
     assert_eq!(emitted, expected);
 }
@@ -233,7 +253,8 @@ fn emitted_descriptor_matches_snapshot() {
 #[test]
 fn emitted_nested_layout_descriptors_match_snapshot() {
     let (idl, yaml, policy) = fixture("bind_group_layout");
-    let emitted = generate_conversions(&idl, &yaml, &policy).expect("nested fixture emission");
+    let emitted =
+        generate_conversions_with_policy(&idl, &yaml, &policy).expect("nested fixture emission");
     let expected =
         fs::read_to_string(fixtures().join("bind_group_layout.rs")).expect("nested snapshot");
     assert_eq!(emitted, expected);
@@ -271,20 +292,56 @@ fn joined_layout_model_preserves_inheritance_sentinels_and_one_sided_members() {
 }
 
 #[test]
+fn generated_enum_idl_only_values_require_a_reasoned_policy_skip() {
+    let (idl, yaml, policy) = fixture("bind_group_layout");
+    let idl = idl.replace(
+        "    \"read-only-storage\",\n",
+        "    \"read-only-storage\",\n    \"future-only\",\n",
+    );
+
+    let error = generate_conversions_with_policy(&idl, &yaml, &policy)
+        .expect_err("generated IDL-only enum value must be policy-covered");
+    assert!(matches!(
+        error,
+        CodegenError::Policy(message)
+            if message.contains("unpoliced IDL-only value on generated enum GPUBufferBindingType: future-only")
+    ));
+
+    let policy = format!(
+        "{policy}\n[[enum_value_skip]]\nenum = \"GPUBufferBindingType\"\nvalue = \"future-only\"\nreason = \"fixture C ABI does not expose the future value\"\n"
+    );
+    generate_conversions_with_policy(&idl, &yaml, &policy)
+        .expect("reasoned enum-value skip permits generation");
+    let report = render_report(
+        &join_inputs_with_policy(&idl, &yaml, &policy).expect("policy-covered fixture join"),
+    );
+    assert!(report.contains(
+        "enum-value GPUBufferBindingType.future-only (fixture C ABI does not expose the future value)"
+    ));
+}
+
+#[test]
+fn report_renders_c_only_enum_values_by_mismatch_class() {
+    let report = render_report(&joined_fixture("bind_group_layout"));
+    assert!(report.contains("enum GPUBufferBindingType: C-only value binding_not_used"));
+}
+
+#[test]
 fn unsupported_member_policy_is_checked_in_both_directions() {
     let (idl, yaml, policy) = fixture("bind_group_layout");
     let missing = policy.replace(
         "[\"sampler\", \"texture\", \"storageTexture\", \"externalTexture\"]",
         "[\"sampler\", \"texture\", \"storageTexture\"]",
     );
-    let error = generate_conversions(&idl, &yaml, &missing).expect_err("missing policy");
+    let error =
+        generate_conversions_with_policy(&idl, &yaml, &missing).expect_err("missing policy");
     assert!(matches!(error, CodegenError::Policy(message) if message.contains("externalTexture")));
 
     let dead = policy.replace(
         "\"externalTexture\"]",
         "\"externalTexture\", \"notAMember\"]",
     );
-    let error = generate_conversions(&idl, &yaml, &dead).expect_err("dead policy");
+    let error = generate_conversions_with_policy(&idl, &yaml, &dead).expect_err("dead policy");
     assert!(matches!(error, CodegenError::Policy(message) if message.contains("notAMember")));
 }
 
@@ -292,7 +349,8 @@ fn unsupported_member_policy_is_checked_in_both_directions() {
 fn c_only_zero_policy_is_checked_in_both_directions() {
     let (idl, yaml, policy) = fixture("bind_group_layout");
     let missing = policy.replace("zero = [\"binding_array_size\"]\n", "");
-    let error = generate_conversions(&idl, &yaml, &missing).expect_err("missing policy");
+    let error =
+        generate_conversions_with_policy(&idl, &yaml, &missing).expect_err("missing policy");
     assert!(
         matches!(error, CodegenError::Policy(message) if message.contains("binding_array_size"))
     );
@@ -301,7 +359,7 @@ fn c_only_zero_policy_is_checked_in_both_directions() {
         "zero = [\"binding_array_size\"]",
         "zero = [\"binding_array_size\", \"not_a_member\"]",
     );
-    let error = generate_conversions(&idl, &yaml, &dead).expect_err("dead policy");
+    let error = generate_conversions_with_policy(&idl, &yaml, &dead).expect_err("dead policy");
     assert!(matches!(error, CodegenError::Policy(message) if message.contains("not_a_member")));
 }
 
@@ -312,7 +370,7 @@ fn missing_string_policy_is_a_loud_unpoliced_deviation() {
         "\n[[descriptor.strings]]\nmember = \"label\"\nnullable = false\n",
         "\n",
     );
-    let error = generate_conversions(&idl, &yaml, &policy).expect_err("missing policy");
+    let error = generate_conversions_with_policy(&idl, &yaml, &policy).expect_err("missing policy");
     assert!(matches!(error, CodegenError::Policy(message) if message.contains("unpoliced string")));
 }
 
@@ -320,8 +378,40 @@ fn missing_string_policy_is_a_loud_unpoliced_deviation() {
 fn dead_string_policy_is_rejected() {
     let (idl, yaml, policy) = fixture("emission");
     let policy = policy.replace("member = \"label\"", "member = \"missing\"");
-    let error = generate_conversions(&idl, &yaml, &policy).expect_err("dead policy");
+    let error = generate_conversions_with_policy(&idl, &yaml, &policy).expect_err("dead policy");
     assert!(
         matches!(error, CodegenError::Policy(message) if message.contains("dead string policy"))
     );
+}
+
+#[test]
+fn emitted_rust_targets_and_vacuous_zero_entries_are_rejected() {
+    let (idl, yaml, policy) = fixture("emission");
+    let invalid_target = policy.replace("target = \"BufferDescriptor\"", "target = \"not valid\"");
+    let error = generate_conversions_with_policy(&idl, &yaml, &invalid_target)
+        .expect_err("descriptor target must be a Rust identifier");
+    assert!(error
+        .to_string()
+        .contains("invalid descriptor target identifier"));
+
+    let empty_zero = policy.replace(
+        "target = \"BufferDescriptor\"",
+        "target = \"BufferDescriptor\"\nzero = []",
+    );
+    let error = generate_conversions_with_policy(&idl, &yaml, &empty_zero)
+        .expect_err("empty zero policy is vacuous");
+    assert!(error
+        .to_string()
+        .contains("dead zero policy GPUBufferDescriptor"));
+
+    let (idl, yaml, policy) = pinned_inputs();
+    let invalid_chain_target = policy.replace(
+        "target = \"WGPUShaderSourceWGSL\"",
+        "target = \"WGPUShaderSourceWGSL::Injected\"",
+    );
+    let error = generate_conversions_with_policy(&idl, &yaml, &invalid_chain_target)
+        .expect_err("chain target must be a Rust identifier");
+    assert!(error
+        .to_string()
+        .contains("invalid chain target identifier"));
 }

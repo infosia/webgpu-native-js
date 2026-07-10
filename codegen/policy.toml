@@ -15,11 +15,18 @@
 # Nested `[[descriptor.strings]]` entries classify WebIDL nullability for every
 # joined string member. Policy also records name maps, skips with reasons,
 # native handles and handle sequences, flattened unions, typed chains,
-# handle-or-enum unions, retained wrapper captures, and precisely-scoped
-# required-member defaults. It is checked both ways: unknown, duplicate, dead,
-# disagreeing, and unpoliced entries all fail generation.
+# handle-or-enum unions, retained wrapper captures, precisely-scoped
+# required-member defaults, and reasoned IDL-only enum-value skips. Member skips
+# may reject present values instead of silently ignoring them. Policy is checked
+# both ways: unknown, duplicate, dead, disagreeing, and unpoliced entries all
+# fail generation.
 
 schema_version = 1
+
+[[enum_value_skip]]
+enum = "GPUAutoLayoutMode"
+value = "auto"
+reason = "the C ABI represents auto layout with a null pipeline-layout handle"
 
 [[name_map]]
 idl = "GPUProgrammableStage"
@@ -150,7 +157,6 @@ element_field = "buffer"
 
 [[descriptor]]
 dictionary = "GPUPipelineLayoutDescriptor"
-zero = []
 
 [[descriptor.strings]]
 member = "label"
@@ -170,6 +176,7 @@ nullable = false
 [[descriptor.skips]]
 member = "compilationHints"
 reason = "recorded deferral: block 03 section 7"
+reject_if_present = true
 
 [[descriptor.chains]]
 member = "code"
@@ -192,6 +199,7 @@ helper = "shader_module_handle"
 [[descriptor.skips]]
 member = "constants"
 reason = "recorded deferral: pipeline constants are outside the block 01-03 surface"
+reject_if_present = true
 
 [[descriptor]]
 dictionary = "GPUComputePipelineDescriptor"
@@ -245,6 +253,7 @@ nullable = false
 [[descriptor.skips]]
 member = "timestampWrites"
 reason = "out of scope until query sets"
+reject_if_present = true
 
 [[descriptor]]
 dictionary = "GPUBufferBindingLayout"

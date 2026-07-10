@@ -225,8 +225,20 @@ pub struct JoinReport {
     pub skips: Vec<String>,
 }
 
-/// Parses pinned-format inputs, enforces the subset policy, and returns a typed join.
-pub fn join_inputs(idl: &str, yaml: &str, policy: &str) -> Result<JoinReport, CodegenError> {
+/// The committed code-generation policy embedded as a fingerprinted crate source.
+pub const EMBEDDED_POLICY: &str = include_str!("../policy.toml");
+
+/// Parses pinned-format inputs with the committed policy and returns a typed join.
+pub fn join_inputs(idl: &str, yaml: &str) -> Result<JoinReport, CodegenError> {
+    join_inputs_with_policy(idl, yaml, EMBEDDED_POLICY)
+}
+
+/// Parses pinned-format inputs with an explicit policy, for fixtures and policy tests.
+pub fn join_inputs_with_policy(
+    idl: &str,
+    yaml: &str,
+    policy: &str,
+) -> Result<JoinReport, CodegenError> {
     let (cooked, rewrites) = preprocess_namespace_consts(idl)?;
     let (remaining, definitions) = Definitions::parse(&cooked)
         .map_err(|error| CodegenError::Idl(format!("weedle2: {error:?}")))?;
@@ -255,9 +267,18 @@ pub fn join_inputs(idl: &str, yaml: &str, policy: &str) -> Result<JoinReport, Co
     Ok(report)
 }
 
-/// Joins pinned-format inputs and emits the conversions selected by policy.
-pub fn generate_conversions(idl: &str, yaml: &str, policy: &str) -> Result<String, CodegenError> {
-    let report = join_inputs(idl, yaml, policy)?;
+/// Joins pinned-format inputs and emits conversions using the committed policy.
+pub fn generate_conversions(idl: &str, yaml: &str) -> Result<String, CodegenError> {
+    generate_conversions_with_policy(idl, yaml, EMBEDDED_POLICY)
+}
+
+/// Emits conversions with an explicit policy, for fixtures and policy tests.
+pub fn generate_conversions_with_policy(
+    idl: &str,
+    yaml: &str,
+    policy: &str,
+) -> Result<String, CodegenError> {
+    let report = join_inputs_with_policy(idl, yaml, policy)?;
     emission::emit_conversions(&report, policy)
 }
 
@@ -333,6 +354,8 @@ pub(crate) struct Policy {
     pub(crate) name_map: Vec<NameMapEntry>,
     #[serde(default)]
     pub(crate) descriptor: Vec<DescriptorEntry>,
+    #[serde(default)]
+    pub(crate) enum_value_skip: Vec<EnumValueSkipPolicy>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -360,8 +383,7 @@ pub(crate) struct DescriptorEntry {
     pub(crate) strings: Vec<StringPolicy>,
     #[serde(default)]
     pub(crate) unsupported: Vec<String>,
-    #[serde(default)]
-    pub(crate) zero: Vec<String>,
+    pub(crate) zero: Option<Vec<String>>,
     #[serde(default)]
     pub(crate) default_empty_sequence: Vec<String>,
     #[serde(default)]
@@ -392,6 +414,16 @@ pub(crate) struct StringPolicy {
 #[serde(deny_unknown_fields)]
 pub(crate) struct SkipPolicy {
     pub(crate) member: String,
+    pub(crate) reason: String,
+    #[serde(default)]
+    pub(crate) reject_if_present: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct EnumValueSkipPolicy {
+    pub(crate) r#enum: String,
+    pub(crate) value: String,
     pub(crate) reason: String,
 }
 
@@ -1035,6 +1067,12 @@ fn build_report(
                 descriptor.dictionary, union.member, union.reason
             ));
         }
+    }
+    for skip in &policy.enum_value_skip {
+        report.skips.push(format!(
+            "enum-value {}.{} ({})",
+            skip.r#enum, skip.value, skip.reason
+        ));
     }
     for name_map in &policy.name_map {
         report.skips.push(format!(
@@ -1984,9 +2022,9 @@ mod tests {
 
     #[test]
     fn public_join_inputs_covers_happy_and_error_paths() {
-        let report = join_inputs(IDL, YAML, POLICY).expect("clean join");
+        let report = join_inputs_with_policy(IDL, YAML, POLICY).expect("clean join");
         assert_eq!(report.interfaces.len(), 1);
-        let error = join_inputs(
+        let error = join_inputs_with_policy(
             IDL,
             YAML,
             "schema_version = 1\n[[subset]]\ninterface = \"GPUUnknown\"",
@@ -1997,7 +2035,7 @@ mod tests {
 
     #[test]
     fn public_render_report_is_deterministic() {
-        let report = join_inputs(IDL, YAML, POLICY).expect("join");
+        let report = join_inputs_with_policy(IDL, YAML, POLICY).expect("join");
         let rendered = render_report(&report);
         assert!(rendered.contains("parser: weedle2 5.0.0"));
         assert!(rendered.contains("join: interfaces=1"));
@@ -2067,10 +2105,21 @@ mod tests {
 
     #[test]
     fn parser_prepass_is_narrow_and_records_exact_text() {
-        let idl = "namespace GPUFlags {\n const unsigned long ONE = 0x1;\n};\n";
+        let idl = concat!(
+            "// const unsigned long COMMENT_ONLY = 0x0;\n",
+            "interface GPUConstants { const unsigned long INTERFACE_CONST = 0x2; };\n",
+            "enum GPUConstText { \"contains const text\" };\n",
+            "namespace GPUFlags {\n const unsigned long ONE = 0x1;\n};\n",
+        );
         let (cooked, rewrites) = preprocess_namespace_consts(idl).expect("pre-pass");
         assert_eq!(rewrites, vec!["const unsigned long ONE = 0x1;"]);
         assert!(cooked.contains("readonly attribute unsigned long ONE;"));
+        assert!(cooked.contains("// const unsigned long COMMENT_ONLY = 0x0;"));
+        assert!(cooked.contains("const unsigned long INTERFACE_CONST = 0x2;"));
+        assert!(cooked.contains("\"contains const text\""));
+        let (remaining, parsed) = Definitions::parse(&cooked).expect("preserved forms parse");
+        assert!(remaining.is_empty());
+        assert_eq!(parsed.len(), 3);
     }
 
     #[test]
