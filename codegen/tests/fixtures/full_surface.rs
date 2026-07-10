@@ -1,3 +1,182 @@
+/// Function-pointer dispatch for the WebGPU C ABI calls used by this slice.
+#[derive(Clone, Copy)]
+pub struct GpuDispatch {
+    /// `wgpuInstanceProcessEvents`.
+    pub instance_process_events: unsafe fn(WGPUInstance),
+    /// `wgpuInstanceRequestAdapter`.
+    pub instance_request_adapter: unsafe fn(WGPUInstance, *const WGPURequestAdapterOptions, WGPURequestAdapterCallbackInfo) -> WGPUFuture,
+    /// `wgpuAdapterRequestDevice`.
+    pub adapter_request_device: unsafe fn(WGPUAdapter, *const WGPUDeviceDescriptor, WGPURequestDeviceCallbackInfo) -> WGPUFuture,
+    /// `wgpuAdapterRelease`.
+    pub adapter_release: unsafe fn(WGPUAdapter),
+    /// `wgpuBufferGetConstMappedRange`.
+    pub buffer_get_const_mapped_range: unsafe fn(WGPUBuffer, usize, usize) -> *const ::std::ffi::c_void,
+    /// `wgpuDeviceAddRef`.
+    pub device_add_ref: unsafe fn(WGPUDevice),
+    /// `wgpuDeviceRelease`.
+    pub device_release: unsafe fn(WGPUDevice),
+    /// `wgpuDeviceCreateBuffer`.
+    pub device_create_buffer: unsafe fn(WGPUDevice, *const WGPUBufferDescriptor) -> WGPUBuffer,
+    /// `wgpuDeviceCreateSampler`.
+    pub device_create_sampler: unsafe fn(WGPUDevice, *const WGPUSamplerDescriptor) -> WGPUSampler,
+    /// `wgpuDeviceCreateShaderModule`.
+    pub device_create_shader_module: unsafe fn(WGPUDevice, *const WGPUShaderModuleDescriptor) -> WGPUShaderModule,
+    /// `wgpuDeviceCreateBindGroupLayout`.
+    pub device_create_bind_group_layout: unsafe fn(WGPUDevice, *const WGPUBindGroupLayoutDescriptor) -> WGPUBindGroupLayout,
+    /// `wgpuDeviceCreatePipelineLayout`.
+    pub device_create_pipeline_layout: unsafe fn(WGPUDevice, *const WGPUPipelineLayoutDescriptor) -> WGPUPipelineLayout,
+    /// `wgpuDeviceCreateBindGroup`.
+    pub device_create_bind_group: unsafe fn(WGPUDevice, *const WGPUBindGroupDescriptor) -> WGPUBindGroup,
+    /// `wgpuDeviceCreateComputePipeline`.
+    pub device_create_compute_pipeline: unsafe fn(WGPUDevice, *const WGPUComputePipelineDescriptor) -> WGPUComputePipeline,
+    /// `wgpuDeviceCreateCommandEncoder`.
+    pub device_create_command_encoder: unsafe fn(WGPUDevice, *const WGPUCommandEncoderDescriptor) -> WGPUCommandEncoder,
+    /// `wgpuDeviceGetQueue`.
+    pub device_get_queue: unsafe fn(WGPUDevice) -> WGPUQueue,
+    /// `wgpuBufferAddRef`.
+    pub buffer_add_ref: unsafe fn(WGPUBuffer),
+    /// `wgpuBufferRelease`.
+    pub buffer_release: unsafe fn(WGPUBuffer),
+    /// `wgpuBufferMapAsync`.
+    pub buffer_map_async: unsafe fn(WGPUBuffer, WGPUMapMode, usize, usize, WGPUBufferMapCallbackInfo) -> WGPUFuture,
+    /// `wgpuBufferGetMappedRange`.
+    pub buffer_get_mapped_range: unsafe fn(WGPUBuffer, usize, usize) -> *mut ::std::ffi::c_void,
+    /// `wgpuBufferUnmap`.
+    pub buffer_unmap: unsafe fn(WGPUBuffer),
+    /// `wgpuBufferDestroy`.
+    pub buffer_destroy: unsafe fn(WGPUBuffer),
+    /// `wgpuBufferSetLabel`.
+    pub buffer_set_label: unsafe fn(WGPUBuffer, WGPUStringView),
+    /// `wgpuQueueAddRef`.
+    pub queue_add_ref: unsafe fn(WGPUQueue),
+    /// `wgpuQueueRelease`.
+    pub queue_release: unsafe fn(WGPUQueue),
+    /// `wgpuQueueWriteBuffer`.
+    pub queue_write_buffer: unsafe fn(WGPUQueue, WGPUBuffer, u64, *const ::std::ffi::c_void, usize),
+    /// `wgpuQueueSubmit`.
+    pub queue_submit: unsafe fn(WGPUQueue, usize, *const WGPUCommandBuffer),
+    /// `wgpuQueueOnSubmittedWorkDone`.
+    pub queue_on_submitted_work_done: unsafe fn(WGPUQueue, WGPUQueueWorkDoneCallbackInfo) -> WGPUFuture,
+    /// `wgpuShaderModuleAddRef`.
+    pub shader_module_add_ref: unsafe fn(WGPUShaderModule),
+    /// `wgpuShaderModuleRelease`.
+    pub shader_module_release: unsafe fn(WGPUShaderModule),
+    /// `wgpuSamplerAddRef`.
+    pub sampler_add_ref: unsafe fn(WGPUSampler),
+    /// `wgpuSamplerRelease`.
+    pub sampler_release: unsafe fn(WGPUSampler),
+    /// `wgpuSamplerSetLabel`.
+    pub sampler_set_label: unsafe fn(WGPUSampler, WGPUStringView),
+    /// `wgpuBindGroupLayoutAddRef`.
+    pub bind_group_layout_add_ref: unsafe fn(WGPUBindGroupLayout),
+    /// `wgpuBindGroupLayoutRelease`.
+    pub bind_group_layout_release: unsafe fn(WGPUBindGroupLayout),
+    /// `wgpuPipelineLayoutAddRef`.
+    pub pipeline_layout_add_ref: unsafe fn(WGPUPipelineLayout),
+    /// `wgpuPipelineLayoutRelease`.
+    pub pipeline_layout_release: unsafe fn(WGPUPipelineLayout),
+    /// `wgpuBindGroupAddRef`.
+    pub bind_group_add_ref: unsafe fn(WGPUBindGroup),
+    /// `wgpuBindGroupRelease`.
+    pub bind_group_release: unsafe fn(WGPUBindGroup),
+    /// `wgpuComputePipelineAddRef`.
+    pub compute_pipeline_add_ref: unsafe fn(WGPUComputePipeline),
+    /// `wgpuComputePipelineRelease`.
+    pub compute_pipeline_release: unsafe fn(WGPUComputePipeline),
+    /// `wgpuCommandEncoderRelease`.
+    pub command_encoder_release: unsafe fn(WGPUCommandEncoder),
+    /// `wgpuCommandEncoderBeginComputePass`.
+    pub command_encoder_begin_compute_pass: unsafe fn(WGPUCommandEncoder, *const WGPUComputePassDescriptor) -> WGPUComputePassEncoder,
+    /// `wgpuCommandEncoderCopyBufferToBuffer`.
+    pub command_encoder_copy_buffer_to_buffer: unsafe fn(WGPUCommandEncoder, WGPUBuffer, u64, WGPUBuffer, u64, u64),
+    /// `wgpuCommandEncoderFinish`.
+    pub command_encoder_finish: unsafe fn(WGPUCommandEncoder, *const WGPUCommandBufferDescriptor) -> WGPUCommandBuffer,
+    /// `wgpuComputePassEncoderRelease`.
+    pub compute_pass_encoder_release: unsafe fn(WGPUComputePassEncoder),
+    /// `wgpuComputePassEncoderSetPipeline`.
+    pub compute_pass_encoder_set_pipeline: unsafe fn(WGPUComputePassEncoder, WGPUComputePipeline),
+    /// `wgpuComputePassEncoderSetBindGroup`.
+    pub compute_pass_encoder_set_bind_group: unsafe fn(WGPUComputePassEncoder, u32, WGPUBindGroup, usize, *const u32),
+    /// `wgpuComputePassEncoderDispatchWorkgroups`.
+    pub compute_pass_encoder_dispatch_workgroups: unsafe fn(WGPUComputePassEncoder, u32, u32, u32),
+    /// `wgpuComputePassEncoderEnd`.
+    pub compute_pass_encoder_end: unsafe fn(WGPUComputePassEncoder),
+    /// `wgpuCommandBufferRelease`.
+    pub command_buffer_release: unsafe fn(WGPUCommandBuffer),
+}
+
+/// Invokes a caller-supplied macro with every dispatch `(field, symbol, signature)` triple.
+#[macro_export]
+macro_rules! for_each_gpu_dispatch_entry {
+    ($macro:ident $(, $context:ident)?) => {
+        $macro! {
+            $($context;)?
+            (instance_process_events, wgpuInstanceProcessEvents, unsafe fn(instance: $crate::WGPUInstance)),
+            (instance_request_adapter, wgpuInstanceRequestAdapter, unsafe fn(instance: $crate::WGPUInstance, options: *const $crate::WGPURequestAdapterOptions, callback_info: $crate::WGPURequestAdapterCallbackInfo) -> $crate::WGPUFuture),
+            (adapter_request_device, wgpuAdapterRequestDevice, unsafe fn(adapter: $crate::WGPUAdapter, descriptor: *const $crate::WGPUDeviceDescriptor, callback_info: $crate::WGPURequestDeviceCallbackInfo) -> $crate::WGPUFuture),
+            (adapter_release, wgpuAdapterRelease, unsafe fn(adapter: $crate::WGPUAdapter)),
+            (buffer_get_const_mapped_range, wgpuBufferGetConstMappedRange, unsafe fn(buffer: $crate::WGPUBuffer, offset: usize, size: usize) -> *const ::std::ffi::c_void),
+            (device_add_ref, wgpuDeviceAddRef, unsafe fn(device: $crate::WGPUDevice)),
+            (device_release, wgpuDeviceRelease, unsafe fn(device: $crate::WGPUDevice)),
+            (device_create_buffer, wgpuDeviceCreateBuffer, unsafe fn(device: $crate::WGPUDevice, descriptor: *const $crate::WGPUBufferDescriptor) -> $crate::WGPUBuffer),
+            (device_create_sampler, wgpuDeviceCreateSampler, unsafe fn(device: $crate::WGPUDevice, descriptor: *const $crate::WGPUSamplerDescriptor) -> $crate::WGPUSampler),
+            (device_create_shader_module, wgpuDeviceCreateShaderModule, unsafe fn(device: $crate::WGPUDevice, descriptor: *const $crate::WGPUShaderModuleDescriptor) -> $crate::WGPUShaderModule),
+            (device_create_bind_group_layout, wgpuDeviceCreateBindGroupLayout, unsafe fn(device: $crate::WGPUDevice, descriptor: *const $crate::WGPUBindGroupLayoutDescriptor) -> $crate::WGPUBindGroupLayout),
+            (device_create_pipeline_layout, wgpuDeviceCreatePipelineLayout, unsafe fn(device: $crate::WGPUDevice, descriptor: *const $crate::WGPUPipelineLayoutDescriptor) -> $crate::WGPUPipelineLayout),
+            (device_create_bind_group, wgpuDeviceCreateBindGroup, unsafe fn(device: $crate::WGPUDevice, descriptor: *const $crate::WGPUBindGroupDescriptor) -> $crate::WGPUBindGroup),
+            (device_create_compute_pipeline, wgpuDeviceCreateComputePipeline, unsafe fn(device: $crate::WGPUDevice, descriptor: *const $crate::WGPUComputePipelineDescriptor) -> $crate::WGPUComputePipeline),
+            (device_create_command_encoder, wgpuDeviceCreateCommandEncoder, unsafe fn(device: $crate::WGPUDevice, descriptor: *const $crate::WGPUCommandEncoderDescriptor) -> $crate::WGPUCommandEncoder),
+            (device_get_queue, wgpuDeviceGetQueue, unsafe fn(device: $crate::WGPUDevice) -> $crate::WGPUQueue),
+            (buffer_add_ref, wgpuBufferAddRef, unsafe fn(buffer: $crate::WGPUBuffer)),
+            (buffer_release, wgpuBufferRelease, unsafe fn(buffer: $crate::WGPUBuffer)),
+            (buffer_map_async, wgpuBufferMapAsync, unsafe fn(buffer: $crate::WGPUBuffer, mode: $crate::WGPUMapMode, offset: usize, size: usize, callback_info: $crate::WGPUBufferMapCallbackInfo) -> $crate::WGPUFuture),
+            (buffer_get_mapped_range, wgpuBufferGetMappedRange, unsafe fn(buffer: $crate::WGPUBuffer, offset: usize, size: usize) -> *mut ::std::ffi::c_void),
+            (buffer_unmap, wgpuBufferUnmap, unsafe fn(buffer: $crate::WGPUBuffer)),
+            (buffer_destroy, wgpuBufferDestroy, unsafe fn(buffer: $crate::WGPUBuffer)),
+            (buffer_set_label, wgpuBufferSetLabel, unsafe fn(buffer: $crate::WGPUBuffer, label: $crate::WGPUStringView)),
+            (queue_add_ref, wgpuQueueAddRef, unsafe fn(queue: $crate::WGPUQueue)),
+            (queue_release, wgpuQueueRelease, unsafe fn(queue: $crate::WGPUQueue)),
+            (queue_write_buffer, wgpuQueueWriteBuffer, unsafe fn(queue: $crate::WGPUQueue, buffer: $crate::WGPUBuffer, buffer_offset: u64, data: *const ::std::ffi::c_void, size: usize)),
+            (queue_submit, wgpuQueueSubmit, unsafe fn(queue: $crate::WGPUQueue, commands_count: usize, commands: *const $crate::WGPUCommandBuffer)),
+            (queue_on_submitted_work_done, wgpuQueueOnSubmittedWorkDone, unsafe fn(queue: $crate::WGPUQueue, callback_info: $crate::WGPUQueueWorkDoneCallbackInfo) -> $crate::WGPUFuture),
+            (shader_module_add_ref, wgpuShaderModuleAddRef, unsafe fn(shader_module: $crate::WGPUShaderModule)),
+            (shader_module_release, wgpuShaderModuleRelease, unsafe fn(shader_module: $crate::WGPUShaderModule)),
+            (sampler_add_ref, wgpuSamplerAddRef, unsafe fn(sampler: $crate::WGPUSampler)),
+            (sampler_release, wgpuSamplerRelease, unsafe fn(sampler: $crate::WGPUSampler)),
+            (sampler_set_label, wgpuSamplerSetLabel, unsafe fn(sampler: $crate::WGPUSampler, label: $crate::WGPUStringView)),
+            (bind_group_layout_add_ref, wgpuBindGroupLayoutAddRef, unsafe fn(bind_group_layout: $crate::WGPUBindGroupLayout)),
+            (bind_group_layout_release, wgpuBindGroupLayoutRelease, unsafe fn(bind_group_layout: $crate::WGPUBindGroupLayout)),
+            (pipeline_layout_add_ref, wgpuPipelineLayoutAddRef, unsafe fn(pipeline_layout: $crate::WGPUPipelineLayout)),
+            (pipeline_layout_release, wgpuPipelineLayoutRelease, unsafe fn(pipeline_layout: $crate::WGPUPipelineLayout)),
+            (bind_group_add_ref, wgpuBindGroupAddRef, unsafe fn(bind_group: $crate::WGPUBindGroup)),
+            (bind_group_release, wgpuBindGroupRelease, unsafe fn(bind_group: $crate::WGPUBindGroup)),
+            (compute_pipeline_add_ref, wgpuComputePipelineAddRef, unsafe fn(compute_pipeline: $crate::WGPUComputePipeline)),
+            (compute_pipeline_release, wgpuComputePipelineRelease, unsafe fn(compute_pipeline: $crate::WGPUComputePipeline)),
+            (command_encoder_release, wgpuCommandEncoderRelease, unsafe fn(command_encoder: $crate::WGPUCommandEncoder)),
+            (command_encoder_begin_compute_pass, wgpuCommandEncoderBeginComputePass, unsafe fn(command_encoder: $crate::WGPUCommandEncoder, descriptor: *const $crate::WGPUComputePassDescriptor) -> $crate::WGPUComputePassEncoder),
+            (command_encoder_copy_buffer_to_buffer, wgpuCommandEncoderCopyBufferToBuffer, unsafe fn(command_encoder: $crate::WGPUCommandEncoder, source: $crate::WGPUBuffer, source_offset: u64, destination: $crate::WGPUBuffer, destination_offset: u64, size: u64)),
+            (command_encoder_finish, wgpuCommandEncoderFinish, unsafe fn(command_encoder: $crate::WGPUCommandEncoder, descriptor: *const $crate::WGPUCommandBufferDescriptor) -> $crate::WGPUCommandBuffer),
+            (compute_pass_encoder_release, wgpuComputePassEncoderRelease, unsafe fn(compute_pass_encoder: $crate::WGPUComputePassEncoder)),
+            (compute_pass_encoder_set_pipeline, wgpuComputePassEncoderSetPipeline, unsafe fn(compute_pass_encoder: $crate::WGPUComputePassEncoder, pipeline: $crate::WGPUComputePipeline)),
+            (compute_pass_encoder_set_bind_group, wgpuComputePassEncoderSetBindGroup, unsafe fn(compute_pass_encoder: $crate::WGPUComputePassEncoder, group_index: u32, group: $crate::WGPUBindGroup, dynamic_offsets_count: usize, dynamic_offsets: *const u32)),
+            (compute_pass_encoder_dispatch_workgroups, wgpuComputePassEncoderDispatchWorkgroups, unsafe fn(compute_pass_encoder: $crate::WGPUComputePassEncoder, workgroup_count_x: u32, workgroup_count_y: u32, workgroup_count_z: u32)),
+            (compute_pass_encoder_end, wgpuComputePassEncoderEnd, unsafe fn(compute_pass_encoder: $crate::WGPUComputePassEncoder)),
+            (command_buffer_release, wgpuCommandBufferRelease, unsafe fn(command_buffer: $crate::WGPUCommandBuffer)),
+        }
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __gpu_dispatch_from_ffi {
+    ($ffi:ident; $(($field:ident, $symbol:ident, unsafe fn($($argument:ident: $argument_type:ty),*) $(-> $result:ty)?),)*) => {{
+        $(unsafe fn $field($($argument: $argument_type),*) $(-> $result)? {
+            unsafe { $ffi::$symbol($($argument),*) }
+        })*
+        $crate::GpuDispatch { $($field),* }
+    }};
+}
+
 /// Converts a JavaScript `GPUBufferDescriptor` into `BufferDescriptor`.
 pub(super) fn convert_buffer_descriptor<E: JsEngine>(
     cx: E::Context<'_>,

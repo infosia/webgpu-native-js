@@ -1138,3 +1138,12 @@ now costs nothing per interface; the remaining per-interface cost is class/
 lifecycle plumbing, which is itself mechanical and pattern-identical. The
 full-vs-subset decision (criterion 6) and a class-spec-emission slice are the
 open items, then the Phase 4 review.
+
+**Slice 4a landed (2026-07-10): G13, the dispatch triplicate dies.** The
+generator now emits `GpuDispatch` and a `for_each_gpu_dispatch_entry!` macro
+from `webgpu.yml`; each adapter's passthrough table and the mock's are one
+macro invocation. Net deltas: quickjs −353, JSC −353, core −130, mock −44.
+Adding an interface adds zero dispatch lines anywhere (G16's net-negative
+demand met with room to spare). Five exceptional symbols are policy-listed
+with reasons, enforced both directions. All suites unchanged-green; parity
+byte-identical.

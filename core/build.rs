@@ -3,7 +3,7 @@ use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 
-use webgpu_native_js_codegen::generate_conversions;
+use webgpu_native_js_codegen::generate_core;
 
 const BACKEND_LIB_DIR_ENV: &str = "WEBGPU_NATIVE_JS_BACKEND_LIB_DIR";
 
@@ -33,7 +33,7 @@ fn generate_descriptor_conversions() {
         println!("cargo:rerun-if-changed={}", path.display());
     }
 
-    let emitted = generate_conversions(&read_input(&idl_path), &read_input(&yaml_path))
+    let emitted = generate_core(&read_input(&idl_path), &read_input(&yaml_path))
         .expect("pinned WebGPU conversion inputs must generate");
     let output = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo sets OUT_DIR"))
         .join("generated_conversions.rs");

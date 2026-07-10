@@ -2,6 +2,7 @@
 //! Parses the pinned WebIDL and C-API YAML inputs, joins their shared surface,
 //! and emits engine-generic descriptor conversions for the selected policy.
 
+mod dispatch;
 /// Rust source emission from a joined WebIDL and C-ABI model.
 pub mod emission;
 
@@ -282,6 +283,27 @@ pub fn generate_conversions_with_policy(
     emission::emit_conversions(&report, policy)
 }
 
+/// Joins pinned-format inputs and emits the complete source included by `core`.
+pub fn generate_core(idl: &str, yaml: &str) -> Result<String, CodegenError> {
+    generate_core_with_policy(idl, yaml, EMBEDDED_POLICY)
+}
+
+/// Emits the complete `core` artifact with an explicit policy.
+pub fn generate_core_with_policy(
+    idl: &str,
+    yaml: &str,
+    policy: &str,
+) -> Result<String, CodegenError> {
+    let report = join_inputs_with_policy(idl, yaml, policy)?;
+    let mut output = dispatch::emit_dispatch(&report, yaml, policy)?;
+    let conversions = emission::emit_conversions(&report, policy)?;
+    if !conversions.is_empty() {
+        output.push('\n');
+        output.push_str(&conversions);
+    }
+    Ok(output)
+}
+
 /// Renders a deterministic text report suitable for the `report` CLI and reviews.
 #[must_use]
 pub fn render_report(report: &JoinReport) -> String {
@@ -356,6 +378,42 @@ pub(crate) struct Policy {
     pub(crate) descriptor: Vec<DescriptorEntry>,
     #[serde(default)]
     pub(crate) enum_value_skip: Vec<EnumValueSkipPolicy>,
+    pub(crate) dispatch: Option<DispatchPolicy>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DispatchPolicy {
+    #[serde(default)]
+    pub(crate) skip_members: Vec<DispatchMemberPolicy>,
+    #[serde(default)]
+    pub(crate) add_ref: Vec<DispatchInterfacePolicy>,
+    #[serde(default)]
+    pub(crate) no_add_ref: Vec<DispatchInterfacePolicy>,
+    #[serde(default)]
+    pub(crate) extra_symbols: Vec<DispatchSymbolPolicy>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DispatchMemberPolicy {
+    pub(crate) interface: String,
+    pub(crate) member: String,
+    pub(crate) reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DispatchInterfacePolicy {
+    pub(crate) interface: String,
+    pub(crate) reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DispatchSymbolPolicy {
+    pub(crate) symbol: String,
+    pub(crate) reason: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -513,7 +571,7 @@ pub(crate) struct WrapperSequenceCapturePolicy {
 }
 
 #[derive(Debug, Deserialize, Default)]
-struct YamlRoot {
+pub(crate) struct YamlRoot {
     #[serde(default)]
     enums: Vec<YamlEnum>,
     #[serde(default)]
@@ -521,9 +579,9 @@ struct YamlRoot {
     #[serde(default)]
     structs: Vec<YamlStruct>,
     #[serde(default)]
-    functions: Vec<YamlFunction>,
+    pub(crate) functions: Vec<YamlFunction>,
     #[serde(default)]
-    objects: Vec<YamlObject>,
+    pub(crate) objects: Vec<YamlObject>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -550,28 +608,28 @@ struct YamlStruct {
 }
 
 #[derive(Debug, Deserialize)]
-struct YamlObject {
-    name: String,
+pub(crate) struct YamlObject {
+    pub(crate) name: String,
     #[serde(default)]
-    methods: Vec<YamlFunction>,
+    pub(crate) methods: Vec<YamlFunction>,
 }
 
 #[derive(Debug, Deserialize)]
-struct YamlFunction {
-    name: String,
-    returns: Option<YamlValue>,
+pub(crate) struct YamlFunction {
+    pub(crate) name: String,
+    pub(crate) returns: Option<YamlValue>,
     #[serde(default)]
-    args: Vec<YamlValue>,
-    callback: Option<String>,
+    pub(crate) args: Vec<YamlValue>,
+    pub(crate) callback: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-struct YamlValue {
+pub(crate) struct YamlValue {
     #[serde(default)]
-    name: String,
+    pub(crate) name: String,
     #[serde(rename = "type")]
-    type_name: Option<String>,
-    pointer: Option<String>,
+    pub(crate) type_name: Option<String>,
+    pub(crate) pointer: Option<String>,
     #[serde(default)]
     optional: bool,
     default: Option<serde_yaml::Value>,
@@ -1894,7 +1952,7 @@ fn canonical(value: &str) -> String {
         .collect()
 }
 
-fn snake_case(value: &str) -> String {
+pub(crate) fn snake_case(value: &str) -> String {
     let mut output = String::new();
     let chars: Vec<char> = value.chars().collect();
     for (index, character) in chars.iter().copied().enumerate() {
@@ -1916,7 +1974,7 @@ fn snake_case(value: &str) -> String {
     output
 }
 
-fn pascal_case(value: &str) -> String {
+pub(crate) fn pascal_case(value: &str) -> String {
     value
         .split('_')
         .filter(|part| !part.is_empty())
@@ -1930,11 +1988,11 @@ fn pascal_case(value: &str) -> String {
         .collect()
 }
 
-fn c_type_name(yaml_name: &str) -> String {
+pub(crate) fn c_type_name(yaml_name: &str) -> String {
     format!("WGPU{}", pascal_case(yaml_name))
 }
 
-fn c_function_name(object: &str, method: &str) -> String {
+pub(crate) fn c_function_name(object: &str, method: &str) -> String {
     format!("wgpu{}{}", pascal_case(object), pascal_case(method))
 }
 

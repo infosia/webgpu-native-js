@@ -23,6 +23,42 @@
 
 schema_version = 1
 
+# G13: selected interface members and Release families are derived from the
+# joined subset. These lists account only for the non-obvious boundary: core-
+# cached members, native references retained by wrappers/descriptors, transient
+# objects that need no AddRef entry, and bootstrap/alternate C symbols outside
+# the joined subset. Every subset interface must occur in exactly one AddRef
+# list, and the exceptional symbols/skips are checked in both directions.
+[dispatch]
+skip_members = [
+  { interface = "GPUDevice", member = "destroy", reason = "the current subset exposes no GPUDevice.destroy method body" },
+  { interface = "GPUBuffer", member = "size", reason = "the immutable size is cached from GPUBufferDescriptor" },
+  { interface = "GPUBuffer", member = "usage", reason = "the immutable usage is cached from GPUBufferDescriptor" },
+]
+add_ref = [
+  { interface = "GPUDevice", reason = "adopted devices and child payloads retain the native device" },
+  { interface = "GPUBuffer", reason = "mapped ranges and bind-group descriptors retain buffers" },
+  { interface = "GPUQueue", reason = "the SameObject queue wrapper owns an independent native reference" },
+  { interface = "GPUShaderModule", reason = "compute-pipeline descriptors retain shader modules" },
+  { interface = "GPUSampler", reason = "standard resource lifecycle keeps AddRef available for retained descriptors" },
+  { interface = "GPUBindGroupLayout", reason = "bind-group descriptors retain their layout" },
+  { interface = "GPUPipelineLayout", reason = "compute-pipeline descriptors retain explicit layouts" },
+  { interface = "GPUBindGroup", reason = "standard resource lifecycle keeps AddRef available for command recording" },
+  { interface = "GPUComputePipeline", reason = "standard resource lifecycle keeps AddRef available for command recording" },
+]
+no_add_ref = [
+  { interface = "GPUCommandEncoder", reason = "the single-use encoder is adopted and never retained" },
+  { interface = "GPUComputePassEncoder", reason = "the pass encoder is single-use and never retained" },
+  { interface = "GPUCommandBuffer", reason = "the finished command buffer is adopted and consumed by submit" },
+]
+extra_symbols = [
+  { symbol = "wgpuInstanceProcessEvents", reason = "the settlement tick operates above the selected interface subset" },
+  { symbol = "wgpuInstanceRequestAdapter", reason = "GPU bootstrap precedes the selected interface subset" },
+  { symbol = "wgpuAdapterRequestDevice", reason = "GPU bootstrap precedes the selected interface subset" },
+  { symbol = "wgpuAdapterRelease", reason = "the bootstrap adapter is outside the selected interface subset" },
+  { symbol = "wgpuBufferGetConstMappedRange", reason = "getMappedRange selects the const C alternative for read mappings" },
+]
+
 [[enum_value_skip]]
 enum = "GPUAutoLayoutMode"
 value = "auto"

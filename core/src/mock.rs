@@ -997,62 +997,18 @@ pub fn runtime() -> Runtime {
     Runtime::new(dispatch())
 }
 
+// Mock dispatch functions deliberately use the generated field names. Keeping this
+// plain naming convention lets one small callback build the complete table.
+macro_rules! mock_gpu_dispatch {
+    ($(($field:ident, $symbol:ident, unsafe fn($($argument:ident: $argument_type:ty),*) $(-> $result:ty)?),)*) => {
+        GpuDispatch { $($field),* }
+    };
+}
+
 /// Returns mock WebGPU dispatch functions.
 #[must_use]
 pub fn dispatch() -> GpuDispatch {
-    GpuDispatch {
-        instance_process_events,
-        instance_request_adapter,
-        adapter_request_device,
-        adapter_release,
-        device_add_ref,
-        device_release,
-        device_create_buffer,
-        device_get_queue,
-        device_create_shader_module,
-        device_create_sampler,
-        device_create_bind_group_layout,
-        device_create_pipeline_layout,
-        device_create_bind_group,
-        device_create_compute_pipeline,
-        device_create_command_encoder,
-        buffer_set_label,
-        buffer_destroy,
-        buffer_get_mapped_range,
-        buffer_get_const_mapped_range,
-        buffer_add_ref,
-        buffer_map_async,
-        buffer_unmap,
-        buffer_release,
-        queue_add_ref,
-        queue_release,
-        queue_write_buffer,
-        queue_submit,
-        queue_on_submitted_work_done,
-        shader_module_add_ref,
-        shader_module_release,
-        sampler_add_ref,
-        sampler_release,
-        sampler_set_label,
-        bind_group_layout_add_ref,
-        bind_group_layout_release,
-        pipeline_layout_add_ref,
-        pipeline_layout_release,
-        bind_group_add_ref,
-        bind_group_release,
-        compute_pipeline_add_ref,
-        compute_pipeline_release,
-        command_encoder_release,
-        command_encoder_copy_buffer_to_buffer,
-        command_encoder_begin_compute_pass,
-        command_encoder_finish,
-        command_buffer_release,
-        compute_pass_encoder_release,
-        compute_pass_encoder_set_pipeline,
-        compute_pass_encoder_set_bind_group,
-        compute_pass_encoder_dispatch_workgroups,
-        compute_pass_encoder_end,
-    }
+    for_each_gpu_dispatch_entry!(mock_gpu_dispatch)
 }
 
 unsafe fn instance_process_events(_instance: crate::WGPUInstance) {

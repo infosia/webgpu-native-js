@@ -2,8 +2,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use webgpu_native_js_codegen::{
-    generate_conversions, generate_conversions_with_policy, join_inputs, join_inputs_with_policy,
-    render_report, CodegenError, JoinReport,
+    generate_conversions, generate_conversions_with_policy, generate_core,
+    generate_core_with_policy, join_inputs, join_inputs_with_policy, render_report, CodegenError,
+    JoinReport,
 };
 
 fn fixtures() -> PathBuf {
@@ -32,6 +33,17 @@ fn pinned_inputs() -> (String, String, String) {
         .expect("pinned YAML");
     let policy = fs::read_to_string(root.join("codegen/policy.toml")).expect("policy");
     (idl, yaml, policy)
+}
+
+fn dispatch_macro_surface(emitted: &str) -> &str {
+    let start = emitted
+        .find("/// Invokes a caller-supplied macro")
+        .expect("dispatch enumerator documentation");
+    let end = emitted[start..]
+        .find("\n#[doc(hidden)]")
+        .map(|offset| start + offset)
+        .expect("hidden FFI callback follows enumerator");
+    &emitted[start..end]
 }
 
 #[test]
@@ -129,16 +141,69 @@ fn full_pinned_inputs_parse_and_subset_join_offline() {
 
 #[test]
 fn full_pinned_surface_matches_committed_artifact() {
-    // To accept an intentional full-surface change, run:
+    // This snapshot is the complete OUT_DIR artifact (dispatch plus conversions).
+    // To regenerate it and the focused dispatch-macro shape snapshot, run:
     // UPDATE_FULL_SURFACE=1 cargo test -p webgpu-native-js-codegen --test fixtures full_pinned_surface_matches_committed_artifact
     let (idl, yaml, _policy) = pinned_inputs();
-    let emitted = generate_conversions(&idl, &yaml).expect("full pinned generation");
+    let emitted = generate_core(&idl, &yaml).expect("full pinned generation");
     let expectation = fixtures().join("full_surface.rs");
     if std::env::var_os("UPDATE_FULL_SURFACE").is_some() {
         fs::write(&expectation, &emitted).expect("regenerate full-surface expectation");
+        fs::write(
+            fixtures().join("dispatch_surface.rs"),
+            dispatch_macro_surface(&emitted),
+        )
+        .expect("regenerate dispatch-macro expectation");
     }
     let expected = fs::read_to_string(expectation).expect("full-surface expectation");
     assert_eq!(emitted, expected);
+}
+
+#[test]
+fn generated_dispatch_macro_matches_focused_shape_fixture() {
+    let (idl, yaml, _policy) = pinned_inputs();
+    let emitted = generate_core(&idl, &yaml).expect("full pinned generation");
+    let expected =
+        fs::read_to_string(fixtures().join("dispatch_surface.rs")).expect("dispatch snapshot");
+    assert_eq!(dispatch_macro_surface(&emitted), expected);
+    assert_eq!(expected.matches(", unsafe fn(").count(), 51);
+}
+
+#[test]
+fn dispatch_policy_is_checked_in_both_directions() {
+    let (idl, yaml, policy) = pinned_inputs();
+    let cases = [
+        (
+            policy.replace(
+                "  { symbol = \"wgpuAdapterRelease\", reason = \"the bootstrap adapter is outside the selected interface subset\" },\n",
+                "",
+            ),
+            "dispatch extras must account",
+        ),
+        (
+            policy.replace(
+                "  { interface = \"GPUSampler\", reason = \"standard resource lifecycle keeps AddRef available for retained descriptors\" },\n",
+                "",
+            ),
+            "must account for every subset interface",
+        ),
+        (
+            policy.replace("wgpuBufferGetConstMappedRange", "wgpuBufferNoSuchRange"),
+            "nonexistent symbol",
+        ),
+        (
+            policy.replace(
+                "  { interface = \"GPUBuffer\", member = \"usage\", reason = \"the immutable usage is cached from GPUBufferDescriptor\" },\n",
+                "",
+            ),
+            "dispatch member skips must account",
+        ),
+    ];
+    for (bad_policy, needle) in cases {
+        let error = generate_core_with_policy(&idl, &yaml, &bad_policy)
+            .expect_err("dispatch policy deviation must fail");
+        assert!(error.to_string().contains(needle), "{error}");
+    }
 }
 
 #[test]
