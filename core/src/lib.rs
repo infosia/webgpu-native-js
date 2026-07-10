@@ -78,6 +78,8 @@ impl WGPUStringViewExt for WGPUStringView {
 /// Function-pointer dispatch for the WebGPU C ABI calls used by this slice.
 #[derive(Clone, Copy)]
 pub struct GpuDispatch {
+    /// `wgpuInstanceProcessEvents`.
+    pub instance_process_events: unsafe fn(webgpu_native_js_ffi::native::WGPUInstance),
     /// `wgpuInstanceRequestAdapter`.
     pub instance_request_adapter: unsafe fn(
         webgpu_native_js_ffi::native::WGPUInstance,
@@ -237,12 +239,7 @@ impl Environment {
 /// Per-call bump-style arena for transient conversion data.
 #[derive(Default)]
 pub struct Arena {
-    strings: RefCell<Vec<Box<[u8]>>>,
-    bind_group_layout_entries: RefCell<Vec<Box<[WGPUBindGroupLayoutEntry]>>>,
-    bind_group_entries: RefCell<Vec<Box<[WGPUBindGroupEntry]>>>,
-    bind_group_layouts: RefCell<Vec<Box<[WGPUBindGroupLayout]>>>,
-    command_buffers: RefCell<Vec<Box<[WGPUCommandBuffer]>>>,
-    shader_sources: RefCell<Vec<Box<[WGPUShaderSourceWGSL]>>>,
+    allocations: RefCell<Vec<Box<dyn Any>>>,
 }
 
 impl Arena {
@@ -254,73 +251,22 @@ impl Arena {
 
     /// Copies a string into the arena and returns the arena-owned bytes.
     pub fn alloc_str(&self, value: &str) -> &str {
-        let mut strings = self.strings.borrow_mut();
-        strings.push(value.as_bytes().to_vec().into_boxed_slice());
-        let Some(bytes) = strings.last() else {
-            return "";
-        };
-        let ptr = bytes.as_ptr();
-        let len = bytes.len();
+        let bytes = self.alloc_slice(value.as_bytes().to_vec());
         // SAFETY: the bytes are copied from a valid `str` and stored in `self`.
         // The returned borrow is tied to the arena lifetime.
-        unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len)) }
+        unsafe { std::str::from_utf8_unchecked(bytes) }
     }
 
-    fn alloc_bind_group_layout_entries(
-        &self,
-        value: Vec<WGPUBindGroupLayoutEntry>,
-    ) -> &[WGPUBindGroupLayoutEntry] {
-        let mut values = self.bind_group_layout_entries.borrow_mut();
-        values.push(value.into_boxed_slice());
-        let entries = values.last().map_or(&[][..], |entries| &**entries);
-        let ptr = entries.as_ptr();
-        let len = entries.len();
+    /// Copies a slice allocation into address-stable arena storage.
+    pub fn alloc_slice<T: Copy + 'static>(&self, value: Vec<T>) -> &[T] {
+        let values = value.into_boxed_slice();
+        let ptr = values.as_ptr();
+        let len = values.len();
+        self.allocations.borrow_mut().push(Box::new(values));
+        // SAFETY: the boxed slice allocation is owned by `self.allocations`.
+        // Moving its owning Box does not move the slice, and the returned borrow
+        // is tied to the arena lifetime.
         unsafe { std::slice::from_raw_parts(ptr, len) }
-    }
-
-    fn alloc_bind_group_entries(&self, value: Vec<WGPUBindGroupEntry>) -> &[WGPUBindGroupEntry] {
-        let mut values = self.bind_group_entries.borrow_mut();
-        values.push(value.into_boxed_slice());
-        let entries = values.last().map_or(&[][..], |entries| &**entries);
-        let ptr = entries.as_ptr();
-        let len = entries.len();
-        unsafe { std::slice::from_raw_parts(ptr, len) }
-    }
-
-    fn alloc_bind_group_layouts(&self, value: Vec<WGPUBindGroupLayout>) -> &[WGPUBindGroupLayout] {
-        let mut values = self.bind_group_layouts.borrow_mut();
-        values.push(value.into_boxed_slice());
-        let entries = values.last().map_or(&[][..], |entries| &**entries);
-        let ptr = entries.as_ptr();
-        let len = entries.len();
-        unsafe { std::slice::from_raw_parts(ptr, len) }
-    }
-
-    fn alloc_command_buffers(&self, value: Vec<WGPUCommandBuffer>) -> &[WGPUCommandBuffer] {
-        let mut values = self.command_buffers.borrow_mut();
-        values.push(value.into_boxed_slice());
-        let entries = values.last().map_or(&[][..], |entries| &**entries);
-        let ptr = entries.as_ptr();
-        let len = entries.len();
-        unsafe { std::slice::from_raw_parts(ptr, len) }
-    }
-
-    fn alloc_wgsl_source(&self, code: WGPUStringView) -> &WGPUShaderSourceWGSL {
-        let mut values = self.shader_sources.borrow_mut();
-        let source = Box::new([WGPUShaderSourceWGSL {
-            chain: WGPUChainedStruct {
-                next: ptr::null_mut(),
-                sType: WGPUSType_WGPUSType_ShaderSourceWGSL,
-            },
-            code,
-        }]);
-        let ptr = source.as_ptr();
-        values.push(source);
-        // SAFETY: arena-owned shader sources live in boxed slices. Moving the
-        // owning Box inside `shader_sources` does not move the allocation, so
-        // descriptor pointers handed to the backend remain address-stable for
-        // the arena lifetime.
-        unsafe { &*ptr }
     }
 }
 
@@ -376,16 +322,6 @@ pub trait JsEngine: Sized {
         obj: Self::Value,
         class: ClassId,
     ) -> Option<&'a (dyn Any + Send)>;
-    /// Visits every engine value the payload holds, so the engine can trace it.
-    ///
-    /// QuickJS uses this from `JSClassDef::gc_mark`; JavaScriptCore-style
-    /// adapters can satisfy the same boundary by protecting on store and
-    /// unprotecting on drop.
-    fn trace_payload(
-        cx: Self::Context<'_>,
-        payload: &(dyn Any + Send),
-        visit: &mut dyn FnMut(Self::Value),
-    );
     /// Creates a JavaScript `undefined` value.
     fn undefined(cx: Self::Context<'_>) -> Self::Value;
     /// Creates a JavaScript number value.
@@ -404,6 +340,8 @@ pub trait JsEngine: Sized {
     fn new_promise(cx: Self::Context<'_>) -> Result<(Self::Value, Deferred<Self>), Self::Error>;
     /// Settles a batch of deferred promises inside one JavaScript frame.
     fn settle_deferreds(cx: Self::Context<'_>, settlements: Vec<DeferredSettlement<Self>>);
+    /// Drains engine microtasks scheduled by promise settlement.
+    fn drain_microtasks(cx: Self::Context<'_>) -> Result<(), Self::Error>;
     /// Creates a script-visible ArrayBuffer over external memory.
     ///
     /// # Safety
@@ -436,6 +374,12 @@ pub trait JsEngine: Sized {
     fn arraybuffer_copy(cx: Self::Context<'_>, value: Self::Value) -> Option<Vec<u8>>;
     /// Duplicates a value so core can hold it beyond the current call.
     fn duplicate_value(cx: Self::Context<'_>, value: Self::Value) -> Self::Value;
+    /// Produces a callback return value from a core-held value.
+    ///
+    /// This does not create another persistent core hold. Refcounted engines
+    /// duplicate callback-return ownership; tracing engines may return the same
+    /// identity because the existing core hold keeps it protected.
+    fn return_held_value(cx: Self::Context<'_>, held: Self::Value) -> Self::Value;
     /// Releases a value previously duplicated for core.
     fn release_value(cx: Self::Context<'_>, value: Self::Value);
     /// Registers a deferred slot owned by a raw async callback request.
@@ -583,8 +527,11 @@ impl<E: JsEngine + 'static> SettlementRequest<E> {
                 ref mut native,
             } => {
                 let device = native.take_device();
-                let value =
-                    E::new_instance(cx, GPU_DEVICE_CLASS, Box::new(DevicePayload { device }));
+                let value = E::new_instance(
+                    cx,
+                    GPU_DEVICE_CLASS,
+                    Box::new(DevicePayload::<E>::new(device)),
+                );
                 match value {
                     Ok(value) => (deferred, Ok(value)),
                     Err(error) => {
@@ -993,25 +940,107 @@ pub enum QueueError {
     UnexpectedSettlementType,
 }
 
-/// Payload stored by a `GPUDevice` wrapper.
-pub struct DevicePayload {
-    device: WGPUDevice,
+/// Failure from the engine-neutral four-step tick skeleton.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum TickError<E> {
+    /// Promise settlement or release queue failure.
+    Queue(QueueError),
+    /// Engine microtask drain failure.
+    Engine(E),
 }
 
-impl DevicePayload {
+/// Runs one host tick in the required cross-engine order.
+///
+/// The order is WebGPU `ProcessEvents`, one batched settlement drain, engine
+/// microtasks, then the native release queue.
+///
+/// # Safety
+///
+/// `instance` must be a live instance from `E`'s configured backend and must
+/// remain valid for this call. The caller must invoke this on the designated
+/// engine/tick thread.
+pub unsafe fn tick<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    instance: webgpu_native_js_ffi::native::WGPUInstance,
+) -> std::result::Result<usize, TickError<E::Error>> {
+    let env = E::environment(cx);
+    unsafe { (env.gpu().instance_process_events)(instance) };
+    env.settlements().drain::<E>(cx).map_err(TickError::Queue)?;
+    E::drain_microtasks(cx).map_err(TickError::Engine)?;
+    env.queue().drain().map_err(TickError::Queue)
+}
+
+/// Payload stored by a `GPUDevice` wrapper.
+pub struct DevicePayload<E: JsEngine> {
+    device: WGPUDevice,
+    queue: HeldValue<E>,
+}
+
+impl<E: JsEngine> DevicePayload<E> {
+    fn new(device: WGPUDevice) -> Self {
+        Self {
+            device,
+            queue: HeldValue::empty(),
+        }
+    }
+
     /// Returns the native device handle.
     #[must_use]
     pub fn device(&self) -> WGPUDevice {
         self.device
     }
+
+    fn cached_queue(&self) -> Option<E::Value> {
+        self.queue.get()
+    }
+
+    fn cache_queue(&self, value: E::Value) {
+        self.queue.set(value);
+    }
 }
 
-// SAFETY: `DevicePayload` stores a `WGPUDevice` adopted by the JS wrapper. A
-// finalizer may move this payload to another thread, but it only reads the
-// handle value and enqueues `ReleaseRequest::Device`; the device is dereferenced
-// when that request is drained on the creating `tick()` thread.
-// SAFETY: The `WGPUDevice` is enqueued by finalizers and released on the `tick()` thread.
-unsafe impl Send for DevicePayload {}
+// SAFETY: `DevicePayload` stores an adopted `WGPUDevice` plus a cached engine
+// value in `HeldValue`. A finalizer may move the payload to another thread, but
+// it only copies the native handle into `ReleaseRequest::Device` and passes the
+// opaque cached value to the adapter-provided release closure. Neither value is
+// dereferenced as a native/engine object off-thread; actual native release runs
+// when the queue drains on the creating `tick()` thread.
+unsafe impl<E: JsEngine> Send for DevicePayload<E> {}
+
+struct HeldValue<E: JsEngine> {
+    value: std::cell::UnsafeCell<Option<E::Value>>,
+}
+
+impl<E: JsEngine> HeldValue<E> {
+    fn empty() -> Self {
+        Self {
+            value: std::cell::UnsafeCell::new(None),
+        }
+    }
+
+    fn get(&self) -> Option<E::Value> {
+        // SAFETY: wrapper access and GC tracing are confined to the engine
+        // thread and cannot run concurrently with a property getter.
+        unsafe { *self.value.get() }
+    }
+
+    fn set(&self, value: E::Value) {
+        // SAFETY: the queue cache is initialized at most once by the engine
+        // thread; GC tracing can only observe it between JS entry points.
+        unsafe { *self.value.get() = Some(value) };
+    }
+
+    fn take(&self) -> Option<E::Value> {
+        // SAFETY: payload value release runs after the wrapper is unreachable,
+        // with no concurrent getter or trace operation.
+        unsafe { &mut *self.value.get() }.take()
+    }
+}
+
+// SAFETY: the held engine value is never dereferenced off the engine thread;
+// finalizers only pass it to the adapter-provided value-release operation.
+unsafe impl<E: JsEngine> Send for HeldValue<E> {}
 
 /// Payload stored by a `GPUBuffer` wrapper.
 pub struct BufferPayload<E: JsEngine> {
@@ -1039,6 +1068,36 @@ impl<E: JsEngine> BufferPayload<E> {
         self.traced_values.clear();
         for range in std::mem::take(&mut state.ranges) {
             release(range.value);
+        }
+    }
+}
+
+/// Visits every engine value retained by a core wrapper payload.
+pub fn trace_payload_values<E: JsEngine + 'static>(
+    payload: &(dyn Any + Send),
+    visit: &mut dyn FnMut(E::Value),
+) {
+    if let Some(buffer) = payload.downcast_ref::<BufferPayload<E>>() {
+        buffer.trace_mapped_range_values(&mut *visit);
+    }
+    if let Some(device) = payload.downcast_ref::<DevicePayload<E>>() {
+        if let Some(queue) = device.cached_queue() {
+            visit(queue);
+        }
+    }
+}
+
+/// Removes every engine value retained by a core wrapper payload.
+pub fn release_payload_values<E: JsEngine + 'static>(
+    payload: &(dyn Any + Send),
+    release: &mut dyn FnMut(E::Value),
+) {
+    if let Some(buffer) = payload.downcast_ref::<BufferPayload<E>>() {
+        buffer.release_mapped_range_values(&mut *release);
+    }
+    if let Some(device) = payload.downcast_ref::<DevicePayload<E>>() {
+        if let Some(queue) = device.queue.take() {
+            release(queue);
         }
     }
 }
@@ -1383,7 +1442,11 @@ pub unsafe fn wrap_device<E: JsEngine + 'static>(
     }
     let _ = register_device_class::<E>(cx)?;
     let _ = register_buffer_class::<E>(cx)?;
-    E::new_instance(cx, GPU_DEVICE_CLASS, Box::new(DevicePayload { device }))
+    E::new_instance(
+        cx,
+        GPU_DEVICE_CLASS,
+        Box::new(DevicePayload::<E>::new(device)),
+    )
 }
 
 /// Implements `GPUDevice.createBuffer`.
@@ -1393,7 +1456,7 @@ pub fn device_create_buffer<E: JsEngine + 'static>(
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
     let Some(device_payload) = E::payload(cx, this, GPU_DEVICE_CLASS)
-        .and_then(|payload| payload.downcast_ref::<DevicePayload>())
+        .and_then(|payload| payload.downcast_ref::<DevicePayload<E>>())
     else {
         return Err(E::type_error(
             cx,
@@ -1749,13 +1812,16 @@ pub fn device_queue_get<E: JsEngine + 'static>(
     this: E::Value,
 ) -> Result<E::Value, E::Error> {
     let Some(device_payload) = E::payload(cx, this, GPU_DEVICE_CLASS)
-        .and_then(|payload| payload.downcast_ref::<DevicePayload>())
+        .and_then(|payload| payload.downcast_ref::<DevicePayload<E>>())
     else {
         return Err(E::type_error(
             cx,
             "GPUDevice.queue called on an incompatible object",
         ));
     };
+    if let Some(queue) = device_payload.cached_queue() {
+        return Ok(E::return_held_value(cx, queue));
+    }
     let env = E::environment(cx);
     let queue = unsafe { (env.gpu().device_get_queue)(device_payload.device) };
     if queue.is_null() {
@@ -1766,7 +1832,10 @@ pub fn device_queue_get<E: JsEngine + 'static>(
         return Err(error);
     }
     match E::new_instance(cx, GPU_QUEUE_CLASS, Box::new(QueuePayload { queue })) {
-        Ok(value) => Ok(value),
+        Ok(value) => {
+            device_payload.cache_queue(E::duplicate_value(cx, value));
+            Ok(value)
+        }
         Err(error) => {
             unsafe { (env.gpu().queue_release)(queue) };
             Err(error)
@@ -1870,7 +1939,7 @@ pub fn queue_submit<E: JsEngine + 'static>(
             .map_err(|_| E::operation_error(cx, "GPUCommandBuffer state is poisoned"))?
             .consumed = true;
     }
-    let commands = arena.alloc_command_buffers(command_handles);
+    let commands = arena.alloc_slice(command_handles);
     unsafe {
         (E::environment(cx).gpu().queue_submit)(
             queue_payload.queue,
@@ -2595,8 +2664,8 @@ pub fn finalize_compute_pass_encoder(payload: Box<dyn Any + Send>, env: &Environ
 }
 
 /// Finalizes a `GPUDevice` payload by enqueuing its release.
-pub fn finalize_device(payload: Box<dyn Any + Send>, env: &Environment) {
-    let Ok(payload) = payload.downcast::<DevicePayload>() else {
+pub fn finalize_device<E: JsEngine + 'static>(payload: Box<dyn Any + Send>, env: &Environment) {
+    let Ok(payload) = payload.downcast::<DevicePayload<E>>() else {
         return;
     };
     let _ = env.queue().enqueue(ReleaseRequest::Device {
@@ -2858,9 +2927,20 @@ fn convert_shader_module_descriptor<E: JsEngine>(
     let code_value = required_member::<E>(cx, value, "code")?;
     let code = E::to_str(cx, code_value, arena)?;
     let label = optional_non_null_string::<E>(cx, value, "label", arena)?;
-    let source = arena.alloc_wgsl_source(WGPUStringView::from_bytes(code.as_bytes()));
+    let source = arena
+        .alloc_slice(vec![WGPUShaderSourceWGSL {
+            chain: WGPUChainedStruct {
+                next: ptr::null_mut(),
+                sType: WGPUSType_WGPUSType_ShaderSourceWGSL,
+            },
+            code: WGPUStringView::from_bytes(code.as_bytes()),
+        }])
+        .as_ptr();
+    // SAFETY: the vector literal above contains exactly one initialized source,
+    // and `Arena::alloc_slice` keeps its allocation address-stable for `arena`.
+    let chain = unsafe { ptr::addr_of!((*source).chain) }.cast_mut();
     Ok(WGPUShaderModuleDescriptor {
-        nextInChain: ptr::from_ref(&source.chain).cast_mut(),
+        nextInChain: chain,
         label: WGPUStringView::from_bytes(label.as_bytes()),
     })
 }
@@ -3102,7 +3182,7 @@ fn convert_bind_group_layout_entries<'a, E: JsEngine>(
         let item = sequence_item::<E>(cx, value, index)?;
         entries.push(convert_bind_group_layout_entry::<E>(cx, item)?);
     }
-    Ok(arena.alloc_bind_group_layout_entries(entries))
+    Ok(arena.alloc_slice(entries))
 }
 
 fn convert_bind_group_layout_entry<E: JsEngine>(
@@ -3188,7 +3268,7 @@ fn convert_bind_group_entries<'a, E: JsEngine + 'static>(
         }
         entries.push(entry);
     }
-    Ok((arena.alloc_bind_group_entries(entries), buffers))
+    Ok((arena.alloc_slice(entries), buffers))
 }
 
 fn convert_bind_group_entry<E: JsEngine + 'static>(
@@ -3239,7 +3319,7 @@ fn convert_bind_group_layout_sequence<'a, E: JsEngine + 'static>(
             sequence_item::<E>(cx, value, index)?,
         )?);
     }
-    Ok(arena.alloc_bind_group_layouts(layouts))
+    Ok(arena.alloc_slice(layouts))
 }
 
 fn convert_command_buffer_sequence<E: JsEngine + 'static>(
@@ -3324,7 +3404,7 @@ fn device_handle<E: JsEngine + 'static>(
     value: E::Value,
 ) -> Result<WGPUDevice, E::Error> {
     E::payload(cx, value, GPU_DEVICE_CLASS)
-        .and_then(|payload| payload.downcast_ref::<DevicePayload>())
+        .and_then(|payload| payload.downcast_ref::<DevicePayload<E>>())
         .map(|payload| payload.device)
         .ok_or_else(|| E::type_error(cx, "GPUDevice method called on an incompatible object"))
 }
@@ -3643,7 +3723,7 @@ fn device_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
                 call: device_create_command_encoder::<E>,
             },
         ])),
-        finalizer: finalize_device,
+        finalizer: finalize_device::<E>,
     })
 }
 

@@ -215,38 +215,23 @@ impl Runtime {
     /// must remain live for the whole pump. Callers must not pass an instance
     /// that is concurrently being released.
     pub unsafe fn tick(&self, instance: ffi_wgpu::WGPUInstance) -> Result<usize> {
-        unsafe { ffi_wgpu::wgpuInstanceProcessEvents(instance) };
-        with_scope(self.raw_context(), |cx| {
-            self.state
-                .env
-                .settlements()
-                .drain::<Engine>(cx)
-                .map_err(|_| Error::Exception("settlement queue is poisoned".to_owned()))
+        let drained = with_scope(self.raw_context(), |cx| {
+            match unsafe { core::tick::<Engine>(cx, instance) } {
+                Ok(drained) => Ok(drained),
+                Err(core::TickError::Queue(error)) => {
+                    Err(Error::Exception(format!("tick queue error: {error:?}")))
+                }
+                Err(core::TickError::Engine(error)) => {
+                    cx.scope.escape(error);
+                    Err(Error::Exception(exception_or_value(cx.ctx, error)))
+                }
+                Err(_) => Err(Error::Exception("unknown tick failure".to_owned())),
+            }
         })?;
-        loop {
-            let mut job_ctx = ptr::null_mut();
-            let rc = unsafe { qjs::JS_ExecutePendingJob(self.rt.as_ptr(), &mut job_ctx) };
-            if rc > 0 {
-                continue;
-            }
-            if rc == 0 {
-                break;
-            }
-            let ctx = if job_ctx.is_null() {
-                self.raw_context()
-            } else {
-                job_ctx
-            };
-            return Err(Error::Exception(take_exception(
-                ctx,
-                "JS_ExecutePendingJob",
-            )));
-        }
         if let Some(message) = self.state.take_unhandled_rejection(self.raw_context()) {
             return Err(Error::Exception(message));
         }
-        self.drain_releases()
-            .map_err(|_| Error::Exception("release queue is poisoned".to_owned()))
+        Ok(drained)
     }
 
     /// Pumps only WebGPU callbacks, for event-loop regression tests.
@@ -705,16 +690,6 @@ impl core::JsEngine for Engine {
             .map(|ptr| unsafe { ptr.as_ref().payload.as_ref() })
     }
 
-    fn trace_payload(
-        _cx: Self::Context<'_>,
-        payload: &(dyn Any + Send),
-        visit: &mut dyn FnMut(Self::Value),
-    ) {
-        if let Some(buffer) = payload.downcast_ref::<core::BufferPayload<Self>>() {
-            buffer.trace_mapped_range_values(visit);
-        }
-    }
-
     fn undefined(_cx: Self::Context<'_>) -> Self::Value {
         qjs_value_with_tag(qjs::JS_TAG_UNDEFINED as i64)
     }
@@ -831,6 +806,24 @@ impl core::JsEngine for Engine {
         clear_pending_exception(cx.ctx);
     }
 
+    fn drain_microtasks(cx: Self::Context<'_>) -> core::Result<(), Self::Error> {
+        loop {
+            let mut job_ctx = ptr::null_mut();
+            let rc = unsafe { qjs::JS_ExecutePendingJob(qjs::JS_GetRuntime(cx.ctx), &mut job_ctx) };
+            if rc > 0 {
+                continue;
+            }
+            if rc == 0 {
+                return Ok(());
+            }
+            let error_cx = Context {
+                ctx: if job_ctx.is_null() { cx.ctx } else { job_ctx },
+                scope: cx.scope,
+            };
+            return Err(take_exception_value(error_cx));
+        }
+    }
+
     unsafe fn new_external_arraybuffer(
         cx: Self::Context<'_>,
         ptr: *mut u8,
@@ -928,6 +921,10 @@ impl core::JsEngine for Engine {
 
     fn duplicate_value(cx: Self::Context<'_>, value: Self::Value) -> Self::Value {
         unsafe { qjs::JS_DupValue(cx.ctx, value) }
+    }
+
+    fn return_held_value(cx: Self::Context<'_>, held: Self::Value) -> Self::Value {
+        unsafe { qjs::JS_DupValue(cx.ctx, held) }
     }
 
     fn release_value(cx: Self::Context<'_>, value: Self::Value) {
@@ -1252,14 +1249,9 @@ extern "C" fn qjs_finalizer(rt: *mut qjs::JSRuntime, value: qjs::JSValue) {
             return;
         };
         let payload = unsafe { Box::from_raw(raw.as_ptr()) };
-        if let Some(buffer) = payload
-            .payload
-            .downcast_ref::<core::BufferPayload<Engine>>()
-        {
-            buffer.release_mapped_range_values(|value| unsafe {
-                qjs::JS_FreeValueRT(rt, value);
-            });
-        }
+        core::release_payload_values::<Engine>(payload.payload.as_ref(), &mut |value| unsafe {
+            qjs::JS_FreeValueRT(rt, value);
+        });
         (payload.spec.finalizer)(payload.payload, &state.env);
     }));
 }
@@ -1276,15 +1268,10 @@ unsafe extern "C" fn qjs_gc_mark(
             return;
         };
         let payload = unsafe { raw.as_ref() };
-        let scope = Scope::new(ptr::null_mut());
-        let cx = Context {
-            ctx: ptr::null_mut(),
-            scope: &scope,
-        };
         let mut visit = |value| unsafe {
             qjs::JS_MarkValue(rt, value, mark_func);
         };
-        Engine::trace_payload(cx, payload.payload.as_ref(), &mut visit);
+        core::trace_payload_values::<Engine>(payload.payload.as_ref(), &mut visit);
     }));
 }
 
@@ -1378,6 +1365,7 @@ fn exception_or_value(ctx: *mut qjs::JSContext, value: qjs::JSValue) -> String {
 
 fn gpu_dispatch() -> core::GpuDispatch {
     core::GpuDispatch {
+        instance_process_events,
         instance_request_adapter,
         adapter_request_device,
         adapter_release,
@@ -1425,6 +1413,10 @@ fn gpu_dispatch() -> core::GpuDispatch {
         compute_pass_encoder_dispatch_workgroups,
         compute_pass_encoder_end,
     }
+}
+
+unsafe fn instance_process_events(instance: core::WGPUInstance) {
+    unsafe { ffi_wgpu::wgpuInstanceProcessEvents(instance) };
 }
 
 unsafe fn instance_request_adapter(
@@ -2238,6 +2230,55 @@ mod tests {
     }
 
     #[test]
+    fn get_mapped_range_rejects_unmapped_and_destroyed_buffers() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let wrapped = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("device", wrapped)
+            .expect("set device");
+        eval_drop(
+            &runtime,
+            r#"
+                var unmapped = device.createBuffer({ size: 8, usage: 2 });
+                var unmappedThrew = false;
+                try { unmapped.getMappedRange(); } catch (e) { unmappedThrew = true; }
+                if (!unmappedThrew) throw new Error('unmapped getMappedRange did not throw');
+
+                var destroyed = device.createBuffer({ size: 8, usage: 2, mappedAtCreation: true });
+                destroyed.destroy();
+                var destroyedThrew = false;
+                try { destroyed.getMappedRange(); } catch (e) { destroyedThrew = true; }
+                if (!destroyedThrew) throw new Error('destroyed getMappedRange did not throw');
+                unmapped = destroyed = null;
+            "#,
+            "get-mapped-range-errors.js",
+        );
+        runtime.clear_global("device").expect("clear device");
+        runtime.run_gc();
+        let _ = runtime.drain_releases().expect("drain");
+    }
+
+    #[test]
+    fn device_queue_property_has_same_object_identity() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let wrapped = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("device", wrapped)
+            .expect("set device");
+        eval_drop(
+            &runtime,
+            "if (device.queue !== device.queue) throw new Error('GPUDevice.queue is not SameObject');",
+            "device-queue-same-object.js",
+        );
+        runtime.clear_global("device").expect("clear device");
+        runtime.run_gc();
+        runtime.run_gc();
+        let _ = runtime.drain_releases().expect("drain");
+    }
+
+    #[test]
     fn tick_surfaces_throwing_microtask_message() {
         let setup = native_setup();
         let runtime = Runtime::new().expect("quickjs runtime");
@@ -2405,7 +2446,7 @@ mod tests {
     }
 
     #[test]
-    fn mapped_at_creation_detaches_on_unmap() {
+    fn mapped_at_creation_writes_reach_backend_and_ranges_detach() {
         let setup = native_setup();
         let runtime = Runtime::new().expect("quickjs runtime");
         let wrapped = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
@@ -2415,22 +2456,47 @@ mod tests {
         eval_drop(
             &runtime,
             r#"
-                var mapped = device.createBuffer({ size: 8, usage: 1, mappedAtCreation: true });
+                var mapped = device.createBuffer({ size: 8, usage: 4, mappedAtCreation: true });
+                var mappedReadback = device.createBuffer({ size: 8, usage: 9 });
                 var createdRange = mapped.getMappedRange(0, 4);
                 var createdView = new Uint8Array(createdRange);
-                createdView[0] = 7;
+                createdView.set([7, 8, 9, 10]);
                 mapped.unmap();
                 if (createdRange.byteLength !== 0 || createdView.byteLength !== 0) {
                     throw new Error('mappedAtCreation range was not detached');
                 }
-
+                var mappedEncoder = device.createCommandEncoder();
+                mappedEncoder.copyBufferToBuffer(mapped, 0, mappedReadback, 0, 4);
+                var mappedCommand = mappedEncoder.finish();
+                device.queue.submit([mappedCommand]);
+                var mappedBytesReachedBackend = false;
+                device.queue.onSubmittedWorkDone().then(function () {
+                    return mappedReadback.mapAsync(1, 0, 8);
+                }).then(function () {
+                    var got = new Uint8Array(mappedReadback.getMappedRange());
+                    var expected = [7, 8, 9, 10];
+                    for (var i = 0; i < expected.length; i++) {
+                        if (got[i] !== expected[i]) {
+                            throw new Error('mappedAtCreation backend byte mismatch at ' + i);
+                        }
+                    }
+                    mappedReadback.unmap();
+                    mappedBytesReachedBackend = true;
+                });
                 "#,
             "mapping.js",
+        );
+        unsafe { runtime.tick(setup.instance) }.expect("work-done tick");
+        unsafe { runtime.tick(setup.instance) }.expect("map tick");
+        eval_drop(
+            &runtime,
+            "if (!mappedBytesReachedBackend) throw new Error('mappedAtCreation bytes were not observed');",
+            "mapping-check.js",
         );
         let _ = runtime.drain_releases().expect("drain detached ranges");
         eval_drop(
             &runtime,
-            "mapped = null; createdRange = null; createdView = null;",
+            "mapped = mappedReadback = createdRange = createdView = mappedEncoder = mappedCommand = null; mappedBytesReachedBackend = undefined;",
             "cleanup.js",
         );
         runtime.clear_global("device").expect("clear device");

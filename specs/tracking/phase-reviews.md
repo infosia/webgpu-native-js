@@ -684,3 +684,49 @@ adapter/device releases; every current WebGPU callback copies the backend's
 unhandled-rejection values.
 
 Verified fixed: **DR-C1, DR-M1..M5, DR-m1..m4**. **DR-F2 remains open.**
+
+### Gate — PASSED. DR-F2 is COMPLETE.
+
+Gates re-run directly: engine-agnostic `core` **51 passed**; workspace tests
+**PASSED** (`quickjs-adapter` 35, no ignored tests); workspace build **PASSED**;
+workspace/all-target clippy with `-D warnings` **PASSED**; `cargo fmt --check`
+and `git diff --check` **PASSED**. The only warnings are the pre-existing ones
+from the vendored QuickJS C sources.
+
+**Both deletion experiments are red now.** In an isolated worktree, changing
+the real core `ReleaseQueue` drain from `pop_front` to `pop_back` makes the new
+FIFO test report `[3, 2, 1]` instead of `[1, 2, 3]`. Splitting one settlement
+batch into two one-item `settle_deferreds` calls makes the A30 test report two
+calls instead of one. The spike's private queue and QuickJS's naturally-deferred
+microtasks are no longer asked to prove properties they cannot observe.
+
+**The four-step tick contract is written once.** `core::tick` owns
+ProcessEvents → one settlement batch → engine microtasks → release drain.
+`drain_microtasks` is finally the additive engine capability A18 named, and the
+QuickJS host API delegates rather than restating the order. The mock records the
+batch size, call count and native step order, so JSC inherits an executable
+contract rather than a paragraph.
+
+**The mock takes the union now.** Property reads can fail and every successful
+read is a scoped owned alias that becomes semantically reclaimed at scope drop.
+Numeric coercion can re-enter `unmap()`. External zero-copy buffers retain their
+native owner and pair each range AddRef with a queued release. Settlement
+batching is observable. These are the four obligations whose absence hid the
+review's real defects; none is represented only by an unasserted counter.
+
+`Arena` now stores heterogeneous, address-stable slices through one generic
+allocator; adding an IDL sequence type no longer adds another pool to core.
+Payload value tracing and release are enumerated once in core, and adapters call
+the blind helpers. `GPUDevice.queue` caches one duplicated, traced wrapper value
+and returns the same identity on every read; QuickJS adds only return ownership,
+while a future tracing engine can return the protected identity directly.
+
+The remaining coverage gaps are closed at their public paths: real backend
+bytes prove A17, unmapped and destroyed ranges cover A14, `unmap()` idempotence
+covers A16, `arraybuffer_len(None)` covers A26, the 2^32 guard is driven through
+`writeBuffer`, and command-buffer consumption plus mapped-range owner references
+have direct core tests.
+
+Verified fixed: **DR-M6..M10, DR-m5..m8**. The two production handoffs from the
+2026-07-10 design review are complete; Phase 3 itself remains open for the JSC
+adapter.

@@ -47,6 +47,11 @@ pub struct Runtime {
     reclaimed_handles: RefCell<Vec<Value>>,
     detach_noop: Cell<bool>,
     duplicated_values: RefCell<BTreeMap<Value, usize>>,
+    property_errors: RefCell<BTreeMap<(Value, String), String>>,
+    coercion_unmap: Cell<Option<Value>>,
+    settle_calls: Cell<usize>,
+    settlement_batch_sizes: RefCell<Vec<usize>>,
+    held_returns: Cell<usize>,
 }
 
 impl Runtime {
@@ -61,6 +66,11 @@ impl Runtime {
             reclaimed_handles: RefCell::new(Vec::new()),
             detach_noop: Cell::new(false),
             duplicated_values: RefCell::new(BTreeMap::new()),
+            property_errors: RefCell::new(BTreeMap::new()),
+            coercion_unmap: Cell::new(None),
+            settle_calls: Cell::new(0),
+            settlement_batch_sizes: RefCell::new(Vec::new()),
+            held_returns: Cell::new(0),
         }
     }
 
@@ -95,6 +105,24 @@ impl Runtime {
     #[must_use]
     pub fn reclaimed_values(&self) -> usize {
         self.reclaimed_values.get()
+    }
+
+    fn set_property_error(&self, object: Value, property: &str, error: &str) {
+        self.property_errors
+            .borrow_mut()
+            .insert((object, property.to_owned()), error.to_owned());
+    }
+
+    fn reenter_unmap_on_next_coercion(&self, buffer: Value) {
+        self.coercion_unmap.set(Some(buffer));
+    }
+
+    fn live_scoped_values(&self) -> usize {
+        self.values
+            .borrow()
+            .iter()
+            .filter(|value| matches!(value, MockValue::Scoped(_)))
+            .count()
     }
 
     /// Returns the release queue.
@@ -160,6 +188,7 @@ impl Runtime {
                 ptr,
                 len,
                 detached: false,
+                ..
             } => {
                 if ptr.is_null() || *len != bytes.len() {
                     return false;
@@ -191,6 +220,7 @@ impl Runtime {
                 ptr,
                 len,
                 detached: false,
+                ..
             } if !ptr.is_null() => Some(unsafe { std::slice::from_raw_parts(*ptr, *len).to_vec() }),
             _ => None,
         })
@@ -217,11 +247,33 @@ impl Runtime {
     }
 
     fn get(&self, value: Value) -> MockValue {
-        self.values
+        let current = self.canonical(value);
+        match self
+            .values
             .borrow()
-            .get(value.0)
+            .get(current.0)
             .cloned()
             .unwrap_or(MockValue::Undefined)
+        {
+            MockValue::Reclaimed => MockValue::Undefined,
+            value => value,
+        }
+    }
+
+    fn canonical(&self, value: Value) -> Value {
+        let mut current = value;
+        loop {
+            let stored = self
+                .values
+                .borrow()
+                .get(current.0)
+                .cloned()
+                .unwrap_or(MockValue::Undefined);
+            match stored {
+                MockValue::Scoped(inner) => current = inner,
+                _ => return current,
+            }
+        }
     }
 
     fn with_value<R>(&self, value: Value, f: impl FnOnce(&mut MockValue) -> R) -> Option<R> {
@@ -241,21 +293,45 @@ impl Drop for Runtime {
 
 impl Drop for Scope<'_> {
     fn drop(&mut self) {
-        let count = self.owned.borrow().len();
+        let mut owned = self.owned.borrow_mut();
+        let count = owned.len();
+        for value in owned.iter().copied() {
+            assert!(
+                value.0 < self.runtime.values.borrow().len(),
+                "mock scope owned a value that the runtime never issued: {value:?}"
+            );
+            let reclaimed = self.runtime.with_value(value, |stored| {
+                assert!(
+                    matches!(stored, MockValue::Scoped(_)),
+                    "mock scope value was not an owned engine result: {value:?}"
+                );
+                *stored = MockValue::Reclaimed;
+            });
+            assert!(
+                reclaimed.is_some(),
+                "mock scope failed to reclaim {value:?}"
+            );
+        }
         self.runtime
             .reclaimed_values
             .set(self.runtime.reclaimed_values.get() + count);
         self.runtime
             .reclaimed_handles
             .borrow_mut()
-            .extend(self.owned.borrow().iter().copied());
-        self.owned.borrow_mut().clear();
+            .extend(owned.iter().copied());
+        owned.clear();
+        assert!(
+            owned.is_empty(),
+            "mock scope did not reclaim every owned value"
+        );
     }
 }
 
 #[derive(Clone)]
 enum MockValue {
     Undefined,
+    Scoped(Value),
+    Reclaimed,
     Null,
     Number(f64),
     Bool(bool),
@@ -276,6 +352,7 @@ enum MockValue {
     ExternalArrayBuffer {
         ptr: *mut u8,
         len: usize,
+        owner: WGPUBuffer,
         detached: bool,
     },
     Instance {
@@ -311,17 +388,27 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
         obj: Self::Value,
         key: &str,
     ) -> Result<Self::Value, Self::Error> {
-        match cx.runtime.get(obj) {
-            MockValue::Object(map) => {
-                let value = map
-                    .get(key)
-                    .copied()
-                    .unwrap_or_else(|| cx.runtime.undefined());
-                cx.scope.owned.borrow_mut().push(value);
-                Ok(value)
-            }
-            _ => Ok(cx.runtime.undefined()),
+        if let Some(error) = cx
+            .runtime
+            .property_errors
+            .borrow()
+            .get(&(cx.runtime.canonical(obj), key.to_owned()))
+            .cloned()
+        {
+            return Err(error);
         }
+        let value = match cx.runtime.get(obj) {
+            MockValue::Object(map) => map
+                .get(key)
+                .copied()
+                .unwrap_or_else(|| cx.runtime.undefined()),
+            _ => cx.runtime.undefined(),
+        };
+        let owned = cx
+            .runtime
+            .insert(MockValue::Scoped(cx.runtime.canonical(value)));
+        cx.scope.owned.borrow_mut().push(owned);
+        Ok(owned)
     }
 
     fn is_undefined(cx: Self::Context<'_>, value: Self::Value) -> bool {
@@ -333,11 +420,16 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
     }
 
     fn to_f64(cx: Self::Context<'_>, value: Self::Value) -> Result<f64, Self::Error> {
+        if let Some(buffer) = cx.runtime.coercion_unmap.take() {
+            let _ = crate::buffer_unmap::<Self>(cx, buffer, &[])?;
+        }
         match cx.runtime.get(value) {
             MockValue::Number(value) => Ok(value),
             MockValue::Bool(value) => Ok(if value { 1.0 } else { 0.0 }),
             MockValue::String(value) => value.parse::<f64>().map_err(|_| "number".to_owned()),
             MockValue::Undefined
+            | MockValue::Scoped(_)
+            | MockValue::Reclaimed
             | MockValue::Null
             | MockValue::Object(_)
             | MockValue::Promise { .. }
@@ -351,6 +443,7 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
     fn to_bool(cx: Self::Context<'_>, value: Self::Value) -> bool {
         match cx.runtime.get(value) {
             MockValue::Undefined => false,
+            MockValue::Scoped(_) | MockValue::Reclaimed => false,
             MockValue::Null => false,
             MockValue::Bool(value) => value,
             MockValue::Number(value) => value != 0.0 && !value.is_nan(),
@@ -371,6 +464,7 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
     ) -> Result<&'a str, Self::Error> {
         match cx.runtime.get(value) {
             MockValue::Undefined => Ok(arena.alloc_str("undefined")),
+            MockValue::Scoped(_) | MockValue::Reclaimed => Ok(arena.alloc_str("undefined")),
             MockValue::Null => Ok(arena.alloc_str("null")),
             MockValue::Number(value) => Ok(arena.alloc_str(&value.to_string())),
             MockValue::Bool(value) => Ok(arena.alloc_str(if value { "true" } else { "false" })),
@@ -412,26 +506,6 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
                 payload,
             } if actual == class => Some(payload),
             _ => None,
-        }
-    }
-
-    fn trace_payload(
-        cx: Self::Context<'_>,
-        payload: &(dyn Any + Send),
-        visit: &mut dyn FnMut(Self::Value),
-    ) {
-        if let Some(buffer) = payload.downcast_ref::<crate::BufferPayload<Self>>() {
-            buffer.trace_mapped_range_values(|value| {
-                assert!(
-                    value.0 < cx.runtime.values.borrow().len(),
-                    "mock traced value was not issued: {value:?}"
-                );
-                assert!(
-                    !cx.runtime.reclaimed_handles.borrow().contains(&value),
-                    "mock payload traced a reclaimed value: {value:?}"
-                );
-                visit(value);
-            });
         }
     }
 
@@ -480,6 +554,14 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
     }
 
     fn settle_deferreds(cx: Self::Context<'_>, settlements: Vec<crate::DeferredSettlement<Self>>) {
+        cx.runtime
+            .settle_calls
+            .set(cx.runtime.settle_calls.get() + 1);
+        cx.runtime
+            .settlement_batch_sizes
+            .borrow_mut()
+            .push(settlements.len());
+        GPU_STATE.with(|state| state.borrow_mut().native_order.push("settle"));
         for (deferred, result) in settlements {
             let runtime = cx.runtime;
             let resolver = match result {
@@ -508,15 +590,21 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
         }
     }
 
+    fn drain_microtasks(_cx: Self::Context<'_>) -> Result<(), Self::Error> {
+        GPU_STATE.with(|state| state.borrow_mut().native_order.push("microtasks"));
+        Ok(())
+    }
+
     unsafe fn new_external_arraybuffer(
         cx: Self::Context<'_>,
         ptr: *mut u8,
         len: usize,
-        _owner: WGPUBuffer,
+        owner: WGPUBuffer,
     ) -> Result<Self::Value, Self::Error> {
         Ok(cx.runtime.insert(MockValue::ExternalArrayBuffer {
             ptr,
             len,
+            owner,
             detached: false,
         }))
     }
@@ -559,7 +647,19 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
                     }
                     Ok(())
                 }
-                MockValue::ExternalArrayBuffer { detached, .. } => {
+                MockValue::ExternalArrayBuffer {
+                    owner, detached, ..
+                } => {
+                    if !*detached {
+                        let _ = cx
+                            .runtime
+                            .env
+                            .queue()
+                            .enqueue(crate::ReleaseRequest::Buffer {
+                                buffer: *owner,
+                                gpu: cx.runtime.env.gpu(),
+                            });
+                    }
                     *detached = true;
                     Ok(())
                 }
@@ -585,9 +685,17 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
     }
 
     fn duplicate_value(cx: Self::Context<'_>, value: Self::Value) -> Self::Value {
+        let value = cx.runtime.canonical(value);
         let mut duplicated = cx.runtime.duplicated_values.borrow_mut();
         *duplicated.entry(value).or_insert(0) += 1;
         value
+    }
+
+    fn return_held_value(cx: Self::Context<'_>, held: Self::Value) -> Self::Value {
+        cx.runtime
+            .held_returns
+            .set(cx.runtime.held_returns.get() + 1);
+        held
     }
 
     fn release_value(cx: Self::Context<'_>, value: Self::Value) {
@@ -612,6 +720,7 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
 
 thread_local! {
     static GPU_STATE: RefCell<MockGpuState> = RefCell::new(MockGpuState::default());
+    static TEST_RELEASE_ORDER: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
 }
 
 #[derive(Default)]
@@ -619,6 +728,7 @@ struct MockGpuState {
     next: usize,
     adapter_releases: usize,
     device_add_refs: usize,
+    device_get_queue_calls: usize,
     buffer_add_refs: usize,
     queue_add_refs: usize,
     shader_module_add_refs: usize,
@@ -631,6 +741,7 @@ struct MockGpuState {
     bind_group_layout_releases: usize,
     pipeline_layout_releases: usize,
     buffer_destroys: usize,
+    buffer_unmaps: usize,
     mapped_range_calls: usize,
     const_mapped_range_calls: usize,
     labels: Vec<Vec<u8>>,
@@ -670,6 +781,7 @@ pub fn runtime() -> Runtime {
 #[must_use]
 pub fn dispatch() -> GpuDispatch {
     GpuDispatch {
+        instance_process_events,
         instance_request_adapter,
         adapter_request_device,
         adapter_release,
@@ -717,6 +829,10 @@ pub fn dispatch() -> GpuDispatch {
         compute_pass_encoder_dispatch_workgroups,
         compute_pass_encoder_end,
     }
+}
+
+unsafe fn instance_process_events(_instance: crate::WGPUInstance) {
+    GPU_STATE.with(|state| state.borrow_mut().native_order.push("process_events"));
 }
 
 /// Creates a non-null fake device handle.
@@ -797,6 +913,10 @@ unsafe fn device_release(_device: WGPUDevice) {
     });
 }
 
+unsafe fn ordered_device_release(device: WGPUDevice) {
+    TEST_RELEASE_ORDER.with(|order| order.borrow_mut().push(device as usize));
+}
+
 unsafe fn device_create_buffer(
     _device: WGPUDevice,
     descriptor: *const WGPUBufferDescriptor,
@@ -824,7 +944,10 @@ unsafe fn device_create_buffer(
 }
 
 unsafe fn device_get_queue(_device: WGPUDevice) -> WGPUQueue {
-    fake_handle(1001)
+    GPU_STATE.with(|state| {
+        state.borrow_mut().device_get_queue_calls += 1;
+        fake_handle(1001)
+    })
 }
 
 unsafe fn device_create_shader_module(
@@ -989,7 +1112,9 @@ unsafe fn buffer_map_async(
     webgpu_native_js_ffi::native::WGPUFuture { id: 3 }
 }
 
-unsafe fn buffer_unmap(_buffer: WGPUBuffer) {}
+unsafe fn buffer_unmap(_buffer: WGPUBuffer) {
+    GPU_STATE.with(|state| state.borrow_mut().buffer_unmaps += 1);
+}
 
 unsafe fn buffer_release(_buffer: WGPUBuffer) {
     GPU_STATE.with(|state| {
@@ -1169,23 +1294,112 @@ mod tests {
     use super::*;
     use crate::{
         buffer_destroy, buffer_get_mapped_range, buffer_label_get, buffer_label_set,
-        buffer_map_async, buffer_size_get, buffer_unmap, buffer_usage_get,
+        buffer_map_async, buffer_size_get, buffer_unmap, buffer_usage_get, command_encoder_finish,
         convert_bind_group_descriptor, convert_bind_group_layout_descriptor,
         convert_buffer_binding_layout, convert_buffer_descriptor,
         convert_command_buffer_descriptor, convert_command_encoder_descriptor,
         convert_compute_pass_descriptor, convert_compute_pipeline_descriptor,
         convert_pipeline_layout_descriptor, convert_shader_module_descriptor,
-        device_create_bind_group, device_create_buffer, device_create_compute_pipeline,
-        device_queue_get, finalize_bind_group, finalize_buffer, finalize_compute_pipeline,
-        finalize_device, finalize_queue, optional_gpu_size_to_usize, queue_work_done_callback,
-        wrap_device, BindGroupLayoutPayload, BindGroupPayload, BufferPayload,
-        ComputePipelinePayload, DevicePayload, JsEngine, PendingNative, PendingNativeHandle,
-        PipelineLayoutPayload, QueueError, QueuePayload, QueueWorkDoneRequest, SettlementRequest,
-        ShaderModulePayload,
+        device_create_bind_group, device_create_buffer, device_create_command_encoder,
+        device_create_compute_pipeline, device_queue_get, finalize_bind_group, finalize_buffer,
+        finalize_compute_pipeline, finalize_device, finalize_queue, queue_submit,
+        queue_work_done_callback, queue_write_buffer, wrap_device, BindGroupLayoutPayload,
+        BindGroupPayload, BufferPayload, ComputePipelinePayload, DevicePayload, JsEngine,
+        PendingNative, PendingNativeHandle, PipelineLayoutPayload, QueueError, QueuePayload,
+        QueueWorkDoneRequest, SettlementRequest, ShaderModulePayload,
     };
 
     fn descriptor(rt: &Runtime, fields: &[(&str, Value)]) -> Value {
         rt.object(fields)
+    }
+
+    fn release_device_held_values(rt: &Runtime, cx: Context<'_>, device: Value) {
+        let payload = Engine::payload(cx, device, crate::GPU_DEVICE_CLASS)
+            .and_then(|payload| payload.downcast_ref::<DevicePayload<Engine>>())
+            .expect("device payload");
+        crate::release_payload_values::<Engine>(payload, &mut |value| {
+            Engine::release_value(cx, value);
+        });
+        assert!(rt.duplicated_values.borrow().is_empty());
+    }
+
+    #[test]
+    fn arena_alloc_slice_keeps_heterogeneous_allocations_address_stable() {
+        let arena = Arena::new();
+        let numbers = arena.alloc_slice(vec![1_u32, 2, 3]);
+        let number_ptr = numbers.as_ptr();
+        let bytes = arena.alloc_slice(vec![b'a', b'b']);
+        assert_eq!(numbers, [1, 2, 3]);
+        assert_eq!(numbers.as_ptr(), number_ptr);
+        assert_eq!(bytes, b"ab");
+    }
+
+    #[test]
+    fn release_queue_drains_core_requests_in_fifo_order() {
+        TEST_RELEASE_ORDER.with(|order| order.borrow_mut().clear());
+        let queue = ReleaseQueue::new();
+        let mut gpu = dispatch();
+        gpu.device_release = ordered_device_release;
+        for id in [1_usize, 2, 3] {
+            queue
+                .enqueue(crate::ReleaseRequest::Device {
+                    device: fake_handle(id),
+                    gpu,
+                })
+                .expect("enqueue");
+        }
+        assert_eq!(queue.drain(), Ok(3));
+        TEST_RELEASE_ORDER.with(|order| assert_eq!(&*order.borrow(), &[1, 2, 3]));
+    }
+
+    #[test]
+    fn a30_core_tick_batches_settlements_and_owns_step_order() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        for _ in 0..2 {
+            let (_, deferred) = Engine::new_promise(cx).expect("promise");
+            rt.env
+                .settlements()
+                .enqueue::<Engine>(crate::SettlementRequest::Success { deferred })
+                .expect("enqueue settlement");
+        }
+        rt.queue()
+            .enqueue(crate::ReleaseRequest::Device {
+                device: fake_device(),
+                gpu: dispatch(),
+            })
+            .expect("enqueue release");
+
+        let drained = unsafe { crate::tick::<Engine>(cx, fake_handle(99)) }.expect("tick");
+
+        assert_eq!(drained, 1);
+        assert_eq!(rt.settle_calls.get(), 1);
+        assert_eq!(&*rt.settlement_batch_sizes.borrow(), &[2]);
+        GPU_STATE.with(|state| {
+            assert_eq!(
+                state.borrow().native_order,
+                ["process_events", "settle", "microtasks", "device_release"]
+            );
+        });
+    }
+
+    #[test]
+    fn core_tick_reports_unexpected_settlement_type() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let (_, deferred) = MockEngine::<true>::new_promise(cx).expect("promise");
+        rt.env
+            .settlements()
+            .enqueue::<MockEngine<true>>(crate::SettlementRequest::Success { deferred })
+            .expect("enqueue settlement");
+
+        let error = unsafe { crate::tick::<Engine>(cx, fake_handle(99)) }.expect_err("tick error");
+        assert!(matches!(
+            error,
+            crate::TickError::Queue(QueueError::UnexpectedSettlementType)
+        ));
     }
 
     #[test]
@@ -1539,6 +1753,19 @@ mod tests {
             let desc = descriptor(&rt, &[("entries", entries)]);
             assert!(convert_bind_group_layout_descriptor::<Engine>(cx, desc, &arena).is_err());
         }
+
+        let entry = descriptor(
+            &rt,
+            &[("binding", rt.number(0.0)), ("visibility", rt.number(1.0))],
+        );
+        rt.set_property_error(entry, "visibility", "visibility getter failed");
+        let entries = descriptor(&rt, &[("length", rt.number(1.0)), ("0", entry)]);
+        let desc = descriptor(&rt, &[("entries", entries)]);
+        assert_eq!(
+            convert_bind_group_layout_descriptor::<Engine>(cx, desc, &arena)
+                .expect_err("getter failure must propagate"),
+            "visibility getter failed"
+        );
     }
 
     #[test]
@@ -1560,30 +1787,66 @@ mod tests {
     }
 
     #[test]
-    fn b7_write_buffer_rejects_size_that_would_truncate_on_32_bit_hosts() {
-        let rt = runtime();
-        let cx = rt.context();
-
-        let error =
-            optional_gpu_size_to_usize::<Engine>(cx, Some(rt.number(4_294_967_296.0)), "size", 0)
-                .expect_err("oversized size must fail before narrowing");
-
-        assert_eq!(error, "TypeError: size");
-    }
-
-    #[test]
-    fn device_queue_get_balances_returned_owned_queue_reference() {
+    fn b7_write_buffer_method_rejects_size_that_would_truncate_on_32_bit_hosts() {
         reset_gpu();
         let rt = runtime();
         let cx = rt.context();
         let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
-        let _queue = device_queue_get::<Engine>(cx, device).expect("queue");
+        let queue = device_queue_get::<Engine>(cx, device).expect("queue");
+        let desc = descriptor(&rt, &[("size", rt.number(8.0)), ("usage", rt.number(8.0))]);
+        let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("buffer");
+        let data = Engine::new_arraybuffer_copy(cx, &[0; 8]).expect("arraybuffer");
+        let error = queue_write_buffer::<Engine>(
+            cx,
+            queue,
+            &[
+                buffer,
+                rt.number(0.0),
+                data,
+                rt.number(0.0),
+                rt.number(4_294_967_296.0),
+            ],
+        )
+        .expect_err("oversized size must fail before narrowing");
+
+        assert_eq!(error, "TypeError: size");
+        release_device_held_values(&rt, cx, device);
+    }
+
+    #[test]
+    fn b21_device_queue_is_same_object_with_one_persistent_hold() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let first = device_queue_get::<Engine>(cx, device).expect("queue");
+        let second = device_queue_get::<Engine>(cx, device).expect("cached queue");
+        assert_eq!(first, second);
 
         GPU_STATE.with(|state| {
             let state = state.borrow();
+            assert_eq!(state.device_get_queue_calls, 1);
             assert_eq!(state.queue_add_refs, 0);
             assert_eq!(state.queue_releases, 0);
         });
+        assert_eq!(rt.held_returns.get(), 1);
+        assert_eq!(rt.duplicated_values.borrow().get(&first), Some(&1));
+
+        let payload = Engine::payload(cx, device, crate::GPU_DEVICE_CLASS)
+            .and_then(|payload| payload.downcast_ref::<DevicePayload<Engine>>())
+            .expect("device payload");
+        let mut traced = Vec::new();
+        crate::trace_payload_values::<Engine>(payload, &mut |value| traced.push(value));
+        assert_eq!(traced, [first]);
+        let mut released = 0;
+        crate::release_payload_values::<Engine>(payload, &mut |value| {
+            released += 1;
+            Engine::release_value(cx, value);
+        });
+        crate::release_payload_values::<Engine>(payload, &mut |_| released += 1);
+        assert_eq!(released, 1);
+        assert!(rt.duplicated_values.borrow().is_empty());
+
         finalize_queue(
             Box::new(QueuePayload {
                 queue: fake_handle(1001),
@@ -1632,7 +1895,7 @@ mod tests {
         let arena = Arena::new();
 
         assert!(convert_bind_group_descriptor::<Engine>(cx, desc, &arena).is_err());
-        assert_eq!(arena.bind_group_entries.borrow().len(), 0);
+        assert_eq!(arena.allocations.borrow().len(), 0);
         assert!(device_create_bind_group::<Engine>(cx, device, &[desc]).is_err());
         GPU_STATE.with(|state| {
             assert_eq!(state.borrow().buffer_add_refs, 0);
@@ -1882,6 +2145,23 @@ mod tests {
                 convert_buffer_descriptor::<Engine>(cx, desc, &arena).expect("descriptor");
             assert_eq!(converted.label, "scoped");
         });
+        assert_eq!(rt.reclaimed_values(), 4);
+        assert_eq!(rt.live_scoped_values(), 0);
+    }
+
+    #[test]
+    fn r23_non_object_property_result_is_scoped_and_reclaimed() {
+        let rt = runtime();
+        let object = rt.number(1.0);
+        let mut result = rt.undefined();
+        rt.with_scope(|cx| {
+            result = Engine::get_property(cx, object, "missing").expect("property");
+            assert_ne!(result, rt.undefined());
+            assert!(Engine::is_undefined(cx, result));
+            assert_eq!(rt.live_scoped_values(), 1);
+        });
+        assert_eq!(rt.live_scoped_values(), 0);
+        assert!(Engine::is_undefined(rt.context(), result));
     }
 
     #[test]
@@ -1948,7 +2228,7 @@ mod tests {
     }
 
     #[test]
-    fn r15_size_and_usage_getters_are_synchronous() {
+    fn buffer_size_and_usage_getters_return_wrapper_metadata() {
         reset_gpu();
         let rt = runtime();
         let cx = rt.context();
@@ -1996,6 +2276,13 @@ mod tests {
             &[rt.number(4.0), rt.number(4.0)],
         )
         .expect("range");
+        GPU_STATE.with(|state| {
+            assert_eq!(
+                state.borrow().buffer_add_refs,
+                if COPY { 0 } else { 2 },
+                "zero-copy ranges must retain their owner once per range"
+            );
+        });
         assert_eq!(MockEngine::<COPY>::arraybuffer_len(cx, first), Some(4));
         assert_eq!(MockEngine::<COPY>::arraybuffer_len(cx, second), Some(4));
         assert!(rt.write_arraybuffer(first, &[1, 2, 3, 4]));
@@ -2009,6 +2296,12 @@ mod tests {
         }
 
         let _ = buffer_unmap::<MockEngine<COPY>>(cx, buffer, &[]).expect("unmap");
+
+        if !COPY {
+            assert_eq!(rt.queue().len(), Ok(2));
+            assert_eq!(rt.queue().drain(), Ok(2));
+            GPU_STATE.with(|state| assert_eq!(state.borrow().buffer_releases, 2));
+        }
 
         assert_eq!(MockEngine::<COPY>::arraybuffer_len(cx, first), Some(0));
         assert_eq!(MockEngine::<COPY>::arraybuffer_len(cx, second), Some(0));
@@ -2035,6 +2328,120 @@ mod tests {
     #[test]
     fn a10_a20_copy_in_copy_out_detaches_and_copies_back() {
         assert_unmap_detaches_all_mapped_ranges::<true>();
+    }
+
+    #[test]
+    fn payload_value_dispatch_traces_and_releases_all_buffer_ranges_once() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let desc = descriptor(
+            &rt,
+            &[
+                ("size", rt.number(8.0)),
+                ("usage", rt.number(2.0)),
+                ("mappedAtCreation", rt.bool(true)),
+            ],
+        );
+        let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("buffer");
+        let first =
+            buffer_get_mapped_range::<Engine>(cx, buffer, &[rt.number(0.0), rt.number(4.0)])
+                .expect("first range");
+        let second =
+            buffer_get_mapped_range::<Engine>(cx, buffer, &[rt.number(4.0), rt.number(4.0)])
+                .expect("second range");
+        let payload = Engine::payload(cx, buffer, crate::GPU_BUFFER_CLASS)
+            .and_then(|payload| payload.downcast_ref::<BufferPayload<Engine>>())
+            .expect("buffer payload");
+
+        let mut traced = Vec::new();
+        crate::trace_payload_values::<Engine>(payload, &mut |value| traced.push(value));
+        assert_eq!(traced, [first, second]);
+
+        let mut released = Vec::new();
+        crate::release_payload_values::<Engine>(payload, &mut |value| {
+            released.push(value);
+            Engine::release_value(cx, value);
+        });
+        crate::release_payload_values::<Engine>(payload, &mut |value| released.push(value));
+        assert_eq!(released, [first, second]);
+        let mut traced_after_release = Vec::new();
+        crate::trace_payload_values::<Engine>(payload, &mut |value| {
+            traced_after_release.push(value)
+        });
+        assert!(traced_after_release.is_empty());
+        assert!(rt.duplicated_values.borrow().is_empty());
+    }
+
+    #[test]
+    fn r27_mock_coercion_reenters_unmap_before_mapped_range_state_lock() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let desc = descriptor(
+            &rt,
+            &[
+                ("size", rt.number(8.0)),
+                ("usage", rt.number(2.0)),
+                ("mappedAtCreation", rt.bool(true)),
+            ],
+        );
+        let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("buffer");
+        rt.reenter_unmap_on_next_coercion(buffer);
+
+        assert_eq!(
+            buffer_get_mapped_range::<Engine>(cx, buffer, &[rt.undefined(), rt.number(4.0)],)
+                .expect_err("reentrant unmap must invalidate the range request"),
+            "OperationError: buffer is not mapped"
+        );
+    }
+
+    #[test]
+    fn a26_arraybuffer_len_returns_none_for_non_arraybuffer() {
+        let rt = runtime();
+        let cx = rt.context();
+        assert_eq!(Engine::arraybuffer_len(cx, rt.number(1.0)), None);
+    }
+
+    #[test]
+    fn a16_unmap_is_idempotent() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let desc = descriptor(
+            &rt,
+            &[
+                ("size", rt.number(8.0)),
+                ("usage", rt.number(2.0)),
+                ("mappedAtCreation", rt.bool(true)),
+            ],
+        );
+        let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("buffer");
+        buffer_unmap::<Engine>(cx, buffer, &[]).expect("first unmap");
+        buffer_unmap::<Engine>(cx, buffer, &[]).expect("second unmap");
+        GPU_STATE.with(|state| assert_eq!(state.borrow().buffer_unmaps, 1));
+    }
+
+    #[test]
+    fn b19_queue_submit_core_guard_consumes_command_buffer_once() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let queue = device_queue_get::<Engine>(cx, device).expect("queue");
+        let encoder = device_create_command_encoder::<Engine>(cx, device, &[]).expect("encoder");
+        let command = command_encoder_finish::<Engine>(cx, encoder, &[]).expect("command");
+        let commands = descriptor(&rt, &[("length", rt.number(1.0)), ("0", command)]);
+
+        queue_submit::<Engine>(cx, queue, &[commands]).expect("first submit");
+        assert_eq!(
+            queue_submit::<Engine>(cx, queue, &[commands]).expect_err("second submit"),
+            "OperationError: GPUCommandBuffer is consumed"
+        );
+        release_device_held_values(&rt, cx, device);
     }
 
     #[test]
@@ -2242,12 +2649,10 @@ mod tests {
         );
 
         let device_payload = Engine::payload(cx, device, crate::GPU_DEVICE_CLASS)
-            .and_then(|payload| payload.downcast_ref::<DevicePayload>())
+            .and_then(|payload| payload.downcast_ref::<DevicePayload<Engine>>())
             .expect("payload");
-        finalize_device(
-            Box::new(DevicePayload {
-                device: device_payload.device(),
-            }),
+        finalize_device::<Engine>(
+            Box::new(DevicePayload::<Engine>::new(device_payload.device())),
             Engine::environment(cx),
         );
 
