@@ -386,3 +386,30 @@ won't-do.)
 flow (spec citation, the wgpu-native rejection message verbatim, suggested fix
 shape + tests, and the question of why a fail=0 CTS run missed it). Nothing on
 the binding side waits on it.
+
+**D11 RETRACTED (2026-07-11) — yawgpu's reply (REPORT.md) is correct and the
+defect was the planner's diagnosis.** yawgpu has enforced the anisotropy/
+filter rule since 2026-05-21 (their `validate_sampler_descriptor`, verified by
+their C-level Noop repro: scope active → validation error fires, error sampler
+returned). What actually happened on our side: createSampler returns a
+NON-NULL error object on validation failure (webgpu.h-correct), our B16 check
+observes only null, and the parity sampler line ran with NO error scope — so
+yawgpu's rejection routed to the uncaptured path, which its default silently
+drops. wgpu-native "rejected visibly" only because its default uncaptured
+handler PANICS. The real deltas, restated:
+
+- **D11′ — default uncaptured-error disposition differs**: yawgpu drops
+  silently (no scope, no callback); wgpu-native aborts the process. Neither
+  is contract; hosts should install the uncaptured callback / use the S6
+  forwarder, and the host-contract docs already say so.
+- **Error-object creation semantics**: a failed createXxx yields a live
+  non-null error handle — "creation returned non-null" proves nothing about
+  validity. Any test line that means "this descriptor is valid" must observe
+  it under an error scope (the parity render-pipeline line already does; the
+  old sampler line did not — the B2 lesson, one layer up).
+
+The spec-valid sampler inputs stay (correct regardless). The yawgpu handoff is
+closed with a retraction note. The reflection worth keeping: the planner
+inferred "backend A accepts, backend B rejects" from "suite green on A, loud
+on B" without isolating WHERE the paths diverge — a green line proves only
+what it observes, and this project had already written that rule down twice.
