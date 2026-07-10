@@ -6,9 +6,9 @@ pub(super) fn convert_buffer_binding_layout<E: JsEngine>(
     let type_value = E::get_property(cx, value, "type")?;
     let has_dynamic_offset_value = E::get_property(cx, value, "hasDynamicOffset")?;
     let min_binding_size_value = E::get_property(cx, value, "minBindingSize")?;
-    // B6: string enum values are joined to C values; absence uses the C sentinel.
+    // B6: string enums are joined to C values; absence uses the IDL default or C sentinel.
     let type_ = if E::is_undefined(cx, type_value) {
-        WGPUBufferBindingType_WGPUBufferBindingType_Undefined
+        WGPUBufferBindingType_WGPUBufferBindingType_Uniform
     } else {
         let enum_arena = Arena::new();
         match E::to_str(cx, type_value, &enum_arena)? {

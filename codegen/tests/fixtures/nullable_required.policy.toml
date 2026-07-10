@@ -3,3 +3,14 @@ schema_version = 1
 [[subset]]
 interface = "GPUDevice"
 members = ["consume"]
+
+[[descriptor]]
+dictionary = "GPUExampleDescriptor"
+
+[[descriptor.handles]]
+member = "buffer"
+helper = "buffer_handle"
+
+[[descriptor.handles]]
+member = "optionalBuffer"
+helper = "buffer_handle"

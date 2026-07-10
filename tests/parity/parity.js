@@ -51,6 +51,7 @@
             log("bigint:" + bigintName);
 
             labelBuffer.destroy();
+            paritySampler = null;
             log("destroy:ok");
             finished = true;
             globalThis.parityDone = true;
@@ -124,6 +125,19 @@
         var nullLabel = labelBuffer.label;
         labelBuffer.label = "round-trip";
         log("buffer:" + nullLabel + "," + labelBuffer.label + ";method:" + stableMethod);
+
+        var paritySampler = device.createSampler({
+            label: "parity-sampler",
+            addressModeU: "repeat",
+            magFilter: "linear",
+            mipmapFilter: "linear",
+            lodMinClamp: 1.5,
+            lodMaxClamp: 9.5,
+            compare: "less-equal",
+            maxAnisotropy: 4
+        });
+        paritySampler.label = "sampler-round-trip";
+        log("sampler:" + paritySampler.label);
 
         gpu.requestAdapter().then(function (firstAdapter) {
             var order = [];

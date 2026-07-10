@@ -1433,6 +1433,7 @@ fn gpu_dispatch() -> core::GpuDispatch {
         device_create_buffer,
         device_get_queue,
         device_create_shader_module,
+        device_create_sampler,
         device_create_bind_group_layout,
         device_create_pipeline_layout,
         device_create_bind_group,
@@ -1453,6 +1454,9 @@ fn gpu_dispatch() -> core::GpuDispatch {
         queue_on_submitted_work_done,
         shader_module_add_ref,
         shader_module_release,
+        sampler_add_ref,
+        sampler_release,
+        sampler_set_label,
         bind_group_layout_add_ref,
         bind_group_layout_release,
         pipeline_layout_add_ref,
@@ -1522,6 +1526,13 @@ unsafe fn device_create_shader_module(
     descriptor: *const core::WGPUShaderModuleDescriptor,
 ) -> core::WGPUShaderModule {
     unsafe { ffi_wgpu::wgpuDeviceCreateShaderModule(device, descriptor) }
+}
+
+unsafe fn device_create_sampler(
+    device: core::WGPUDevice,
+    descriptor: *const core::WGPUSamplerDescriptor,
+) -> core::WGPUSampler {
+    unsafe { ffi_wgpu::wgpuDeviceCreateSampler(device, descriptor) }
 }
 
 unsafe fn device_create_bind_group_layout(
@@ -1644,6 +1655,18 @@ unsafe fn shader_module_add_ref(module: core::WGPUShaderModule) {
 
 unsafe fn shader_module_release(module: core::WGPUShaderModule) {
     unsafe { ffi_wgpu::wgpuShaderModuleRelease(module) };
+}
+
+unsafe fn sampler_add_ref(sampler: core::WGPUSampler) {
+    unsafe { ffi_wgpu::wgpuSamplerAddRef(sampler) };
+}
+
+unsafe fn sampler_release(sampler: core::WGPUSampler) {
+    unsafe { ffi_wgpu::wgpuSamplerRelease(sampler) };
+}
+
+unsafe fn sampler_set_label(sampler: core::WGPUSampler, label: core::WGPUStringView) {
+    unsafe { ffi_wgpu::wgpuSamplerSetLabel(sampler, label) };
 }
 
 unsafe fn bind_group_layout_add_ref(layout: core::WGPUBindGroupLayout) {
@@ -1799,6 +1822,7 @@ mod tests {
     use webgpu_native_js_core::JsEngine;
 
     static COUNTED_BUFFER_RELEASES: AtomicUsize = AtomicUsize::new(0);
+    static COUNTED_SAMPLER_RELEASES: AtomicUsize = AtomicUsize::new(0);
 
     struct AdapterRequestState {
         status: Cell<wgpu::WGPURequestAdapterStatus>,
@@ -2236,9 +2260,20 @@ mod tests {
         gpu
     }
 
+    fn counted_sampler_release_dispatch() -> core::GpuDispatch {
+        let mut gpu = super::gpu_dispatch();
+        gpu.sampler_release = counted_sampler_release;
+        gpu
+    }
+
     unsafe fn counted_buffer_release(buffer: core::WGPUBuffer) {
         COUNTED_BUFFER_RELEASES.fetch_add(1, Ordering::SeqCst);
         unsafe { wgpu::wgpuBufferRelease(buffer) };
+    }
+
+    unsafe fn counted_sampler_release(sampler: core::WGPUSampler) {
+        COUNTED_SAMPLER_RELEASES.fetch_add(1, Ordering::SeqCst);
+        unsafe { wgpu::wgpuSamplerRelease(sampler) };
     }
 
     fn callback_magic(runtime: &Runtime, kind: CallbackKind, index: usize) -> c_int {
@@ -2332,6 +2367,48 @@ mod tests {
         runtime.clear_global("device").expect("clear device");
         runtime.run_gc();
         assert!(runtime.drain_releases().expect("drain") >= 2);
+    }
+
+    #[test]
+    fn script_creates_labels_and_releases_sampler_on_tick() {
+        let setup = native_setup();
+        COUNTED_SAMPLER_RELEASES.store(0, Ordering::SeqCst);
+        let runtime = Runtime::new_with_dispatch(counted_sampler_release_dispatch())
+            .expect("quickjs runtime");
+        let wrapped = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("device", wrapped)
+            .expect("set device");
+        eval_drop(
+            &runtime,
+            r#"
+                var transientSampler = device.createSampler({
+                    label: "quickjs-sampler",
+                    addressModeU: "repeat",
+                    addressModeV: "mirror-repeat",
+                    addressModeW: "clamp-to-edge",
+                    magFilter: "linear",
+                    minFilter: "nearest",
+                    mipmapFilter: "linear",
+                    lodMinClamp: 1.5,
+                    lodMaxClamp: 12.5,
+                    compare: "less-equal",
+                    maxAnisotropy: 4
+                });
+                if (transientSampler.label !== "quickjs-sampler") {
+                    throw new Error("sampler label mismatch");
+                }
+                transientSampler = null;
+            "#,
+            "sampler-slice.js",
+        );
+        runtime.run_gc();
+        unsafe { runtime.tick(setup.instance) }.expect("sampler release tick");
+        assert_eq!(COUNTED_SAMPLER_RELEASES.load(Ordering::SeqCst), 1);
+
+        runtime.clear_global("device").expect("clear device");
+        runtime.run_gc();
+        let _ = runtime.drain_releases().expect("device drain");
     }
 
     #[test]

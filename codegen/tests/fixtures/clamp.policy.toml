@@ -2,7 +2,7 @@ schema_version = 1
 
 [[subset]]
 interface = "GPUDevice"
-members = ["createBuffer"]
+members = ["createSampler"]
 
 [[descriptor]]
-dictionary = "GPUBufferDescriptor"
+dictionary = "GPUSamplerDescriptor"

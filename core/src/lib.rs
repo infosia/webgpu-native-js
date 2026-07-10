@@ -28,7 +28,8 @@ use generated::{
     convert_bind_group_descriptor, convert_bind_group_layout_descriptor, convert_buffer_descriptor,
     convert_command_buffer_descriptor, convert_command_encoder_descriptor,
     convert_compute_pass_descriptor, convert_compute_pipeline_descriptor,
-    convert_pipeline_layout_descriptor, convert_shader_module_descriptor,
+    convert_pipeline_layout_descriptor, convert_sampler_descriptor,
+    convert_shader_module_descriptor,
 };
 
 /// Result type used by the core crate.
@@ -47,6 +48,7 @@ const GPU_COMPUTE_PIPELINE_CLASS: ClassId = ClassId(10);
 const GPU_COMMAND_ENCODER_CLASS: ClassId = ClassId(11);
 const GPU_COMMAND_BUFFER_CLASS: ClassId = ClassId(12);
 const GPU_COMPUTE_PASS_ENCODER_CLASS: ClassId = ClassId(13);
+const GPU_SAMPLER_CLASS: ClassId = ClassId(14);
 const WEBIDL_U32_MAX: u64 = u32::MAX as u64;
 
 /// A JavaScript class identifier scoped to an engine context.
@@ -120,6 +122,8 @@ pub struct GpuDispatch {
     /// `wgpuDeviceCreateShaderModule`.
     pub device_create_shader_module:
         unsafe fn(WGPUDevice, *const WGPUShaderModuleDescriptor) -> WGPUShaderModule,
+    /// `wgpuDeviceCreateSampler`.
+    pub device_create_sampler: unsafe fn(WGPUDevice, *const WGPUSamplerDescriptor) -> WGPUSampler,
     /// `wgpuDeviceCreateBindGroupLayout`.
     pub device_create_bind_group_layout:
         unsafe fn(WGPUDevice, *const WGPUBindGroupLayoutDescriptor) -> WGPUBindGroupLayout,
@@ -172,6 +176,12 @@ pub struct GpuDispatch {
     pub shader_module_add_ref: unsafe fn(WGPUShaderModule),
     /// `wgpuShaderModuleRelease`.
     pub shader_module_release: unsafe fn(WGPUShaderModule),
+    /// `wgpuSamplerAddRef`.
+    pub sampler_add_ref: unsafe fn(WGPUSampler),
+    /// `wgpuSamplerRelease`.
+    pub sampler_release: unsafe fn(WGPUSampler),
+    /// `wgpuSamplerSetLabel`.
+    pub sampler_set_label: unsafe fn(WGPUSampler, WGPUStringView),
     /// `wgpuBindGroupLayoutAddRef`.
     pub bind_group_layout_add_ref: unsafe fn(WGPUBindGroupLayout),
     /// `wgpuBindGroupLayoutRelease`.
@@ -767,6 +777,13 @@ pub enum ReleaseRequest {
         /// Dispatch table used on the drain thread.
         gpu: GpuDispatch,
     },
+    /// Release a sampler.
+    Sampler {
+        /// Sampler handle to release.
+        sampler: WGPUSampler,
+        /// Dispatch table used on the drain thread.
+        gpu: GpuDispatch,
+    },
     /// Release a bind group layout.
     BindGroupLayout {
         /// Bind group layout handle to release.
@@ -827,7 +844,7 @@ pub enum ReleaseRequest {
 }
 
 // SAFETY: `ReleaseRequest` carries WGPU adapter, device, buffer, queue, shader
-// module, bind group layout, pipeline layout, bind group, compute pipeline,
+// module, sampler, bind group layout, pipeline layout, bind group, compute pipeline,
 // command encoder, command buffer, and compute pass encoder handles from
 // JavaScriptCore finalizers to the release queue. Finalizers only enqueue these
 // handle values; the native handles are dereferenced only by `ReleaseRequest::run`,
@@ -861,6 +878,9 @@ impl ReleaseRequest {
             },
             Self::ShaderModule { module, gpu } => unsafe {
                 (gpu.shader_module_release)(module);
+            },
+            Self::Sampler { sampler, gpu } => unsafe {
+                (gpu.sampler_release)(sampler);
             },
             Self::BindGroupLayout { layout, gpu } => unsafe {
                 (gpu.bind_group_layout_release)(layout);
@@ -1276,6 +1296,17 @@ pub struct ShaderModulePayload {
 // dereferenced for release when the queue drains on the creating `tick()` thread.
 // SAFETY: The `WGPUShaderModule` is finalizer-enqueued and released on the `tick()` thread.
 unsafe impl Send for ShaderModulePayload {}
+
+/// Payload stored by a `GPUSampler` wrapper.
+pub struct SamplerPayload {
+    sampler: WGPUSampler,
+    label: Mutex<String>,
+}
+
+// SAFETY: `SamplerPayload` stores a `WGPUSampler`. A finalizer only moves the
+// handle into `ReleaseRequest::Sampler`; native release is deferred to the
+// creating `tick()` thread. Label access is synchronized independently.
+unsafe impl Send for SamplerPayload {}
 
 /// Payload stored by a `GPUBindGroupLayout` wrapper.
 pub struct BindGroupLayoutPayload {
@@ -1836,6 +1867,46 @@ pub fn buffer_label_set<E: JsEngine + 'static>(
     })
 }
 
+/// Implements the `GPUSampler.label` getter.
+pub fn sampler_label_get<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+) -> Result<E::Value, E::Error> {
+    let payload = E::payload(cx, this, GPU_SAMPLER_CLASS)
+        .and_then(|payload| payload.downcast_ref::<SamplerPayload>())
+        .ok_or_else(|| E::type_error(cx, "GPUSampler.label called on an incompatible object"))?;
+    let label = payload
+        .label
+        .lock()
+        .map_err(|_| E::operation_error(cx, "GPUSampler label is poisoned"))?;
+    E::string(cx, &label)
+}
+
+/// Implements the `GPUSampler.label` setter.
+pub fn sampler_label_set<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    value: E::Value,
+) -> Result<(), E::Error> {
+    let arena = Arena::new();
+    let new_label = E::to_str(cx, value, &arena)?;
+    let payload = E::payload(cx, this, GPU_SAMPLER_CLASS)
+        .and_then(|payload| payload.downcast_ref::<SamplerPayload>())
+        .ok_or_else(|| E::type_error(cx, "GPUSampler.label called on an incompatible object"))?;
+    let mut label = payload
+        .label
+        .lock()
+        .map_err(|_| E::operation_error(cx, "GPUSampler label is poisoned"))?;
+    unsafe {
+        (E::environment(cx).gpu().sampler_set_label)(
+            payload.sampler,
+            WGPUStringView::from_bytes(new_label.as_bytes()),
+        );
+    }
+    new_label.clone_into(&mut label);
+    Ok(())
+}
+
 /// Implements the `GPUBuffer.size` getter.
 pub fn buffer_size_get<E: JsEngine + 'static>(
     cx: E::Context<'_>,
@@ -2071,6 +2142,45 @@ pub fn device_create_shader_module<E: JsEngine + 'static>(
         Ok(value) => Ok(value),
         Err(error) => {
             unsafe { (E::environment(cx).gpu().shader_module_release)(module) };
+            Err(error)
+        }
+    }
+}
+
+/// Implements `GPUDevice.createSampler`.
+pub fn device_create_sampler<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let device = device_handle::<E>(cx, this)?;
+    let descriptor = args.first().copied().unwrap_or_else(|| E::undefined(cx));
+    let arena = Arena::new();
+    let native = convert_sampler_descriptor::<E>(cx, descriptor, &arena)?;
+    let label = unsafe { string_view_to_owned(native.label) };
+    let sampler =
+        unsafe { (E::environment(cx).gpu().device_create_sampler)(device, ptr::from_ref(&native)) };
+    if sampler.is_null() {
+        return Err(E::operation_error(
+            cx,
+            "wgpuDeviceCreateSampler returned null",
+        ));
+    }
+    if let Err(error) = E::register_class(cx, sampler_class::<E>()) {
+        unsafe { (E::environment(cx).gpu().sampler_release)(sampler) };
+        return Err(error);
+    }
+    match E::new_instance(
+        cx,
+        GPU_SAMPLER_CLASS,
+        Box::new(SamplerPayload {
+            sampler,
+            label: Mutex::new(label),
+        }),
+    ) {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            unsafe { (E::environment(cx).gpu().sampler_release)(sampler) };
             Err(error)
         }
     }
@@ -2619,6 +2729,17 @@ pub fn finalize_shader_module(payload: Box<dyn Any + Send>, env: &Environment) {
     });
 }
 
+/// Finalizes a `GPUSampler` payload by enqueuing its release.
+pub fn finalize_sampler(payload: Box<dyn Any + Send>, env: &Environment) {
+    let Ok(payload) = payload.downcast::<SamplerPayload>() else {
+        return;
+    };
+    let _ = env.queue().enqueue(ReleaseRequest::Sampler {
+        sampler: payload.sampler,
+        gpu: env.gpu(),
+    });
+}
+
 /// Finalizes a `GPUBindGroupLayout` payload by enqueuing its release.
 pub fn finalize_bind_group_layout(payload: Box<dyn Any + Send>, env: &Environment) {
     let Ok(payload) = payload.downcast::<BindGroupLayoutPayload>() else {
@@ -2774,6 +2895,16 @@ struct QueueWorkDoneRequest<E: JsEngine + 'static> {
     deferred: Option<Deferred<E>>,
     settlements: Arc<SettlementQueue>,
     _registration: Option<E::DeferredRegistration>,
+}
+
+unsafe fn string_view_to_owned(view: WGPUStringView) -> String {
+    if view.data.is_null() || view.length == wgpu_strlen() {
+        return String::new();
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(view.data.cast::<u8>(), view.length) };
+    // SAFETY: descriptor string views are created from `E::to_str`, whose
+    // contract returns valid UTF-8, and remain arena-backed for this call.
+    unsafe { std::str::from_utf8_unchecked(bytes) }.to_owned()
 }
 
 unsafe fn callback_message(message: WGPUStringView, fallback: &'static str) -> String {
@@ -3221,6 +3352,25 @@ fn enforce_u32<E: JsEngine>(
     Ok(number as u32)
 }
 
+fn clamp_u16<E: JsEngine>(cx: E::Context<'_>, value: E::Value) -> Result<u16, E::Error> {
+    let number = E::to_f64(cx, value)?;
+    let number = if number.is_nan() { 0.0 } else { number };
+    Ok(number.clamp(0.0, f64::from(u16::MAX)).round_ties_even() as u16)
+}
+
+fn restricted_f32<E: JsEngine>(
+    cx: E::Context<'_>,
+    value: E::Value,
+    name: &'static str,
+) -> Result<f32, E::Error> {
+    let number = E::to_f64(cx, value)?;
+    let converted = number as f32;
+    if !number.is_finite() || !converted.is_finite() {
+        return Err(E::type_error(cx, name));
+    }
+    Ok(converted)
+}
+
 fn with_buffer_state<E, F, R>(cx: E::Context<'_>, this: E::Value, f: F) -> Result<R, E::Error>
 where
     E: JsEngine + 'static,
@@ -3365,6 +3515,11 @@ fn device_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
                 call: device_create_shader_module::<E>,
             },
             MethodSpec {
+                name: "createSampler",
+                length: 0,
+                call: device_create_sampler::<E>,
+            },
+            MethodSpec {
                 name: "createBindGroupLayout",
                 length: 1,
                 call: device_create_bind_group_layout::<E>,
@@ -3427,6 +3582,20 @@ fn shader_module_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
         properties: &[],
         methods: &[],
         finalizer: finalize_shader_module,
+    })
+}
+
+fn sampler_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
+    class_spec_once::<E, _>(GPU_SAMPLER_CLASS, || ClassSpec {
+        name: "GPUSampler",
+        id: GPU_SAMPLER_CLASS,
+        properties: Box::leak(Box::new([PropertySpec {
+            name: "label",
+            get: Some(sampler_label_get::<E>),
+            set: Some(sampler_label_set::<E>),
+        }])),
+        methods: &[],
+        finalizer: finalize_sampler,
     })
 }
 

@@ -1824,6 +1824,7 @@ fn gpu_dispatch() -> core::GpuDispatch {
         device_create_buffer,
         device_get_queue,
         device_create_shader_module,
+        device_create_sampler,
         device_create_bind_group_layout,
         device_create_pipeline_layout,
         device_create_bind_group,
@@ -1844,6 +1845,9 @@ fn gpu_dispatch() -> core::GpuDispatch {
         queue_on_submitted_work_done,
         shader_module_add_ref,
         shader_module_release,
+        sampler_add_ref,
+        sampler_release,
+        sampler_set_label,
         bind_group_layout_add_ref,
         bind_group_layout_release,
         pipeline_layout_add_ref,
@@ -1913,6 +1917,13 @@ unsafe fn device_create_shader_module(
     descriptor: *const core::WGPUShaderModuleDescriptor,
 ) -> core::WGPUShaderModule {
     unsafe { ffi_wgpu::wgpuDeviceCreateShaderModule(device, descriptor) }
+}
+
+unsafe fn device_create_sampler(
+    device: core::WGPUDevice,
+    descriptor: *const core::WGPUSamplerDescriptor,
+) -> core::WGPUSampler {
+    unsafe { ffi_wgpu::wgpuDeviceCreateSampler(device, descriptor) }
 }
 
 unsafe fn device_create_bind_group_layout(
@@ -2035,6 +2046,18 @@ unsafe fn shader_module_add_ref(module: core::WGPUShaderModule) {
 
 unsafe fn shader_module_release(module: core::WGPUShaderModule) {
     unsafe { ffi_wgpu::wgpuShaderModuleRelease(module) };
+}
+
+unsafe fn sampler_add_ref(sampler: core::WGPUSampler) {
+    unsafe { ffi_wgpu::wgpuSamplerAddRef(sampler) };
+}
+
+unsafe fn sampler_release(sampler: core::WGPUSampler) {
+    unsafe { ffi_wgpu::wgpuSamplerRelease(sampler) };
+}
+
+unsafe fn sampler_set_label(sampler: core::WGPUSampler, label: core::WGPUStringView) {
+    unsafe { ffi_wgpu::wgpuSamplerSetLabel(sampler, label) };
 }
 
 unsafe fn bind_group_layout_add_ref(layout: core::WGPUBindGroupLayout) {

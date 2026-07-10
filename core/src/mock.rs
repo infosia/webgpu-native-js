@@ -18,8 +18,8 @@ use crate::{
     WGPUCommandBuffer, WGPUCommandBufferDescriptor, WGPUCommandEncoder,
     WGPUCommandEncoderDescriptor, WGPUComputePassDescriptor, WGPUComputePassEncoder,
     WGPUComputePipeline, WGPUComputePipelineDescriptor, WGPUFuture, WGPUPipelineLayout,
-    WGPUPipelineLayoutDescriptor, WGPUQueue, WGPUQueueWorkDoneCallbackInfo, WGPUShaderModule,
-    WGPUShaderModuleDescriptor,
+    WGPUPipelineLayoutDescriptor, WGPUQueue, WGPUQueueWorkDoneCallbackInfo, WGPUSampler,
+    WGPUSamplerDescriptor, WGPUShaderModule, WGPUShaderModuleDescriptor,
 };
 
 /// Mock JavaScript value handle.
@@ -925,12 +925,14 @@ struct MockGpuState {
     buffer_add_refs: usize,
     queue_add_refs: usize,
     shader_module_add_refs: usize,
+    sampler_add_refs: usize,
     bind_group_layout_add_refs: usize,
     pipeline_layout_add_refs: usize,
     device_releases: usize,
     buffer_releases: usize,
     queue_releases: usize,
     shader_module_releases: usize,
+    sampler_releases: usize,
     bind_group_layout_releases: usize,
     pipeline_layout_releases: usize,
     buffer_destroys: usize,
@@ -939,7 +941,9 @@ struct MockGpuState {
     const_mapped_range_calls: usize,
     labels: Vec<Vec<u8>>,
     descriptors: Vec<RecordedDescriptor>,
+    sampler_descriptors: Vec<RecordedSamplerDescriptor>,
     null_create_buffer: bool,
+    null_create_sampler: bool,
     native_order: Vec<&'static str>,
     buffers: BTreeMap<WGPUBuffer, Vec<u8>>,
     mapped_ranges: BTreeMap<WGPUBuffer, Vec<MockMappedRange>>,
@@ -958,6 +962,21 @@ struct RecordedDescriptor {
     usage: u64,
     mapped: u32,
     label: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct RecordedSamplerDescriptor {
+    label: Vec<u8>,
+    address_mode_u: crate::WGPUAddressMode,
+    address_mode_v: crate::WGPUAddressMode,
+    address_mode_w: crate::WGPUAddressMode,
+    mag_filter: crate::WGPUFilterMode,
+    min_filter: crate::WGPUFilterMode,
+    mipmap_filter: crate::WGPUMipmapFilterMode,
+    lod_min_clamp: f32,
+    lod_max_clamp: f32,
+    compare: crate::WGPUCompareFunction,
+    max_anisotropy: u16,
 }
 
 /// Resets the mock GPU call log.
@@ -991,6 +1010,7 @@ pub fn dispatch() -> GpuDispatch {
         device_create_buffer,
         device_get_queue,
         device_create_shader_module,
+        device_create_sampler,
         device_create_bind_group_layout,
         device_create_pipeline_layout,
         device_create_bind_group,
@@ -1011,6 +1031,9 @@ pub fn dispatch() -> GpuDispatch {
         queue_on_submitted_work_done,
         shader_module_add_ref,
         shader_module_release,
+        sampler_add_ref,
+        sampler_release,
+        sampler_set_label,
         bind_group_layout_add_ref,
         bind_group_layout_release,
         pipeline_layout_add_ref,
@@ -1159,6 +1182,34 @@ unsafe fn device_create_shader_module(
         let mut state = state.borrow_mut();
         state.next += 1;
         fake_handle(2000 + state.next)
+    })
+}
+
+unsafe fn device_create_sampler(
+    _device: WGPUDevice,
+    descriptor: *const WGPUSamplerDescriptor,
+) -> WGPUSampler {
+    GPU_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        if state.null_create_sampler {
+            return ptr::null_mut();
+        }
+        let descriptor = unsafe { &*descriptor };
+        state.sampler_descriptors.push(RecordedSamplerDescriptor {
+            label: read_view(descriptor.label),
+            address_mode_u: descriptor.addressModeU,
+            address_mode_v: descriptor.addressModeV,
+            address_mode_w: descriptor.addressModeW,
+            mag_filter: descriptor.magFilter,
+            min_filter: descriptor.minFilter,
+            mipmap_filter: descriptor.mipmapFilter,
+            lod_min_clamp: descriptor.lodMinClamp,
+            lod_max_clamp: descriptor.lodMaxClamp,
+            compare: descriptor.compare,
+            max_anisotropy: descriptor.maxAnisotropy,
+        });
+        state.next += 1;
+        fake_handle(2500 + state.next)
     })
 }
 
@@ -1440,6 +1491,15 @@ unsafe fn shader_module_add_ref(_module: WGPUShaderModule) {
 unsafe fn shader_module_release(_module: WGPUShaderModule) {
     GPU_STATE.with(|state| state.borrow_mut().shader_module_releases += 1);
 }
+unsafe fn sampler_add_ref(_sampler: WGPUSampler) {
+    GPU_STATE.with(|state| state.borrow_mut().sampler_add_refs += 1);
+}
+unsafe fn sampler_release(_sampler: WGPUSampler) {
+    GPU_STATE.with(|state| state.borrow_mut().sampler_releases += 1);
+}
+unsafe fn sampler_set_label(_sampler: WGPUSampler, label: WGPUStringView) {
+    GPU_STATE.with(|state| state.borrow_mut().labels.push(read_view(label)));
+}
 unsafe fn bind_group_layout_add_ref(_layout: WGPUBindGroupLayout) {
     GPU_STATE.with(|state| state.borrow_mut().bind_group_layout_add_refs += 1);
 }
@@ -1548,16 +1608,18 @@ mod tests {
         convert_buffer_binding_layout, convert_buffer_descriptor,
         convert_command_buffer_descriptor, convert_command_encoder_descriptor,
         convert_compute_pass_descriptor, convert_compute_pipeline_descriptor,
-        convert_pipeline_layout_descriptor, convert_shader_module_descriptor,
-        device_create_bind_group, device_create_buffer, device_create_command_encoder,
-        device_create_compute_pipeline, device_queue_get, finalize_bind_group, finalize_buffer,
-        finalize_compute_pipeline, finalize_device, finalize_queue, queue_submit,
-        queue_work_done_callback, queue_write_buffer, request_adapter_callback,
-        request_device_callback, wrap_device, AdapterRequest, BindGroupLayoutPayload,
-        BindGroupPayload, BufferPayload, ComputePipelinePayload, DevicePayload, DeviceRequest,
-        JsEngine, PendingNative, PendingNativeHandle, PipelineLayoutPayload, QueueError,
-        QueuePayload, QueueWorkDoneRequest, SettlementRequest, ShaderModulePayload,
+        convert_pipeline_layout_descriptor, convert_sampler_descriptor,
+        convert_shader_module_descriptor, device_create_bind_group, device_create_buffer,
+        device_create_command_encoder, device_create_compute_pipeline, device_create_sampler,
+        device_queue_get, finalize_bind_group, finalize_buffer, finalize_compute_pipeline,
+        finalize_device, finalize_queue, finalize_sampler, queue_submit, queue_work_done_callback,
+        queue_write_buffer, request_adapter_callback, request_device_callback, wrap_device,
+        AdapterRequest, BindGroupLayoutPayload, BindGroupPayload, BufferPayload,
+        ComputePipelinePayload, DevicePayload, DeviceRequest, JsEngine, PendingNative,
+        PendingNativeHandle, PipelineLayoutPayload, QueueError, QueuePayload, QueueWorkDoneRequest,
+        SamplerPayload, SettlementRequest, ShaderModulePayload,
     };
+    use std::sync::Mutex;
 
     fn descriptor(rt: &Runtime, fields: &[(&str, Value)]) -> Value {
         rt.object(fields)
@@ -1735,6 +1797,148 @@ mod tests {
     }
 
     #[test]
+    fn g12_sampler_descriptor_happy_path_converts_every_kind() {
+        let rt = runtime();
+        let cx = rt.context();
+        let desc = descriptor(
+            &rt,
+            &[
+                ("label", rt.string("shadow")),
+                ("addressModeU", rt.string("repeat")),
+                ("addressModeV", rt.string("mirror-repeat")),
+                ("addressModeW", rt.string("clamp-to-edge")),
+                ("magFilter", rt.string("linear")),
+                ("minFilter", rt.string("nearest")),
+                ("mipmapFilter", rt.string("linear")),
+                ("lodMinClamp", rt.number(1.25)),
+                ("lodMaxClamp", rt.number(12.5)),
+                ("compare", rt.string("greater-equal")),
+                ("maxAnisotropy", rt.number(8.0)),
+            ],
+        );
+        let arena = Arena::new();
+        let converted =
+            convert_sampler_descriptor::<Engine>(cx, desc, &arena).expect("sampler descriptor");
+
+        assert_eq!(read_view(converted.label), b"shadow");
+        assert_eq!(
+            converted.addressModeU,
+            crate::WGPUAddressMode_WGPUAddressMode_Repeat
+        );
+        assert_eq!(
+            converted.addressModeV,
+            crate::WGPUAddressMode_WGPUAddressMode_MirrorRepeat
+        );
+        assert_eq!(
+            converted.addressModeW,
+            crate::WGPUAddressMode_WGPUAddressMode_ClampToEdge
+        );
+        assert_eq!(
+            converted.magFilter,
+            crate::WGPUFilterMode_WGPUFilterMode_Linear
+        );
+        assert_eq!(
+            converted.minFilter,
+            crate::WGPUFilterMode_WGPUFilterMode_Nearest
+        );
+        assert_eq!(
+            converted.mipmapFilter,
+            crate::WGPUMipmapFilterMode_WGPUMipmapFilterMode_Linear
+        );
+        assert_eq!(converted.lodMinClamp, 1.25);
+        assert_eq!(converted.lodMaxClamp, 12.5);
+        assert_eq!(
+            converted.compare,
+            crate::WGPUCompareFunction_WGPUCompareFunction_GreaterEqual
+        );
+        assert_eq!(converted.maxAnisotropy, 8);
+    }
+
+    #[test]
+    fn g12_sampler_enum_conversions_reject_unknown_strings() {
+        for (member, expected) in [
+            ("addressModeU", "GPUAddressMode"),
+            ("magFilter", "GPUFilterMode"),
+            ("mipmapFilter", "GPUMipmapFilterMode"),
+            ("compare", "GPUCompareFunction"),
+        ] {
+            let rt = runtime();
+            let cx = rt.context();
+            let desc = descriptor(&rt, &[(member, rt.string("unknown"))]);
+            let arena = Arena::new();
+            assert_eq!(
+                convert_sampler_descriptor::<Engine>(cx, desc, &arena)
+                    .expect_err("unknown enum must fail"),
+                format!("TypeError: {expected}")
+            );
+        }
+    }
+
+    #[test]
+    fn g12_sampler_defaults_follow_webidl() {
+        let rt = runtime();
+        let cx = rt.context();
+        let arena = Arena::new();
+        let converted = convert_sampler_descriptor::<Engine>(cx, rt.undefined(), &arena)
+            .expect("default sampler descriptor");
+
+        assert_eq!(read_view(converted.label), b"");
+        assert_eq!(
+            converted.addressModeU,
+            crate::WGPUAddressMode_WGPUAddressMode_ClampToEdge
+        );
+        assert_eq!(converted.addressModeV, converted.addressModeU);
+        assert_eq!(converted.addressModeW, converted.addressModeU);
+        assert_eq!(
+            converted.magFilter,
+            crate::WGPUFilterMode_WGPUFilterMode_Nearest
+        );
+        assert_eq!(converted.minFilter, converted.magFilter);
+        assert_eq!(
+            converted.mipmapFilter,
+            crate::WGPUMipmapFilterMode_WGPUMipmapFilterMode_Nearest
+        );
+        assert_eq!(converted.lodMinClamp, 0.0);
+        assert_eq!(converted.lodMaxClamp, 32.0);
+        assert_eq!(
+            converted.compare,
+            crate::WGPUCompareFunction_WGPUCompareFunction_Undefined
+        );
+        assert_eq!(converted.maxAnisotropy, 1);
+    }
+
+    #[test]
+    fn g12_sampler_max_anisotropy_uses_webidl_clamp() {
+        for (input, expected) in [
+            (f64::NAN, 0),
+            (-1.0, 0),
+            (2.5, 2),
+            (3.5, 4),
+            (70_000.0, u16::MAX),
+            (f64::INFINITY, u16::MAX),
+        ] {
+            let rt = runtime();
+            let cx = rt.context();
+            let desc = descriptor(&rt, &[("maxAnisotropy", rt.number(input))]);
+            let arena = Arena::new();
+            let converted = convert_sampler_descriptor::<Engine>(cx, desc, &arena)
+                .expect("clamped sampler descriptor");
+            assert_eq!(converted.maxAnisotropy, expected, "input={input}");
+        }
+    }
+
+    #[test]
+    fn g12_sampler_restricted_floats_reject_non_finite_values() {
+        for member in ["lodMinClamp", "lodMaxClamp"] {
+            let rt = runtime();
+            let cx = rt.context();
+            let desc = descriptor(&rt, &[(member, rt.number(f64::INFINITY))]);
+            let arena = Arena::new();
+            assert!(convert_sampler_descriptor::<Engine>(cx, desc, &arena).is_err());
+        }
+    }
+
+    #[test]
     fn b4_null_non_nullable_labels_stringify_consistently() {
         let rt = runtime();
         let cx = rt.context();
@@ -1836,6 +2040,60 @@ mod tests {
             ),
             b"null"
         );
+    }
+
+    #[test]
+    fn g12_sampler_create_label_and_release_are_balanced() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let desc = descriptor(&rt, &[("label", rt.string("created"))]);
+        let sampler = device_create_sampler::<Engine>(cx, device, &[desc]).expect("sampler");
+
+        let label = crate::sampler_label_get::<Engine>(cx, sampler).expect("label getter");
+        assert!(matches!(rt.get(label), MockValue::String(value) if value == "created"));
+        crate::sampler_label_set::<Engine>(cx, sampler, rt.string("renamed"))
+            .expect("label setter");
+        let label = crate::sampler_label_get::<Engine>(cx, sampler).expect("updated label");
+        assert!(matches!(rt.get(label), MockValue::String(value) if value == "renamed"));
+
+        let payload = Engine::payload(cx, sampler, crate::GPU_SAMPLER_CLASS)
+            .and_then(|payload| payload.downcast_ref::<SamplerPayload>())
+            .expect("sampler payload");
+        finalize_sampler(
+            Box::new(SamplerPayload {
+                sampler: payload.sampler,
+                label: Mutex::new("renamed".to_owned()),
+            }),
+            &rt.env,
+        );
+        assert_eq!(rt.queue().drain().expect("sampler release"), 1);
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.sampler_descriptors.len(), 1);
+            assert_eq!(state.sampler_descriptors[0].label, b"created");
+            assert_eq!(
+                state.labels.last().map(Vec::as_slice),
+                Some(b"renamed".as_slice())
+            );
+            assert_eq!(state.sampler_add_refs, 0);
+            assert_eq!(state.sampler_releases, 1);
+        });
+    }
+
+    #[test]
+    fn r13_sampler_create_rejects_a_null_native_handle() {
+        reset_gpu();
+        GPU_STATE.with(|state| state.borrow_mut().null_create_sampler = true);
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        assert_eq!(
+            device_create_sampler::<Engine>(cx, device, &[]).expect_err("null sampler must fail"),
+            "OperationError: wgpuDeviceCreateSampler returned null"
+        );
+        GPU_STATE.with(|state| assert_eq!(state.borrow().sampler_releases, 0));
     }
 
     #[test]

@@ -62,6 +62,27 @@ fn enforce_range_fixture_marks_the_argument() {
 }
 
 #[test]
+fn clamp_fixture_is_distinct_from_enforce_range_and_matches_snapshot() {
+    let report = joined_fixture("clamp");
+    let member = &report.dictionaries[0].members[0].idl[0].values[0];
+    assert!(member.clamp);
+    assert!(!member.enforce_range);
+
+    let (idl, yaml, policy) = fixture("clamp");
+    let emitted = generate_conversions(&idl, &yaml, &policy).expect("Clamp emission");
+    let expected = fs::read_to_string(fixtures().join("clamp.rs")).expect("Clamp snapshot");
+    assert_eq!(emitted, expected);
+
+    let missing = idl.replace("[Clamp] ", "");
+    let error = generate_conversions(&missing, &yaml, &policy).expect_err("missing Clamp kind");
+    assert!(error.to_string().contains("unsigned short"));
+
+    let wrong_width = idl.replace("unsigned short", "unsigned long");
+    let error = generate_conversions(&wrong_width, &yaml, &policy).expect_err("dead Clamp shape");
+    assert!(error.to_string().contains("unsupported Clamp shape"));
+}
+
+#[test]
 fn nullable_and_required_dictionary_members_remain_distinct() {
     let report = joined_fixture("nullable_required");
     let dictionary = report
@@ -95,7 +116,7 @@ fn full_pinned_inputs_parse_and_subset_join_offline() {
     let report = join_inputs(&idl, &yaml, &policy).expect("full pinned join");
     assert_eq!(report.parser.remaining_bytes, 0);
     assert_eq!(report.parser.definitions, 209);
-    assert_eq!(report.interfaces.len(), 11);
+    assert_eq!(report.interfaces.len(), 12);
     assert!(report.parser.saw_enforce_range);
     assert!(report.parser.saw_same_object);
     assert!(report.parser.saw_exposed);
@@ -154,6 +175,21 @@ fn new_descriptor_policy_kinds_reject_missing_and_dead_entries() {
         let error = generate_conversions(&idl, &yaml, &bad_policy).expect_err("policy must fail");
         assert!(error.to_string().contains(needle), "{error}");
     }
+}
+
+#[test]
+fn sampler_subset_and_descriptor_policy_are_checked_in_both_directions() {
+    let (idl, yaml, policy) = pinned_inputs();
+    let missing_subset_member = policy.replace("  \"createSampler\",\n", "");
+    let error = generate_conversions(&idl, &yaml, &missing_subset_member)
+        .expect_err("dead sampler descriptor policy");
+    assert!(error.to_string().contains("GPUSamplerDescriptor"));
+
+    let sampler_descriptor = "[[descriptor]]\ndictionary = \"GPUSamplerDescriptor\"\n\n[[descriptor.strings]]\nmember = \"label\"\nnullable = false\n\n";
+    let missing_descriptor = policy.replace(sampler_descriptor, "");
+    let error = generate_conversions(&idl, &yaml, &missing_descriptor)
+        .expect_err("unpoliced createSampler descriptor");
+    assert!(error.to_string().contains("GPUDevice.createSampler"));
 }
 
 #[test]

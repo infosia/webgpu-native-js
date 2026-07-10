@@ -30,6 +30,7 @@ reason = "WebIDL names the reusable programmable stage while the C ABI names its
 interface = "GPUDevice"
 members = [
   "createBuffer",
+  "createSampler",
   "createShaderModule",
   "createBindGroupLayout",
   "createPipelineLayout",
@@ -51,6 +52,10 @@ members = ["writeBuffer", "submit", "onSubmittedWorkDone"]
 [[subset]]
 interface = "GPUShaderModule"
 members = []
+
+[[subset]]
+interface = "GPUSampler"
+members = ["label"]
 
 [[subset]]
 interface = "GPUBindGroupLayout"
@@ -83,6 +88,13 @@ members = []
 [[descriptor]]
 dictionary = "GPUBufferDescriptor"
 target = "BufferDescriptor"
+
+[[descriptor.strings]]
+member = "label"
+nullable = false
+
+[[descriptor]]
+dictionary = "GPUSamplerDescriptor"
 
 [[descriptor.strings]]
 member = "label"

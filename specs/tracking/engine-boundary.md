@@ -1120,3 +1120,21 @@ non-buffer binding resource is now a clear TypeError instead of a silent
 misread (2b's precedent applied to the union arm). Final: codegen 24, core 72,
 quickjs 43, JSC 17+1, parity byte-identical both engines, workspace green,
 clippys/fmt clean.
+
+**Phase 4 slice 3 landed (2026-07-10): GPUSampler — the first interface with no
+hand-written ancestor (block 05 exit criterion 5).** The descriptor (five
+string enums, two restricted floats, one `[Clamp] unsigned short` — a NEW
+attribute kind, verified at webgpu.idl:467, distinct from `[EnforceRange]`:
+NaN→0, range-clamp, ties-to-even) is fully generated from policy. The
+effort-delta datum for criterion 6: **hand-written plumbing was 217 added
+lines** (payload+SAFETY, create fn with B16/R13 discipline, class spec, release
+arm, dispatch fields, two 23-line adapter ABI thunks) **against zero lines of
+conversion logic**. Parity extended by one line (`sampler:sampler-round-trip`),
+byte-identical on both engines. Suites: codegen 26, core 79, quickjs 44,
+JSC 17+1.
+
+The datum's message: descriptor conversion — invariant 1's "bulk of the work" —
+now costs nothing per interface; the remaining per-interface cost is class/
+lifecycle plumbing, which is itself mechanical and pattern-identical. The
+full-vs-subset decision (criterion 6) and a class-spec-emission slice are the
+open items, then the Phase 4 review.

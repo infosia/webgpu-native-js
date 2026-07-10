@@ -98,6 +98,8 @@ pub struct ValueModel {
     pub default_value: Option<String>,
     /// Whether WebIDL applies `[EnforceRange]` directly or through a typedef.
     pub enforce_range: bool,
+    /// Whether WebIDL applies `[Clamp]` directly to this value.
+    pub clamp: bool,
     /// Width of an integer representation after resolving WebIDL typedefs or
     /// C-ABI aliases such as bitflags.
     pub integer_width: Option<u8>,
@@ -1435,6 +1437,7 @@ fn idl_plain_value(
         type_name,
         default_value: default.map(render_default),
         enforce_range: attrs_contain(attributes, "EnforceRange") || typedef_enforced,
+        clamp: attrs_contain(attributes, "Clamp"),
         integer_width: idl_integer_width(type_, index),
         nullable: type_is_nullable(type_),
         required,
@@ -1476,6 +1479,7 @@ fn c_value(value: &YamlValue, yaml: &YamlRoot) -> ValueModel {
         type_name: c_render_type(base_type),
         default_value: value.default.as_ref().map(yaml_scalar),
         enforce_range: false,
+        clamp: false,
         integer_width: c_integer_width(base_type),
         nullable: value.optional || base_type == "nullable_string",
         required: !value.optional,
@@ -1969,6 +1973,13 @@ mod tests {
         [[subset]]
         interface = "GPUDevice"
         members = ["queue", "createBuffer"]
+
+        [[descriptor]]
+        dictionary = "GPUBufferDescriptor"
+
+        [[descriptor.strings]]
+        member = "note"
+        nullable = true
     "#;
 
     #[test]

@@ -1,0 +1,9 @@
+interface GPUDevice {
+    GPUSampler createSampler(optional GPUSamplerDescriptor descriptor = {});
+};
+
+interface GPUSampler {};
+
+dictionary GPUSamplerDescriptor {
+    [Clamp] unsigned short maxAnisotropy = 1;
+};

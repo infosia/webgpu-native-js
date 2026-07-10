@@ -43,6 +43,27 @@ pub(crate) fn validate_policy(report: &JoinReport, policy: &Policy) -> Result<()
         let pair = descriptor_pair(report, &descriptor.dictionary)?;
         validate_descriptor_policy(report, pair, descriptor, &selected)?;
     }
+    for interface in &report.interfaces {
+        for member in &interface.members {
+            for overload in &member.idl {
+                for argument in overload.values.iter().skip(1) {
+                    let dictionary = argument.type_name.trim_end_matches('?');
+                    if dictionary.ends_with("Descriptor")
+                        && report
+                            .dictionaries
+                            .iter()
+                            .any(|pair| pair.idl_name.as_deref() == Some(dictionary))
+                        && !selected.contains(dictionary)
+                    {
+                        return Err(CodegenError::Policy(format!(
+                            "unpoliced descriptor argument {}.{}: {dictionary}",
+                            member.owner, member.member
+                        )));
+                    }
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -153,6 +174,15 @@ fn validate_descriptor_policy(
             .iter()
             .map(|entry| entry.member.as_str()),
     )?;
+    let clamp_members: BTreeSet<&str> = pair
+        .members
+        .iter()
+        .filter_map(|member| {
+            member.idl[0].values[0]
+                .clamp
+                .then_some(member.member.as_str())
+        })
+        .collect();
     let mut special = BTreeSet::new();
     for (kind, entries) in [
         ("unsupported", &unsupported),
@@ -322,6 +352,15 @@ fn validate_descriptor_policy(
                 descriptor.dictionary
             )));
         }
+        if idl.clamp {
+            if idl.enforce_range || idl.integer_width != Some(16) || c.integer_width != Some(16) {
+                return Err(CodegenError::Policy(format!(
+                    "unsupported Clamp shape {}.{name}: IDL={} C-ABI={}",
+                    descriptor.dictionary, idl.type_name, c.type_name
+                )));
+            }
+            continue;
+        }
         if unsupported.contains(name) {
             if !is_dictionary(report, &idl.type_name) || c.default_value.as_deref() != Some("zero")
             {
@@ -474,6 +513,14 @@ fn validate_descriptor_policy(
         if !pair.members.iter().any(|member| member.member == *name) {
             return Err(CodegenError::Policy(format!(
                 "dead default-empty sequence policy {}.{name}: member is not joined",
+                descriptor.dictionary
+            )));
+        }
+    }
+    for name in clamp_members {
+        if special.contains(name) {
+            return Err(CodegenError::Policy(format!(
+                "Clamp member {}.{name} has overlapping policy",
                 descriptor.dictionary
             )));
         }
@@ -1363,21 +1410,12 @@ fn emit_enum_local(
                     .is_some_and(|value| canonical(value) == "undefined")
         })
         .and_then(|value| value.c_value.as_deref());
-    let default = if let Some(undefined) = undefined {
-        enum_constant(c_type, undefined)
-    } else {
-        let idl_default = idl
-            .default_value
-            .as_deref()
-            .and_then(|value| value.strip_prefix('"'))
-            .and_then(|value| value.strip_suffix('"'))
-            .ok_or_else(|| {
-                unsupported_shape(
-                    dictionary,
-                    name,
-                    "enum has no C undefined sentinel or IDL default",
-                )
-            })?;
+    let idl_default = idl
+        .default_value
+        .as_deref()
+        .and_then(|value| value.strip_prefix('"'))
+        .and_then(|value| value.strip_suffix('"'));
+    let default = if let Some(idl_default) = idl_default {
         let value = pair
             .enum_values
             .iter()
@@ -1385,9 +1423,17 @@ fn emit_enum_local(
             .and_then(|value| value.c_value.as_deref())
             .ok_or_else(|| unsupported_shape(dictionary, name, "enum default is not joined"))?;
         enum_constant(c_type, value)
+    } else if let Some(undefined) = undefined {
+        enum_constant(c_type, undefined)
+    } else {
+        return Err(unsupported_shape(
+            dictionary,
+            name,
+            "enum has no C undefined sentinel or IDL default",
+        ));
     };
     output.push_str(
-        "    // B6: string enum values are joined to C values; absence uses the C sentinel.\n",
+        "    // B6: string enums are joined to C values; absence uses the IDL default or C sentinel.\n",
     );
     let _ = writeln!(
         output,
@@ -1672,6 +1718,34 @@ fn emit_field(
         }
         return Ok(());
     }
+    if idl.clamp {
+        output
+            .push_str("        // WebIDL `[Clamp]`: NaN becomes +0, the value is clamped to the\n");
+        output.push_str(
+            "        // unsigned-short range, then rounded to the nearest integer (ties to even).\n",
+        );
+        let conversion = format!("clamp_u16::<E>(cx, {value})?");
+        if idl.required {
+            let _ = writeln!(output, "        {field}: {conversion},");
+        } else {
+            let default = idl.default_value.as_deref().ok_or_else(|| {
+                unsupported_shape(
+                    dictionary,
+                    name,
+                    "optional Clamp integer without an IDL default",
+                )
+            })?;
+            let _ = writeln!(
+                output,
+                "        {field}: if E::is_undefined(cx, {value}) {{"
+            );
+            let _ = writeln!(output, "            {default}");
+            output.push_str("        } else {\n");
+            let _ = writeln!(output, "            {conversion}");
+            output.push_str("        },\n");
+        }
+        return Ok(());
+    }
     if idl.enforce_range {
         let conversion = match (idl.integer_width, c.integer_width) {
             (Some(64), Some(64)) => {
@@ -1724,6 +1798,28 @@ fn emit_field(
                 "        {field}: if E::is_undefined(cx, {value}) {{"
             );
             let _ = writeln!(output, "            {default}");
+            output.push_str("        } else {\n");
+            let _ = writeln!(output, "            {conversion}");
+            output.push_str("        },\n");
+        }
+        return Ok(());
+    }
+    if idl.type_name == "float" && c.type_name == "float" {
+        output.push_str(
+            "        // G11: restricted WebIDL `float` rejects non-finite values before f32 conversion.\n",
+        );
+        let conversion = format!("restricted_f32::<E>(cx, {value}, \"{name}\")?");
+        if idl.required {
+            let _ = writeln!(output, "        {field}: {conversion},");
+        } else {
+            let default = idl.default_value.as_deref().ok_or_else(|| {
+                unsupported_shape(dictionary, name, "optional float without an IDL default")
+            })?;
+            let _ = writeln!(
+                output,
+                "        {field}: if E::is_undefined(cx, {value}) {{"
+            );
+            let _ = writeln!(output, "            {default}_f32");
             output.push_str("        } else {\n");
             let _ = writeln!(output, "            {conversion}");
             output.push_str("        },\n");

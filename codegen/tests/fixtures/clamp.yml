@@ -1,0 +1,21 @@
+objects:
+  - name: device
+    methods:
+      - name: create_sampler
+        returns:
+          type: object.sampler
+          passed_with_ownership: true
+        args:
+          - name: descriptor
+            type: struct.sampler_descriptor
+            pointer: immutable
+            optional: true
+  - name: sampler
+    methods: []
+structs:
+  - name: sampler_descriptor
+    type: extensible
+    members:
+      - name: max_anisotropy
+        type: uint16
+        default: 1
