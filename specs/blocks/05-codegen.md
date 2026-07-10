@@ -195,3 +195,50 @@ extension when the interface is script-observable.
   (`mapAsync`, `onSubmittedWorkDone`, `requestAdapter`, `requestDevice`,
   Phase 6's `popErrorScope`); expect no, verify when method emission lands
   (methods are still hand-written plumbing as of slice 3).
+
+---
+
+## 9. Extension (2026-07-10, approved): lifecycle emission — G13–G16
+
+Slice 3's datum said the remaining per-interface cost is 217 lines of
+pattern-identical plumbing. This extension generates it. Project-owner
+approved order: this, then B22, then error scopes.
+
+**G13 — the dispatch enumeration is generated once, and the triplicate dies.**
+The design review recorded (E-4) that every C entry point is enumerated by hand
+three times: core's `GpuDispatch` struct, each adapter's passthrough table, and
+the mock's. The generator now emits, from `webgpu.yml`, the single source of
+truth — the `GpuDispatch` field list AND an enumeration macro
+(`for_each_gpu_dispatch_entry!`-style: `(field, wgpu_symbol)` pairs) that
+adapters and the mock invoke to build their tables generically. Adding an
+interface adds **zero** dispatch lines anywhere. G10 holds: the emitted code
+lives in `core/`; adapters merely invoke the macro.
+
+**G14 — lifecycle is emitted, and B8 retention is derived, not declared.**
+For every subset interface following the standard pattern — create from a
+descriptor, wrap a handle, label get/set, release through the queue — the
+generator emits: the payload struct (with the standard `// SAFETY:`
+moved-not-dereferenced argument), the `device_create_*` function (R13/B16 null
+check, registration-failure cleanup, `new_instance`), the `ReleaseRequest`
+variant + finalize arm, and the `ClassSpec`. **The set of retained handles is
+derived from the joined model**: every handle-typed member reachable through
+the descriptor (including through unions and nested dictionaries) is stored and
+`AddRef`'d per B8, released with the wrapper. A policy entry may *extend* the
+derived set with a reason, never shrink it.
+
+**G15 — method tables are generated; method bodies are policy-mapped.** The
+`ClassSpec`'s method/property tables are emitted for every subset interface.
+The standard create-pattern bodies come from G14. Non-standard bodies —
+`mapAsync`, `getMappedRange`, `unmap`, `destroy`, `submit`, `writeBuffer`,
+`onSubmittedWorkDone`, encoder/pass state machines (B10/B19) — remain
+hand-written in `core/` and are wired by a policy mapping (IDL method → core
+fn path). A subset method with neither a generated body nor a mapping is a
+generation error; a mapping to a nonexistent fn fails the build loudly.
+
+**G16 — the oracle applies, and the adapters must shrink.** Regenerating the
+existing interfaces' lifecycle must leave every test unchanged (G7 discipline;
+the five-deviations lesson says: surface every preserved quirk as a policy
+entry and let the planner triage). The adapter diff for this extension must be
+**net-negative** (the passthrough tables collapse into the macro invocation);
+per G10, any new per-interface adapter line is the boundary breaking — stop
+and report.
