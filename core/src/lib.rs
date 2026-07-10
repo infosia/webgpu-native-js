@@ -52,6 +52,7 @@ const GPU_INTERNAL_ERROR_CLASS: ClassId = ClassId(18);
 const GPU_DEVICE_LOST_INFO_CLASS: ClassId = ClassId(19);
 const GPU_TEXTURE_CLASS: ClassId = ClassId(20);
 const GPU_TEXTURE_VIEW_CLASS: ClassId = ClassId(21);
+const GPU_RENDER_PIPELINE_CLASS: ClassId = ClassId(22);
 const WEBIDL_U32_MAX: u64 = u32::MAX as u64;
 
 /// A JavaScript class identifier scoped to an engine context.
@@ -97,16 +98,17 @@ impl WGPUStringViewExt for WGPUStringView {
 
 pub use generated::{
     device_create_bind_group, device_create_bind_group_layout, device_create_command_encoder,
-    device_create_compute_pipeline, device_create_pipeline_layout, device_create_sampler,
-    device_create_shader_module, device_create_texture, finalize_bind_group,
+    device_create_compute_pipeline, device_create_pipeline_layout, device_create_render_pipeline,
+    device_create_sampler, device_create_shader_module, device_create_texture, finalize_bind_group,
     finalize_bind_group_layout, finalize_command_encoder, finalize_compute_pipeline,
-    finalize_pipeline_layout, finalize_sampler, finalize_shader_module, finalize_texture,
-    finalize_texture_view, sampler_label_get, sampler_label_set, texture_create_view,
-    texture_depth_or_array_layers_get, texture_dimension_get, texture_format_get,
-    texture_height_get, texture_mip_level_count_get, texture_sample_count_get, texture_usage_get,
-    texture_width_get, BindGroupLayoutPayload, BindGroupPayload, CommandEncoderPayload,
-    ComputePipelinePayload, GpuDispatch, PipelineLayoutPayload, ReleaseRequest, SamplerPayload,
-    ShaderModulePayload, TexturePayload, TextureViewPayload,
+    finalize_pipeline_layout, finalize_render_pipeline, finalize_sampler, finalize_shader_module,
+    finalize_texture, finalize_texture_view, sampler_label_get, sampler_label_set,
+    texture_create_view, texture_depth_or_array_layers_get, texture_dimension_get,
+    texture_format_get, texture_height_get, texture_mip_level_count_get, texture_sample_count_get,
+    texture_usage_get, texture_width_get, BindGroupLayoutPayload, BindGroupPayload,
+    CommandEncoderPayload, ComputePipelinePayload, GpuDispatch, PipelineLayoutPayload,
+    ReleaseRequest, RenderPipelinePayload, SamplerPayload, ShaderModulePayload, TexturePayload,
+    TextureViewPayload,
 };
 /// A per-context environment shared by wrapper callbacks.
 pub struct Environment {
@@ -3431,6 +3433,13 @@ struct ConvertedComputePipelineDescriptor {
     layout: WGPUPipelineLayout,
 }
 
+struct ConvertedRenderPipelineDescriptor {
+    native: WGPURenderPipelineDescriptor,
+    vertex_module: WGPUShaderModule,
+    fragment_module: WGPUShaderModule,
+    layout: WGPUPipelineLayout,
+}
+
 fn convert_sequence<E: JsEngine, T>(
     cx: E::Context<'_>,
     value: E::Value,
@@ -3724,6 +3733,21 @@ fn enforce_u32<E: JsEngine>(
         return Err(E::type_error(cx, name));
     }
     Ok(number as u32)
+}
+
+fn enforce_i32<E: JsEngine>(
+    cx: E::Context<'_>,
+    value: E::Value,
+    name: &'static str,
+) -> Result<i32, E::Error> {
+    let number = E::to_f64(cx, value)?;
+    if !number.is_finite()
+        || number.fract() != 0.0
+        || !(-2_147_483_648.0..2_147_483_648.0).contains(&number)
+    {
+        return Err(E::type_error(cx, name));
+    }
+    Ok(number as i32)
 }
 
 fn clamp_u16<E: JsEngine>(cx: E::Context<'_>, value: E::Value) -> Result<u16, E::Error> {

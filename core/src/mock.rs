@@ -20,10 +20,10 @@ use crate::{
     WGPUComputePipeline, WGPUComputePipelineDescriptor, WGPUDeviceLostCallbackInfo,
     WGPUErrorFilter, WGPUErrorType, WGPUFuture, WGPUPipelineLayout, WGPUPipelineLayoutDescriptor,
     WGPUPopErrorScopeCallbackInfo, WGPUPopErrorScopeStatus, WGPUQueue,
-    WGPUQueueWorkDoneCallbackInfo, WGPUSampler, WGPUSamplerDescriptor, WGPUShaderModule,
-    WGPUShaderModuleDescriptor, WGPUTexture, WGPUTextureDescriptor, WGPUTextureDimension,
-    WGPUTextureFormat, WGPUTextureUsage, WGPUTextureView, WGPUTextureViewDescriptor,
-    WGPUUncapturedErrorCallbackInfo,
+    WGPUQueueWorkDoneCallbackInfo, WGPURenderPipeline, WGPURenderPipelineDescriptor, WGPUSampler,
+    WGPUSamplerDescriptor, WGPUShaderModule, WGPUShaderModuleDescriptor, WGPUTexture,
+    WGPUTextureDescriptor, WGPUTextureDimension, WGPUTextureFormat, WGPUTextureUsage,
+    WGPUTextureView, WGPUTextureViewDescriptor, WGPUUncapturedErrorCallbackInfo,
 };
 
 /// Mock JavaScript value handle.
@@ -1471,6 +1471,17 @@ unsafe fn device_create_compute_pipeline(
     })
 }
 
+unsafe fn device_create_render_pipeline(
+    _device: WGPUDevice,
+    _descriptor: *const WGPURenderPipelineDescriptor,
+) -> WGPURenderPipeline {
+    GPU_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        state.next += 1;
+        fake_handle(6500 + state.next)
+    })
+}
+
 unsafe fn device_create_command_encoder(
     _device: WGPUDevice,
     _descriptor: *const WGPUCommandEncoderDescriptor,
@@ -1742,6 +1753,8 @@ unsafe fn bind_group_add_ref(_bind_group: WGPUBindGroup) {}
 unsafe fn bind_group_release(_bind_group: WGPUBindGroup) {}
 unsafe fn compute_pipeline_add_ref(_pipeline: WGPUComputePipeline) {}
 unsafe fn compute_pipeline_release(_pipeline: WGPUComputePipeline) {}
+unsafe fn render_pipeline_add_ref(_pipeline: WGPURenderPipeline) {}
+unsafe fn render_pipeline_release(_pipeline: WGPURenderPipeline) {}
 unsafe fn command_encoder_release(_encoder: WGPUCommandEncoder) {}
 
 unsafe fn command_encoder_copy_buffer_to_buffer(
@@ -1831,29 +1844,33 @@ mod tests {
         adapter_request_device, buffer_destroy, buffer_get_mapped_range, buffer_label_get,
         buffer_label_set, buffer_map_async, buffer_size_get, buffer_unmap, buffer_usage_get,
         command_encoder_finish, convert_bind_group_descriptor, convert_bind_group_entry,
-        convert_bind_group_layout_descriptor, convert_buffer_binding_layout,
-        convert_buffer_descriptor, convert_command_buffer_descriptor,
-        convert_command_encoder_descriptor, convert_compute_pass_descriptor,
-        convert_compute_pipeline_descriptor, convert_gpu_extent3d, convert_gpu_origin3d,
-        convert_pipeline_layout_descriptor, convert_sampler_binding_layout,
-        convert_sampler_descriptor, convert_shader_module_descriptor,
+        convert_bind_group_layout_descriptor, convert_blend_component,
+        convert_buffer_binding_layout, convert_buffer_descriptor, convert_color_target_state,
+        convert_command_buffer_descriptor, convert_command_encoder_descriptor,
+        convert_compute_pass_descriptor, convert_compute_pipeline_descriptor,
+        convert_depth_stencil_state, convert_gpu_extent3d, convert_gpu_origin3d,
+        convert_multisample_state, convert_pipeline_layout_descriptor, convert_primitive_state,
+        convert_render_pipeline_descriptor, convert_sampler_binding_layout,
+        convert_sampler_descriptor, convert_shader_module_descriptor, convert_stencil_face_state,
         convert_storage_texture_binding_layout, convert_texture_binding_layout,
-        convert_texture_descriptor, convert_texture_view_descriptor, device_create_bind_group,
-        device_create_buffer, device_create_command_encoder, device_create_compute_pipeline,
-        device_create_sampler, device_create_texture, device_lost_get,
-        device_lost_info_message_get, device_lost_info_reason_get, device_on_uncaptured_error_get,
-        device_on_uncaptured_error_set, device_pop_error_scope, device_push_error_scope,
-        device_queue_get, finalize_bind_group, finalize_buffer, finalize_compute_pipeline,
-        finalize_device, finalize_queue, finalize_sampler, finalize_texture, finalize_texture_view,
-        queue_submit, queue_work_done_callback, queue_write_buffer, request_adapter_callback,
+        convert_texture_descriptor, convert_texture_view_descriptor, convert_vertex_attribute,
+        convert_vertex_buffer_layout, device_create_bind_group, device_create_buffer,
+        device_create_command_encoder, device_create_compute_pipeline,
+        device_create_render_pipeline, device_create_sampler, device_create_texture,
+        device_lost_get, device_lost_info_message_get, device_lost_info_reason_get,
+        device_on_uncaptured_error_get, device_on_uncaptured_error_set, device_pop_error_scope,
+        device_push_error_scope, device_queue_get, finalize_bind_group, finalize_buffer,
+        finalize_compute_pipeline, finalize_device, finalize_queue, finalize_render_pipeline,
+        finalize_sampler, finalize_texture, finalize_texture_view, queue_submit,
+        queue_work_done_callback, queue_write_buffer, request_adapter_callback,
         request_device_callback, texture_depth_or_array_layers_get, texture_dimension_get,
         texture_format_get, texture_height_get, texture_mip_level_count_get,
         texture_sample_count_get, texture_usage_get, texture_width_get, wrap_device,
         AdapterPayload, AdapterRequest, BindGroupLayoutPayload, BindGroupPayload, BufferPayload,
         ComputePipelinePayload, DeviceEventState, DevicePayload, DeviceRequest, ErrorPayload,
         JsEngine, PendingNative, PendingNativeHandle, PipelineLayoutPayload, QueueError,
-        QueuePayload, QueueWorkDoneRequest, SamplerPayload, SettlementRequest, ShaderModulePayload,
-        TexturePayload, TextureViewPayload,
+        QueuePayload, QueueWorkDoneRequest, RenderPipelinePayload, SamplerPayload,
+        SettlementRequest, ShaderModulePayload, TexturePayload, TextureViewPayload,
     };
     use std::sync::atomic::AtomicBool;
     use std::sync::{Mutex, Weak};
@@ -1877,6 +1894,17 @@ mod tests {
 
     fn descriptor(rt: &Runtime, fields: &[(&str, Value)]) -> Value {
         rt.object(fields)
+    }
+
+    fn shader_module(_rt: &Runtime, cx: Context<'_>, handle: usize) -> Value {
+        Engine::new_instance(
+            cx,
+            crate::GPU_SHADER_MODULE_CLASS,
+            Box::new(ShaderModulePayload {
+                module: fake_handle(handle),
+            }),
+        )
+        .expect("shader module")
     }
 
     fn array_buffer_view(
@@ -4042,6 +4070,579 @@ mod tests {
         GPU_STATE.with(|state| {
             let state = state.borrow();
             assert_eq!(state.shader_module_releases, 1);
+            assert_eq!(state.pipeline_layout_releases, 1);
+        });
+    }
+
+    #[test]
+    fn t5_full_render_pipeline_descriptor_converts_every_c_field_and_nullable_holes() {
+        let rt = runtime();
+        let cx = rt.context();
+        let vertex_module = shader_module(&rt, cx, 71);
+        let fragment_module = shader_module(&rt, cx, 72);
+        let layout = Engine::new_instance(
+            cx,
+            crate::GPU_PIPELINE_LAYOUT_CLASS,
+            Box::new(PipelineLayoutPayload {
+                layout: fake_handle(73),
+            }),
+        )
+        .expect("pipeline layout");
+
+        let attribute = descriptor(
+            &rt,
+            &[
+                ("format", rt.string("float32x3")),
+                ("offset", rt.number(4.0)),
+                ("shaderLocation", rt.number(7.0)),
+            ],
+        );
+        let attributes = rt.set_like(&[attribute]);
+        let buffer = descriptor(
+            &rt,
+            &[
+                ("arrayStride", rt.number(24.0)),
+                ("stepMode", rt.string("instance")),
+                ("attributes", attributes),
+            ],
+        );
+        let buffers = rt.set_like(&[buffer, rt.null()]);
+        let vertex = descriptor(
+            &rt,
+            &[
+                ("module", vertex_module),
+                ("entryPoint", rt.string("vs_main")),
+                ("buffers", buffers),
+            ],
+        );
+        let primitive = descriptor(
+            &rt,
+            &[
+                ("topology", rt.string("triangle-strip")),
+                ("stripIndexFormat", rt.string("uint32")),
+                ("frontFace", rt.string("cw")),
+                ("cullMode", rt.string("back")),
+                ("unclippedDepth", rt.bool(true)),
+            ],
+        );
+        let stencil_front = descriptor(
+            &rt,
+            &[
+                ("compare", rt.string("equal")),
+                ("failOp", rt.string("replace")),
+                ("depthFailOp", rt.string("increment-clamp")),
+                ("passOp", rt.string("invert")),
+            ],
+        );
+        let stencil_back = descriptor(
+            &rt,
+            &[
+                ("compare", rt.string("greater")),
+                ("failOp", rt.string("zero")),
+                ("depthFailOp", rt.string("decrement-wrap")),
+                ("passOp", rt.string("keep")),
+            ],
+        );
+        let depth_stencil = descriptor(
+            &rt,
+            &[
+                ("format", rt.string("depth24plus-stencil8")),
+                ("depthWriteEnabled", rt.bool(true)),
+                ("depthCompare", rt.string("less")),
+                ("stencilFront", stencil_front),
+                ("stencilBack", stencil_back),
+                ("stencilReadMask", rt.number(0x1122_3344 as f64)),
+                ("stencilWriteMask", rt.number(0x5566_7788 as f64)),
+                ("depthBias", rt.number(-7.0)),
+                ("depthBiasSlopeScale", rt.number(1.25)),
+                ("depthBiasClamp", rt.number(2.5)),
+            ],
+        );
+        let multisample = descriptor(
+            &rt,
+            &[
+                ("count", rt.number(4.0)),
+                ("mask", rt.number(0x1234_5678 as f64)),
+                ("alphaToCoverageEnabled", rt.bool(true)),
+            ],
+        );
+        let color_blend = descriptor(
+            &rt,
+            &[
+                ("operation", rt.string("subtract")),
+                ("srcFactor", rt.string("src-alpha")),
+                ("dstFactor", rt.string("one-minus-dst-alpha")),
+            ],
+        );
+        let alpha_blend = descriptor(
+            &rt,
+            &[
+                ("operation", rt.string("reverse-subtract")),
+                ("srcFactor", rt.string("one")),
+                ("dstFactor", rt.string("zero")),
+            ],
+        );
+        let blend = descriptor(&rt, &[("color", color_blend), ("alpha", alpha_blend)]);
+        let target = descriptor(
+            &rt,
+            &[
+                ("format", rt.string("rgba8unorm")),
+                ("blend", blend),
+                ("writeMask", rt.number(3.0)),
+            ],
+        );
+        let targets = rt.set_like(&[target, rt.null()]);
+        let fragment = descriptor(
+            &rt,
+            &[
+                ("module", fragment_module),
+                ("entryPoint", rt.string("fs_main")),
+                ("targets", targets),
+            ],
+        );
+        let value = descriptor(
+            &rt,
+            &[
+                ("label", rt.string("full-render")),
+                ("layout", layout),
+                ("vertex", vertex),
+                ("primitive", primitive),
+                ("depthStencil", depth_stencil),
+                ("multisample", multisample),
+                ("fragment", fragment),
+            ],
+        );
+        let arena = Arena::new();
+        let converted = convert_render_pipeline_descriptor::<Engine>(cx, value, &arena)
+            .expect("full render descriptor");
+        let native = &converted.native;
+        assert!(native.nextInChain.is_null());
+        assert_eq!(read_view(native.label), b"full-render");
+        assert_eq!(native.layout, fake_handle(73));
+        assert!(native.vertex.nextInChain.is_null());
+        assert_eq!(native.vertex.module, fake_handle(71));
+        assert_eq!(read_view(native.vertex.entryPoint), b"vs_main");
+        assert_eq!(native.vertex.constantCount, 0);
+        assert!(native.vertex.constants.is_null());
+        assert_eq!(native.vertex.bufferCount, 2);
+        let native_buffers =
+            unsafe { std::slice::from_raw_parts(native.vertex.buffers, native.vertex.bufferCount) };
+        assert!(native_buffers[0].nextInChain.is_null());
+        assert_eq!(
+            native_buffers[0].stepMode,
+            crate::WGPUVertexStepMode_WGPUVertexStepMode_Instance
+        );
+        assert_eq!(native_buffers[0].arrayStride, 24);
+        assert_eq!(native_buffers[0].attributeCount, 1);
+        let native_attribute = unsafe { &*native_buffers[0].attributes };
+        assert!(native_attribute.nextInChain.is_null());
+        assert_eq!(
+            native_attribute.format,
+            crate::WGPUVertexFormat_WGPUVertexFormat_Float32x3
+        );
+        assert_eq!(native_attribute.offset, 4);
+        assert_eq!(native_attribute.shaderLocation, 7);
+        assert!(native_buffers[1].nextInChain.is_null());
+        assert_eq!(
+            native_buffers[1].stepMode,
+            crate::WGPUVertexStepMode_WGPUVertexStepMode_Undefined
+        );
+        assert_eq!(native_buffers[1].arrayStride, 0);
+        assert_eq!(native_buffers[1].attributeCount, 0);
+        assert!(native_buffers[1].attributes.is_null());
+
+        assert!(native.primitive.nextInChain.is_null());
+        assert_eq!(
+            native.primitive.topology,
+            crate::WGPUPrimitiveTopology_WGPUPrimitiveTopology_TriangleStrip
+        );
+        assert_eq!(
+            native.primitive.stripIndexFormat,
+            crate::WGPUIndexFormat_WGPUIndexFormat_Uint32
+        );
+        assert_eq!(
+            native.primitive.frontFace,
+            crate::WGPUFrontFace_WGPUFrontFace_CW
+        );
+        assert_eq!(
+            native.primitive.cullMode,
+            crate::WGPUCullMode_WGPUCullMode_Back
+        );
+        assert_eq!(native.primitive.unclippedDepth, 1);
+
+        let depth = unsafe { native.depthStencil.as_ref() }.expect("depth/stencil pointer");
+        assert!(depth.nextInChain.is_null());
+        assert_eq!(
+            depth.format,
+            crate::WGPUTextureFormat_WGPUTextureFormat_Depth24PlusStencil8
+        );
+        assert_eq!(
+            depth.depthWriteEnabled,
+            crate::WGPUOptionalBool_WGPUOptionalBool_True
+        );
+        assert_eq!(
+            depth.depthCompare,
+            crate::WGPUCompareFunction_WGPUCompareFunction_Less
+        );
+        assert_eq!(
+            depth.stencilFront.compare,
+            crate::WGPUCompareFunction_WGPUCompareFunction_Equal
+        );
+        assert_eq!(
+            depth.stencilFront.failOp,
+            crate::WGPUStencilOperation_WGPUStencilOperation_Replace
+        );
+        assert_eq!(
+            depth.stencilFront.depthFailOp,
+            crate::WGPUStencilOperation_WGPUStencilOperation_IncrementClamp
+        );
+        assert_eq!(
+            depth.stencilFront.passOp,
+            crate::WGPUStencilOperation_WGPUStencilOperation_Invert
+        );
+        assert_eq!(
+            depth.stencilBack.compare,
+            crate::WGPUCompareFunction_WGPUCompareFunction_Greater
+        );
+        assert_eq!(
+            depth.stencilBack.failOp,
+            crate::WGPUStencilOperation_WGPUStencilOperation_Zero
+        );
+        assert_eq!(
+            depth.stencilBack.depthFailOp,
+            crate::WGPUStencilOperation_WGPUStencilOperation_DecrementWrap
+        );
+        assert_eq!(
+            depth.stencilBack.passOp,
+            crate::WGPUStencilOperation_WGPUStencilOperation_Keep
+        );
+        assert_eq!(depth.stencilReadMask, 0x1122_3344);
+        assert_eq!(depth.stencilWriteMask, 0x5566_7788);
+        assert_eq!(depth.depthBias, -7);
+        assert_eq!(depth.depthBiasSlopeScale, 1.25);
+        assert_eq!(depth.depthBiasClamp, 2.5);
+
+        assert!(native.multisample.nextInChain.is_null());
+        assert_eq!(native.multisample.count, 4);
+        assert_eq!(native.multisample.mask, 0x1234_5678);
+        assert_eq!(native.multisample.alphaToCoverageEnabled, 1);
+        let fragment = unsafe { native.fragment.as_ref() }.expect("fragment pointer");
+        assert!(fragment.nextInChain.is_null());
+        assert_eq!(fragment.module, fake_handle(72));
+        assert_eq!(read_view(fragment.entryPoint), b"fs_main");
+        assert_eq!(fragment.constantCount, 0);
+        assert!(fragment.constants.is_null());
+        assert_eq!(fragment.targetCount, 2);
+        let native_targets = unsafe { std::slice::from_raw_parts(fragment.targets, 2) };
+        assert!(native_targets[0].nextInChain.is_null());
+        assert_eq!(
+            native_targets[0].format,
+            crate::WGPUTextureFormat_WGPUTextureFormat_RGBA8Unorm
+        );
+        assert_eq!(native_targets[0].writeMask, 3);
+        let native_blend = unsafe { native_targets[0].blend.as_ref() }.expect("blend pointer");
+        assert_eq!(
+            native_blend.color.operation,
+            crate::WGPUBlendOperation_WGPUBlendOperation_Subtract
+        );
+        assert_eq!(
+            native_blend.color.srcFactor,
+            crate::WGPUBlendFactor_WGPUBlendFactor_SrcAlpha
+        );
+        assert_eq!(
+            native_blend.color.dstFactor,
+            crate::WGPUBlendFactor_WGPUBlendFactor_OneMinusDstAlpha
+        );
+        assert_eq!(
+            native_blend.alpha.operation,
+            crate::WGPUBlendOperation_WGPUBlendOperation_ReverseSubtract
+        );
+        assert_eq!(
+            native_blend.alpha.srcFactor,
+            crate::WGPUBlendFactor_WGPUBlendFactor_One
+        );
+        assert_eq!(
+            native_blend.alpha.dstFactor,
+            crate::WGPUBlendFactor_WGPUBlendFactor_Zero
+        );
+        assert!(native_targets[1].nextInChain.is_null());
+        assert_eq!(
+            native_targets[1].format,
+            crate::WGPUTextureFormat_WGPUTextureFormat_Undefined
+        );
+        assert!(native_targets[1].blend.is_null());
+        assert_eq!(native_targets[1].writeMask, 0);
+    }
+
+    #[test]
+    fn t5_render_enum_families_reject_unknown_values_and_required_members() {
+        let rt = runtime();
+        let cx = rt.context();
+        let arena = Arena::new();
+        assert!(convert_vertex_attribute::<Engine>(
+            cx,
+            descriptor(
+                &rt,
+                &[
+                    ("format", rt.string("bad")),
+                    ("offset", rt.number(0.0)),
+                    ("shaderLocation", rt.number(0.0))
+                ]
+            ),
+        )
+        .is_err());
+        assert!(convert_vertex_buffer_layout::<Engine>(
+            cx,
+            descriptor(
+                &rt,
+                &[
+                    ("arrayStride", rt.number(0.0)),
+                    ("stepMode", rt.string("bad")),
+                    ("attributes", rt.set_like(&[]))
+                ]
+            ),
+            &arena,
+        )
+        .is_err());
+        for (member, value) in [
+            ("topology", "bad"),
+            ("stripIndexFormat", "bad"),
+            ("frontFace", "bad"),
+            ("cullMode", "bad"),
+        ] {
+            assert!(convert_primitive_state::<Engine>(
+                cx,
+                descriptor(&rt, &[(member, rt.string(value))])
+            )
+            .is_err());
+        }
+        assert!(convert_stencil_face_state::<Engine>(
+            cx,
+            descriptor(&rt, &[("compare", rt.string("bad"))])
+        )
+        .is_err());
+        assert!(convert_stencil_face_state::<Engine>(
+            cx,
+            descriptor(&rt, &[("failOp", rt.string("bad"))])
+        )
+        .is_err());
+        assert!(convert_blend_component::<Engine>(
+            cx,
+            descriptor(&rt, &[("operation", rt.string("bad"))])
+        )
+        .is_err());
+        assert!(convert_blend_component::<Engine>(
+            cx,
+            descriptor(&rt, &[("srcFactor", rt.string("bad"))])
+        )
+        .is_err());
+
+        assert!(convert_vertex_attribute::<Engine>(cx, descriptor(&rt, &[])).is_err());
+        assert!(convert_vertex_buffer_layout::<Engine>(cx, descriptor(&rt, &[]), &arena).is_err());
+        let module = shader_module(&rt, cx, 81);
+        let vertex = descriptor(&rt, &[("module", module)]);
+        assert!(convert_render_pipeline_descriptor::<Engine>(
+            cx,
+            descriptor(&rt, &[("layout", rt.string("auto")), ("vertex", vertex)]),
+            &arena,
+        )
+        .is_ok());
+        assert!(convert_render_pipeline_descriptor::<Engine>(
+            cx,
+            descriptor(&rt, &[("layout", rt.string("auto"))]),
+            &arena,
+        )
+        .is_err());
+        assert!(convert_depth_stencil_state::<Engine>(cx, descriptor(&rt, &[])).is_err());
+        for (member, value) in [
+            ("depthBias", 2_147_483_648.0),
+            ("depthBias", -2_147_483_649.0),
+            ("depthBiasSlopeScale", f64::INFINITY),
+            ("depthBiasClamp", f64::NEG_INFINITY),
+        ] {
+            let depth = descriptor(
+                &rt,
+                &[
+                    ("format", rt.string("depth24plus")),
+                    (member, rt.number(value)),
+                ],
+            );
+            assert!(convert_depth_stencil_state::<Engine>(cx, depth).is_err());
+        }
+    }
+
+    #[test]
+    fn t5_render_state_defaults_preserve_idl_values_and_c_optional_sentinels() {
+        let rt = runtime();
+        let cx = rt.context();
+        let depth = convert_depth_stencil_state::<Engine>(
+            cx,
+            descriptor(&rt, &[("format", rt.string("depth24plus"))]),
+        )
+        .expect("default depth/stencil state");
+        assert_eq!(
+            depth.depthWriteEnabled,
+            crate::WGPUOptionalBool_WGPUOptionalBool_Undefined
+        );
+        assert_eq!(
+            depth.depthCompare,
+            crate::WGPUCompareFunction_WGPUCompareFunction_Undefined
+        );
+        for face in [depth.stencilFront, depth.stencilBack] {
+            assert_eq!(
+                face.compare,
+                crate::WGPUCompareFunction_WGPUCompareFunction_Always
+            );
+            assert_eq!(
+                face.failOp,
+                crate::WGPUStencilOperation_WGPUStencilOperation_Keep
+            );
+            assert_eq!(
+                face.depthFailOp,
+                crate::WGPUStencilOperation_WGPUStencilOperation_Keep
+            );
+            assert_eq!(
+                face.passOp,
+                crate::WGPUStencilOperation_WGPUStencilOperation_Keep
+            );
+        }
+        assert_eq!(depth.stencilReadMask, u32::MAX);
+        assert_eq!(depth.stencilWriteMask, u32::MAX);
+        assert_eq!(depth.depthBias, 0);
+        assert_eq!(depth.depthBiasSlopeScale, 0.0);
+        assert_eq!(depth.depthBiasClamp, 0.0);
+
+        let primitive =
+            convert_primitive_state::<Engine>(cx, rt.undefined()).expect("default primitive state");
+        assert_eq!(
+            primitive.topology,
+            crate::WGPUPrimitiveTopology_WGPUPrimitiveTopology_TriangleList
+        );
+        assert_eq!(
+            primitive.stripIndexFormat,
+            crate::WGPUIndexFormat_WGPUIndexFormat_Undefined
+        );
+        assert_eq!(primitive.frontFace, crate::WGPUFrontFace_WGPUFrontFace_CCW);
+        assert_eq!(primitive.cullMode, crate::WGPUCullMode_WGPUCullMode_None);
+        assert_eq!(primitive.unclippedDepth, 0);
+
+        let multisample = convert_multisample_state::<Engine>(cx, rt.undefined())
+            .expect("default multisample state");
+        assert_eq!(multisample.count, 1);
+        assert_eq!(multisample.mask, u32::MAX);
+        assert_eq!(multisample.alphaToCoverageEnabled, 0);
+
+        let component =
+            convert_blend_component::<Engine>(cx, rt.undefined()).expect("default blend component");
+        assert_eq!(
+            component.operation,
+            crate::WGPUBlendOperation_WGPUBlendOperation_Add
+        );
+        assert_eq!(
+            component.srcFactor,
+            crate::WGPUBlendFactor_WGPUBlendFactor_One
+        );
+        assert_eq!(
+            component.dstFactor,
+            crate::WGPUBlendFactor_WGPUBlendFactor_Zero
+        );
+
+        let arena = Arena::new();
+        let target = convert_color_target_state::<Engine>(
+            cx,
+            descriptor(&rt, &[("format", rt.string("rgba8unorm"))]),
+            &arena,
+        )
+        .expect("default color target");
+        assert!(target.blend.is_null());
+        assert_eq!(target.writeMask, 0xF);
+    }
+
+    #[test]
+    fn t5_vertex_only_render_pipeline_retains_one_module_and_optional_layout() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let module = shader_module(&rt, cx, 91);
+        let vertex = descriptor(&rt, &[("module", module)]);
+        let desc = descriptor(&rt, &[("layout", rt.string("auto")), ("vertex", vertex)]);
+        let pipeline = device_create_render_pipeline::<Engine>(cx, device, &[desc])
+            .expect("vertex-only render pipeline");
+        GPU_STATE.with(|state| {
+            assert_eq!(state.borrow().shader_module_add_refs, 1);
+            assert_eq!(state.borrow().pipeline_layout_add_refs, 0);
+        });
+        let payload = Engine::payload(cx, pipeline, crate::GPU_RENDER_PIPELINE_CLASS)
+            .and_then(|payload| payload.downcast_ref::<RenderPipelinePayload>())
+            .expect("render pipeline payload");
+        assert_eq!(payload.vertex_module, fake_handle(91));
+        assert!(payload.fragment_module.is_null());
+        finalize_render_pipeline(
+            Box::new(RenderPipelinePayload {
+                render_pipeline: payload.render_pipeline,
+                vertex_module: payload.vertex_module,
+                fragment_module: payload.fragment_module,
+                layout: payload.layout,
+            }),
+            &rt.env,
+        );
+        assert_eq!(rt.queue().drain().expect("drain render pipeline"), 1);
+        GPU_STATE.with(|state| assert_eq!(state.borrow().shader_module_releases, 1));
+    }
+
+    #[test]
+    fn t5_render_pipeline_retention_is_vertex_module_fragment_module_and_layout() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let vertex_module = shader_module(&rt, cx, 101);
+        let fragment_module = shader_module(&rt, cx, 102);
+        let layout = Engine::new_instance(
+            cx,
+            crate::GPU_PIPELINE_LAYOUT_CLASS,
+            Box::new(PipelineLayoutPayload {
+                layout: fake_handle(103),
+            }),
+        )
+        .expect("pipeline layout");
+        let vertex = descriptor(&rt, &[("module", vertex_module)]);
+        let fragment = descriptor(
+            &rt,
+            &[("module", fragment_module), ("targets", rt.set_like(&[]))],
+        );
+        let desc = descriptor(
+            &rt,
+            &[
+                ("layout", layout),
+                ("vertex", vertex),
+                ("fragment", fragment),
+            ],
+        );
+        let pipeline =
+            device_create_render_pipeline::<Engine>(cx, device, &[desc]).expect("render pipeline");
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.shader_module_add_refs, 2);
+            assert_eq!(state.pipeline_layout_add_refs, 1);
+        });
+        let payload = Engine::payload(cx, pipeline, crate::GPU_RENDER_PIPELINE_CLASS)
+            .and_then(|payload| payload.downcast_ref::<RenderPipelinePayload>())
+            .expect("render pipeline payload");
+        finalize_render_pipeline(
+            Box::new(RenderPipelinePayload {
+                render_pipeline: payload.render_pipeline,
+                vertex_module: payload.vertex_module,
+                fragment_module: payload.fragment_module,
+                layout: payload.layout,
+            }),
+            &rt.env,
+        );
+        assert_eq!(rt.queue().drain().expect("drain render pipeline"), 1);
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.shader_module_releases, 2);
             assert_eq!(state.pipeline_layout_releases, 1);
         });
     }

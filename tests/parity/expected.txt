@@ -21,6 +21,9 @@ texture:format-rejection:TypeError:GPUTextureFormat
 texture:extent-length:TypeError:GPUExtent3D sequence length must be 1..=3
 bindGroup:resources:buffer,sampler,texture-view:ok
 bindGroup:sampler-type-rejection:TypeError:GPUSamplerBindingType
+renderPipeline:create:ok
+renderPipeline:topology-rejection:TypeError:GPUPrimitiveTopology
+renderPipeline:nullable-holes:ok
 coerce:size-0:ok
 coerce:size-u32-max:ok
 coerce:size-2^53:ok

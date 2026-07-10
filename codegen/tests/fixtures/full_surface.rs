@@ -31,6 +31,8 @@ pub struct GpuDispatch {
     pub device_create_bind_group: unsafe fn(WGPUDevice, *const WGPUBindGroupDescriptor) -> WGPUBindGroup,
     /// `wgpuDeviceCreateComputePipeline`.
     pub device_create_compute_pipeline: unsafe fn(WGPUDevice, *const WGPUComputePipelineDescriptor) -> WGPUComputePipeline,
+    /// `wgpuDeviceCreateRenderPipeline`.
+    pub device_create_render_pipeline: unsafe fn(WGPUDevice, *const WGPURenderPipelineDescriptor) -> WGPURenderPipeline,
     /// `wgpuDeviceCreateCommandEncoder`.
     pub device_create_command_encoder: unsafe fn(WGPUDevice, *const WGPUCommandEncoderDescriptor) -> WGPUCommandEncoder,
     /// `wgpuDeviceGetQueue`.
@@ -117,6 +119,10 @@ pub struct GpuDispatch {
     pub compute_pipeline_add_ref: unsafe fn(WGPUComputePipeline),
     /// `wgpuComputePipelineRelease`.
     pub compute_pipeline_release: unsafe fn(WGPUComputePipeline),
+    /// `wgpuRenderPipelineAddRef`.
+    pub render_pipeline_add_ref: unsafe fn(WGPURenderPipeline),
+    /// `wgpuRenderPipelineRelease`.
+    pub render_pipeline_release: unsafe fn(WGPURenderPipeline),
     /// `wgpuCommandEncoderRelease`.
     pub command_encoder_release: unsafe fn(WGPUCommandEncoder),
     /// `wgpuCommandEncoderBeginComputePass`.
@@ -160,6 +166,7 @@ macro_rules! for_each_gpu_dispatch_entry {
             (device_create_pipeline_layout, wgpuDeviceCreatePipelineLayout, unsafe fn(device: $crate::WGPUDevice, descriptor: *const $crate::WGPUPipelineLayoutDescriptor) -> $crate::WGPUPipelineLayout),
             (device_create_bind_group, wgpuDeviceCreateBindGroup, unsafe fn(device: $crate::WGPUDevice, descriptor: *const $crate::WGPUBindGroupDescriptor) -> $crate::WGPUBindGroup),
             (device_create_compute_pipeline, wgpuDeviceCreateComputePipeline, unsafe fn(device: $crate::WGPUDevice, descriptor: *const $crate::WGPUComputePipelineDescriptor) -> $crate::WGPUComputePipeline),
+            (device_create_render_pipeline, wgpuDeviceCreateRenderPipeline, unsafe fn(device: $crate::WGPUDevice, descriptor: *const $crate::WGPURenderPipelineDescriptor) -> $crate::WGPURenderPipeline),
             (device_create_command_encoder, wgpuDeviceCreateCommandEncoder, unsafe fn(device: $crate::WGPUDevice, descriptor: *const $crate::WGPUCommandEncoderDescriptor) -> $crate::WGPUCommandEncoder),
             (device_get_queue, wgpuDeviceGetQueue, unsafe fn(device: $crate::WGPUDevice) -> $crate::WGPUQueue),
             (device_push_error_scope, wgpuDevicePushErrorScope, unsafe fn(device: $crate::WGPUDevice, filter: $crate::WGPUErrorFilter)),
@@ -203,6 +210,8 @@ macro_rules! for_each_gpu_dispatch_entry {
             (bind_group_release, wgpuBindGroupRelease, unsafe fn(bind_group: $crate::WGPUBindGroup)),
             (compute_pipeline_add_ref, wgpuComputePipelineAddRef, unsafe fn(compute_pipeline: $crate::WGPUComputePipeline)),
             (compute_pipeline_release, wgpuComputePipelineRelease, unsafe fn(compute_pipeline: $crate::WGPUComputePipeline)),
+            (render_pipeline_add_ref, wgpuRenderPipelineAddRef, unsafe fn(render_pipeline: $crate::WGPURenderPipeline)),
+            (render_pipeline_release, wgpuRenderPipelineRelease, unsafe fn(render_pipeline: $crate::WGPURenderPipeline)),
             (command_encoder_release, wgpuCommandEncoderRelease, unsafe fn(command_encoder: $crate::WGPUCommandEncoder)),
             (command_encoder_begin_compute_pass, wgpuCommandEncoderBeginComputePass, unsafe fn(command_encoder: $crate::WGPUCommandEncoder, descriptor: *const $crate::WGPUComputePassDescriptor) -> $crate::WGPUComputePassEncoder),
             (command_encoder_copy_buffer_to_buffer, wgpuCommandEncoderCopyBufferToBuffer, unsafe fn(command_encoder: $crate::WGPUCommandEncoder, source: $crate::WGPUBuffer, source_offset: u64, destination: $crate::WGPUBuffer, destination_offset: u64, size: u64)),
@@ -359,9 +368,7 @@ pub(super) fn convert_texture_descriptor<E: JsEngine>(
         }
     };
     // B6: string enums are joined to C values; absence uses the IDL default or C sentinel.
-    let format = if E::is_undefined(cx, format_value) {
-        WGPUTextureFormat_WGPUTextureFormat_Undefined
-    } else {
+    let format = {
         let enum_arena = Arena::new();
         match E::to_str(cx, format_value, &enum_arena)? {
             "r8unorm" => WGPUTextureFormat_WGPUTextureFormat_R8Unorm,
@@ -1222,6 +1229,910 @@ pub(super) fn convert_compute_pipeline_descriptor<E: JsEngine + 'static>(
     })
 }
 
+/// Converts a JavaScript `GPUVertexAttribute` into `WGPUVertexAttribute`.
+pub(super) fn convert_vertex_attribute<E: JsEngine>(
+    cx: E::Context<'_>,
+    value: E::Value,
+) -> Result<WGPUVertexAttribute, E::Error> {
+    // DR-M3: required dictionary members reject undefined.
+    let format_value = required_member::<E>(cx, value, "format")?;
+    let offset_value = required_member::<E>(cx, value, "offset")?;
+    let shader_location_value = required_member::<E>(cx, value, "shaderLocation")?;
+    // B6: string enums are joined to C values; absence uses the IDL default or C sentinel.
+    let format = {
+        let enum_arena = Arena::new();
+        match E::to_str(cx, format_value, &enum_arena)? {
+            "uint8" => WGPUVertexFormat_WGPUVertexFormat_Uint8,
+            "uint8x2" => WGPUVertexFormat_WGPUVertexFormat_Uint8x2,
+            "uint8x4" => WGPUVertexFormat_WGPUVertexFormat_Uint8x4,
+            "sint8" => WGPUVertexFormat_WGPUVertexFormat_Sint8,
+            "sint8x2" => WGPUVertexFormat_WGPUVertexFormat_Sint8x2,
+            "sint8x4" => WGPUVertexFormat_WGPUVertexFormat_Sint8x4,
+            "unorm8" => WGPUVertexFormat_WGPUVertexFormat_Unorm8,
+            "unorm8x2" => WGPUVertexFormat_WGPUVertexFormat_Unorm8x2,
+            "unorm8x4" => WGPUVertexFormat_WGPUVertexFormat_Unorm8x4,
+            "snorm8" => WGPUVertexFormat_WGPUVertexFormat_Snorm8,
+            "snorm8x2" => WGPUVertexFormat_WGPUVertexFormat_Snorm8x2,
+            "snorm8x4" => WGPUVertexFormat_WGPUVertexFormat_Snorm8x4,
+            "uint16" => WGPUVertexFormat_WGPUVertexFormat_Uint16,
+            "uint16x2" => WGPUVertexFormat_WGPUVertexFormat_Uint16x2,
+            "uint16x4" => WGPUVertexFormat_WGPUVertexFormat_Uint16x4,
+            "sint16" => WGPUVertexFormat_WGPUVertexFormat_Sint16,
+            "sint16x2" => WGPUVertexFormat_WGPUVertexFormat_Sint16x2,
+            "sint16x4" => WGPUVertexFormat_WGPUVertexFormat_Sint16x4,
+            "unorm16" => WGPUVertexFormat_WGPUVertexFormat_Unorm16,
+            "unorm16x2" => WGPUVertexFormat_WGPUVertexFormat_Unorm16x2,
+            "unorm16x4" => WGPUVertexFormat_WGPUVertexFormat_Unorm16x4,
+            "snorm16" => WGPUVertexFormat_WGPUVertexFormat_Snorm16,
+            "snorm16x2" => WGPUVertexFormat_WGPUVertexFormat_Snorm16x2,
+            "snorm16x4" => WGPUVertexFormat_WGPUVertexFormat_Snorm16x4,
+            "float16" => WGPUVertexFormat_WGPUVertexFormat_Float16,
+            "float16x2" => WGPUVertexFormat_WGPUVertexFormat_Float16x2,
+            "float16x4" => WGPUVertexFormat_WGPUVertexFormat_Float16x4,
+            "float32" => WGPUVertexFormat_WGPUVertexFormat_Float32,
+            "float32x2" => WGPUVertexFormat_WGPUVertexFormat_Float32x2,
+            "float32x3" => WGPUVertexFormat_WGPUVertexFormat_Float32x3,
+            "float32x4" => WGPUVertexFormat_WGPUVertexFormat_Float32x4,
+            "uint32" => WGPUVertexFormat_WGPUVertexFormat_Uint32,
+            "uint32x2" => WGPUVertexFormat_WGPUVertexFormat_Uint32x2,
+            "uint32x3" => WGPUVertexFormat_WGPUVertexFormat_Uint32x3,
+            "uint32x4" => WGPUVertexFormat_WGPUVertexFormat_Uint32x4,
+            "sint32" => WGPUVertexFormat_WGPUVertexFormat_Sint32,
+            "sint32x2" => WGPUVertexFormat_WGPUVertexFormat_Sint32x2,
+            "sint32x3" => WGPUVertexFormat_WGPUVertexFormat_Sint32x3,
+            "sint32x4" => WGPUVertexFormat_WGPUVertexFormat_Sint32x4,
+            "unorm10-10-10-2" => WGPUVertexFormat_WGPUVertexFormat_Unorm10_10_10_2,
+            "unorm8x4-bgra" => WGPUVertexFormat_WGPUVertexFormat_Unorm8x4BGRA,
+            _ => return Err(E::type_error(cx, "GPUVertexFormat")),
+        }
+    };
+    Ok(WGPUVertexAttribute {
+        nextInChain: ptr::null_mut(),
+        format,
+        // R8: `[EnforceRange]` GPUSize64 is checked at the 64-bit boundary.
+        offset: enforce_u64::<E>(cx, offset_value, "offset")?,
+        // R8: `[EnforceRange]` GPUIndex32 is checked at the 32-bit boundary.
+        shaderLocation: enforce_u32::<E>(cx, shader_location_value, "shaderLocation")?,
+    })
+}
+
+/// Converts a JavaScript `GPUVertexBufferLayout` into `WGPUVertexBufferLayout`.
+pub(super) fn convert_vertex_buffer_layout<E: JsEngine>(
+    cx: E::Context<'_>,
+    value: E::Value,
+    arena: &Arena,
+) -> Result<WGPUVertexBufferLayout, E::Error> {
+    // DR-M3: required dictionary members reject undefined.
+    let array_stride_value = required_member::<E>(cx, value, "arrayStride")?;
+    let step_mode_value = dictionary_member::<E>(cx, value, "stepMode")?;
+    let attributes_value = required_member::<E>(cx, value, "attributes")?;
+    // B6: string enums are joined to C values; absence uses the IDL default or C sentinel.
+    let step_mode = if E::is_undefined(cx, step_mode_value) {
+        WGPUVertexStepMode_WGPUVertexStepMode_Vertex
+    } else {
+        let enum_arena = Arena::new();
+        match E::to_str(cx, step_mode_value, &enum_arena)? {
+            "vertex" => WGPUVertexStepMode_WGPUVertexStepMode_Vertex,
+            "instance" => WGPUVertexStepMode_WGPUVertexStepMode_Instance,
+            _ => return Err(E::type_error(cx, "GPUVertexStepMode")),
+        }
+    };
+    let attributes = {
+        let converted = convert_sequence::<E, _>(cx, attributes_value, "attributes", |item| {
+            convert_vertex_attribute::<E>(cx, item)
+        })?;
+        arena.alloc_slice(converted)
+    };
+    Ok(WGPUVertexBufferLayout {
+        nextInChain: ptr::null_mut(),
+        // R8: `[EnforceRange]` GPUSize64 is checked at the 64-bit boundary.
+        arrayStride: enforce_u64::<E>(cx, array_stride_value, "arrayStride")?,
+        stepMode: step_mode,
+        attributeCount: attributes.len(),
+        attributes: if attributes.is_empty() {
+            ptr::null()
+        } else {
+            attributes.as_ptr()
+        },
+    })
+}
+
+/// Converts a JavaScript `GPUVertexState` into `WGPUVertexState`.
+pub(super) fn convert_vertex_state<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    value: E::Value,
+    arena: &Arena,
+) -> Result<WGPUVertexState, E::Error> {
+    // DR-M3: required dictionary members reject undefined.
+    let module_value = required_member::<E>(cx, value, "module")?;
+    let entry_point_value = dictionary_member::<E>(cx, value, "entryPoint")?;
+    let constants_value = dictionary_member::<E>(cx, value, "constants")?;
+    // Policy skip: reject present unsupported API instead of ignoring it.
+    if !E::is_undefined(cx, constants_value) {
+        return Err(E::type_error(cx, "constants are not supported yet"));
+    }
+    let buffers_value = dictionary_member::<E>(cx, value, "buffers")?;
+    let module = shader_module_handle::<E>(cx, module_value)?;
+    // B4: optional non-nullable strings preserve absence; present null is stringified.
+    let entry_point = if E::is_undefined(cx, entry_point_value) {
+        None
+    } else {
+        Some(E::to_str(cx, entry_point_value, arena)?)
+    };
+    let buffers = if E::is_undefined(cx, buffers_value) {
+        &[][..]
+    } else {
+        let converted = convert_sequence::<E, _>(cx, buffers_value, "buffers", |item| {
+            // T5: nullable sequence elements are C sentinel-filled struct holes.
+            if E::is_null(cx, item) {
+                // SAFETY: the pinned C ABI defines the all-zero element as the hole sentinel.
+                Ok(unsafe { std::mem::zeroed() })
+            } else {
+                convert_vertex_buffer_layout::<E>(cx, item, arena)
+            }
+        })?;
+        arena.alloc_slice(converted)
+    };
+    Ok(WGPUVertexState {
+        nextInChain: ptr::null_mut(),
+        module,
+        entryPoint: entry_point.map_or_else(
+            || WGPUStringView { data: ptr::null(), length: wgpu_strlen() },
+            |value| WGPUStringView::from_bytes(value.as_bytes()),
+        ),
+        // Policy skip: recorded deferral: pipeline constants are outside the block 09 slice-3 surface.
+        constantCount: 0,
+        constants: ptr::null(),
+        bufferCount: buffers.len(),
+        buffers: if buffers.is_empty() {
+            ptr::null()
+        } else {
+            buffers.as_ptr()
+        },
+    })
+}
+
+/// Converts a JavaScript `GPUPrimitiveState` into `WGPUPrimitiveState`.
+pub(super) fn convert_primitive_state<E: JsEngine>(
+    cx: E::Context<'_>,
+    value: E::Value,
+) -> Result<WGPUPrimitiveState, E::Error> {
+    let topology_value = dictionary_member::<E>(cx, value, "topology")?;
+    let strip_index_format_value = dictionary_member::<E>(cx, value, "stripIndexFormat")?;
+    let front_face_value = dictionary_member::<E>(cx, value, "frontFace")?;
+    let cull_mode_value = dictionary_member::<E>(cx, value, "cullMode")?;
+    let unclipped_depth_value = dictionary_member::<E>(cx, value, "unclippedDepth")?;
+    // B6: string enums are joined to C values; absence uses the IDL default or C sentinel.
+    let topology = if E::is_undefined(cx, topology_value) {
+        WGPUPrimitiveTopology_WGPUPrimitiveTopology_TriangleList
+    } else {
+        let enum_arena = Arena::new();
+        match E::to_str(cx, topology_value, &enum_arena)? {
+            "point-list" => WGPUPrimitiveTopology_WGPUPrimitiveTopology_PointList,
+            "line-list" => WGPUPrimitiveTopology_WGPUPrimitiveTopology_LineList,
+            "line-strip" => WGPUPrimitiveTopology_WGPUPrimitiveTopology_LineStrip,
+            "triangle-list" => WGPUPrimitiveTopology_WGPUPrimitiveTopology_TriangleList,
+            "triangle-strip" => WGPUPrimitiveTopology_WGPUPrimitiveTopology_TriangleStrip,
+            _ => return Err(E::type_error(cx, "GPUPrimitiveTopology")),
+        }
+    };
+    // B6: string enums are joined to C values; absence uses the IDL default or C sentinel.
+    let strip_index_format = if E::is_undefined(cx, strip_index_format_value) {
+        WGPUIndexFormat_WGPUIndexFormat_Undefined
+    } else {
+        let enum_arena = Arena::new();
+        match E::to_str(cx, strip_index_format_value, &enum_arena)? {
+            "uint16" => WGPUIndexFormat_WGPUIndexFormat_Uint16,
+            "uint32" => WGPUIndexFormat_WGPUIndexFormat_Uint32,
+            _ => return Err(E::type_error(cx, "GPUIndexFormat")),
+        }
+    };
+    // B6: string enums are joined to C values; absence uses the IDL default or C sentinel.
+    let front_face = if E::is_undefined(cx, front_face_value) {
+        WGPUFrontFace_WGPUFrontFace_CCW
+    } else {
+        let enum_arena = Arena::new();
+        match E::to_str(cx, front_face_value, &enum_arena)? {
+            "ccw" => WGPUFrontFace_WGPUFrontFace_CCW,
+            "cw" => WGPUFrontFace_WGPUFrontFace_CW,
+            _ => return Err(E::type_error(cx, "GPUFrontFace")),
+        }
+    };
+    // B6: string enums are joined to C values; absence uses the IDL default or C sentinel.
+    let cull_mode = if E::is_undefined(cx, cull_mode_value) {
+        WGPUCullMode_WGPUCullMode_None
+    } else {
+        let enum_arena = Arena::new();
+        match E::to_str(cx, cull_mode_value, &enum_arena)? {
+            "none" => WGPUCullMode_WGPUCullMode_None,
+            "front" => WGPUCullMode_WGPUCullMode_Front,
+            "back" => WGPUCullMode_WGPUCullMode_Back,
+            _ => return Err(E::type_error(cx, "GPUCullMode")),
+        }
+    };
+    Ok(WGPUPrimitiveState {
+        nextInChain: ptr::null_mut(),
+        topology,
+        stripIndexFormat: strip_index_format,
+        frontFace: front_face,
+        cullMode: cull_mode,
+        // R8: an optional boolean defaults to false and otherwise uses `ToBoolean`.
+        unclippedDepth: if E::is_undefined(cx, unclipped_depth_value) {
+            0
+        } else {
+            u32::from(E::to_bool(cx, unclipped_depth_value))
+        },
+    })
+}
+
+/// Converts a JavaScript `GPUStencilFaceState` into `WGPUStencilFaceState`.
+pub(super) fn convert_stencil_face_state<E: JsEngine>(
+    cx: E::Context<'_>,
+    value: E::Value,
+) -> Result<WGPUStencilFaceState, E::Error> {
+    let compare_value = dictionary_member::<E>(cx, value, "compare")?;
+    let fail_op_value = dictionary_member::<E>(cx, value, "failOp")?;
+    let depth_fail_op_value = dictionary_member::<E>(cx, value, "depthFailOp")?;
+    let pass_op_value = dictionary_member::<E>(cx, value, "passOp")?;
+    // B6: string enums are joined to C values; absence uses the IDL default or C sentinel.
+    let compare = if E::is_undefined(cx, compare_value) {
+        WGPUCompareFunction_WGPUCompareFunction_Always
+    } else {
+        let enum_arena = Arena::new();
+        match E::to_str(cx, compare_value, &enum_arena)? {
+            "never" => WGPUCompareFunction_WGPUCompareFunction_Never,
+            "less" => WGPUCompareFunction_WGPUCompareFunction_Less,
+            "equal" => WGPUCompareFunction_WGPUCompareFunction_Equal,
+            "less-equal" => WGPUCompareFunction_WGPUCompareFunction_LessEqual,
+            "greater" => WGPUCompareFunction_WGPUCompareFunction_Greater,
+            "not-equal" => WGPUCompareFunction_WGPUCompareFunction_NotEqual,
+            "greater-equal" => WGPUCompareFunction_WGPUCompareFunction_GreaterEqual,
+            "always" => WGPUCompareFunction_WGPUCompareFunction_Always,
+            _ => return Err(E::type_error(cx, "GPUCompareFunction")),
+        }
+    };
+    // B6: string enums are joined to C values; absence uses the IDL default or C sentinel.
+    let fail_op = if E::is_undefined(cx, fail_op_value) {
+        WGPUStencilOperation_WGPUStencilOperation_Keep
+    } else {
+        let enum_arena = Arena::new();
+        match E::to_str(cx, fail_op_value, &enum_arena)? {
+            "keep" => WGPUStencilOperation_WGPUStencilOperation_Keep,
+            "zero" => WGPUStencilOperation_WGPUStencilOperation_Zero,
+            "replace" => WGPUStencilOperation_WGPUStencilOperation_Replace,
+            "invert" => WGPUStencilOperation_WGPUStencilOperation_Invert,
+            "increment-clamp" => WGPUStencilOperation_WGPUStencilOperation_IncrementClamp,
+            "decrement-clamp" => WGPUStencilOperation_WGPUStencilOperation_DecrementClamp,
+            "increment-wrap" => WGPUStencilOperation_WGPUStencilOperation_IncrementWrap,
+            "decrement-wrap" => WGPUStencilOperation_WGPUStencilOperation_DecrementWrap,
+            _ => return Err(E::type_error(cx, "GPUStencilOperation")),
+        }
+    };
+    // B6: string enums are joined to C values; absence uses the IDL default or C sentinel.
+    let depth_fail_op = if E::is_undefined(cx, depth_fail_op_value) {
+        WGPUStencilOperation_WGPUStencilOperation_Keep
+    } else {
+        let enum_arena = Arena::new();
+        match E::to_str(cx, depth_fail_op_value, &enum_arena)? {
+            "keep" => WGPUStencilOperation_WGPUStencilOperation_Keep,
+            "zero" => WGPUStencilOperation_WGPUStencilOperation_Zero,
+            "replace" => WGPUStencilOperation_WGPUStencilOperation_Replace,
+            "invert" => WGPUStencilOperation_WGPUStencilOperation_Invert,
+            "increment-clamp" => WGPUStencilOperation_WGPUStencilOperation_IncrementClamp,
+            "decrement-clamp" => WGPUStencilOperation_WGPUStencilOperation_DecrementClamp,
+            "increment-wrap" => WGPUStencilOperation_WGPUStencilOperation_IncrementWrap,
+            "decrement-wrap" => WGPUStencilOperation_WGPUStencilOperation_DecrementWrap,
+            _ => return Err(E::type_error(cx, "GPUStencilOperation")),
+        }
+    };
+    // B6: string enums are joined to C values; absence uses the IDL default or C sentinel.
+    let pass_op = if E::is_undefined(cx, pass_op_value) {
+        WGPUStencilOperation_WGPUStencilOperation_Keep
+    } else {
+        let enum_arena = Arena::new();
+        match E::to_str(cx, pass_op_value, &enum_arena)? {
+            "keep" => WGPUStencilOperation_WGPUStencilOperation_Keep,
+            "zero" => WGPUStencilOperation_WGPUStencilOperation_Zero,
+            "replace" => WGPUStencilOperation_WGPUStencilOperation_Replace,
+            "invert" => WGPUStencilOperation_WGPUStencilOperation_Invert,
+            "increment-clamp" => WGPUStencilOperation_WGPUStencilOperation_IncrementClamp,
+            "decrement-clamp" => WGPUStencilOperation_WGPUStencilOperation_DecrementClamp,
+            "increment-wrap" => WGPUStencilOperation_WGPUStencilOperation_IncrementWrap,
+            "decrement-wrap" => WGPUStencilOperation_WGPUStencilOperation_DecrementWrap,
+            _ => return Err(E::type_error(cx, "GPUStencilOperation")),
+        }
+    };
+    Ok(WGPUStencilFaceState {
+        compare,
+        failOp: fail_op,
+        depthFailOp: depth_fail_op,
+        passOp: pass_op,
+    })
+}
+
+/// Converts a JavaScript `GPUDepthStencilState` into `WGPUDepthStencilState`.
+pub(super) fn convert_depth_stencil_state<E: JsEngine>(
+    cx: E::Context<'_>,
+    value: E::Value,
+) -> Result<WGPUDepthStencilState, E::Error> {
+    // DR-M3: required dictionary members reject undefined.
+    let format_value = required_member::<E>(cx, value, "format")?;
+    let depth_write_enabled_value = dictionary_member::<E>(cx, value, "depthWriteEnabled")?;
+    let depth_compare_value = dictionary_member::<E>(cx, value, "depthCompare")?;
+    let stencil_front_value = dictionary_member::<E>(cx, value, "stencilFront")?;
+    let stencil_back_value = dictionary_member::<E>(cx, value, "stencilBack")?;
+    let stencil_read_mask_value = dictionary_member::<E>(cx, value, "stencilReadMask")?;
+    let stencil_write_mask_value = dictionary_member::<E>(cx, value, "stencilWriteMask")?;
+    let depth_bias_value = dictionary_member::<E>(cx, value, "depthBias")?;
+    let depth_bias_slope_scale_value = dictionary_member::<E>(cx, value, "depthBiasSlopeScale")?;
+    let depth_bias_clamp_value = dictionary_member::<E>(cx, value, "depthBiasClamp")?;
+    // B6: string enums are joined to C values; absence uses the IDL default or C sentinel.
+    let format = {
+        let enum_arena = Arena::new();
+        match E::to_str(cx, format_value, &enum_arena)? {
+            "r8unorm" => WGPUTextureFormat_WGPUTextureFormat_R8Unorm,
+            "r8snorm" => WGPUTextureFormat_WGPUTextureFormat_R8Snorm,
+            "r8uint" => WGPUTextureFormat_WGPUTextureFormat_R8Uint,
+            "r8sint" => WGPUTextureFormat_WGPUTextureFormat_R8Sint,
+            "r16unorm" => WGPUTextureFormat_WGPUTextureFormat_R16Unorm,
+            "r16snorm" => WGPUTextureFormat_WGPUTextureFormat_R16Snorm,
+            "r16uint" => WGPUTextureFormat_WGPUTextureFormat_R16Uint,
+            "r16sint" => WGPUTextureFormat_WGPUTextureFormat_R16Sint,
+            "r16float" => WGPUTextureFormat_WGPUTextureFormat_R16Float,
+            "rg8unorm" => WGPUTextureFormat_WGPUTextureFormat_RG8Unorm,
+            "rg8snorm" => WGPUTextureFormat_WGPUTextureFormat_RG8Snorm,
+            "rg8uint" => WGPUTextureFormat_WGPUTextureFormat_RG8Uint,
+            "rg8sint" => WGPUTextureFormat_WGPUTextureFormat_RG8Sint,
+            "r32uint" => WGPUTextureFormat_WGPUTextureFormat_R32Uint,
+            "r32sint" => WGPUTextureFormat_WGPUTextureFormat_R32Sint,
+            "r32float" => WGPUTextureFormat_WGPUTextureFormat_R32Float,
+            "rg16unorm" => WGPUTextureFormat_WGPUTextureFormat_RG16Unorm,
+            "rg16snorm" => WGPUTextureFormat_WGPUTextureFormat_RG16Snorm,
+            "rg16uint" => WGPUTextureFormat_WGPUTextureFormat_RG16Uint,
+            "rg16sint" => WGPUTextureFormat_WGPUTextureFormat_RG16Sint,
+            "rg16float" => WGPUTextureFormat_WGPUTextureFormat_RG16Float,
+            "rgba8unorm" => WGPUTextureFormat_WGPUTextureFormat_RGBA8Unorm,
+            "rgba8unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_RGBA8UnormSrgb,
+            "rgba8snorm" => WGPUTextureFormat_WGPUTextureFormat_RGBA8Snorm,
+            "rgba8uint" => WGPUTextureFormat_WGPUTextureFormat_RGBA8Uint,
+            "rgba8sint" => WGPUTextureFormat_WGPUTextureFormat_RGBA8Sint,
+            "bgra8unorm" => WGPUTextureFormat_WGPUTextureFormat_BGRA8Unorm,
+            "bgra8unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_BGRA8UnormSrgb,
+            "rgb9e5ufloat" => WGPUTextureFormat_WGPUTextureFormat_RGB9E5Ufloat,
+            "rgb10a2uint" => WGPUTextureFormat_WGPUTextureFormat_RGB10A2Uint,
+            "rgb10a2unorm" => WGPUTextureFormat_WGPUTextureFormat_RGB10A2Unorm,
+            "rg11b10ufloat" => WGPUTextureFormat_WGPUTextureFormat_RG11B10Ufloat,
+            "rg32uint" => WGPUTextureFormat_WGPUTextureFormat_RG32Uint,
+            "rg32sint" => WGPUTextureFormat_WGPUTextureFormat_RG32Sint,
+            "rg32float" => WGPUTextureFormat_WGPUTextureFormat_RG32Float,
+            "rgba16unorm" => WGPUTextureFormat_WGPUTextureFormat_RGBA16Unorm,
+            "rgba16snorm" => WGPUTextureFormat_WGPUTextureFormat_RGBA16Snorm,
+            "rgba16uint" => WGPUTextureFormat_WGPUTextureFormat_RGBA16Uint,
+            "rgba16sint" => WGPUTextureFormat_WGPUTextureFormat_RGBA16Sint,
+            "rgba16float" => WGPUTextureFormat_WGPUTextureFormat_RGBA16Float,
+            "rgba32uint" => WGPUTextureFormat_WGPUTextureFormat_RGBA32Uint,
+            "rgba32sint" => WGPUTextureFormat_WGPUTextureFormat_RGBA32Sint,
+            "rgba32float" => WGPUTextureFormat_WGPUTextureFormat_RGBA32Float,
+            "stencil8" => WGPUTextureFormat_WGPUTextureFormat_Stencil8,
+            "depth16unorm" => WGPUTextureFormat_WGPUTextureFormat_Depth16Unorm,
+            "depth24plus" => WGPUTextureFormat_WGPUTextureFormat_Depth24Plus,
+            "depth24plus-stencil8" => WGPUTextureFormat_WGPUTextureFormat_Depth24PlusStencil8,
+            "depth32float" => WGPUTextureFormat_WGPUTextureFormat_Depth32Float,
+            "depth32float-stencil8" => WGPUTextureFormat_WGPUTextureFormat_Depth32FloatStencil8,
+            "bc1-rgba-unorm" => WGPUTextureFormat_WGPUTextureFormat_BC1RGBAUnorm,
+            "bc1-rgba-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_BC1RGBAUnormSrgb,
+            "bc2-rgba-unorm" => WGPUTextureFormat_WGPUTextureFormat_BC2RGBAUnorm,
+            "bc2-rgba-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_BC2RGBAUnormSrgb,
+            "bc3-rgba-unorm" => WGPUTextureFormat_WGPUTextureFormat_BC3RGBAUnorm,
+            "bc3-rgba-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_BC3RGBAUnormSrgb,
+            "bc4-r-unorm" => WGPUTextureFormat_WGPUTextureFormat_BC4RUnorm,
+            "bc4-r-snorm" => WGPUTextureFormat_WGPUTextureFormat_BC4RSnorm,
+            "bc5-rg-unorm" => WGPUTextureFormat_WGPUTextureFormat_BC5RGUnorm,
+            "bc5-rg-snorm" => WGPUTextureFormat_WGPUTextureFormat_BC5RGSnorm,
+            "bc6h-rgb-ufloat" => WGPUTextureFormat_WGPUTextureFormat_BC6HRGBUfloat,
+            "bc6h-rgb-float" => WGPUTextureFormat_WGPUTextureFormat_BC6HRGBFloat,
+            "bc7-rgba-unorm" => WGPUTextureFormat_WGPUTextureFormat_BC7RGBAUnorm,
+            "bc7-rgba-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_BC7RGBAUnormSrgb,
+            "etc2-rgb8unorm" => WGPUTextureFormat_WGPUTextureFormat_ETC2RGB8Unorm,
+            "etc2-rgb8unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ETC2RGB8UnormSrgb,
+            "etc2-rgb8a1unorm" => WGPUTextureFormat_WGPUTextureFormat_ETC2RGB8A1Unorm,
+            "etc2-rgb8a1unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ETC2RGB8A1UnormSrgb,
+            "etc2-rgba8unorm" => WGPUTextureFormat_WGPUTextureFormat_ETC2RGBA8Unorm,
+            "etc2-rgba8unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ETC2RGBA8UnormSrgb,
+            "eac-r11unorm" => WGPUTextureFormat_WGPUTextureFormat_EACR11Unorm,
+            "eac-r11snorm" => WGPUTextureFormat_WGPUTextureFormat_EACR11Snorm,
+            "eac-rg11unorm" => WGPUTextureFormat_WGPUTextureFormat_EACRG11Unorm,
+            "eac-rg11snorm" => WGPUTextureFormat_WGPUTextureFormat_EACRG11Snorm,
+            "astc-4x4-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC4x4Unorm,
+            "astc-4x4-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC4x4UnormSrgb,
+            "astc-5x4-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC5x4Unorm,
+            "astc-5x4-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC5x4UnormSrgb,
+            "astc-5x5-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC5x5Unorm,
+            "astc-5x5-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC5x5UnormSrgb,
+            "astc-6x5-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC6x5Unorm,
+            "astc-6x5-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC6x5UnormSrgb,
+            "astc-6x6-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC6x6Unorm,
+            "astc-6x6-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC6x6UnormSrgb,
+            "astc-8x5-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC8x5Unorm,
+            "astc-8x5-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC8x5UnormSrgb,
+            "astc-8x6-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC8x6Unorm,
+            "astc-8x6-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC8x6UnormSrgb,
+            "astc-8x8-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC8x8Unorm,
+            "astc-8x8-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC8x8UnormSrgb,
+            "astc-10x5-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC10x5Unorm,
+            "astc-10x5-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC10x5UnormSrgb,
+            "astc-10x6-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC10x6Unorm,
+            "astc-10x6-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC10x6UnormSrgb,
+            "astc-10x8-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC10x8Unorm,
+            "astc-10x8-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC10x8UnormSrgb,
+            "astc-10x10-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC10x10Unorm,
+            "astc-10x10-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC10x10UnormSrgb,
+            "astc-12x10-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC12x10Unorm,
+            "astc-12x10-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC12x10UnormSrgb,
+            "astc-12x12-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC12x12Unorm,
+            "astc-12x12-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC12x12UnormSrgb,
+            _ => return Err(E::type_error(cx, "GPUTextureFormat")),
+        }
+    };
+    // B6: string enums are joined to C values; absence uses the IDL default or C sentinel.
+    let depth_compare = if E::is_undefined(cx, depth_compare_value) {
+        WGPUCompareFunction_WGPUCompareFunction_Undefined
+    } else {
+        let enum_arena = Arena::new();
+        match E::to_str(cx, depth_compare_value, &enum_arena)? {
+            "never" => WGPUCompareFunction_WGPUCompareFunction_Never,
+            "less" => WGPUCompareFunction_WGPUCompareFunction_Less,
+            "equal" => WGPUCompareFunction_WGPUCompareFunction_Equal,
+            "less-equal" => WGPUCompareFunction_WGPUCompareFunction_LessEqual,
+            "greater" => WGPUCompareFunction_WGPUCompareFunction_Greater,
+            "not-equal" => WGPUCompareFunction_WGPUCompareFunction_NotEqual,
+            "greater-equal" => WGPUCompareFunction_WGPUCompareFunction_GreaterEqual,
+            "always" => WGPUCompareFunction_WGPUCompareFunction_Always,
+            _ => return Err(E::type_error(cx, "GPUCompareFunction")),
+        }
+    };
+    let stencil_front = convert_stencil_face_state::<E>(cx, stencil_front_value)?;
+    let stencil_back = convert_stencil_face_state::<E>(cx, stencil_back_value)?;
+    Ok(WGPUDepthStencilState {
+        nextInChain: ptr::null_mut(),
+        format,
+        // T5: an omitted optional boolean maps to WGPUOptionalBool_Undefined.
+        depthWriteEnabled: if E::is_undefined(cx, depth_write_enabled_value) {
+            WGPUOptionalBool_WGPUOptionalBool_Undefined
+        } else if E::to_bool(cx, depth_write_enabled_value) {
+            WGPUOptionalBool_WGPUOptionalBool_True
+        } else {
+            WGPUOptionalBool_WGPUOptionalBool_False
+        },
+        depthCompare: depth_compare,
+        stencilFront: stencil_front,
+        stencilBack: stencil_back,
+        // R8: `[EnforceRange]` GPUStencilValue is checked at the 32-bit boundary.
+        stencilReadMask: if E::is_undefined(cx, stencil_read_mask_value) {
+            0xFFFFFFFF
+        } else {
+            enforce_u32::<E>(cx, stencil_read_mask_value, "stencilReadMask")?
+        },
+        // R8: `[EnforceRange]` GPUStencilValue is checked at the 32-bit boundary.
+        stencilWriteMask: if E::is_undefined(cx, stencil_write_mask_value) {
+            0xFFFFFFFF
+        } else {
+            enforce_u32::<E>(cx, stencil_write_mask_value, "stencilWriteMask")?
+        },
+        // T5: signed `[EnforceRange]` long is checked at the i32 boundary.
+        depthBias: if E::is_undefined(cx, depth_bias_value) {
+            0
+        } else {
+            enforce_i32::<E>(cx, depth_bias_value, "depthBias")?
+        },
+        // G11: restricted WebIDL `float` rejects non-finite values before f32 conversion.
+        depthBiasSlopeScale: if E::is_undefined(cx, depth_bias_slope_scale_value) {
+            0_f32
+        } else {
+            restricted_f32::<E>(cx, depth_bias_slope_scale_value, "depthBiasSlopeScale")?
+        },
+        // G11: restricted WebIDL `float` rejects non-finite values before f32 conversion.
+        depthBiasClamp: if E::is_undefined(cx, depth_bias_clamp_value) {
+            0_f32
+        } else {
+            restricted_f32::<E>(cx, depth_bias_clamp_value, "depthBiasClamp")?
+        },
+    })
+}
+
+/// Converts a JavaScript `GPUMultisampleState` into `WGPUMultisampleState`.
+pub(super) fn convert_multisample_state<E: JsEngine>(
+    cx: E::Context<'_>,
+    value: E::Value,
+) -> Result<WGPUMultisampleState, E::Error> {
+    let count_value = dictionary_member::<E>(cx, value, "count")?;
+    let mask_value = dictionary_member::<E>(cx, value, "mask")?;
+    let alpha_to_coverage_enabled_value = dictionary_member::<E>(cx, value, "alphaToCoverageEnabled")?;
+    Ok(WGPUMultisampleState {
+        nextInChain: ptr::null_mut(),
+        // R8: `[EnforceRange]` GPUSize32 is checked at the 32-bit boundary.
+        count: if E::is_undefined(cx, count_value) {
+            1
+        } else {
+            enforce_u32::<E>(cx, count_value, "count")?
+        },
+        // R8: `[EnforceRange]` GPUSampleMask is checked at the 32-bit boundary.
+        mask: if E::is_undefined(cx, mask_value) {
+            0xFFFFFFFF
+        } else {
+            enforce_u32::<E>(cx, mask_value, "mask")?
+        },
+        // R8: an optional boolean defaults to false and otherwise uses `ToBoolean`.
+        alphaToCoverageEnabled: if E::is_undefined(cx, alpha_to_coverage_enabled_value) {
+            0
+        } else {
+            u32::from(E::to_bool(cx, alpha_to_coverage_enabled_value))
+        },
+    })
+}
+
+/// Converts a JavaScript `GPUBlendComponent` into `WGPUBlendComponent`.
+pub(super) fn convert_blend_component<E: JsEngine>(
+    cx: E::Context<'_>,
+    value: E::Value,
+) -> Result<WGPUBlendComponent, E::Error> {
+    let operation_value = dictionary_member::<E>(cx, value, "operation")?;
+    let src_factor_value = dictionary_member::<E>(cx, value, "srcFactor")?;
+    let dst_factor_value = dictionary_member::<E>(cx, value, "dstFactor")?;
+    // B6: string enums are joined to C values; absence uses the IDL default or C sentinel.
+    let operation = if E::is_undefined(cx, operation_value) {
+        WGPUBlendOperation_WGPUBlendOperation_Add
+    } else {
+        let enum_arena = Arena::new();
+        match E::to_str(cx, operation_value, &enum_arena)? {
+            "add" => WGPUBlendOperation_WGPUBlendOperation_Add,
+            "subtract" => WGPUBlendOperation_WGPUBlendOperation_Subtract,
+            "reverse-subtract" => WGPUBlendOperation_WGPUBlendOperation_ReverseSubtract,
+            "min" => WGPUBlendOperation_WGPUBlendOperation_Min,
+            "max" => WGPUBlendOperation_WGPUBlendOperation_Max,
+            _ => return Err(E::type_error(cx, "GPUBlendOperation")),
+        }
+    };
+    // B6: string enums are joined to C values; absence uses the IDL default or C sentinel.
+    let src_factor = if E::is_undefined(cx, src_factor_value) {
+        WGPUBlendFactor_WGPUBlendFactor_One
+    } else {
+        let enum_arena = Arena::new();
+        match E::to_str(cx, src_factor_value, &enum_arena)? {
+            "zero" => WGPUBlendFactor_WGPUBlendFactor_Zero,
+            "one" => WGPUBlendFactor_WGPUBlendFactor_One,
+            "src" => WGPUBlendFactor_WGPUBlendFactor_Src,
+            "one-minus-src" => WGPUBlendFactor_WGPUBlendFactor_OneMinusSrc,
+            "src-alpha" => WGPUBlendFactor_WGPUBlendFactor_SrcAlpha,
+            "one-minus-src-alpha" => WGPUBlendFactor_WGPUBlendFactor_OneMinusSrcAlpha,
+            "dst" => WGPUBlendFactor_WGPUBlendFactor_Dst,
+            "one-minus-dst" => WGPUBlendFactor_WGPUBlendFactor_OneMinusDst,
+            "dst-alpha" => WGPUBlendFactor_WGPUBlendFactor_DstAlpha,
+            "one-minus-dst-alpha" => WGPUBlendFactor_WGPUBlendFactor_OneMinusDstAlpha,
+            "src-alpha-saturated" => WGPUBlendFactor_WGPUBlendFactor_SrcAlphaSaturated,
+            "constant" => WGPUBlendFactor_WGPUBlendFactor_Constant,
+            "one-minus-constant" => WGPUBlendFactor_WGPUBlendFactor_OneMinusConstant,
+            "src1" => WGPUBlendFactor_WGPUBlendFactor_Src1,
+            "one-minus-src1" => WGPUBlendFactor_WGPUBlendFactor_OneMinusSrc1,
+            "src1-alpha" => WGPUBlendFactor_WGPUBlendFactor_Src1Alpha,
+            "one-minus-src1-alpha" => WGPUBlendFactor_WGPUBlendFactor_OneMinusSrc1Alpha,
+            _ => return Err(E::type_error(cx, "GPUBlendFactor")),
+        }
+    };
+    // B6: string enums are joined to C values; absence uses the IDL default or C sentinel.
+    let dst_factor = if E::is_undefined(cx, dst_factor_value) {
+        WGPUBlendFactor_WGPUBlendFactor_Zero
+    } else {
+        let enum_arena = Arena::new();
+        match E::to_str(cx, dst_factor_value, &enum_arena)? {
+            "zero" => WGPUBlendFactor_WGPUBlendFactor_Zero,
+            "one" => WGPUBlendFactor_WGPUBlendFactor_One,
+            "src" => WGPUBlendFactor_WGPUBlendFactor_Src,
+            "one-minus-src" => WGPUBlendFactor_WGPUBlendFactor_OneMinusSrc,
+            "src-alpha" => WGPUBlendFactor_WGPUBlendFactor_SrcAlpha,
+            "one-minus-src-alpha" => WGPUBlendFactor_WGPUBlendFactor_OneMinusSrcAlpha,
+            "dst" => WGPUBlendFactor_WGPUBlendFactor_Dst,
+            "one-minus-dst" => WGPUBlendFactor_WGPUBlendFactor_OneMinusDst,
+            "dst-alpha" => WGPUBlendFactor_WGPUBlendFactor_DstAlpha,
+            "one-minus-dst-alpha" => WGPUBlendFactor_WGPUBlendFactor_OneMinusDstAlpha,
+            "src-alpha-saturated" => WGPUBlendFactor_WGPUBlendFactor_SrcAlphaSaturated,
+            "constant" => WGPUBlendFactor_WGPUBlendFactor_Constant,
+            "one-minus-constant" => WGPUBlendFactor_WGPUBlendFactor_OneMinusConstant,
+            "src1" => WGPUBlendFactor_WGPUBlendFactor_Src1,
+            "one-minus-src1" => WGPUBlendFactor_WGPUBlendFactor_OneMinusSrc1,
+            "src1-alpha" => WGPUBlendFactor_WGPUBlendFactor_Src1Alpha,
+            "one-minus-src1-alpha" => WGPUBlendFactor_WGPUBlendFactor_OneMinusSrc1Alpha,
+            _ => return Err(E::type_error(cx, "GPUBlendFactor")),
+        }
+    };
+    Ok(WGPUBlendComponent {
+        operation,
+        srcFactor: src_factor,
+        dstFactor: dst_factor,
+    })
+}
+
+/// Converts a JavaScript `GPUBlendState` into `WGPUBlendState`.
+pub(super) fn convert_blend_state<E: JsEngine>(
+    cx: E::Context<'_>,
+    value: E::Value,
+) -> Result<WGPUBlendState, E::Error> {
+    // DR-M3: required dictionary members reject undefined.
+    let color_value = required_member::<E>(cx, value, "color")?;
+    let alpha_value = required_member::<E>(cx, value, "alpha")?;
+    let color = convert_blend_component::<E>(cx, color_value)?;
+    let alpha = convert_blend_component::<E>(cx, alpha_value)?;
+    Ok(WGPUBlendState {
+        color,
+        alpha,
+    })
+}
+
+/// Converts a JavaScript `GPUColorTargetState` into `WGPUColorTargetState`.
+pub(super) fn convert_color_target_state<E: JsEngine>(
+    cx: E::Context<'_>,
+    value: E::Value,
+    arena: &Arena,
+) -> Result<WGPUColorTargetState, E::Error> {
+    // DR-M3: required dictionary members reject undefined.
+    let format_value = required_member::<E>(cx, value, "format")?;
+    let blend_value = dictionary_member::<E>(cx, value, "blend")?;
+    let write_mask_value = dictionary_member::<E>(cx, value, "writeMask")?;
+    // B6: string enums are joined to C values; absence uses the IDL default or C sentinel.
+    let format = {
+        let enum_arena = Arena::new();
+        match E::to_str(cx, format_value, &enum_arena)? {
+            "r8unorm" => WGPUTextureFormat_WGPUTextureFormat_R8Unorm,
+            "r8snorm" => WGPUTextureFormat_WGPUTextureFormat_R8Snorm,
+            "r8uint" => WGPUTextureFormat_WGPUTextureFormat_R8Uint,
+            "r8sint" => WGPUTextureFormat_WGPUTextureFormat_R8Sint,
+            "r16unorm" => WGPUTextureFormat_WGPUTextureFormat_R16Unorm,
+            "r16snorm" => WGPUTextureFormat_WGPUTextureFormat_R16Snorm,
+            "r16uint" => WGPUTextureFormat_WGPUTextureFormat_R16Uint,
+            "r16sint" => WGPUTextureFormat_WGPUTextureFormat_R16Sint,
+            "r16float" => WGPUTextureFormat_WGPUTextureFormat_R16Float,
+            "rg8unorm" => WGPUTextureFormat_WGPUTextureFormat_RG8Unorm,
+            "rg8snorm" => WGPUTextureFormat_WGPUTextureFormat_RG8Snorm,
+            "rg8uint" => WGPUTextureFormat_WGPUTextureFormat_RG8Uint,
+            "rg8sint" => WGPUTextureFormat_WGPUTextureFormat_RG8Sint,
+            "r32uint" => WGPUTextureFormat_WGPUTextureFormat_R32Uint,
+            "r32sint" => WGPUTextureFormat_WGPUTextureFormat_R32Sint,
+            "r32float" => WGPUTextureFormat_WGPUTextureFormat_R32Float,
+            "rg16unorm" => WGPUTextureFormat_WGPUTextureFormat_RG16Unorm,
+            "rg16snorm" => WGPUTextureFormat_WGPUTextureFormat_RG16Snorm,
+            "rg16uint" => WGPUTextureFormat_WGPUTextureFormat_RG16Uint,
+            "rg16sint" => WGPUTextureFormat_WGPUTextureFormat_RG16Sint,
+            "rg16float" => WGPUTextureFormat_WGPUTextureFormat_RG16Float,
+            "rgba8unorm" => WGPUTextureFormat_WGPUTextureFormat_RGBA8Unorm,
+            "rgba8unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_RGBA8UnormSrgb,
+            "rgba8snorm" => WGPUTextureFormat_WGPUTextureFormat_RGBA8Snorm,
+            "rgba8uint" => WGPUTextureFormat_WGPUTextureFormat_RGBA8Uint,
+            "rgba8sint" => WGPUTextureFormat_WGPUTextureFormat_RGBA8Sint,
+            "bgra8unorm" => WGPUTextureFormat_WGPUTextureFormat_BGRA8Unorm,
+            "bgra8unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_BGRA8UnormSrgb,
+            "rgb9e5ufloat" => WGPUTextureFormat_WGPUTextureFormat_RGB9E5Ufloat,
+            "rgb10a2uint" => WGPUTextureFormat_WGPUTextureFormat_RGB10A2Uint,
+            "rgb10a2unorm" => WGPUTextureFormat_WGPUTextureFormat_RGB10A2Unorm,
+            "rg11b10ufloat" => WGPUTextureFormat_WGPUTextureFormat_RG11B10Ufloat,
+            "rg32uint" => WGPUTextureFormat_WGPUTextureFormat_RG32Uint,
+            "rg32sint" => WGPUTextureFormat_WGPUTextureFormat_RG32Sint,
+            "rg32float" => WGPUTextureFormat_WGPUTextureFormat_RG32Float,
+            "rgba16unorm" => WGPUTextureFormat_WGPUTextureFormat_RGBA16Unorm,
+            "rgba16snorm" => WGPUTextureFormat_WGPUTextureFormat_RGBA16Snorm,
+            "rgba16uint" => WGPUTextureFormat_WGPUTextureFormat_RGBA16Uint,
+            "rgba16sint" => WGPUTextureFormat_WGPUTextureFormat_RGBA16Sint,
+            "rgba16float" => WGPUTextureFormat_WGPUTextureFormat_RGBA16Float,
+            "rgba32uint" => WGPUTextureFormat_WGPUTextureFormat_RGBA32Uint,
+            "rgba32sint" => WGPUTextureFormat_WGPUTextureFormat_RGBA32Sint,
+            "rgba32float" => WGPUTextureFormat_WGPUTextureFormat_RGBA32Float,
+            "stencil8" => WGPUTextureFormat_WGPUTextureFormat_Stencil8,
+            "depth16unorm" => WGPUTextureFormat_WGPUTextureFormat_Depth16Unorm,
+            "depth24plus" => WGPUTextureFormat_WGPUTextureFormat_Depth24Plus,
+            "depth24plus-stencil8" => WGPUTextureFormat_WGPUTextureFormat_Depth24PlusStencil8,
+            "depth32float" => WGPUTextureFormat_WGPUTextureFormat_Depth32Float,
+            "depth32float-stencil8" => WGPUTextureFormat_WGPUTextureFormat_Depth32FloatStencil8,
+            "bc1-rgba-unorm" => WGPUTextureFormat_WGPUTextureFormat_BC1RGBAUnorm,
+            "bc1-rgba-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_BC1RGBAUnormSrgb,
+            "bc2-rgba-unorm" => WGPUTextureFormat_WGPUTextureFormat_BC2RGBAUnorm,
+            "bc2-rgba-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_BC2RGBAUnormSrgb,
+            "bc3-rgba-unorm" => WGPUTextureFormat_WGPUTextureFormat_BC3RGBAUnorm,
+            "bc3-rgba-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_BC3RGBAUnormSrgb,
+            "bc4-r-unorm" => WGPUTextureFormat_WGPUTextureFormat_BC4RUnorm,
+            "bc4-r-snorm" => WGPUTextureFormat_WGPUTextureFormat_BC4RSnorm,
+            "bc5-rg-unorm" => WGPUTextureFormat_WGPUTextureFormat_BC5RGUnorm,
+            "bc5-rg-snorm" => WGPUTextureFormat_WGPUTextureFormat_BC5RGSnorm,
+            "bc6h-rgb-ufloat" => WGPUTextureFormat_WGPUTextureFormat_BC6HRGBUfloat,
+            "bc6h-rgb-float" => WGPUTextureFormat_WGPUTextureFormat_BC6HRGBFloat,
+            "bc7-rgba-unorm" => WGPUTextureFormat_WGPUTextureFormat_BC7RGBAUnorm,
+            "bc7-rgba-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_BC7RGBAUnormSrgb,
+            "etc2-rgb8unorm" => WGPUTextureFormat_WGPUTextureFormat_ETC2RGB8Unorm,
+            "etc2-rgb8unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ETC2RGB8UnormSrgb,
+            "etc2-rgb8a1unorm" => WGPUTextureFormat_WGPUTextureFormat_ETC2RGB8A1Unorm,
+            "etc2-rgb8a1unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ETC2RGB8A1UnormSrgb,
+            "etc2-rgba8unorm" => WGPUTextureFormat_WGPUTextureFormat_ETC2RGBA8Unorm,
+            "etc2-rgba8unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ETC2RGBA8UnormSrgb,
+            "eac-r11unorm" => WGPUTextureFormat_WGPUTextureFormat_EACR11Unorm,
+            "eac-r11snorm" => WGPUTextureFormat_WGPUTextureFormat_EACR11Snorm,
+            "eac-rg11unorm" => WGPUTextureFormat_WGPUTextureFormat_EACRG11Unorm,
+            "eac-rg11snorm" => WGPUTextureFormat_WGPUTextureFormat_EACRG11Snorm,
+            "astc-4x4-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC4x4Unorm,
+            "astc-4x4-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC4x4UnormSrgb,
+            "astc-5x4-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC5x4Unorm,
+            "astc-5x4-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC5x4UnormSrgb,
+            "astc-5x5-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC5x5Unorm,
+            "astc-5x5-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC5x5UnormSrgb,
+            "astc-6x5-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC6x5Unorm,
+            "astc-6x5-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC6x5UnormSrgb,
+            "astc-6x6-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC6x6Unorm,
+            "astc-6x6-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC6x6UnormSrgb,
+            "astc-8x5-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC8x5Unorm,
+            "astc-8x5-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC8x5UnormSrgb,
+            "astc-8x6-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC8x6Unorm,
+            "astc-8x6-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC8x6UnormSrgb,
+            "astc-8x8-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC8x8Unorm,
+            "astc-8x8-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC8x8UnormSrgb,
+            "astc-10x5-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC10x5Unorm,
+            "astc-10x5-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC10x5UnormSrgb,
+            "astc-10x6-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC10x6Unorm,
+            "astc-10x6-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC10x6UnormSrgb,
+            "astc-10x8-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC10x8Unorm,
+            "astc-10x8-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC10x8UnormSrgb,
+            "astc-10x10-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC10x10Unorm,
+            "astc-10x10-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC10x10UnormSrgb,
+            "astc-12x10-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC12x10Unorm,
+            "astc-12x10-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC12x10UnormSrgb,
+            "astc-12x12-unorm" => WGPUTextureFormat_WGPUTextureFormat_ASTC12x12Unorm,
+            "astc-12x12-unorm-srgb" => WGPUTextureFormat_WGPUTextureFormat_ASTC12x12UnormSrgb,
+            _ => return Err(E::type_error(cx, "GPUTextureFormat")),
+        }
+    };
+    // T5: an absent optional dictionary is a null pointer in the pinned C ABI.
+    let blend = if E::is_undefined(cx, blend_value) {
+        ptr::null()
+    } else {
+        let converted = convert_blend_state::<E>(cx, blend_value)?;
+        arena.alloc_slice(vec![converted]).as_ptr()
+    };
+    Ok(WGPUColorTargetState {
+        nextInChain: ptr::null_mut(),
+        format,
+        blend,
+        // R8/B7: the 32-bit WebIDL value is checked before C-ABI widening.
+        writeMask: if E::is_undefined(cx, write_mask_value) {
+            0xF
+        } else {
+            u64::from(enforce_u32::<E>(cx, write_mask_value, "writeMask")?)
+        },
+    })
+}
+
+/// Converts a JavaScript `GPUFragmentState` into `WGPUFragmentState`.
+pub(super) fn convert_fragment_state<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    value: E::Value,
+    arena: &Arena,
+) -> Result<WGPUFragmentState, E::Error> {
+    // DR-M3: required dictionary members reject undefined.
+    let module_value = required_member::<E>(cx, value, "module")?;
+    let entry_point_value = dictionary_member::<E>(cx, value, "entryPoint")?;
+    let constants_value = dictionary_member::<E>(cx, value, "constants")?;
+    // Policy skip: reject present unsupported API instead of ignoring it.
+    if !E::is_undefined(cx, constants_value) {
+        return Err(E::type_error(cx, "constants are not supported yet"));
+    }
+    let targets_value = required_member::<E>(cx, value, "targets")?;
+    let module = shader_module_handle::<E>(cx, module_value)?;
+    // B4: optional non-nullable strings preserve absence; present null is stringified.
+    let entry_point = if E::is_undefined(cx, entry_point_value) {
+        None
+    } else {
+        Some(E::to_str(cx, entry_point_value, arena)?)
+    };
+    let targets = {
+        let converted = convert_sequence::<E, _>(cx, targets_value, "targets", |item| {
+            // T5: nullable sequence elements are C sentinel-filled struct holes.
+            if E::is_null(cx, item) {
+                // SAFETY: the pinned C ABI defines the all-zero element as the hole sentinel.
+                Ok(unsafe { std::mem::zeroed() })
+            } else {
+                convert_color_target_state::<E>(cx, item, arena)
+            }
+        })?;
+        arena.alloc_slice(converted)
+    };
+    Ok(WGPUFragmentState {
+        nextInChain: ptr::null_mut(),
+        module,
+        entryPoint: entry_point.map_or_else(
+            || WGPUStringView { data: ptr::null(), length: wgpu_strlen() },
+            |value| WGPUStringView::from_bytes(value.as_bytes()),
+        ),
+        // Policy skip: recorded deferral: pipeline constants are outside the block 09 slice-3 surface.
+        constantCount: 0,
+        constants: ptr::null(),
+        targetCount: targets.len(),
+        targets: if targets.is_empty() {
+            ptr::null()
+        } else {
+            targets.as_ptr()
+        },
+    })
+}
+
+/// Converts a JavaScript `GPURenderPipelineDescriptor` into `ConvertedRenderPipelineDescriptor`.
+pub(super) fn convert_render_pipeline_descriptor<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    value: E::Value,
+    arena: &Arena,
+) -> Result<ConvertedRenderPipelineDescriptor, E::Error> {
+    let label_value = dictionary_member::<E>(cx, value, "label")?;
+    // DR-M3: required dictionary members reject undefined.
+    let layout_value = required_member::<E>(cx, value, "layout")?;
+    let vertex_value = required_member::<E>(cx, value, "vertex")?;
+    let primitive_value = dictionary_member::<E>(cx, value, "primitive")?;
+    let depth_stencil_value = dictionary_member::<E>(cx, value, "depthStencil")?;
+    let multisample_value = dictionary_member::<E>(cx, value, "multisample")?;
+    let fragment_value = dictionary_member::<E>(cx, value, "fragment")?;
+    // B4: non-nullable strings default only for undefined; null is stringified.
+    let label = if E::is_undefined(cx, label_value) {
+        ""
+    } else {
+        E::to_str(cx, label_value, arena)?
+    };
+    // Policy: the handle-or-enum union preserves explicit handles and auto layout.
+    let layout = if E::is_null(cx, layout_value) {
+        return Err(E::type_error(cx, "layout"));
+    } else if let Ok(handle) = pipeline_layout_handle::<E>(cx, layout_value) {
+        handle
+    } else {
+        let union_arena = Arena::new();
+        match E::to_str(cx, layout_value, &union_arena)? {
+            "auto" => ptr::null_mut(),
+            _ => return Err(E::type_error(cx, "(GPUPipelineLayout or GPUAutoLayoutMode)")),
+        }
+    };
+    let vertex = convert_vertex_state::<E>(cx, vertex_value, arena)?;
+    let primitive = convert_primitive_state::<E>(cx, primitive_value)?;
+    // T5: an absent optional dictionary is a null pointer in the pinned C ABI.
+    let depth_stencil = if E::is_undefined(cx, depth_stencil_value) {
+        ptr::null()
+    } else {
+        let converted = convert_depth_stencil_state::<E>(cx, depth_stencil_value)?;
+        arena.alloc_slice(vec![converted]).as_ptr()
+    };
+    let multisample = convert_multisample_state::<E>(cx, multisample_value)?;
+    // T5: an absent optional dictionary is a null pointer in the pinned C ABI.
+    let fragment = if E::is_undefined(cx, fragment_value) {
+        ptr::null()
+    } else {
+        let converted = convert_fragment_state::<E>(cx, fragment_value, arena)?;
+        arena.alloc_slice(vec![converted]).as_ptr()
+    };
+    let vertex_module = vertex.module;
+    let fragment_module = if fragment.is_null() {
+        ptr::null_mut()
+    } else {
+        // SAFETY: the arena-owned optional nested descriptor remains live through the native call.
+        unsafe { (*fragment).module }
+    };
+    let native = WGPURenderPipelineDescriptor {
+        nextInChain: ptr::null_mut(),
+        label: WGPUStringView::from_bytes(label.as_bytes()),
+        layout,
+        vertex,
+        primitive,
+        depthStencil: depth_stencil,
+        multisample,
+        fragment,
+    };
+    Ok(ConvertedRenderPipelineDescriptor {
+        native,
+        vertex_module,
+        fragment_module,
+        layout,
+    })
+}
+
 /// Converts a JavaScript `GPUCommandEncoderDescriptor` into `WGPUCommandEncoderDescriptor`.
 pub(super) fn convert_command_encoder_descriptor<E: JsEngine>(
     cx: E::Context<'_>,
@@ -1420,9 +2331,7 @@ pub(super) fn convert_storage_texture_binding_layout<E: JsEngine>(
         }
     };
     // B6: string enums are joined to C values; absence uses the IDL default or C sentinel.
-    let format = if E::is_undefined(cx, format_value) {
-        WGPUTextureFormat_WGPUTextureFormat_Undefined
-    } else {
+    let format = {
         let enum_arena = Arena::new();
         match E::to_str(cx, format_value, &enum_arena)? {
             "r8unorm" => WGPUTextureFormat_WGPUTextureFormat_R8Unorm,
@@ -1784,6 +2693,19 @@ pub struct ComputePipelinePayload {
 // `ReleaseRequest::run()` during release-queue drain on the creating `tick()` thread.
 unsafe impl Send for ComputePipelinePayload {}
 
+/// Payload stored by a `GPURenderPipeline` wrapper.
+pub struct RenderPipelinePayload {
+    pub(super) render_pipeline: WGPURenderPipeline,
+    pub(super) vertex_module: WGPUShaderModule,
+    pub(super) fragment_module: WGPUShaderModule,
+    pub(super) layout: WGPUPipelineLayout,
+}
+
+// SAFETY: `RenderPipelinePayload` stores WGPU handle values. Finalization only moves those values
+// into `ReleaseRequest`; native handles are dereferenced only by
+// `ReleaseRequest::run()` during release-queue drain on the creating `tick()` thread.
+unsafe impl Send for RenderPipelinePayload {}
+
 /// Payload stored by a `GPUCommandEncoder` wrapper.
 pub struct CommandEncoderPayload {
     pub(super) state: Arc<Mutex<CommandEncoderState>>,
@@ -1887,6 +2809,19 @@ pub enum ReleaseRequest {
         /// Dispatch table used on the drain thread.
         gpu: GpuDispatch,
     },
+    /// Release a `GPURenderPipeline` and its retained descriptor handles.
+    RenderPipeline {
+        /// Created native handle.
+        render_pipeline: WGPURenderPipeline,
+        /// Retained descriptor handle or handles.
+        vertex_module: WGPUShaderModule,
+        /// Retained descriptor handle or handles.
+        fragment_module: WGPUShaderModule,
+        /// Retained descriptor handle or handles.
+        layout: WGPUPipelineLayout,
+        /// Dispatch table used on the drain thread.
+        gpu: GpuDispatch,
+    },
     /// Release a `GPUCommandEncoder` and its retained descriptor handles.
     CommandEncoder {
         /// Created native handle.
@@ -1945,6 +2880,12 @@ impl ReleaseRequest {
             Self::ComputePipeline { pipeline, module, layout, gpu } => unsafe {
                 (gpu.compute_pipeline_release)(pipeline);
                 (gpu.shader_module_release)(module);
+                if !layout.is_null() { (gpu.pipeline_layout_release)(layout); }
+            },
+            Self::RenderPipeline { render_pipeline, vertex_module, fragment_module, layout, gpu } => unsafe {
+                (gpu.render_pipeline_release)(render_pipeline);
+                (gpu.shader_module_release)(vertex_module);
+                if !fragment_module.is_null() { (gpu.shader_module_release)(fragment_module); }
                 if !layout.is_null() { (gpu.pipeline_layout_release)(layout); }
             },
             Self::CommandEncoder { encoder, gpu } => unsafe {
@@ -2528,6 +3469,69 @@ pub fn finalize_compute_pipeline(payload: Box<dyn Any + Send>, env: &Environment
     });
 }
 
+/// Implements `GPUDevice.createRenderPipeline`.
+pub fn device_create_render_pipeline<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let device = device_handle::<E>(cx, this)?;
+    let arena = Arena::new();
+    let descriptor = args.first().copied().ok_or_else(|| E::type_error(cx, "GPURenderPipelineDescriptor"))?;
+    let converted = convert_render_pipeline_descriptor::<E>(cx, descriptor, &arena)?;
+    let render_pipeline = unsafe { (E::environment(cx).gpu().device_create_render_pipeline)(device, ptr::from_ref(&converted.native)) };
+    if render_pipeline.is_null() {
+        return Err(E::operation_error(cx, "wgpuDeviceCreateRenderPipeline returned null"));
+    }
+    let gpu = E::environment(cx).gpu();
+    unsafe {
+        (gpu.shader_module_add_ref)(converted.vertex_module);
+        if !converted.fragment_module.is_null() { (gpu.shader_module_add_ref)(converted.fragment_module); }
+        if !converted.layout.is_null() { (gpu.pipeline_layout_add_ref)(converted.layout); }
+    }
+    if let Err(error) = E::register_class(cx, render_pipeline_class::<E>()) {
+        unsafe {
+            (gpu.render_pipeline_release)(render_pipeline);
+            (gpu.shader_module_release)(converted.vertex_module);
+            if !converted.fragment_module.is_null() { (gpu.shader_module_release)(converted.fragment_module); }
+            if !converted.layout.is_null() { (gpu.pipeline_layout_release)(converted.layout); }
+        }
+        return Err(error);
+    }
+    let retained_vertex_module = converted.vertex_module;
+    let retained_fragment_module = converted.fragment_module;
+    let retained_layout = converted.layout;
+    match E::new_instance(cx, GPU_RENDER_PIPELINE_CLASS, Box::new(RenderPipelinePayload {
+        render_pipeline,
+        vertex_module: converted.vertex_module,
+        fragment_module: converted.fragment_module,
+        layout: converted.layout,
+    })) {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            unsafe {
+                (gpu.render_pipeline_release)(render_pipeline);
+                (gpu.shader_module_release)(retained_vertex_module);
+                if !retained_fragment_module.is_null() { (gpu.shader_module_release)(retained_fragment_module); }
+                if !retained_layout.is_null() { (gpu.pipeline_layout_release)(retained_layout); }
+            }
+            Err(error)
+        }
+    }
+}
+
+/// Finalizes a `GPURenderPipeline` payload by enqueuing its release.
+pub fn finalize_render_pipeline(payload: Box<dyn Any + Send>, env: &Environment) {
+    let Ok(payload) = payload.downcast::<RenderPipelinePayload>() else { return; };
+    let _ = env.queue().enqueue(ReleaseRequest::RenderPipeline {
+        render_pipeline: payload.render_pipeline,
+        vertex_module: payload.vertex_module,
+        fragment_module: payload.fragment_module,
+        layout: payload.layout,
+        gpu: env.gpu(),
+    });
+}
+
 /// Implements `GPUDevice.createCommandEncoder`.
 pub fn device_create_command_encoder<E: JsEngine + 'static>(
     cx: E::Context<'_>,
@@ -2620,6 +3624,7 @@ pub(super) fn device_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
             MethodSpec { name: "createPipelineLayout", length: 1, call: device_create_pipeline_layout::<E> },
             MethodSpec { name: "createBindGroup", length: 1, call: device_create_bind_group::<E> },
             MethodSpec { name: "createComputePipeline", length: 1, call: device_create_compute_pipeline::<E> },
+            MethodSpec { name: "createRenderPipeline", length: 1, call: device_create_render_pipeline::<E> },
             MethodSpec { name: "createCommandEncoder", length: 0, call: device_create_command_encoder::<E> },
         ])),
         finalizer: finalize_device::<E>,
@@ -2760,6 +3765,17 @@ pub(super) fn compute_pipeline_class<E: JsEngine + 'static>() -> &'static ClassS
         properties: &[],
         methods: &[],
         finalizer: finalize_compute_pipeline,
+    })
+}
+
+pub(super) fn render_pipeline_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
+    class_spec_once::<E, _>(GPU_RENDER_PIPELINE_CLASS, || ClassSpec {
+        name: "GPURenderPipeline",
+        id: GPU_RENDER_PIPELINE_CLASS,
+        constructor: None,
+        properties: &[],
+        methods: &[],
+        finalizer: finalize_render_pipeline,
     })
 }
 

@@ -167,7 +167,7 @@ fn full_pinned_inputs_parse_and_subset_join_offline() {
     let report = join_inputs(&idl, &yaml).expect("full pinned join");
     assert_eq!(report.parser.remaining_bytes, 0);
     assert_eq!(report.parser.definitions, 209);
-    assert_eq!(report.interfaces.len(), 14);
+    assert_eq!(report.interfaces.len(), 15);
     assert!(report.parser.saw_enforce_range);
     assert!(report.parser.saw_same_object);
     assert!(report.parser.saw_exposed);
@@ -200,7 +200,7 @@ fn generated_dispatch_macro_matches_focused_shape_fixture() {
     let expected =
         fs::read_to_string(fixtures().join("dispatch_surface.rs")).expect("dispatch snapshot");
     assert_eq!(dispatch_macro_surface(&emitted), expected);
-    assert_eq!(expected.matches(", unsafe fn(").count(), 68);
+    assert_eq!(expected.matches(", unsafe fn(").count(), 71);
 }
 
 #[test]
@@ -259,6 +259,7 @@ fn generated_lifecycle_covers_every_selected_class_and_retention_set() {
         "pipeline_layout_class",
         "bind_group_class",
         "compute_pipeline_class",
+        "render_pipeline_class",
         "command_encoder_class",
         "compute_pass_encoder_class",
         "command_buffer_class",
@@ -273,12 +274,19 @@ fn generated_lifecycle_covers_every_selected_class_and_retention_set() {
             "missing generated {class}"
         );
     }
+    assert!(emitted.contains(
+        "MethodSpec { name: \"createRenderPipeline\", length: 1, call: device_create_render_pipeline::<E> }"
+    ));
+    assert!(!emitted.contains("getBindGroupLayout"));
 
     assert!(emitted.contains(
         "pub struct BindGroupPayload {\n    pub(super) bind_group: WGPUBindGroup,\n    pub(super) layout: WGPUBindGroupLayout,\n    pub(super) buffers: Vec<WGPUBuffer>,\n    pub(super) samplers: Vec<WGPUSampler>,\n    pub(super) texture_views: Vec<WGPUTextureView>,\n}"
     ));
     assert!(emitted.contains(
         "pub struct ComputePipelinePayload {\n    pub(super) pipeline: WGPUComputePipeline,\n    pub(super) module: WGPUShaderModule,\n    pub(super) layout: WGPUPipelineLayout,\n}"
+    ));
+    assert!(emitted.contains(
+        "pub struct RenderPipelinePayload {\n    pub(super) render_pipeline: WGPURenderPipeline,\n    pub(super) vertex_module: WGPUShaderModule,\n    pub(super) fragment_module: WGPUShaderModule,\n    pub(super) layout: WGPUPipelineLayout,\n}"
     ));
     assert!(emitted.contains(
         "pub struct TextureViewPayload {\n    pub(super) texture_view: WGPUTextureView,\n    pub(super) texture: WGPUTexture,\n}"
@@ -299,6 +307,23 @@ fn lifecycle_retention_is_derived_and_policy_can_only_extend_it() {
         error
             .to_string()
             .contains("derived retention for GPUBindGroup differs"),
+        "{error}"
+    );
+
+    let shrunk_render = policy.replace(
+        "[[descriptor.wrapper.captures]]\nfield = \"fragment_module\"\nsource = \"fragment.module\"\n\n",
+        "",
+    );
+    assert_ne!(
+        shrunk_render, policy,
+        "render capture fixture must be found"
+    );
+    let error = generate_lifecycle_with_policy(&idl, &yaml, &shrunk_render)
+        .expect_err("removing derived render retention must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("derived retention for GPURenderPipeline differs"),
         "{error}"
     );
 
@@ -361,6 +386,7 @@ fn new_descriptor_policy_reasons_are_surfaced_in_the_report() {
         "recorded deferral: block 03 section 7",
         "out of scope until query sets",
         "WebIDL names the reusable programmable stage",
+        "T5 defers getBindGroupLayout because its returned wrapper must retain a pipeline-derived native layout handle",
     ] {
         assert!(report.contains(reason), "missing policy reason: {reason}");
     }
@@ -610,6 +636,53 @@ fn texture_format_join_covers_every_pinned_value_and_reports_only_the_sentinel()
         mismatch,
         ["  enum GPUTextureFormat: C-only value undefined"]
     );
+}
+
+#[test]
+fn vertex_format_join_is_exact_and_render_family_uses_generated_conversion_kinds() {
+    let (idl, yaml, _policy) = pinned_inputs();
+    let report = join_inputs(&idl, &yaml).expect("full pinned join");
+    let format = report
+        .enums
+        .iter()
+        .find(|pair| pair.idl_name.as_deref() == Some("GPUVertexFormat"))
+        .expect("vertex format join");
+    assert_eq!(
+        format
+            .enum_values
+            .iter()
+            .filter(|value| value.idl_value.is_some())
+            .count(),
+        41
+    );
+    assert_eq!(
+        format
+            .enum_values
+            .iter()
+            .filter(|value| value.c_value.is_some())
+            .count(),
+        41
+    );
+    assert!(!render_report(&report).contains("enum GPUVertexFormat:"));
+
+    let emitted = generate_conversions(&idl, &yaml).expect("render conversions");
+    for marker in [
+        "fn convert_vertex_state<",
+        "fn convert_primitive_state<",
+        "fn convert_depth_stencil_state<",
+        "fn convert_multisample_state<",
+        "fn convert_fragment_state<",
+        "fn convert_render_pipeline_descriptor<",
+        "nullable sequence elements are C sentinel-filled struct holes",
+        "an absent optional dictionary is a null pointer in the pinned C ABI",
+        "an omitted optional boolean maps to WGPUOptionalBool_Undefined",
+        "signed `[EnforceRange]` long is checked at the i32 boundary",
+    ] {
+        assert!(
+            emitted.contains(marker),
+            "missing generated marker {marker}"
+        );
+    }
 }
 
 #[test]

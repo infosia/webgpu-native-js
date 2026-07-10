@@ -47,6 +47,7 @@ add_ref = [
   { interface = "GPUPipelineLayout", reason = "compute-pipeline descriptors retain explicit layouts" },
   { interface = "GPUBindGroup", reason = "standard resource lifecycle keeps AddRef available for command recording" },
   { interface = "GPUComputePipeline", reason = "standard resource lifecycle keeps AddRef available for command recording" },
+  { interface = "GPURenderPipeline", reason = "standard resource lifecycle keeps AddRef available for render command recording" },
 ]
 no_add_ref = [
   { interface = "GPUCommandEncoder", reason = "the single-use encoder is adopted and never retained" },
@@ -82,6 +83,7 @@ members = [
   "createPipelineLayout",
   "createBindGroup",
   "createComputePipeline",
+  "createRenderPipeline",
   "createCommandEncoder",
   "queue",
   "destroy",
@@ -141,6 +143,10 @@ interface = "GPUComputePipeline"
 members = []
 
 [[subset]]
+interface = "GPURenderPipeline"
+members = []
+
+[[subset]]
 interface = "GPUCommandEncoder"
 members = ["beginComputePass", "copyBufferToBuffer", "finish"]
 
@@ -167,6 +173,7 @@ standard_interfaces = [
   "GPUPipelineLayout",
   "GPUBindGroup",
   "GPUComputePipeline",
+  "GPURenderPipeline",
   "GPUCommandEncoder",
 ]
 extra_class_interfaces = ["GPU", "GPUAdapter"]
@@ -309,6 +316,11 @@ get = "buffer_usage_get"
 interface = "GPUDevice"
 member = "destroy"
 reason = "preserved quirk: GPUDevice.destroy is selected for dispatch accounting but was not exposed by the shipped class table"
+
+[[lifecycle.omitted_methods]]
+interface = "GPURenderPipeline"
+member = "getBindGroupLayout"
+reason = "T5 defers getBindGroupLayout because its returned wrapper must retain a pipeline-derived native layout handle, which is a non-creator lifecycle shape"
 
 [[lifecycle.quirks]]
 interface = "GPUCommandEncoder"
@@ -524,6 +536,98 @@ native_field = "native"
 [[descriptor.wrapper.captures]]
 field = "module"
 source = "compute.module"
+
+[[descriptor.wrapper.captures]]
+field = "layout"
+source = "layout"
+
+[[descriptor]]
+dictionary = "GPUVertexAttribute"
+
+[[descriptor]]
+dictionary = "GPUVertexBufferLayout"
+
+[[descriptor]]
+dictionary = "GPUVertexState"
+default_empty_sequence = ["buffers"]
+
+[[descriptor.strings]]
+member = "entryPoint"
+nullable = false
+
+[[descriptor.handles]]
+member = "module"
+helper = "shader_module_handle"
+
+[[descriptor.skips]]
+member = "constants"
+reason = "recorded deferral: pipeline constants are outside the block 09 slice-3 surface"
+reject_if_present = true
+
+[[descriptor]]
+dictionary = "GPUPrimitiveState"
+
+[[descriptor]]
+dictionary = "GPUStencilFaceState"
+
+[[descriptor]]
+dictionary = "GPUDepthStencilState"
+
+[[descriptor]]
+dictionary = "GPUMultisampleState"
+
+[[descriptor]]
+dictionary = "GPUBlendComponent"
+
+[[descriptor]]
+dictionary = "GPUBlendState"
+
+[[descriptor]]
+dictionary = "GPUColorTargetState"
+
+[[descriptor]]
+dictionary = "GPUFragmentState"
+
+[[descriptor.strings]]
+member = "entryPoint"
+nullable = false
+
+[[descriptor.handles]]
+member = "module"
+helper = "shader_module_handle"
+
+[[descriptor.skips]]
+member = "constants"
+reason = "recorded deferral: pipeline constants are outside the block 09 slice-3 surface"
+reject_if_present = true
+
+[[descriptor]]
+dictionary = "GPURenderPipelineDescriptor"
+
+[[descriptor.strings]]
+member = "label"
+nullable = false
+
+[[descriptor.handle_or_enum_unions]]
+member = "layout"
+union_type = "(GPUPipelineLayout or GPUAutoLayoutMode)"
+handle_type = "GPUPipelineLayout"
+handle_helper = "pipeline_layout_handle"
+enum_type = "GPUAutoLayoutMode"
+enum_value = "auto"
+reason = "the C ABI represents auto layout with a null pipeline-layout handle"
+
+[descriptor.wrapper]
+target = "ConvertedRenderPipelineDescriptor"
+native_field = "native"
+
+[[descriptor.wrapper.captures]]
+field = "vertex_module"
+source = "vertex.module"
+
+[[descriptor.wrapper.captures]]
+field = "fragment_module"
+source = "fragment.module"
 
 [[descriptor.wrapper.captures]]
 field = "layout"

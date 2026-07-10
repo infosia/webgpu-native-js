@@ -1306,3 +1306,17 @@ resource union gains ClassSpec-driven sampler/view arms (no hard-coded names,
 R24); derived retention grows to {layout, buffers[], samplers[], views[]} —
 quoted before/after, matching expectation. Parity 77 → 80. Adapter production
 diff zero (test-only, net −67 via a shared script).
+
+**Block 09 slice 3 landed: createRenderPipeline (T5).** The biggest descriptor
+in the API generated from policy: vertex state with NULLABLE buffer elements
+(hole = attributes-empty + stepMode-Undefined, quoted from webgpu.yml:3444),
+fragment targets with holes (format Undefined, yml:1931), depthStencil as the
+plain nullable pointer (webgpu.h:4842) with `WGPUOptionalBool_Undefined` for
+the IDL's default-less optional depthWriteEnabled, stencil faces, biases
+(i32 + restricted f32), multisample, blend components. GPUVertexFormat joined
+41/41 clean. Derived retention: vertex module + fragment module (null when
+absent) + layout (null on "auto"), AddRef counts verified. Deferred with
+policy reasons: getBindGroupLayout (needs a non-creator lifecycle for
+pipeline-derived layouts — a real future design item), constants (standing).
+Noop accepts a vertex-only pipeline only WITH a minimal depthStencil — pinned
+that shape in parity (error scope resolves null). Parity 80 → 83.

@@ -132,9 +132,7 @@ pub(super) fn convert_storage_texture_binding_layout<E: JsEngine>(
         }
     };
     // B6: string enums are joined to C values; absence uses the IDL default or C sentinel.
-    let format = if E::is_undefined(cx, format_value) {
-        WGPUTextureFormat_WGPUTextureFormat_Undefined
-    } else {
+    let format = {
         let enum_arena = Arena::new();
         match E::to_str(cx, format_value, &enum_arena)? {
             "rgba8unorm" => WGPUTextureFormat_WGPUTextureFormat_Rgba8Unorm,

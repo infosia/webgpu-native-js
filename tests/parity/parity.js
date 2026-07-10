@@ -409,6 +409,61 @@
         });
     }
 
+    function runRenderPipelines() {
+        // Noop validates pipeline creation headlessly but executes no render work.
+        var module = device.createShaderModule({
+            code: "@vertex fn main() -> @builtin(position) vec4f { return vec4f(0); } " +
+                "@fragment fn fragment_main() {}"
+        });
+        device.createRenderPipeline({
+            layout: "auto",
+            vertex: { module: module, entryPoint: "main" },
+            fragment: { module: module, entryPoint: "fragment_main", targets: [] }
+        });
+        log("renderPipeline:create:ok");
+
+        var enumError = caught(function () {
+            device.createRenderPipeline({
+                layout: "auto",
+                vertex: { module: module, entryPoint: "main" },
+                primitive: { topology: "bad" }
+            });
+        });
+        log(errorLine("renderPipeline:topology-rejection", enumError));
+
+        device.createRenderPipeline({
+            layout: "auto",
+            vertex: { module: module, entryPoint: "main", buffers: [null] },
+            fragment: {
+                module: module,
+                entryPoint: "fragment_main",
+                targets: [null]
+            }
+        });
+        log("renderPipeline:nullable-holes:ok");
+    }
+
+    function runRenderPipelineValidation() {
+        device.pushErrorScope("validation");
+        var module = device.createShaderModule({
+            code: "@vertex fn main() -> @builtin(position) vec4f { return vec4f(0); }"
+        });
+        device.createRenderPipeline({
+            layout: "auto",
+            vertex: { module: module, entryPoint: "main" },
+            depthStencil: {
+                format: "depth24plus",
+                depthWriteEnabled: false,
+                depthCompare: "always"
+            }
+        });
+        return device.popErrorScope().then(function (error) {
+            if (error !== null) {
+                throw new Error("minimal render pipeline validation failed: " + error.message);
+            }
+        });
+    }
+
     function runRequiredMembers() {
         var entriesError = caught(function () {
             device.createBindGroupLayout({});
@@ -539,6 +594,7 @@
     function finishConformance() {
         return runTextureRetention()
             .then(runBindGroupRetention)
+            .then(runRenderPipelineValidation)
             .then(runErrorScopes)
             .then(runOrdering)
             .then(function () {
@@ -581,6 +637,7 @@
 
         runTextures();
         runBindGroups();
+        runRenderPipelines();
 
         runCoercions();
         runStrings();

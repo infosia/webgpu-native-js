@@ -1473,7 +1473,23 @@ fn emit_descriptor(
     if let Some(wrapper) = &descriptor.wrapper {
         for capture in &wrapper.captures {
             if capture.source != capture.field {
-                let _ = writeln!(output, "    let {} = {};", capture.field, capture.source);
+                let mut path = capture.source.split('.');
+                let root = path.next().unwrap_or_default();
+                let tail = path.collect::<Vec<_>>();
+                let pointer_root = pair.members.iter().any(|member| {
+                    member.member == root
+                        && member.c.values[0].pointer.as_deref() == Some("immutable")
+                });
+                if pointer_root && !tail.is_empty() {
+                    let access = tail.join(".");
+                    let _ = writeln!(output, "    let {} = if {root}.is_null() {{", capture.field);
+                    output.push_str("        ptr::null_mut()\n    } else {\n");
+                    output.push_str("        // SAFETY: the arena-owned optional nested descriptor remains live through the native call.\n");
+                    let _ = writeln!(output, "        unsafe {{ (*{root}).{access} }}");
+                    output.push_str("    };\n");
+                } else {
+                    let _ = writeln!(output, "    let {} = {};", capture.field, capture.source);
+                }
             }
         }
         for capture in &wrapper.sequence_captures {
@@ -2003,11 +2019,13 @@ fn emit_enum_local(
         .as_deref()
         .and_then(|value| value.strip_prefix('"'))
         .and_then(|value| value.strip_suffix('"'));
-    let default = if prefer_sentinel {
+    let default = if idl.required {
+        None
+    } else if prefer_sentinel {
         let undefined = undefined.ok_or_else(|| {
             unsupported_shape(dictionary, name, "enum has no C undefined sentinel")
         })?;
-        enum_constant(c_type, undefined)
+        Some(enum_constant(c_type, undefined))
     } else if let Some(idl_default) = idl_default {
         let value = pair
             .enum_values
@@ -2015,9 +2033,9 @@ fn emit_enum_local(
             .find(|value| value.idl_value.as_deref() == Some(idl_default))
             .and_then(|value| value.c_value.as_deref())
             .ok_or_else(|| unsupported_shape(dictionary, name, "enum default is not joined"))?;
-        enum_constant(c_type, value)
+        Some(enum_constant(c_type, value))
     } else if let Some(undefined) = undefined {
-        enum_constant(c_type, undefined)
+        Some(enum_constant(c_type, undefined))
     } else {
         return Err(unsupported_shape(
             dictionary,
@@ -2028,12 +2046,17 @@ fn emit_enum_local(
     output.push_str(
         "    // B6: string enums are joined to C values; absence uses the IDL default or C sentinel.\n",
     );
-    let _ = writeln!(
-        output,
-        "    let {local} = if E::is_undefined(cx, {value}) {{"
-    );
-    let _ = writeln!(output, "        {default}");
-    output.push_str("    } else {\n        let enum_arena = Arena::new();\n");
+    if let Some(default) = default {
+        let _ = writeln!(
+            output,
+            "    let {local} = if E::is_undefined(cx, {value}) {{"
+        );
+        let _ = writeln!(output, "        {default}");
+        output.push_str("    } else {\n");
+    } else {
+        let _ = writeln!(output, "    let {local} = {{");
+    }
+    output.push_str("        let enum_arena = Arena::new();\n");
     let _ = writeln!(
         output,
         "        match E::to_str(cx, {value}, &enum_arena)? {{"
@@ -2072,7 +2095,13 @@ fn emit_nested_local(
             &format!("nested dictionary {} is not selected", idl.type_name),
         )
     })?;
-    if !idl.required && c.default_value.as_deref() != Some("zero") {
+    let optional_pointer = !idl.required && c.pointer.as_deref() == Some("immutable");
+    let default_dictionary = !idl.required && idl.default_value.as_deref() == Some("{}");
+    if !idl.required
+        && !optional_pointer
+        && !default_dictionary
+        && c.default_value.as_deref() != Some("zero")
+    {
         return Err(unsupported_shape(
             dictionary,
             name,
@@ -2085,7 +2114,7 @@ fn emit_nested_local(
         snake_case(idl.type_name.strip_prefix("GPU").unwrap_or(&idl.type_name))
     );
     let nested_needs_arena = descriptor_needs_arena(nested_pair, nested);
-    if idl.required {
+    if idl.required || default_dictionary {
         if nested_needs_arena {
             let _ = writeln!(
                 output,
@@ -2097,6 +2126,29 @@ fn emit_nested_local(
                 "    let {local} = {nested_function}::<E>(cx, {value})?;"
             );
         }
+        return Ok(());
+    }
+    if optional_pointer {
+        output.push_str(
+            "    // T5: an absent optional dictionary is a null pointer in the pinned C ABI.\n",
+        );
+        let _ = writeln!(
+            output,
+            "    let {local} = if E::is_undefined(cx, {value}) {{"
+        );
+        output.push_str("        ptr::null()\n    } else {\n");
+        if nested_needs_arena {
+            let _ = writeln!(
+                output,
+                "        let converted = {nested_function}::<E>(cx, {value}, arena)?;"
+            );
+        } else {
+            let _ = writeln!(
+                output,
+                "        let converted = {nested_function}::<E>(cx, {value})?;"
+            );
+        }
+        output.push_str("        arena.alloc_slice(vec![converted]).as_ptr()\n    };\n");
         return Ok(());
     }
     output.push_str(
@@ -2132,6 +2184,8 @@ fn emit_sequence_local(
     default_empty: bool,
     descriptors: &BTreeMap<&str, &DescriptorEntry>,
 ) -> Result<(), CodegenError> {
+    let element_nullable = element.ends_with('?');
+    let element = element.trim_end_matches('?');
     let _ = writeln!(
         output,
         "    let {local} = {}",
@@ -2158,13 +2212,36 @@ fn emit_sequence_local(
             "convert_{}",
             snake_case(element.strip_prefix("GPU").unwrap_or(element))
         );
+        if element_nullable {
+            output.push_str("            // T5: nullable sequence elements are C sentinel-filled struct holes.\n");
+            output.push_str("            if E::is_null(cx, item) {\n");
+            output.push_str("                // SAFETY: the pinned C ABI defines the all-zero element as the hole sentinel.\n");
+            output.push_str("                Ok(unsafe { std::mem::zeroed() })\n");
+            output.push_str("            } else {\n");
+        }
         if descriptor_needs_arena(nested_pair, nested) {
             let _ = writeln!(
                 output,
-                "            {nested_function}::<E>(cx, item, arena)"
+                "{} {nested_function}::<E>(cx, item, arena)",
+                if element_nullable {
+                    "               "
+                } else {
+                    "           "
+                }
             );
         } else {
-            let _ = writeln!(output, "            {nested_function}::<E>(cx, item)");
+            let _ = writeln!(
+                output,
+                "{} {nested_function}::<E>(cx, item)",
+                if element_nullable {
+                    "               "
+                } else {
+                    "           "
+                }
+            );
+        }
+        if element_nullable {
+            output.push_str("            }\n");
         }
     } else if let Some(pair) = enum_pair(report, element) {
         let c_type = pair.c_name.as_deref().ok_or_else(|| {
@@ -2296,6 +2373,30 @@ fn emit_field(
         output.push_str("        },\n");
         return Ok(());
     }
+    if idl.type_name == "boolean" && c.type_name == "WGPUOptionalBool" {
+        if idl.required || idl.default_value.is_some() {
+            return Err(unsupported_shape(
+                dictionary,
+                name,
+                "optional-bool C sentinel requires an optional WebIDL boolean without a default",
+            ));
+        }
+        output.push_str(
+            "        // T5: an omitted optional boolean maps to WGPUOptionalBool_Undefined.\n",
+        );
+        let _ = writeln!(
+            output,
+            "        {field}: if E::is_undefined(cx, {value}) {{"
+        );
+        output.push_str("            WGPUOptionalBool_WGPUOptionalBool_Undefined\n");
+        output.push_str("        } else if E::to_bool(cx, ");
+        output.push_str(&value);
+        output.push_str(") {\n            WGPUOptionalBool_WGPUOptionalBool_True\n");
+        output.push_str(
+            "        } else {\n            WGPUOptionalBool_WGPUOptionalBool_False\n        },\n",
+        );
+        return Ok(());
+    }
     if idl.type_name == "boolean" && c.type_name == "WGPUBool" {
         output.push_str("        // R8: an optional boolean defaults to false and otherwise uses `ToBoolean`.\n");
         if idl.required {
@@ -2362,8 +2463,14 @@ fn emit_field(
         return Ok(());
     }
     if idl.enforce_range {
-        let conversion = match (idl.integer_width, c.integer_width) {
-            (Some(64), Some(64)) => {
+        let conversion = match (idl.integer_width, c.integer_width, c.type_name.as_str()) {
+            (Some(32), Some(32), "int32_t") => {
+                output.push_str(
+                    "        // T5: signed `[EnforceRange]` long is checked at the i32 boundary.\n",
+                );
+                format!("enforce_i32::<E>(cx, {value}, \"{name}\")?")
+            }
+            (Some(64), Some(64), _) => {
                 let _ = writeln!(
                     output,
                     "        // R8: `[EnforceRange]` {} is checked at the 64-bit boundary.",
@@ -2371,13 +2478,13 @@ fn emit_field(
                 );
                 format!("enforce_u64::<E>(cx, {value}, \"{name}\")?")
             }
-            (Some(32), Some(64)) => {
+            (Some(32), Some(64), _) => {
                 output.push_str(
                     "        // R8/B7: the 32-bit WebIDL value is checked before C-ABI widening.\n",
                 );
                 format!("u64::from(enforce_u32::<E>(cx, {value}, \"{name}\")?)")
             }
-            (Some(32), Some(32)) => {
+            (Some(32), Some(32), _) => {
                 let _ = writeln!(
                     output,
                     "        // R8: `[EnforceRange]` {} is checked at the 32-bit boundary.",
@@ -2466,7 +2573,9 @@ fn descriptor_needs_arena(pair: &TypePair, descriptor: &DescriptorEntry) -> bool
         let idl = &member.idl[0].values[0];
         !unsupported.contains(member.member.as_str())
             && !skips.contains(member.member.as_str())
-            && (is_idl_string(idl) || is_sequence(&idl.type_name))
+            && (is_idl_string(idl)
+                || is_sequence(&idl.type_name)
+                || (member.c.values[0].pointer.is_some() && !member.c.values[0].count_and_pointer))
     }) || !descriptor.chains.is_empty()
         || !descriptor.handle_sequences.is_empty()
 }
@@ -2489,7 +2598,7 @@ fn descriptor_needs_static(
         let nested_name = if is_dictionary(report, &idl.type_name) {
             Some(idl.type_name.trim_end_matches('?'))
         } else {
-            sequence_element(&idl.type_name)
+            sequence_element(&idl.type_name).map(|name| name.trim_end_matches('?'))
         };
         nested_name.is_some_and(|name| {
             descriptors.get(name).is_some_and(|nested| {
@@ -2623,6 +2732,9 @@ fn pascal_case(value: &str) -> String {
     value
         .split('_')
         .map(|part| {
+            if part.is_empty() {
+                return "_".to_owned();
+            }
             let mut chars = part.chars();
             match chars.next() {
                 Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),

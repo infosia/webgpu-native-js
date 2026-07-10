@@ -1183,6 +1183,28 @@ fn validate_policy(
                 mapping.interface, mapping.member
             )));
         }
+        for omission in &lifecycle.omitted_methods {
+            if !subset.contains(omission.interface.as_str())
+                && !extras.contains(omission.interface.as_str())
+            {
+                return Err(CodegenError::Policy(format!(
+                    "dead lifecycle omission {}.{}: interface is neither subset nor extra class",
+                    omission.interface, omission.member
+                )));
+            }
+            let operations: BTreeSet<_> = index
+                .effective_members(&omission.interface)
+                .into_iter()
+                .filter(|member| member.kind == IdlMemberKind::Operation)
+                .map(|member| member.name)
+                .collect();
+            if !operations.contains(omission.member.as_str()) {
+                return Err(CodegenError::Policy(format!(
+                    "dead lifecycle omission {}.{}",
+                    omission.interface, omission.member
+                )));
+            }
+        }
     }
     Ok(())
 }
@@ -1359,6 +1381,14 @@ fn build_report(
             "enum-value {}.{} ({})",
             skip.r#enum, skip.value, skip.reason
         ));
+    }
+    if let Some(lifecycle) = &policy.lifecycle {
+        for omission in &lifecycle.omitted_methods {
+            report.skips.push(format!(
+                "lifecycle omission {}.{} ({})",
+                omission.interface, omission.member, omission.reason
+            ));
+        }
     }
     for name_map in &policy.name_map {
         report.skips.push(format!(

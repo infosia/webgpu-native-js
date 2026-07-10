@@ -263,6 +263,9 @@ fn validate_lifecycle(
                 .iter()
                 .map(|mapping| (mapping.interface.as_str(), mapping.member.as_str())),
         )
+        // A reasoned omission may deliberately keep a currently unselected
+        // WebIDL member out of the emitted class table.
+        .chain(omitted.iter().copied())
         .collect();
     for key in methods
         .iter()
@@ -457,14 +460,25 @@ fn derived_retention(
         &descriptor.dictionary,
         "",
         false,
+        false,
         &mut visiting,
         &mut found,
     )?;
     let mut retained = Vec::new();
+    let leaf_counts = found
+        .iter()
+        .fold(BTreeMap::new(), |mut counts, (_, path, _, _)| {
+            *counts
+                .entry(path.rsplit('.').next().unwrap_or(path).to_owned())
+                .or_insert(0usize) += 1;
+            counts
+        });
     for (handle, path, sequence, nullable) in found {
         let object = object_name(&handle);
         let source = if sequence {
             format!("{}s", snake_case(object))
+        } else if leaf_counts[path.rsplit('.').next().unwrap_or(&path)] > 1 {
+            snake_case(&path.replace('.', "_"))
         } else {
             path.rsplit('.').next().unwrap_or(&path).to_owned()
         };
@@ -554,6 +568,7 @@ fn derive_dictionary_handles(
     dictionary: &str,
     prefix: &str,
     in_sequence: bool,
+    in_nullable: bool,
     visiting: &mut BTreeSet<String>,
     found: &mut Vec<(String, String, bool, bool)>,
 ) -> Result<(), CodegenError> {
@@ -597,14 +612,31 @@ fn derive_dictionary_handles(
                     interface,
                     &format!("{path}.{}", snake_case(object)),
                     in_sequence,
+                    in_nullable || !value.required || value.nullable,
                     visiting,
                     found,
                 )?;
             }
-            derive_type_handles(model, &flatten.arm, &path, in_sequence, visiting, found)?;
+            derive_type_handles(
+                model,
+                &flatten.arm,
+                &path,
+                in_sequence,
+                in_nullable || !value.required || value.nullable,
+                visiting,
+                found,
+            )?;
             continue;
         }
-        derive_type_handles(model, &value.type_name, &path, in_sequence, visiting, found)?;
+        derive_type_handles(
+            model,
+            &value.type_name,
+            &path,
+            in_sequence,
+            in_nullable || !value.required || value.nullable,
+            visiting,
+            found,
+        )?;
     }
     for member in &pair.idl_only_members {
         if skipped.contains(member.name.as_str()) {
@@ -629,14 +661,31 @@ fn derive_dictionary_handles(
                     interface,
                     &format!("{path}.{}", snake_case(object)),
                     in_sequence,
+                    in_nullable || !value.required || value.nullable,
                     visiting,
                     found,
                 )?;
             }
-            derive_type_handles(model, &flatten.arm, &path, in_sequence, visiting, found)?;
+            derive_type_handles(
+                model,
+                &flatten.arm,
+                &path,
+                in_sequence,
+                in_nullable || !value.required || value.nullable,
+                visiting,
+                found,
+            )?;
             continue;
         }
-        derive_type_handles(model, &value.type_name, &path, in_sequence, visiting, found)?;
+        derive_type_handles(
+            model,
+            &value.type_name,
+            &path,
+            in_sequence,
+            in_nullable || !value.required || value.nullable,
+            visiting,
+            found,
+        )?;
     }
     visiting.remove(dictionary);
     Ok(())
@@ -647,6 +696,7 @@ fn derive_type_handles(
     type_name: &str,
     path: &str,
     in_sequence: bool,
+    in_nullable: bool,
     visiting: &mut BTreeSet<String>,
     found: &mut Vec<(String, String, bool, bool)>,
 ) -> Result<(), CodegenError> {
@@ -663,7 +713,7 @@ fn derive_type_handles(
                     identifier,
                     path.to_owned(),
                     in_sequence || sequence,
-                    type_name.contains('?'),
+                    in_nullable || type_name.contains('?'),
                 ));
             }
         } else if model
@@ -677,6 +727,7 @@ fn derive_type_handles(
                 &identifier,
                 path,
                 in_sequence || sequence,
+                in_nullable || type_name.contains('?'),
                 visiting,
                 found,
             )?;
@@ -685,7 +736,15 @@ fn derive_type_handles(
                 .as_deref()
                 .and_then(|name| name.strip_prefix(&format!("{identifier} = ")))
         }) {
-            derive_type_handles(model, alias, path, in_sequence || sequence, visiting, found)?;
+            derive_type_handles(
+                model,
+                alias,
+                path,
+                in_sequence || sequence,
+                in_nullable || type_name.contains('?'),
+                visiting,
+                found,
+            )?;
         }
     }
     Ok(())
