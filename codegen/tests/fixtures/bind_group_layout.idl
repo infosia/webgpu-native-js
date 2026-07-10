@@ -1,0 +1,39 @@
+interface GPUDevice {
+    GPUBindGroupLayout createBindGroupLayout(GPUBindGroupLayoutDescriptor descriptor);
+};
+interface GPUBindGroupLayout {};
+
+dictionary GPUObjectDescriptorBase {
+    USVString label = "";
+};
+dictionary GPUBindGroupLayoutDescriptor : GPUObjectDescriptorBase {
+    required sequence<GPUBindGroupLayoutEntry> entries;
+};
+dictionary GPUBindGroupLayoutEntry {
+    required GPUIndex32 binding;
+    required GPUShaderStageFlags visibility;
+    GPUBufferBindingLayout buffer;
+    GPUSamplerBindingLayout sampler;
+    GPUTextureBindingLayout texture;
+    GPUStorageTextureBindingLayout storageTexture;
+    GPUExternalTextureBindingLayout externalTexture;
+};
+typedef [EnforceRange] unsigned long GPUIndex32;
+typedef [EnforceRange] unsigned long GPUShaderStageFlags;
+
+enum GPUBufferBindingType {
+    "uniform",
+    "storage",
+    "read-only-storage",
+};
+dictionary GPUBufferBindingLayout {
+    GPUBufferBindingType type = "uniform";
+    boolean hasDynamicOffset = false;
+    GPUSize64 minBindingSize = 0;
+};
+typedef [EnforceRange] unsigned long long GPUSize64;
+
+dictionary GPUSamplerBindingLayout {};
+dictionary GPUTextureBindingLayout {};
+dictionary GPUStorageTextureBindingLayout {};
+dictionary GPUExternalTextureBindingLayout {};

@@ -9,9 +9,14 @@
 # mismatches.
 #
 # `[[descriptor]]` selects each descriptor conversion emitted into `core`.
-# Its nested `[[descriptor.strings]]` entries are the required B4
-# nullable/non-nullable classification for every joined string member. Unknown,
-# duplicate, dead, disagreeing, or missing string policy fails generation.
+# `target` overrides the joined C type only for an existing core-owned target.
+# `unsupported` names WebIDL nested dictionaries that must reject when present
+# and preserve their zero C form when absent. `zero` accounts for C-only fields,
+# and `default_empty_sequence` records an existing oracle deviation from a
+# required WebIDL sequence. Nested `[[descriptor.strings]]` entries are the B4
+# nullable/non-nullable classification for every joined string member. Policy
+# is checked both ways: unknown, duplicate, dead, disagreeing, and unpoliced
+# entries all fail generation.
 
 schema_version = 1
 
@@ -71,6 +76,23 @@ members = []
 
 [[descriptor]]
 dictionary = "GPUBufferDescriptor"
+target = "BufferDescriptor"
+
+[[descriptor.strings]]
+member = "label"
+nullable = false
+
+[[descriptor]]
+dictionary = "GPUBufferBindingLayout"
+
+[[descriptor]]
+dictionary = "GPUBindGroupLayoutEntry"
+unsupported = ["sampler", "texture", "storageTexture", "externalTexture"]
+zero = ["binding_array_size"]
+
+[[descriptor]]
+dictionary = "GPUBindGroupLayoutDescriptor"
+default_empty_sequence = ["entries"]
 
 [[descriptor.strings]]
 member = "label"

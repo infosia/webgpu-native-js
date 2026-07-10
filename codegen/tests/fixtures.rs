@@ -105,6 +105,81 @@ fn emitted_descriptor_matches_snapshot() {
 }
 
 #[test]
+fn emitted_nested_layout_descriptors_match_snapshot() {
+    let (idl, yaml, policy) = fixture("bind_group_layout");
+    let emitted = generate_conversions(&idl, &yaml, &policy).expect("nested fixture emission");
+    let expected =
+        fs::read_to_string(fixtures().join("bind_group_layout.rs")).expect("nested snapshot");
+    assert_eq!(emitted, expected);
+}
+
+#[test]
+fn joined_layout_model_preserves_inheritance_sentinels_and_one_sided_members() {
+    let report = joined_fixture("bind_group_layout");
+    let descriptor = report
+        .dictionaries
+        .iter()
+        .find(|pair| pair.idl_name.as_deref() == Some("GPUBindGroupLayoutDescriptor"))
+        .expect("layout descriptor");
+    assert_eq!(descriptor.members[0].member, "label");
+
+    let entry = report
+        .dictionaries
+        .iter()
+        .find(|pair| pair.idl_name.as_deref() == Some("GPUBindGroupLayoutEntry"))
+        .expect("layout entry");
+    assert_eq!(entry.idl_only_members[0].name, "externalTexture");
+    assert_eq!(entry.c_only_members[0].name, "binding_array_size");
+
+    let enum_pair = report
+        .enums
+        .iter()
+        .find(|pair| pair.idl_name.as_deref() == Some("GPUBufferBindingType"))
+        .expect("buffer binding enum");
+    assert!(enum_pair.enum_values.iter().any(|value| {
+        value.idl_value.is_none() && value.c_value.as_deref() == Some("undefined")
+    }));
+    assert!(enum_pair.enum_values.iter().any(|value| {
+        value.idl_value.is_none() && value.c_value.as_deref() == Some("binding_not_used")
+    }));
+}
+
+#[test]
+fn unsupported_member_policy_is_checked_in_both_directions() {
+    let (idl, yaml, policy) = fixture("bind_group_layout");
+    let missing = policy.replace(
+        "[\"sampler\", \"texture\", \"storageTexture\", \"externalTexture\"]",
+        "[\"sampler\", \"texture\", \"storageTexture\"]",
+    );
+    let error = generate_conversions(&idl, &yaml, &missing).expect_err("missing policy");
+    assert!(matches!(error, CodegenError::Policy(message) if message.contains("externalTexture")));
+
+    let dead = policy.replace(
+        "\"externalTexture\"]",
+        "\"externalTexture\", \"notAMember\"]",
+    );
+    let error = generate_conversions(&idl, &yaml, &dead).expect_err("dead policy");
+    assert!(matches!(error, CodegenError::Policy(message) if message.contains("notAMember")));
+}
+
+#[test]
+fn c_only_zero_policy_is_checked_in_both_directions() {
+    let (idl, yaml, policy) = fixture("bind_group_layout");
+    let missing = policy.replace("zero = [\"binding_array_size\"]\n", "");
+    let error = generate_conversions(&idl, &yaml, &missing).expect_err("missing policy");
+    assert!(
+        matches!(error, CodegenError::Policy(message) if message.contains("binding_array_size"))
+    );
+
+    let dead = policy.replace(
+        "zero = [\"binding_array_size\"]",
+        "zero = [\"binding_array_size\", \"not_a_member\"]",
+    );
+    let error = generate_conversions(&idl, &yaml, &dead).expect_err("dead policy");
+    assert!(matches!(error, CodegenError::Policy(message) if message.contains("not_a_member")));
+}
+
+#[test]
 fn missing_string_policy_is_a_loud_unpoliced_deviation() {
     let (idl, yaml, policy) = fixture("emission");
     let policy = policy.replace(

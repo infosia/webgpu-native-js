@@ -2158,6 +2158,83 @@ mod tests {
         );
     }
 
+    fn assert_unsupported_layout_binding(kind: &str) {
+        let rt = runtime();
+        let cx = rt.context();
+        let unsupported = descriptor(&rt, &[]);
+        let entry = descriptor(
+            &rt,
+            &[
+                ("binding", rt.number(0.0)),
+                ("visibility", rt.number(1.0)),
+                (kind, unsupported),
+            ],
+        );
+        let entries = rt.set_like(&[entry]);
+        let desc = descriptor(&rt, &[("entries", entries)]);
+        let arena = Arena::new();
+
+        assert_eq!(
+            convert_bind_group_layout_descriptor::<Engine>(cx, desc, &arena)
+                .expect_err("unsupported layout binding must be rejected"),
+            format!("TypeError: {kind} bindings are not supported yet")
+        );
+    }
+
+    #[test]
+    fn sampler_layout_binding_is_rejected_early() {
+        assert_unsupported_layout_binding("sampler");
+    }
+
+    #[test]
+    fn texture_layout_binding_is_rejected_early() {
+        assert_unsupported_layout_binding("texture");
+    }
+
+    #[test]
+    fn storage_texture_layout_binding_is_rejected_early() {
+        assert_unsupported_layout_binding("storageTexture");
+    }
+
+    #[test]
+    fn external_texture_layout_binding_is_rejected_early() {
+        assert_unsupported_layout_binding("externalTexture");
+    }
+
+    #[test]
+    fn absent_layout_binding_members_keep_binding_not_used_zeroes() {
+        let rt = runtime();
+        let cx = rt.context();
+        let entry = descriptor(
+            &rt,
+            &[("binding", rt.number(0.0)), ("visibility", rt.number(1.0))],
+        );
+        let entries = rt.set_like(&[entry]);
+        let desc = descriptor(&rt, &[("entries", entries)]);
+        let arena = Arena::new();
+        let converted = convert_bind_group_layout_descriptor::<Engine>(cx, desc, &arena)
+            .expect("absent optional binding kinds");
+        let native = unsafe { &*converted.entries };
+
+        assert_eq!(
+            native.buffer.type_,
+            crate::WGPUBufferBindingType_WGPUBufferBindingType_BindingNotUsed
+        );
+        assert_eq!(
+            native.sampler.type_,
+            crate::WGPUSamplerBindingType_WGPUSamplerBindingType_BindingNotUsed
+        );
+        assert_eq!(
+            native.texture.sampleType,
+            crate::WGPUTextureSampleType_WGPUTextureSampleType_BindingNotUsed
+        );
+        assert_eq!(
+            native.storageTexture.access,
+            crate::WGPUStorageTextureAccess_WGPUStorageTextureAccess_BindingNotUsed
+        );
+        assert_eq!(native.bindingArraySize, 0);
+    }
+
     #[test]
     fn b6_buffer_binding_type_rejects_unknown_strings_and_numbers() {
         let rt = runtime();

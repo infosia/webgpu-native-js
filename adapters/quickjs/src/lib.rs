@@ -2494,6 +2494,41 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_bind_group_layout_kinds_throw_named_type_errors() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let wrapped = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("device", wrapped)
+            .expect("set device");
+        eval_drop(
+            &runtime,
+            r#"
+                for (const kind of ['sampler', 'texture', 'storageTexture', 'externalTexture']) {
+                    const entry = { binding: 0, visibility: 1 };
+                    entry[kind] = {};
+                    let error;
+                    try {
+                        device.createBindGroupLayout({ entries: [entry] });
+                    } catch (caught) {
+                        error = caught;
+                    }
+                    if (!(error instanceof TypeError)) {
+                        throw new Error(kind + ' binding did not throw TypeError');
+                    }
+                    if (error.message !== kind + ' bindings are not supported yet') {
+                        throw new Error(kind + ' binding error was not named: ' + error.message);
+                    }
+                }
+            "#,
+            "unsupported-bind-group-layout-kinds.js",
+        );
+        runtime.clear_global("device").expect("clear device");
+        runtime.run_gc();
+        let _ = runtime.drain_releases().expect("drain");
+    }
+
+    #[test]
     fn get_mapped_range_rejects_unmapped_and_destroyed_buffers() {
         let setup = native_setup();
         let runtime = Runtime::new().expect("quickjs runtime");

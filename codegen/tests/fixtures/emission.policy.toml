@@ -6,6 +6,7 @@ members = ["createBuffer"]
 
 [[descriptor]]
 dictionary = "GPUBufferDescriptor"
+target = "BufferDescriptor"
 
 [[descriptor.strings]]
 member = "label"

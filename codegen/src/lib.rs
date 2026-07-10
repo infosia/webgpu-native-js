@@ -179,6 +179,22 @@ pub struct TypePair {
     pub c_chained: bool,
     /// Joined selected members or dictionary fields.
     pub members: Vec<MemberPair>,
+    /// WebIDL dictionary fields with no C-ABI field.
+    pub idl_only_members: Vec<IdlMemberModel>,
+    /// C-ABI struct fields with no WebIDL dictionary field.
+    pub c_only_members: Vec<CMemberModel>,
+    /// Joined and one-sided enum values, empty for non-enum types.
+    pub enum_values: Vec<EnumValuePair>,
+}
+
+/// One value in a joined string-enum/C-enum pair.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct EnumValuePair {
+    /// WebIDL string value, absent for a C-only sentinel.
+    pub idl_value: Option<String>,
+    /// YAML enum entry name, absent for an IDL-only value.
+    pub c_value: Option<String>,
 }
 
 /// One loud difference between the WebIDL and C sides.
@@ -327,8 +343,15 @@ pub(crate) struct SubsetEntry {
 #[serde(deny_unknown_fields)]
 pub(crate) struct DescriptorEntry {
     pub(crate) dictionary: String,
+    pub(crate) target: Option<String>,
     #[serde(default)]
     pub(crate) strings: Vec<StringPolicy>,
+    #[serde(default)]
+    pub(crate) unsupported: Vec<String>,
+    #[serde(default)]
+    pub(crate) zero: Vec<String>,
+    #[serde(default)]
+    pub(crate) default_empty_sequence: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -746,6 +769,9 @@ fn build_report(
             c_name: object.map(|value| c_type_name(&value.name)),
             c_chained: false,
             members: Vec::new(),
+            idl_only_members: Vec::new(),
+            c_only_members: Vec::new(),
+            enum_values: Vec::new(),
         };
         let Some(object) = object else {
             report.mismatches.push(mismatch(format!(
@@ -854,6 +880,9 @@ fn build_transitive_types(
                 c_name: c_struct.map(|value| c_type_name(&value.name)),
                 c_chained: c_struct.is_some_and(is_chained_struct),
                 members: Vec::new(),
+                idl_only_members: Vec::new(),
+                c_only_members: Vec::new(),
+                enum_values: Vec::new(),
             };
             if let Some(c_struct) = c_struct {
                 matched_c_structs.insert(c_struct.name.clone());
@@ -867,11 +896,14 @@ fn build_transitive_types(
         } else if let Some(values) = index.enums.get(name) {
             let candidate = canonical(idl_base_name(name));
             let c_enum = enum_map.get(&candidate).copied();
-            let pair = TypePair {
+            let mut pair = TypePair {
                 idl_name: Some(name.clone()),
                 c_name: c_enum.map(|(value, _)| c_type_name(&value.name)),
                 c_chained: false,
                 members: Vec::new(),
+                idl_only_members: Vec::new(),
+                c_only_members: Vec::new(),
+                enum_values: Vec::new(),
             };
             if let Some((c_enum, _)) = c_enum {
                 matched_c_enums.insert(c_enum.name.clone());
@@ -884,6 +916,15 @@ fn build_transitive_types(
                     .map(|value| canonical(&value.name))
                     .collect();
                 for value in values {
+                    let c_value = c_enum
+                        .entries
+                        .iter()
+                        .filter_map(Option::as_ref)
+                        .find(|entry| canonical(&entry.name) == canonical(value));
+                    pair.enum_values.push(EnumValuePair {
+                        idl_value: Some(value.clone()),
+                        c_value: c_value.map(|entry| entry.name.clone()),
+                    });
                     if !c_entries.contains(&canonical(value)) {
                         report
                             .mismatches
@@ -892,6 +933,10 @@ fn build_transitive_types(
                 }
                 for entry in c_enum.entries.iter().filter_map(Option::as_ref) {
                     if !idl_entries.contains(&canonical(&entry.name)) {
+                        pair.enum_values.push(EnumValuePair {
+                            idl_value: None,
+                            c_value: Some(entry.name.clone()),
+                        });
                         report.mismatches.push(mismatch(format!(
                             "enum {name}: C-only value {}",
                             entry.name
@@ -917,6 +962,9 @@ fn build_transitive_types(
                 c_name: c_enum.map(|(value, _)| c_type_name(&value.name)),
                 c_chained: false,
                 members: Vec::new(),
+                idl_only_members: Vec::new(),
+                c_only_members: Vec::new(),
+                enum_values: Vec::new(),
             });
         }
     }
@@ -934,6 +982,9 @@ fn build_transitive_types(
                         c_name: Some(c_type_name(&value.name)),
                         c_chained: is_chained_struct(value),
                         members: Vec::new(),
+                        idl_only_members: Vec::new(),
+                        c_only_members: Vec::new(),
+                        enum_values: Vec::new(),
                     });
                 }
             }
@@ -958,6 +1009,9 @@ fn build_transitive_types(
                         c_name: Some(c_type_name(&value.name)),
                         c_chained: false,
                         members: Vec::new(),
+                        idl_only_members: Vec::new(),
+                        c_only_members: Vec::new(),
+                        enum_values: Vec::new(),
                     });
                 }
             }
@@ -1005,6 +1059,7 @@ fn join_dictionary_fields(
                 },
             });
         } else {
+            pair.idl_only_members.push(member.clone());
             report.mismatches.push(mismatch(format!(
                 "dictionary {dictionary}: IDL-only member {}",
                 member.name
@@ -1013,6 +1068,11 @@ fn join_dictionary_fields(
     }
     for member in &c_struct.members {
         if !matched.contains(&canonical(&member.name)) {
+            pair.c_only_members.push(CMemberModel {
+                name: member.name.clone(),
+                values: vec![c_value(member, yaml)],
+                callback: None,
+            });
             report.mismatches.push(mismatch(format!(
                 "dictionary {dictionary}: C-only member {}",
                 member.name
@@ -1726,11 +1786,18 @@ mod tests {
             idl: vec![idl],
             c,
         };
+        let enum_value = EnumValuePair {
+            idl_value: Some("value".to_owned()),
+            c_value: Some("value".to_owned()),
+        };
         let pair = TypePair {
             idl_name: Some("GPUX".to_owned()),
             c_name: Some("WGPUX".to_owned()),
             c_chained: false,
             members: vec![member],
+            idl_only_members: Vec::new(),
+            c_only_members: Vec::new(),
+            enum_values: vec![enum_value],
         };
         let mismatch = Mismatch {
             message: "difference".to_owned(),
@@ -1746,6 +1813,10 @@ mod tests {
             IdlMemberKind::Attribute
         );
         assert_eq!(report.mismatches[0].message, "difference");
+        assert_eq!(
+            report.interfaces[0].enum_values[0].idl_value.as_deref(),
+            Some("value")
+        );
         assert_eq!(
             CodegenError::Yaml("bad".to_owned()).to_string(),
             "YAML error: bad"

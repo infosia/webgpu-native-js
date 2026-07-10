@@ -22,7 +22,9 @@ mod generated {
     include!(concat!(env!("OUT_DIR"), "/generated_conversions.rs"));
 }
 
-use generated::convert_buffer_descriptor;
+#[cfg(test)]
+use generated::convert_buffer_binding_layout;
+use generated::{convert_bind_group_layout_descriptor, convert_buffer_descriptor};
 
 /// Result type used by the core crate.
 pub type Result<T, E> = std::result::Result<T, E>;
@@ -2998,30 +3000,6 @@ fn convert_shader_module_descriptor<E: JsEngine>(
     })
 }
 
-fn convert_bind_group_layout_descriptor<E: JsEngine>(
-    cx: E::Context<'_>,
-    value: E::Value,
-    arena: &Arena,
-) -> Result<WGPUBindGroupLayoutDescriptor, E::Error> {
-    let label = optional_non_null_string::<E>(cx, value, "label", arena)?;
-    let entries_value = E::get_property(cx, value, "entries")?;
-    let entries = if E::is_undefined(cx, entries_value) {
-        &[][..]
-    } else {
-        convert_bind_group_layout_entries::<E>(cx, entries_value, arena)?
-    };
-    Ok(WGPUBindGroupLayoutDescriptor {
-        nextInChain: ptr::null_mut(),
-        label: WGPUStringView::from_bytes(label.as_bytes()),
-        entryCount: entries.len(),
-        entries: if entries.is_empty() {
-            ptr::null()
-        } else {
-            entries.as_ptr()
-        },
-    })
-}
-
 fn convert_pipeline_layout_descriptor<E: JsEngine + 'static>(
     cx: E::Context<'_>,
     value: E::Value,
@@ -3206,84 +3184,6 @@ fn convert_sequence<E: JsEngine, T>(
         let item = E::get_property(cx, result, "value")?;
         converted.push(convert(item)?);
     }
-}
-
-fn convert_bind_group_layout_entries<'a, E: JsEngine>(
-    cx: E::Context<'_>,
-    value: E::Value,
-    arena: &'a Arena,
-) -> Result<&'a [WGPUBindGroupLayoutEntry], E::Error> {
-    let entries = convert_sequence::<E, _>(cx, value, "entries", |item| {
-        convert_bind_group_layout_entry::<E>(cx, item)
-    })?;
-    Ok(arena.alloc_slice(entries))
-}
-
-fn convert_bind_group_layout_entry<E: JsEngine>(
-    cx: E::Context<'_>,
-    value: E::Value,
-) -> Result<WGPUBindGroupLayoutEntry, E::Error> {
-    let binding = enforce_u32::<E>(cx, required_member::<E>(cx, value, "binding")?, "binding")?;
-    let visibility = u64::from(enforce_u32::<E>(
-        cx,
-        required_member::<E>(cx, value, "visibility")?,
-        "visibility",
-    )?);
-    let buffer_value = E::get_property(cx, value, "buffer")?;
-    let buffer = if E::is_undefined(cx, buffer_value) {
-        WGPUBufferBindingLayout {
-            nextInChain: ptr::null_mut(),
-            type_: WGPUBufferBindingType_WGPUBufferBindingType_BindingNotUsed,
-            hasDynamicOffset: 0,
-            minBindingSize: 0,
-        }
-    } else {
-        convert_buffer_binding_layout::<E>(cx, buffer_value)?
-    };
-    Ok(WGPUBindGroupLayoutEntry {
-        nextInChain: ptr::null_mut(),
-        binding,
-        visibility,
-        bindingArraySize: 0,
-        buffer,
-        sampler: unsafe { std::mem::zeroed() },
-        texture: unsafe { std::mem::zeroed() },
-        storageTexture: unsafe { std::mem::zeroed() },
-    })
-}
-
-fn convert_buffer_binding_layout<E: JsEngine>(
-    cx: E::Context<'_>,
-    value: E::Value,
-) -> Result<WGPUBufferBindingLayout, E::Error> {
-    let type_value = E::get_property(cx, value, "type")?;
-    let type_ = if E::is_undefined(cx, type_value) {
-        WGPUBufferBindingType_WGPUBufferBindingType_Undefined
-    } else {
-        let enum_arena = Arena::new();
-        match E::to_str(cx, type_value, &enum_arena)? {
-            "uniform" => WGPUBufferBindingType_WGPUBufferBindingType_Uniform,
-            "storage" => WGPUBufferBindingType_WGPUBufferBindingType_Storage,
-            "read-only-storage" => WGPUBufferBindingType_WGPUBufferBindingType_ReadOnlyStorage,
-            _ => return Err(E::type_error(cx, "GPUBufferBindingType")),
-        }
-    };
-    let dynamic = E::get_property(cx, value, "hasDynamicOffset")?;
-    let min = E::get_property(cx, value, "minBindingSize")?;
-    Ok(WGPUBufferBindingLayout {
-        nextInChain: ptr::null_mut(),
-        type_,
-        hasDynamicOffset: if E::is_undefined(cx, dynamic) {
-            0
-        } else {
-            u32::from(E::to_bool(cx, dynamic))
-        },
-        minBindingSize: if E::is_undefined(cx, min) {
-            0
-        } else {
-            enforce_u64::<E>(cx, min, "minBindingSize")?
-        },
-    })
 }
 
 fn convert_bind_group_entries<'a, E: JsEngine + 'static>(

@@ -1,0 +1,74 @@
+enums:
+  - name: buffer_binding_type
+    entries:
+      - name: binding_not_used
+      - name: undefined
+      - name: uniform
+      - name: storage
+      - name: read_only_storage
+bitflags:
+  - name: shader_stage
+    entries: []
+structs:
+  - name: bind_group_layout_descriptor
+    type: extensible
+    members:
+      - name: label
+        type: string_with_default_empty
+      - name: entries
+        type: array<struct.bind_group_layout_entry>
+        pointer: immutable
+  - name: bind_group_layout_entry
+    type: extensible
+    members:
+      - name: binding
+        type: uint32
+      - name: visibility
+        type: bitflag.shader_stage
+        default: none
+      - name: binding_array_size
+        type: uint32
+      - name: buffer
+        type: struct.buffer_binding_layout
+        default: zero
+      - name: sampler
+        type: struct.sampler_binding_layout
+        default: zero
+      - name: texture
+        type: struct.texture_binding_layout
+        default: zero
+      - name: storage_texture
+        type: struct.storage_texture_binding_layout
+        default: zero
+  - name: buffer_binding_layout
+    type: extensible
+    members:
+      - name: type
+        type: enum.buffer_binding_type
+      - name: has_dynamic_offset
+        type: bool
+        default: false
+      - name: min_binding_size
+        type: uint64
+        default: 0
+  - name: sampler_binding_layout
+    type: extensible
+    members: []
+  - name: texture_binding_layout
+    type: extensible
+    members: []
+  - name: storage_texture_binding_layout
+    type: extensible
+    members: []
+objects:
+  - name: device
+    methods:
+      - name: create_bind_group_layout
+        returns:
+          type: object.bind_group_layout
+        args:
+          - name: descriptor
+            type: struct.bind_group_layout_descriptor
+            pointer: immutable
+  - name: bind_group_layout
+    methods: []

@@ -1080,3 +1080,20 @@ cites its rule IDs (R8, B4, B7, DR-M3) at each guard, per G11. Policy gained
 its first `[[descriptor]]` entry with both-directions enforcement (dead,
 duplicate, disagreeing, and missing string policy all fail the run, each with
 a test).
+
+**Phase 4 slice 2b landed (2026-07-10): the hard constructs generate.** String
+enums (IDL-listed values only; unknown → TypeError per B6; the C-only
+`Undefined`/`BindingNotUsed` sentinels emitted solely for absent optionals),
+nested dictionaries, `sequence<dict>` → arena count+pointer arrays, and IDL
+dictionary-inheritance flattening. The bind-group-layout family
+(`GPUBufferBindingLayout`, `GPUBindGroupLayoutEntry`,
+`GPUBindGroupLayoutDescriptor` + referenced enums) is generated; hand-written
+copies deleted. **One deliberate behavior change, decided by the planner after
+the agent stopped on the contradiction:** a *present* `sampler`/`texture`/
+`storageTexture`/`externalTexture` member — valid WebGPU this binding does not
+support yet — now raises a TypeError naming the kind, instead of being
+silently ignored into a wrong layout (invariant 8: clear early errors). The
+hand-written code's silence was itself unrecorded; now both the behavior and
+the decision are written down. Four new core rejection tests + one QuickJS
+script test; every pre-existing test unchanged; core 66, quickjs 42, JSC 17,
+parity byte-identical, all clippy/fmt green.
