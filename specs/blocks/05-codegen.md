@@ -177,9 +177,21 @@ extension when the interface is script-observable.
 
 ## 8. Open questions this block will answer
 
-- **Parser** (G9) — decided with evidence in the first slice.
-- **Full IDL vs subset** (G6) — decided after the first slice, with numbers.
+- ~~**Parser** (G9)~~ **ANSWERED (slice 1):** weedle2 5.0.0 + a 26-line
+  namespace-const pre-pass, every rewrite surfaced verbatim. Full pin parses,
+  zero remaining bytes.
+- ~~**Full IDL vs subset** (G6)~~ **ANSWERED (slice 3, with the numbers the
+  question demanded):** descriptor conversion now costs **zero** hand-written
+  lines per interface; GPUSampler — no hand-written ancestor — cost **217
+  lines**, all of it lifecycle plumbing (payload, create fn, class spec,
+  release arm, dispatch fields, two 23-line adapter thunks), pattern-identical
+  across interfaces. Decision: **stay subset-driven**, growing the subset as
+  interfaces are needed; a full-IDL sweep buys nothing while plumbing is the
+  per-interface cost. The next leverage is a **class-spec/lifecycle emission**
+  slice — after that, full coverage becomes a policy-file edit, and the
+  question can be reopened at near-zero marginal cost.
 - **Does `Promise`-returning method emission need anything beyond
-  `new_promise`/`SettlementQueue`?** The async surface is small
+  `new_promise`/`SettlementQueue`?** Still open — the async surface is small
   (`mapAsync`, `onSubmittedWorkDone`, `requestAdapter`, `requestDevice`,
-  Phase 6's `popErrorScope`); expect no, verify while generating `mapAsync`.
+  Phase 6's `popErrorScope`); expect no, verify when method emission lands
+  (methods are still hand-written plumbing as of slice 3).
