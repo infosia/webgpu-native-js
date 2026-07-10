@@ -74,11 +74,28 @@ binding-created devices (`requestDevice`), the binding installs a pure-Rust
 recording callback at creation that feeds the same queue. One queue, two
 producers, one JS-thread consumer.
 
-**S7 — `device.lost` waits for P6b and a header reading.** `wgpuDeviceGetLostFuture`
-exists and returns a `WGPUFuture`; how it interacts with the creation-time
-`WGPUDeviceLostCallbackInfo` (which HAS a mode) and with adopted devices must
-be read from the header's Doc comments — not assumed — before S-rules are
-written for it.
+**S7 — `device.lost` mirrors S6 exactly: two producers, one queue.** *(Header
+reading done 2026-07-10.)* The lost **callback** (`WGPUDeviceLostCallbackInfo`,
+which HAS a `mode`) is settable only at device creation
+(`WGPUDeviceDescriptor.deviceLostCallbackInfo`); `wgpuDeviceGetLostFuture`
+returns the event's `WGPUFuture`, but observing a future without a callback
+means `wgpuInstanceWaitAny` semantics this project has not verified. Decision:
+**do not use `GetLostFuture`** (recorded deliberate non-use — consistency with
+S6 is worth more than a second delivery mechanism). So:
+
+- `device.lost` is a cached per-device `Promise<GPUDeviceLostInfo>` (same
+  object on every read, like B21's queue), settled at most once.
+- **Binding-created devices** (`requestDevice`): the descriptor installs a
+  pure-Rust `AllowProcessEvents` lost callback that records
+  `(reason, message)` into the settlement queue (J1 shape).
+- **Adopted devices** (`wrap_device`, the primary entry): the host owns the
+  creation-time callback; the binding exposes thread-safe, enqueue-only
+  `forward_device_lost(reason, message)` — the same host-contract shape as
+  S6's `forward_uncaptured_error`.
+- `GPUDeviceLostInfo` carries `reason` (`"unknown"` | `"destroyed"` per the
+  IDL; C's `CallbackCancelled`/`FailedCreation` map to `"unknown"` with the
+  message preserved) and `message`. `reason` is an IDL enum-ish attribute, not
+  a GPUError subclass.
 
 **S8 — recorded deviation: no DOMException hierarchy.** WebGPU rejections are
 spec'd as DOMExceptions (`OperationError`, `AbortError`); this binding rejects
