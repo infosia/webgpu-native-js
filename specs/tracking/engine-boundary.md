@@ -1218,3 +1218,15 @@ catastrophic/misuse class (R13/B16). Nothing in the binding needed to stop
 throwing, because a conformant backend does not return null for scope-routable
 validation errors. The recorded deviation is now only: "a null handle from
 createXxx is a synchronous exception", which is by design, permanently.
+
+**Block 08 part 1 landed (2026-07-10): the parity suite grows 12 → 52 lines,
+and P2 pays for itself on day one.** Two real divergences found and excluded
+pending triage: the SYNC operation-error throw path leaks the engine's native
+error class name (`InternalError` under QuickJS via `JS_ThrowInternalError`,
+plain `Error` under JSC via its error constructor) — S4 named async rejections
+but never the synchronous throws. Triage: FIX — the `operation_error` contract
+gains a stable `name: "OperationError"` on both adapters; the two lines then
+land. Also pinned: yawgpu's nested-scope filter routing is deterministic
+(validation crosses an inner oom scope to the outer validation scope,
+identically on both engines); the P6 one-byte corruption proof re-demonstrated
+(both adapters exit 101).
