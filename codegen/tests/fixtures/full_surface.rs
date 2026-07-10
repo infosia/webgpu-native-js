@@ -49,6 +49,8 @@ pub struct GpuDispatch {
     pub device_create_compute_pipeline: unsafe fn(WGPUDevice, *const WGPUComputePipelineDescriptor) -> WGPUComputePipeline,
     /// `wgpuDeviceCreateRenderPipeline`.
     pub device_create_render_pipeline: unsafe fn(WGPUDevice, *const WGPURenderPipelineDescriptor) -> WGPURenderPipeline,
+    /// `wgpuDeviceCreateQuerySet`.
+    pub device_create_query_set: unsafe fn(WGPUDevice, *const WGPUQuerySetDescriptor) -> WGPUQuerySet,
     /// `wgpuDeviceCreateCommandEncoder`.
     pub device_create_command_encoder: unsafe fn(WGPUDevice, *const WGPUCommandEncoderDescriptor) -> WGPUCommandEncoder,
     /// `wgpuDeviceGetQueue`.
@@ -145,6 +147,18 @@ pub struct GpuDispatch {
     pub render_pipeline_release: unsafe fn(WGPURenderPipeline),
     /// `wgpuRenderPipelineGetBindGroupLayout`.
     pub render_pipeline_get_bind_group_layout: unsafe fn(WGPURenderPipeline, u32) -> WGPUBindGroupLayout,
+    /// `wgpuQuerySetAddRef`.
+    pub query_set_add_ref: unsafe fn(WGPUQuerySet),
+    /// `wgpuQuerySetRelease`.
+    pub query_set_release: unsafe fn(WGPUQuerySet),
+    /// `wgpuQuerySetDestroy`.
+    pub query_set_destroy: unsafe fn(WGPUQuerySet),
+    /// `wgpuQuerySetGetType`.
+    pub query_set_get_type: unsafe fn(WGPUQuerySet) -> WGPUQueryType,
+    /// `wgpuQuerySetGetCount`.
+    pub query_set_get_count: unsafe fn(WGPUQuerySet) -> u32,
+    /// `wgpuQuerySetSetLabel`.
+    pub query_set_set_label: unsafe fn(WGPUQuerySet, WGPUStringView),
     /// `wgpuCommandEncoderRelease`.
     pub command_encoder_release: unsafe fn(WGPUCommandEncoder),
     /// `wgpuCommandEncoderBeginComputePass`.
@@ -189,6 +203,10 @@ pub struct GpuDispatch {
     pub render_pass_encoder_set_viewport: unsafe fn(WGPURenderPassEncoder, f32, f32, f32, f32, f32, f32),
     /// `wgpuRenderPassEncoderSetScissorRect`.
     pub render_pass_encoder_set_scissor_rect: unsafe fn(WGPURenderPassEncoder, u32, u32, u32, u32),
+    /// `wgpuRenderPassEncoderBeginOcclusionQuery`.
+    pub render_pass_encoder_begin_occlusion_query: unsafe fn(WGPURenderPassEncoder, u32),
+    /// `wgpuRenderPassEncoderEndOcclusionQuery`.
+    pub render_pass_encoder_end_occlusion_query: unsafe fn(WGPURenderPassEncoder),
     /// `wgpuRenderPassEncoderEnd`.
     pub render_pass_encoder_end: unsafe fn(WGPURenderPassEncoder),
     /// `wgpuCommandBufferRelease`.
@@ -225,6 +243,7 @@ macro_rules! for_each_gpu_dispatch_entry {
             (device_create_bind_group, wgpuDeviceCreateBindGroup, unsafe fn(device: $crate::WGPUDevice, descriptor: *const $crate::WGPUBindGroupDescriptor) -> $crate::WGPUBindGroup),
             (device_create_compute_pipeline, wgpuDeviceCreateComputePipeline, unsafe fn(device: $crate::WGPUDevice, descriptor: *const $crate::WGPUComputePipelineDescriptor) -> $crate::WGPUComputePipeline),
             (device_create_render_pipeline, wgpuDeviceCreateRenderPipeline, unsafe fn(device: $crate::WGPUDevice, descriptor: *const $crate::WGPURenderPipelineDescriptor) -> $crate::WGPURenderPipeline),
+            (device_create_query_set, wgpuDeviceCreateQuerySet, unsafe fn(device: $crate::WGPUDevice, descriptor: *const $crate::WGPUQuerySetDescriptor) -> $crate::WGPUQuerySet),
             (device_create_command_encoder, wgpuDeviceCreateCommandEncoder, unsafe fn(device: $crate::WGPUDevice, descriptor: *const $crate::WGPUCommandEncoderDescriptor) -> $crate::WGPUCommandEncoder),
             (device_get_queue, wgpuDeviceGetQueue, unsafe fn(device: $crate::WGPUDevice) -> $crate::WGPUQueue),
             (device_push_error_scope, wgpuDevicePushErrorScope, unsafe fn(device: $crate::WGPUDevice, filter: $crate::WGPUErrorFilter)),
@@ -273,6 +292,12 @@ macro_rules! for_each_gpu_dispatch_entry {
             (render_pipeline_add_ref, wgpuRenderPipelineAddRef, unsafe fn(render_pipeline: $crate::WGPURenderPipeline)),
             (render_pipeline_release, wgpuRenderPipelineRelease, unsafe fn(render_pipeline: $crate::WGPURenderPipeline)),
             (render_pipeline_get_bind_group_layout, wgpuRenderPipelineGetBindGroupLayout, unsafe fn(render_pipeline: $crate::WGPURenderPipeline, group_index: u32) -> $crate::WGPUBindGroupLayout),
+            (query_set_add_ref, wgpuQuerySetAddRef, unsafe fn(query_set: $crate::WGPUQuerySet)),
+            (query_set_release, wgpuQuerySetRelease, unsafe fn(query_set: $crate::WGPUQuerySet)),
+            (query_set_destroy, wgpuQuerySetDestroy, unsafe fn(query_set: $crate::WGPUQuerySet)),
+            (query_set_get_type, wgpuQuerySetGetType, unsafe fn(query_set: $crate::WGPUQuerySet) -> $crate::WGPUQueryType),
+            (query_set_get_count, wgpuQuerySetGetCount, unsafe fn(query_set: $crate::WGPUQuerySet) -> u32),
+            (query_set_set_label, wgpuQuerySetSetLabel, unsafe fn(query_set: $crate::WGPUQuerySet, label: $crate::WGPUStringView)),
             (command_encoder_release, wgpuCommandEncoderRelease, unsafe fn(command_encoder: $crate::WGPUCommandEncoder)),
             (command_encoder_begin_compute_pass, wgpuCommandEncoderBeginComputePass, unsafe fn(command_encoder: $crate::WGPUCommandEncoder, descriptor: *const $crate::WGPUComputePassDescriptor) -> $crate::WGPUComputePassEncoder),
             (command_encoder_begin_render_pass, wgpuCommandEncoderBeginRenderPass, unsafe fn(command_encoder: $crate::WGPUCommandEncoder, descriptor: *const $crate::WGPURenderPassDescriptor) -> $crate::WGPURenderPassEncoder),
@@ -295,6 +320,8 @@ macro_rules! for_each_gpu_dispatch_entry {
             (render_pass_encoder_draw_indexed, wgpuRenderPassEncoderDrawIndexed, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder, index_count: u32, instance_count: u32, first_index: u32, base_vertex: i32, first_instance: u32)),
             (render_pass_encoder_set_viewport, wgpuRenderPassEncoderSetViewport, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder, x: f32, y: f32, width: f32, height: f32, min_depth: f32, max_depth: f32)),
             (render_pass_encoder_set_scissor_rect, wgpuRenderPassEncoderSetScissorRect, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder, x: u32, y: u32, width: u32, height: u32)),
+            (render_pass_encoder_begin_occlusion_query, wgpuRenderPassEncoderBeginOcclusionQuery, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder, query_index: u32)),
+            (render_pass_encoder_end_occlusion_query, wgpuRenderPassEncoderEndOcclusionQuery, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder)),
             (render_pass_encoder_end, wgpuRenderPassEncoderEnd, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder)),
             (command_buffer_release, wgpuCommandBufferRelease, unsafe fn(command_buffer: $crate::WGPUCommandBuffer)),
         }
@@ -341,6 +368,40 @@ pub(super) fn convert_buffer_descriptor<E: JsEngine>(
             E::to_bool(cx, mapped_at_creation_value)
         },
         label: label.to_owned(),
+    })
+}
+
+/// Converts a JavaScript `GPUQuerySetDescriptor` into `WGPUQuerySetDescriptor`.
+pub(super) fn convert_query_set_descriptor<E: JsEngine>(
+    cx: E::Context<'_>,
+    value: E::Value,
+    arena: &Arena,
+) -> Result<WGPUQuerySetDescriptor, E::Error> {
+    let label_value = dictionary_member::<E>(cx, value, "label")?;
+    // DR-M3: required dictionary members reject undefined.
+    let type_value = required_member::<E>(cx, value, "type")?;
+    let count_value = required_member::<E>(cx, value, "count")?;
+    // B4: non-nullable strings default only for undefined; null is stringified.
+    let label = if E::is_undefined(cx, label_value) {
+        ""
+    } else {
+        E::to_str(cx, label_value, arena)?
+    };
+    // B6: string enums are joined to C values; absence uses the IDL default or C sentinel.
+    let type_ = {
+        let enum_arena = Arena::new();
+        match E::to_str(cx, type_value, &enum_arena)? {
+            "occlusion" => WGPUQueryType_WGPUQueryType_Occlusion,
+            "timestamp" => WGPUQueryType_WGPUQueryType_Timestamp,
+            _ => return Err(E::type_error(cx, "GPUQueryType")),
+        }
+    };
+    Ok(WGPUQuerySetDescriptor {
+        nextInChain: ptr::null_mut(),
+        label: WGPUStringView::from_bytes(label.as_bytes()),
+        type_,
+        // R8: `[EnforceRange]` GPUSize32 is checked at the 32-bit boundary.
+        count: enforce_u32::<E>(cx, count_value, "count")?,
     })
 }
 
@@ -589,10 +650,6 @@ pub(super) fn convert_render_pass_descriptor<E: JsEngine + 'static>(
     let color_attachments_value = required_member::<E>(cx, value, "colorAttachments")?;
     let depth_stencil_attachment_value = dictionary_member::<E>(cx, value, "depthStencilAttachment")?;
     let occlusion_query_set_value = dictionary_member::<E>(cx, value, "occlusionQuerySet")?;
-    // Policy skip: reject present unsupported API instead of ignoring it.
-    if !E::is_undefined(cx, occlusion_query_set_value) {
-        return Err(E::type_error(cx, "occlusionQuerySet are not supported yet"));
-    }
     let timestamp_writes_value = dictionary_member::<E>(cx, value, "timestampWrites")?;
     // Policy skip: reject present unsupported API instead of ignoring it.
     if !E::is_undefined(cx, timestamp_writes_value) {
@@ -638,6 +695,11 @@ pub(super) fn convert_render_pass_descriptor<E: JsEngine + 'static>(
         let converted = convert_render_pass_depth_stencil_attachment::<E>(cx, depth_stencil_attachment_value)?;
         arena.alloc_slice(vec![converted]).as_ptr()
     };
+    let occlusion_query_set = if E::is_undefined(cx, occlusion_query_set_value) {
+        ptr::null_mut()
+    } else {
+        query_set_handle::<E>(cx, occlusion_query_set_value)?
+    };
     Ok(WGPURenderPassDescriptor {
         nextInChain: ptr::null_mut(),
         label: WGPUStringView::from_bytes(label.as_bytes()),
@@ -648,9 +710,8 @@ pub(super) fn convert_render_pass_descriptor<E: JsEngine + 'static>(
             color_attachments.as_ptr()
         },
         depthStencilAttachment: depth_stencil_attachment,
-        // Policy skip: query sets are outside the block 09 render-pass slice.
-        occlusionQuerySet: ptr::null_mut(),
-        // Policy skip: query sets are outside the block 09 render-pass slice.
+        occlusionQuerySet: occlusion_query_set,
+        // Policy skip: timestamp-query requires requiredFeatures, which requestDevice does not yet plumb.
         timestampWrites: ptr::null(),
     })
 }
@@ -3187,6 +3248,18 @@ pub struct RenderPipelinePayload {
 // `ReleaseRequest::run()` during release-queue drain on the creating `tick()` thread.
 unsafe impl Send for RenderPipelinePayload {}
 
+/// Payload stored by a `GPUQuerySet` wrapper.
+pub struct QuerySetPayload {
+    pub(super) query_set: WGPUQuerySet,
+    pub(super) destroyed: AtomicBool,
+    pub(super) label: Mutex<String>,
+}
+
+// SAFETY: `QuerySetPayload` stores WGPU handle values. Finalization only moves those values
+// into `ReleaseRequest`; native handles are dereferenced only by
+// `ReleaseRequest::run()` during release-queue drain on the creating `tick()` thread.
+unsafe impl Send for QuerySetPayload {}
+
 /// Payload stored by a `GPUCommandEncoder` wrapper.
 pub struct CommandEncoderPayload {
     pub(super) state: Arc<Mutex<CommandEncoderState>>,
@@ -3305,6 +3378,13 @@ pub enum ReleaseRequest {
         /// Dispatch table used on the drain thread.
         gpu: GpuDispatch,
     },
+    /// Release a `GPUQuerySet` and its retained descriptor handles.
+    QuerySet {
+        /// Created native handle.
+        query_set: WGPUQuerySet,
+        /// Dispatch table used on the drain thread.
+        gpu: GpuDispatch,
+    },
     /// Release a `GPUCommandEncoder` and its retained descriptor handles.
     CommandEncoder {
         /// Created native handle.
@@ -3378,6 +3458,9 @@ impl ReleaseRequest {
                 (gpu.shader_module_release)(vertex_module);
                 if !fragment_module.is_null() { (gpu.shader_module_release)(fragment_module); }
                 if !layout.is_null() { (gpu.pipeline_layout_release)(layout); }
+            },
+            Self::QuerySet { query_set, gpu } => unsafe {
+                (gpu.query_set_release)(query_set);
             },
             Self::CommandEncoder { encoder, gpu } => unsafe {
                 (gpu.command_encoder_release)(encoder);
@@ -4026,6 +4109,87 @@ pub fn finalize_render_pipeline(payload: Box<dyn Any + Send>, env: &Environment)
     });
 }
 
+/// Implements `GPUDevice.createQuerySet`.
+pub fn device_create_query_set<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let device = device_handle::<E>(cx, this)?;
+    let arena = Arena::new();
+    let descriptor = args.first().copied().ok_or_else(|| E::type_error(cx, "GPUQuerySetDescriptor"))?;
+    let native = convert_query_set_descriptor::<E>(cx, descriptor, &arena)?;
+    let label = unsafe { string_view_to_owned(native.label) };
+    let query_set = unsafe { (E::environment(cx).gpu().device_create_query_set)(device, ptr::from_ref(&native)) };
+    if query_set.is_null() {
+        return Err(E::operation_error(cx, "wgpuDeviceCreateQuerySet returned null"));
+    }
+    if let Err(error) = E::register_class(cx, query_set_class::<E>()) {
+        unsafe {
+            (E::environment(cx).gpu().query_set_release)(query_set);
+        }
+        return Err(error);
+    }
+    match E::new_instance(cx, GPU_QUERY_SET_CLASS, Box::new(QuerySetPayload {
+        query_set,
+        destroyed: AtomicBool::new(false),
+        label: Mutex::new(label),
+    })) {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            unsafe {
+                (E::environment(cx).gpu().query_set_release)(query_set);
+            }
+            Err(error)
+        }
+    }
+}
+
+/// Implements the `GPUQuerySet.label` getter.
+pub fn query_set_label_get<E: JsEngine + 'static>(cx: E::Context<'_>, this: E::Value) -> Result<E::Value, E::Error> {
+    let payload = E::payload(cx, this, GPU_QUERY_SET_CLASS).and_then(|payload| payload.downcast_ref::<QuerySetPayload>()).ok_or_else(|| E::type_error(cx, "GPUQuerySet.label called on an incompatible object"))?;
+    let label = payload.label.lock().map_err(|_| E::operation_error(cx, "GPUQuerySet label is poisoned"))?;
+    E::string(cx, &label)
+}
+
+/// Implements the `GPUQuerySet.label` setter.
+pub fn query_set_label_set<E: JsEngine + 'static>(cx: E::Context<'_>, this: E::Value, value: E::Value) -> Result<(), E::Error> {
+    let arena = Arena::new();
+    let new_label = E::to_str(cx, value, &arena)?;
+    let payload = E::payload(cx, this, GPU_QUERY_SET_CLASS).and_then(|payload| payload.downcast_ref::<QuerySetPayload>()).ok_or_else(|| E::type_error(cx, "GPUQuerySet.label called on an incompatible object"))?;
+    let mut label = payload.label.lock().map_err(|_| E::operation_error(cx, "GPUQuerySet label is poisoned"))?;
+    unsafe { (E::environment(cx).gpu().query_set_set_label)(payload.query_set, WGPUStringView::from_bytes(new_label.as_bytes())); }
+    new_label.clone_into(&mut label);
+    Ok(())
+}
+
+/// Implements the readonly `GPUQuerySet.count` getter through `wgpuQuerySetGetCount`.
+pub fn query_set_count_get<E: JsEngine + 'static>(cx: E::Context<'_>, this: E::Value) -> Result<E::Value, E::Error> {
+    let payload = E::payload(cx, this, GPU_QUERY_SET_CLASS).and_then(|payload| payload.downcast_ref::<QuerySetPayload>()).ok_or_else(|| E::type_error(cx, "GPUQuerySet.count called on an incompatible object"))?;
+    let native = unsafe { (E::environment(cx).gpu().query_set_get_count)(payload.query_set) };
+    E::number(cx, native as f64)
+}
+
+/// Implements the readonly `GPUQuerySet.type` getter through `wgpuQuerySetGetType`.
+pub fn query_set_type_get<E: JsEngine + 'static>(cx: E::Context<'_>, this: E::Value) -> Result<E::Value, E::Error> {
+    let payload = E::payload(cx, this, GPU_QUERY_SET_CLASS).and_then(|payload| payload.downcast_ref::<QuerySetPayload>()).ok_or_else(|| E::type_error(cx, "GPUQuerySet.type called on an incompatible object"))?;
+    let native = unsafe { (E::environment(cx).gpu().query_set_get_type)(payload.query_set) };
+    match native {
+        value if value == WGPUQueryType_WGPUQueryType_Occlusion => E::string(cx, "occlusion"),
+        value if value == WGPUQueryType_WGPUQueryType_Timestamp => E::string(cx, "timestamp"),
+        _ => Err(E::operation_error(cx, "wgpuQuerySetGetType returned an unknown GPUQueryType")),
+    }
+}
+
+/// Finalizes a `GPUQuerySet` payload by enqueuing its release.
+pub fn finalize_query_set(payload: Box<dyn Any + Send>, env: &Environment) {
+    let Ok(payload) = payload.downcast::<QuerySetPayload>() else { return; };
+    let _ = env.queue().enqueue(ReleaseRequest::QuerySet {
+        query_set: payload.query_set,
+        gpu: env.gpu(),
+    });
+}
+
 /// Implements `GPUDevice.createCommandEncoder`.
 pub fn device_create_command_encoder<E: JsEngine + 'static>(
     cx: E::Context<'_>,
@@ -4126,6 +4290,7 @@ pub(super) fn device_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
             MethodSpec { name: "createBindGroup", length: 1, call: device_create_bind_group::<E> },
             MethodSpec { name: "createComputePipeline", length: 1, call: device_create_compute_pipeline::<E> },
             MethodSpec { name: "createRenderPipeline", length: 1, call: device_create_render_pipeline::<E> },
+            MethodSpec { name: "createQuerySet", length: 1, call: device_create_query_set::<E> },
             MethodSpec { name: "createCommandEncoder", length: 0, call: device_create_command_encoder::<E> },
         ])),
         finalizer: finalize_device::<E>,
@@ -4285,6 +4450,23 @@ pub(super) fn render_pipeline_class<E: JsEngine + 'static>() -> &'static ClassSp
     })
 }
 
+pub(super) fn query_set_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
+    class_spec_once::<E, _>(GPU_QUERY_SET_CLASS, || ClassSpec {
+        name: "GPUQuerySet",
+        id: GPU_QUERY_SET_CLASS,
+        constructor: None,
+        properties: Box::leak(Box::new([
+            PropertySpec { name: "type", get: Some(query_set_type_get::<E>), set: None },
+            PropertySpec { name: "count", get: Some(query_set_count_get::<E>), set: None },
+            PropertySpec { name: "label", get: Some(query_set_label_get::<E>), set: Some(query_set_label_set::<E>) },
+        ])),
+        methods: Box::leak(Box::new([
+            MethodSpec { name: "destroy", length: 0, call: query_set_destroy::<E> },
+        ])),
+        finalizer: finalize_query_set,
+    })
+}
+
 pub(super) fn command_encoder_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
     class_spec_once::<E, _>(GPU_COMMAND_ENCODER_CLASS, || ClassSpec {
         name: "GPUCommandEncoder",
@@ -4335,6 +4517,8 @@ pub(super) fn render_pass_encoder_class<E: JsEngine + 'static>() -> &'static Cla
             MethodSpec { name: "drawIndexed", length: 1, call: render_pass_draw_indexed::<E> },
             MethodSpec { name: "setViewport", length: 6, call: render_pass_set_viewport::<E> },
             MethodSpec { name: "setScissorRect", length: 4, call: render_pass_set_scissor_rect::<E> },
+            MethodSpec { name: "beginOcclusionQuery", length: 1, call: render_pass_begin_occlusion_query::<E> },
+            MethodSpec { name: "endOcclusionQuery", length: 0, call: render_pass_end_occlusion_query::<E> },
             MethodSpec { name: "end", length: 0, call: render_pass_end::<E> },
         ])),
         finalizer: finalize_render_pass_encoder,

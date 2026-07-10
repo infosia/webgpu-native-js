@@ -10,6 +10,7 @@ typeof:device.createBuffer:function
 identity:cross-instance-prototype:true
 identity:cross-instance-method:true
 sampler:sampler-round-trip
+scope:sampler:null
 texture:create:ok
 texture:width:4
 texture:height:2
@@ -26,12 +27,24 @@ texture:format-rejection:TypeError:GPUTextureFormat
 texture:extent-length:TypeError:GPUExtent3D sequence length must be 1..=3
 texture:extent-over-length:TypeError:GPUExtent3D sequence length must be 1..=3
 texture:extent-primitive:TypeError:GPUExtent3D must be an object
+scope:texture:null
 bindGroup:resources:buffer,sampler,texture-view:ok
 bindGroup:sampler-type-rejection:TypeError:GPUSamplerBindingType
+scope:bind-group-family:null
 renderPipeline:create:ok
 getBindGroupLayout:create/release:ok
 renderPipeline:topology-rejection:TypeError:GPUPrimitiveTopology
 renderPipeline:nullable-holes:ok
+scope:pipelines:GPUValidationError
+querySet:create:ok
+querySet:type:occlusion
+querySet:count:4
+querySet:label:query-set-round-trip
+querySet:type-rejection:TypeError:GPUQueryType
+scope:querySet:null
+querySet:occlusion-pass:ok
+scope:occlusion-query:null
+querySet:destroy:ok
 coerce:size-0:ok
 coerce:size-u32-max:ok
 coerce:size-2^53:ok

@@ -1367,3 +1367,13 @@ byte-identical on yawgpu AND Dawn (gated run) — device-scoped features/limits
 are backend-stable by construction (default-requested devices report core
 features and spec-default limits). Suites: core 129, quickjs 54, JSC 25+1,
 workspace 270.
+
+**A-3 + A-5 landed (2026-07-11): GPUQuerySet and validity-observing parity.**
+QuerySet rides the generated lifecycle (occlusion tested; timestamp untested —
+**`requiredFeatures` is unplumbed in requestDevice**, recorded as a known gap;
+timestampWrites stays policy-skipped). `occlusionQuerySet` + begin/end
+occlusion query landed at validation level. The D11-retraction lesson applied:
+parity's creation sections now run under validation scopes and log the pop
+result, so "created ok" finally means VALID, not just non-null. Parity
+103 → 116, byte-identical on yawgpu AND Dawn (gated run). Suites: core 130,
+workspace 271.

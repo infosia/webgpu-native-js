@@ -8,6 +8,7 @@
     var labelBuffer;
     var retainedTextureView;
     var retainedBindGroup;
+    var parityQuerySet;
 
     function log(line) {
         globalThis.parityLog.push(String(line));
@@ -41,6 +42,15 @@
 
     function errorLine(section, error) {
         return section + ":" + error.name + ":" + error.message;
+    }
+
+    function validationScope(section, action) {
+        device.pushErrorScope("validation");
+        action();
+        return device.popErrorScope().then(function (error) {
+            log("scope:" + section + ":" +
+                (error === null ? "null" : error.constructor.name));
+        });
     }
 
     function createAndDestroyBuffer(size, usage) {
@@ -460,6 +470,73 @@
         log("renderPipeline:nullable-holes:ok");
     }
 
+    function runQuerySets() {
+        parityQuerySet = device.createQuerySet({
+            type: "occlusion",
+            count: 4,
+            label: "parity-query-set"
+        });
+        log("querySet:create:ok");
+        log("querySet:type:" + parityQuerySet.type);
+        log("querySet:count:" + parityQuerySet.count);
+        parityQuerySet.label = "query-set-round-trip";
+        log("querySet:label:" + parityQuerySet.label);
+
+        var enumError = caught(function () {
+            device.createQuerySet({ type: "bad", count: 1 });
+        });
+        log(errorLine("querySet:type-rejection", enumError));
+    }
+
+    function runCreationParity() {
+        return validationScope("sampler", function () {
+            var paritySampler = device.createSampler({
+                label: "parity-sampler",
+                addressModeU: "repeat",
+                magFilter: "linear",
+                minFilter: "linear",
+                mipmapFilter: "linear",
+                lodMinClamp: 1.5,
+                lodMaxClamp: 9.5,
+                compare: "less-equal",
+                maxAnisotropy: 4
+            });
+            paritySampler.label = "sampler-round-trip";
+            log("sampler:" + paritySampler.label);
+        }).then(function () {
+            return validationScope("texture", runTextures);
+        }).then(function () {
+            return validationScope("bind-group-family", runBindGroups);
+        }).then(function () {
+            return validationScope("pipelines", runRenderPipelines);
+        }).then(function () {
+            return validationScope("querySet", runQuerySets);
+        }).then(function () {
+            return validationScope("occlusion-query", function () {
+                var texture = device.createTexture({
+                    size: [1], format: "rgba8unorm", usage: 16
+                });
+                var encoder = device.createCommandEncoder();
+                var pass = encoder.beginRenderPass({
+                    colorAttachments: [{
+                        view: texture.createView(),
+                        loadOp: "clear",
+                        storeOp: "store"
+                    }],
+                    occlusionQuerySet: parityQuerySet
+                });
+                pass.beginOcclusionQuery(2);
+                pass.endOcclusionQuery();
+                pass.end();
+                device.queue.submit([encoder.finish()]);
+                log("querySet:occlusion-pass:ok");
+            });
+        }).then(function () {
+            parityQuerySet.destroy();
+            log("querySet:destroy:ok");
+        });
+    }
+
     function runRenderPipelineValidation() {
         device.pushErrorScope("validation");
         var module = device.createShaderModule({
@@ -814,35 +891,18 @@
             (labelBuffer.mapAsync === prototypeBuffer.mapAsync));
         prototypeBuffer.destroy();
 
-        var paritySampler = device.createSampler({
-            label: "parity-sampler",
-            addressModeU: "repeat",
-            magFilter: "linear",
-            minFilter: "linear",
-            mipmapFilter: "linear",
-            lodMinClamp: 1.5,
-            lodMaxClamp: 9.5,
-            compare: "less-equal",
-            maxAnisotropy: 4
-        });
-        paritySampler.label = "sampler-round-trip";
-        log("sampler:" + paritySampler.label);
-
-        runTextures();
-        runBindGroups();
-        runRenderPipelines();
-
-        runCoercions();
-        runStrings();
-        runRequiredMembers();
-        runErrorModel();
-        runIterators();
+        runCreationParity().then(function () {
+            runCoercions();
+            runStrings();
+            runRequiredMembers();
+            runErrorModel();
+            runIterators();
 
         device.lost.then(function (info) {
             log("lostReason:" + info.reason);
         }).catch(fail);
 
-        gpu.requestAdapter().then(function (firstAdapter) {
+            gpu.requestAdapter().then(function (firstAdapter) {
             log("identity:adapter.features:" +
                 (firstAdapter.features === firstAdapter.features));
             log("identity:adapter.limits:" +
@@ -881,6 +941,7 @@
             gpu.requestAdapter().then(function () {
                 order.push("then2");
                 afterThen();
+            }).catch(fail);
             }).catch(fail);
         }).catch(fail);
     } catch (error) {

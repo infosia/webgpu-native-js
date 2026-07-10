@@ -65,6 +65,7 @@ const GPU_RENDER_PIPELINE_CLASS: ClassId = ClassId(22);
 const GPU_RENDER_PASS_ENCODER_CLASS: ClassId = ClassId(23);
 const GPU_SUPPORTED_LIMITS_CLASS: ClassId = ClassId(24);
 const GPU_ADAPTER_INFO_CLASS: ClassId = ClassId(25);
+const GPU_QUERY_SET_CLASS: ClassId = ClassId(26);
 const WEBIDL_U32_MAX: u64 = u32::MAX as u64;
 const WGPU_DEPTH_CLEAR_VALUE_UNDEFINED: f32 = f32::NAN;
 
@@ -111,17 +112,19 @@ impl WGPUStringViewExt for WGPUStringView {
 
 pub use generated::{
     device_create_bind_group, device_create_bind_group_layout, device_create_command_encoder,
-    device_create_compute_pipeline, device_create_pipeline_layout, device_create_render_pipeline,
-    device_create_sampler, device_create_shader_module, device_create_texture, finalize_bind_group,
-    finalize_bind_group_layout, finalize_command_encoder, finalize_compute_pipeline,
-    finalize_pipeline_layout, finalize_render_pipeline, finalize_sampler, finalize_shader_module,
-    finalize_texture, finalize_texture_view, sampler_label_get, sampler_label_set,
+    device_create_compute_pipeline, device_create_pipeline_layout, device_create_query_set,
+    device_create_render_pipeline, device_create_sampler, device_create_shader_module,
+    device_create_texture, finalize_bind_group, finalize_bind_group_layout,
+    finalize_command_encoder, finalize_compute_pipeline, finalize_pipeline_layout,
+    finalize_query_set, finalize_render_pipeline, finalize_sampler, finalize_shader_module,
+    finalize_texture, finalize_texture_view, query_set_count_get, query_set_label_get,
+    query_set_label_set, query_set_type_get, sampler_label_get, sampler_label_set,
     texture_create_view, texture_depth_or_array_layers_get, texture_dimension_get,
     texture_format_get, texture_height_get, texture_mip_level_count_get, texture_sample_count_get,
     texture_usage_get, texture_width_get, BindGroupLayoutPayload, BindGroupPayload,
     CommandEncoderPayload, ComputePipelinePayload, GpuDispatch, PipelineLayoutPayload,
-    ReleaseRequest, RenderPipelinePayload, SamplerPayload, ShaderModulePayload, TexturePayload,
-    TextureViewPayload,
+    QuerySetPayload, ReleaseRequest, RenderPipelinePayload, SamplerPayload, ShaderModulePayload,
+    TexturePayload, TextureViewPayload,
 };
 /// A per-context environment shared by wrapper callbacks.
 pub struct Environment {
@@ -2530,6 +2533,23 @@ pub fn texture_destroy<E: JsEngine + 'static>(
     Ok(E::undefined(cx))
 }
 
+/// Implements `GPUQuerySet.destroy`; native destruction is distinct from wrapper release.
+pub fn query_set_destroy<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    _args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let payload = E::payload(cx, this, GPU_QUERY_SET_CLASS)
+        .and_then(|payload| payload.downcast_ref::<QuerySetPayload>())
+        .ok_or_else(|| E::type_error(cx, "GPUQuerySet.destroy called on an incompatible object"))?;
+    if !payload.destroyed.swap(true, Ordering::AcqRel) {
+        unsafe {
+            (E::environment(cx).gpu().query_set_destroy)(payload.query_set);
+        }
+    }
+    Ok(E::undefined(cx))
+}
+
 /// Implements `GPU.requestAdapter`.
 pub fn gpu_request_adapter<E: JsEngine + 'static>(
     cx: E::Context<'_>,
@@ -4473,6 +4493,41 @@ pub fn render_pass_set_scissor_rect<E: JsEngine + 'static>(
     Ok(E::undefined(cx))
 }
 
+/// Implements `GPURenderPassEncoder.beginOcclusionQuery`.
+pub fn render_pass_begin_occlusion_query<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let pass = live_render_pass::<E>(cx, this)?;
+    let query_index = enforce_u32::<E>(
+        cx,
+        required_argument::<E>(cx, args, 0, "queryIndex")?,
+        "queryIndex",
+    )?;
+    unsafe {
+        (E::environment(cx)
+            .gpu()
+            .render_pass_encoder_begin_occlusion_query)(pass, query_index)
+    };
+    Ok(E::undefined(cx))
+}
+
+/// Implements `GPURenderPassEncoder.endOcclusionQuery`.
+pub fn render_pass_end_occlusion_query<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    _args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let pass = live_render_pass::<E>(cx, this)?;
+    unsafe {
+        (E::environment(cx)
+            .gpu()
+            .render_pass_encoder_end_occlusion_query)(pass)
+    };
+    Ok(E::undefined(cx))
+}
+
 /// Implements `GPURenderPassEncoder.end`.
 pub fn render_pass_end<E: JsEngine + 'static>(
     cx: E::Context<'_>,
@@ -5141,6 +5196,16 @@ fn texture_view_handle<E: JsEngine + 'static>(
         .and_then(|payload| payload.downcast_ref::<TextureViewPayload>())
         .map(|payload| payload.texture_view)
         .ok_or_else(|| E::type_error(cx, "GPUTextureView is required"))
+}
+
+fn query_set_handle<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    value: E::Value,
+) -> Result<WGPUQuerySet, E::Error> {
+    E::payload(cx, value, GPU_QUERY_SET_CLASS)
+        .and_then(|payload| payload.downcast_ref::<QuerySetPayload>())
+        .map(|payload| payload.query_set)
+        .ok_or_else(|| E::type_error(cx, "GPUQuerySet is required"))
 }
 
 fn shader_module_handle<E: JsEngine + 'static>(

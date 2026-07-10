@@ -21,12 +21,13 @@ use crate::{
     WGPUComputePipeline, WGPUComputePipelineDescriptor, WGPUDeviceLostCallbackInfo,
     WGPUErrorFilter, WGPUErrorType, WGPUExtent3D, WGPUFuture, WGPUIndexFormat, WGPUPipelineLayout,
     WGPUPipelineLayoutDescriptor, WGPUPopErrorScopeCallbackInfo, WGPUPopErrorScopeStatus,
-    WGPUQueue, WGPUQueueWorkDoneCallbackInfo, WGPURenderPassDescriptor, WGPURenderPassEncoder,
-    WGPURenderPipeline, WGPURenderPipelineDescriptor, WGPUSampler, WGPUSamplerDescriptor,
-    WGPUShaderModule, WGPUShaderModuleDescriptor, WGPUTexelCopyBufferInfo,
-    WGPUTexelCopyBufferLayout, WGPUTexelCopyTextureInfo, WGPUTexture, WGPUTextureDescriptor,
-    WGPUTextureDimension, WGPUTextureFormat, WGPUTextureUsage, WGPUTextureView,
-    WGPUTextureViewDescriptor, WGPUUncapturedErrorCallbackInfo,
+    WGPUQuerySet, WGPUQuerySetDescriptor, WGPUQueryType, WGPUQueue, WGPUQueueWorkDoneCallbackInfo,
+    WGPURenderPassDescriptor, WGPURenderPassEncoder, WGPURenderPipeline,
+    WGPURenderPipelineDescriptor, WGPUSampler, WGPUSamplerDescriptor, WGPUShaderModule,
+    WGPUShaderModuleDescriptor, WGPUTexelCopyBufferInfo, WGPUTexelCopyBufferLayout,
+    WGPUTexelCopyTextureInfo, WGPUTexture, WGPUTextureDescriptor, WGPUTextureDimension,
+    WGPUTextureFormat, WGPUTextureUsage, WGPUTextureView, WGPUTextureViewDescriptor,
+    WGPUUncapturedErrorCallbackInfo,
 };
 
 /// Mock JavaScript value handle.
@@ -1090,6 +1091,9 @@ struct MockGpuState {
     command_buffer_releases: usize,
     compute_pass_encoder_releases: usize,
     render_pass_encoder_releases: usize,
+    query_set_add_refs: usize,
+    query_set_releases: usize,
+    query_set_destroys: usize,
     buffer_destroys: usize,
     texture_destroys: usize,
     buffer_unmaps: usize,
@@ -1100,6 +1104,8 @@ struct MockGpuState {
     sampler_descriptors: Vec<RecordedSamplerDescriptor>,
     texture_descriptors: Vec<RecordedTextureDescriptor>,
     texture_view_descriptors: Vec<RecordedTextureViewDescriptor>,
+    query_set_descriptors: Vec<RecordedQuerySetDescriptor>,
+    query_sets: BTreeMap<WGPUQuerySet, RecordedQuerySetDescriptor>,
     textures: BTreeMap<WGPUTexture, RecordedTextureDescriptor>,
     null_create_buffer: bool,
     null_create_sampler: bool,
@@ -1176,6 +1182,13 @@ struct RecordedTextureViewDescriptor {
     mip_level_count: u32,
     base_array_layer: u32,
     array_layer_count: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RecordedQuerySetDescriptor {
+    label: Vec<u8>,
+    type_: WGPUQueryType,
+    count: u32,
 }
 
 /// Resets the mock GPU call log.
@@ -1581,6 +1594,64 @@ unsafe fn device_create_texture(
         state.textures.insert(texture, recorded);
         texture
     })
+}
+
+unsafe fn device_create_query_set(
+    _device: WGPUDevice,
+    descriptor: *const WGPUQuerySetDescriptor,
+) -> WGPUQuerySet {
+    let Some(descriptor) = (unsafe { descriptor.as_ref() }) else {
+        return ptr::null_mut();
+    };
+    GPU_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let recorded = RecordedQuerySetDescriptor {
+            label: read_view(descriptor.label),
+            type_: descriptor.type_,
+            count: descriptor.count,
+        };
+        state.next += 1;
+        let query_set = fake_handle(2650 + state.next);
+        state.query_set_descriptors.push(recorded.clone());
+        state.query_sets.insert(query_set, recorded);
+        query_set
+    })
+}
+
+unsafe fn query_set_add_ref(_query_set: WGPUQuerySet) {
+    GPU_STATE.with(|state| state.borrow_mut().query_set_add_refs += 1);
+}
+
+unsafe fn query_set_release(_query_set: WGPUQuerySet) {
+    GPU_STATE.with(|state| state.borrow_mut().query_set_releases += 1);
+}
+
+unsafe fn query_set_destroy(_query_set: WGPUQuerySet) {
+    GPU_STATE.with(|state| state.borrow_mut().query_set_destroys += 1);
+}
+
+unsafe fn query_set_get_type(query_set: WGPUQuerySet) -> WGPUQueryType {
+    GPU_STATE.with(|state| {
+        state
+            .borrow()
+            .query_sets
+            .get(&query_set)
+            .map_or(0, |descriptor| descriptor.type_)
+    })
+}
+
+unsafe fn query_set_get_count(query_set: WGPUQuerySet) -> u32 {
+    GPU_STATE.with(|state| {
+        state
+            .borrow()
+            .query_sets
+            .get(&query_set)
+            .map_or(0, |descriptor| descriptor.count)
+    })
+}
+
+unsafe fn query_set_set_label(_query_set: WGPUQuerySet, label: WGPUStringView) {
+    GPU_STATE.with(|state| state.borrow_mut().labels.push(read_view(label)));
 }
 
 unsafe fn texture_create_view(
@@ -2326,6 +2397,27 @@ unsafe fn render_pass_encoder_set_scissor_rect(
             .or_default() += 1;
     });
 }
+unsafe fn render_pass_encoder_begin_occlusion_query(
+    _pass: WGPURenderPassEncoder,
+    _query_index: u32,
+) {
+    GPU_STATE.with(|state| {
+        *state
+            .borrow_mut()
+            .recording_calls
+            .entry("begin_occlusion_query")
+            .or_default() += 1;
+    });
+}
+unsafe fn render_pass_encoder_end_occlusion_query(_pass: WGPURenderPassEncoder) {
+    GPU_STATE.with(|state| {
+        *state
+            .borrow_mut()
+            .recording_calls
+            .entry("end_occlusion_query")
+            .or_default() += 1;
+    });
+}
 unsafe fn render_pass_encoder_end(_pass: WGPURenderPassEncoder) {
     GPU_STATE.with(|state| {
         *state
@@ -2356,7 +2448,7 @@ mod tests {
         convert_command_encoder_descriptor, convert_compute_pass_descriptor,
         convert_compute_pipeline_descriptor, convert_depth_stencil_state, convert_gpu_color,
         convert_gpu_extent3d, convert_gpu_origin3d, convert_multisample_state,
-        convert_pipeline_layout_descriptor, convert_primitive_state,
+        convert_pipeline_layout_descriptor, convert_primitive_state, convert_query_set_descriptor,
         convert_render_pass_color_attachment, convert_render_pass_depth_stencil_attachment,
         convert_render_pass_descriptor, convert_render_pipeline_descriptor,
         convert_sampler_binding_layout, convert_sampler_descriptor,
@@ -2366,22 +2458,22 @@ mod tests {
         convert_texture_binding_layout, convert_texture_descriptor,
         convert_texture_view_descriptor, convert_vertex_attribute, convert_vertex_buffer_layout,
         device_create_bind_group, device_create_buffer, device_create_command_encoder,
-        device_create_compute_pipeline, device_create_render_pipeline, device_create_sampler,
-        device_create_texture, device_lost_get, device_lost_info_message_get,
-        device_lost_info_reason_get, device_on_uncaptured_error_get,
+        device_create_compute_pipeline, device_create_query_set, device_create_render_pipeline,
+        device_create_sampler, device_create_texture, device_lost_get,
+        device_lost_info_message_get, device_lost_info_reason_get, device_on_uncaptured_error_get,
         device_on_uncaptured_error_set, device_pop_error_scope, device_push_error_scope,
         device_queue_get, finalize_bind_group, finalize_buffer, finalize_compute_pipeline,
-        finalize_device, finalize_queue, finalize_render_pipeline, finalize_sampler,
-        finalize_texture, finalize_texture_view, queue_submit, queue_work_done_callback,
-        queue_write_buffer, queue_write_texture, request_adapter_callback, request_device_callback,
-        texture_depth_or_array_layers_get, texture_dimension_get, texture_format_get,
-        texture_height_get, texture_mip_level_count_get, texture_sample_count_get,
-        texture_usage_get, texture_width_get, wrap_device, AdapterPayload, AdapterRequest,
-        BindGroupLayoutPayload, BindGroupPayload, BufferPayload, ComputePipelinePayload,
-        DeviceEventState, DevicePayload, DeviceRequest, ErrorPayload, JsEngine, PendingNative,
-        PendingNativeHandle, PipelineLayoutPayload, QueueError, QueuePayload, QueueWorkDoneRequest,
-        RenderPipelinePayload, SamplerPayload, SettlementRequest, ShaderModulePayload,
-        TexturePayload, TextureViewPayload,
+        finalize_device, finalize_query_set, finalize_queue, finalize_render_pipeline,
+        finalize_sampler, finalize_texture, finalize_texture_view, queue_submit,
+        queue_work_done_callback, queue_write_buffer, queue_write_texture,
+        request_adapter_callback, request_device_callback, texture_depth_or_array_layers_get,
+        texture_dimension_get, texture_format_get, texture_height_get, texture_mip_level_count_get,
+        texture_sample_count_get, texture_usage_get, texture_width_get, wrap_device,
+        AdapterPayload, AdapterRequest, BindGroupLayoutPayload, BindGroupPayload, BufferPayload,
+        ComputePipelinePayload, DeviceEventState, DevicePayload, DeviceRequest, ErrorPayload,
+        JsEngine, PendingNative, PendingNativeHandle, PipelineLayoutPayload, QuerySetPayload,
+        QueueError, QueuePayload, QueueWorkDoneRequest, RenderPipelinePayload, SamplerPayload,
+        SettlementRequest, ShaderModulePayload, TexturePayload, TextureViewPayload,
     };
     use std::sync::atomic::AtomicBool;
     use std::sync::{Mutex, Weak};
@@ -3247,6 +3339,86 @@ mod tests {
             "OperationError: wgpuDeviceCreateSampler returned null"
         );
         GPU_STATE.with(|state| assert_eq!(state.borrow().sampler_releases, 0));
+    }
+
+    #[test]
+    fn query_set_create_readback_destroy_release_and_occlusion_recording() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let desc = descriptor(
+            &rt,
+            &[
+                ("type", rt.string("occlusion")),
+                ("count", rt.number(4.0)),
+                ("label", rt.string("created")),
+            ],
+        );
+        let query_set = device_create_query_set::<Engine>(cx, device, &[desc]).expect("query set");
+
+        let type_ = crate::query_set_type_get::<Engine>(cx, query_set).expect("type");
+        assert!(matches!(rt.get(type_), MockValue::String(value) if value == "occlusion"));
+        let count = crate::query_set_count_get::<Engine>(cx, query_set).expect("count");
+        assert!(matches!(rt.get(count), MockValue::Number(value) if value == 4.0));
+        let label = crate::query_set_label_get::<Engine>(cx, query_set).expect("label");
+        assert!(matches!(rt.get(label), MockValue::String(value) if value == "created"));
+        crate::query_set_label_set::<Engine>(cx, query_set, rt.string("renamed"))
+            .expect("set label");
+
+        let encoder = device_create_command_encoder::<Engine>(cx, device, &[]).expect("encoder");
+        let pass_desc = descriptor(
+            &rt,
+            &[
+                ("colorAttachments", rt.set_like(&[])),
+                ("occlusionQuerySet", query_set),
+            ],
+        );
+        let pass = crate::command_encoder_begin_render_pass::<Engine>(cx, encoder, &[pass_desc])
+            .expect("render pass");
+        crate::render_pass_begin_occlusion_query::<Engine>(cx, pass, &[rt.number(2.0)])
+            .expect("begin query");
+        crate::render_pass_end_occlusion_query::<Engine>(cx, pass, &[]).expect("end query");
+        crate::render_pass_end::<Engine>(cx, pass, &[]).expect("end pass");
+
+        crate::query_set_destroy::<Engine>(cx, query_set, &[]).expect("destroy");
+        crate::query_set_destroy::<Engine>(cx, query_set, &[]).expect("idempotent destroy");
+        let payload = Engine::payload(cx, query_set, crate::GPU_QUERY_SET_CLASS)
+            .and_then(|payload| payload.downcast_ref::<QuerySetPayload>())
+            .expect("query set payload");
+        finalize_query_set(
+            Box::new(QuerySetPayload {
+                query_set: payload.query_set,
+                destroyed: AtomicBool::new(true),
+                label: Mutex::new(payload.label.lock().expect("label lock").clone()),
+            }),
+            &rt.env,
+        );
+        assert_eq!(rt.queue().drain().expect("query set release"), 1);
+
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.query_set_descriptors.len(), 1);
+            assert_eq!(state.query_set_descriptors[0].count, 4);
+            assert_eq!(state.query_set_destroys, 1);
+            assert_eq!(state.query_set_add_refs, 0);
+            assert_eq!(state.query_set_releases, 1);
+            assert_eq!(state.recording_calls.get("begin_occlusion_query"), Some(&1));
+            assert_eq!(state.recording_calls.get("end_occlusion_query"), Some(&1));
+        });
+
+        let bad = descriptor(
+            &rt,
+            &[
+                ("type", rt.string("not-a-query-type")),
+                ("count", rt.number(1.0)),
+            ],
+        );
+        assert_eq!(
+            convert_query_set_descriptor::<Engine>(cx, bad, &Arena::new())
+                .expect_err("unknown enum must fail"),
+            "TypeError: GPUQueryType"
+        );
     }
 
     #[test]

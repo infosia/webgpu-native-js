@@ -52,6 +52,7 @@ add_ref = [
   { interface = "GPUBindGroup", reason = "standard resource lifecycle keeps AddRef available for command recording" },
   { interface = "GPUComputePipeline", reason = "standard resource lifecycle keeps AddRef available for command recording" },
   { interface = "GPURenderPipeline", reason = "standard resource lifecycle keeps AddRef available for render command recording" },
+  { interface = "GPUQuerySet", reason = "standard resource lifecycle keeps AddRef available for command recording" },
 ]
 no_add_ref = [
   { interface = "GPUCommandEncoder", reason = "the single-use encoder is adopted and never retained" },
@@ -100,6 +101,7 @@ members = [
   "createBindGroup",
   "createComputePipeline",
   "createRenderPipeline",
+  "createQuerySet",
   "createCommandEncoder",
   "queue",
   "destroy",
@@ -163,6 +165,10 @@ interface = "GPURenderPipeline"
 members = ["getBindGroupLayout"]
 
 [[subset]]
+interface = "GPUQuerySet"
+members = ["destroy", "type", "count", "label"]
+
+[[subset]]
 interface = "GPUCommandEncoder"
 members = [
   "beginComputePass",
@@ -189,6 +195,8 @@ members = [
   "drawIndexed",
   "setViewport",
   "setScissorRect",
+  "beginOcclusionQuery",
+  "endOcclusionQuery",
   "end",
 ]
 
@@ -212,6 +220,7 @@ standard_interfaces = [
   "GPUBindGroup",
   "GPUComputePipeline",
   "GPURenderPipeline",
+  "GPUQuerySet",
   "GPUCommandEncoder",
 ]
 extra_class_interfaces = ["GPU", "GPUAdapter"]
@@ -262,6 +271,11 @@ path = "buffer_destroy"
 interface = "GPUTexture"
 member = "destroy"
 path = "texture_destroy"
+
+[[lifecycle.methods]]
+interface = "GPUQuerySet"
+member = "destroy"
+path = "query_set_destroy"
 
 [[lifecycle.methods]]
 interface = "GPUBuffer"
@@ -397,6 +411,16 @@ path = "render_pass_set_scissor_rect"
 
 [[lifecycle.methods]]
 interface = "GPURenderPassEncoder"
+member = "beginOcclusionQuery"
+path = "render_pass_begin_occlusion_query"
+
+[[lifecycle.methods]]
+interface = "GPURenderPassEncoder"
+member = "endOcclusionQuery"
+path = "render_pass_end_occlusion_query"
+
+[[lifecycle.methods]]
+interface = "GPURenderPassEncoder"
 member = "end"
 path = "render_pass_end"
 
@@ -477,6 +501,11 @@ interface = "GPUTexture"
 kind = "destroyable_resource_payload"
 reason = "T2/R14 keeps destroy idempotent while finalization remains a distinct release"
 
+[[lifecycle.quirks]]
+interface = "GPUQuerySet"
+kind = "destroyable_resource_payload"
+reason = "R14 keeps destroy idempotent while finalization remains a distinct release"
+
 [[name_map]]
 idl = "GPUExtent3DDict"
 c = "WGPUExtent3D"
@@ -513,6 +542,13 @@ max_length = 4
 [[descriptor]]
 dictionary = "GPUBufferDescriptor"
 target = "BufferDescriptor"
+
+[[descriptor.strings]]
+member = "label"
+nullable = false
+
+[[descriptor]]
+dictionary = "GPUQuerySetDescriptor"
 
 [[descriptor.strings]]
 member = "label"
@@ -560,14 +596,13 @@ dictionary = "GPURenderPassDescriptor"
 member = "label"
 nullable = false
 
-[[descriptor.skips]]
+[[descriptor.handles]]
 member = "occlusionQuerySet"
-reason = "query sets are outside the block 09 render-pass slice"
-reject_if_present = true
+helper = "query_set_handle"
 
 [[descriptor.skips]]
 member = "timestampWrites"
-reason = "query sets are outside the block 09 render-pass slice"
+reason = "timestamp-query requires requiredFeatures, which requestDevice does not yet plumb"
 reject_if_present = true
 
 [[descriptor.skips]]

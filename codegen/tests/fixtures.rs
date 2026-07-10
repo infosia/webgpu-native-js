@@ -167,7 +167,7 @@ fn full_pinned_inputs_parse_and_subset_join_offline() {
     let report = join_inputs(&idl, &yaml).expect("full pinned join");
     assert_eq!(report.parser.remaining_bytes, 0);
     assert_eq!(report.parser.definitions, 209);
-    assert_eq!(report.interfaces.len(), 16);
+    assert_eq!(report.interfaces.len(), 17);
     assert!(report.parser.saw_enforce_range);
     assert!(report.parser.saw_same_object);
     assert!(report.parser.saw_exposed);
@@ -200,7 +200,7 @@ fn generated_dispatch_macro_matches_focused_shape_fixture() {
     let expected =
         fs::read_to_string(fixtures().join("dispatch_surface.rs")).expect("dispatch snapshot");
     assert_eq!(dispatch_macro_surface(&emitted), expected);
-    assert_eq!(expected.matches(", unsafe fn(").count(), 96);
+    assert_eq!(expected.matches(", unsafe fn(").count(), 105);
 }
 
 #[test]
@@ -260,6 +260,7 @@ fn generated_lifecycle_covers_every_selected_class_and_retention_set() {
         "bind_group_class",
         "compute_pipeline_class",
         "render_pipeline_class",
+        "query_set_class",
         "command_encoder_class",
         "compute_pass_encoder_class",
         "render_pass_encoder_class",
