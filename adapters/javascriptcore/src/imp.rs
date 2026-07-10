@@ -5,7 +5,7 @@ use std::ffi::{c_char, c_int, c_void, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use webgpu_native_js_core as core;
 use webgpu_native_js_core::__gpu_dispatch_from_ffi;
@@ -73,6 +73,7 @@ type HasInstanceCallback =
     unsafe extern "C" fn(JSContextRef, JSObjectRef, JSValueRef, *mut JSValueRef) -> bool;
 type ConvertToTypeCallback =
     unsafe extern "C" fn(JSContextRef, JSObjectRef, c_int, *mut JSValueRef) -> JSValueRef;
+type BigIntPredicate = unsafe extern "C" fn(JSContextRef, JSValueRef) -> bool;
 
 #[repr(C)]
 struct JSClassDefinition {
@@ -160,11 +161,10 @@ unsafe extern "C" {
     fn JSValueIsNull(ctx: JSContextRef, value: JSValueRef) -> bool;
     /// Tests whether a value is a JavaScript object.
     fn JSValueIsObject(ctx: JSContextRef, value: JSValueRef) -> bool;
-    /// Tests whether a value is a JavaScript BigInt.
-    ///
-    /// This symbol is `API_AVAILABLE(macos(15.0), ios(18.0))`; hard-linking it
-    /// imposes those OS versions as the JavaScriptCore adapter deployment floor.
-    fn JSValueIsBigInt(ctx: JSContextRef, value: JSValueRef) -> bool;
+    // F9 owner decision: JSValueIsBigInt is intentionally not hard-linked.
+    // Its macOS 15 / iOS 18 availability would impose that deployment floor,
+    // so `bigint_predicate` resolves it at runtime and older systems use one
+    // retained `JSObjectMakeFunction` typeof helper instead.
     /// Tests whether an object was created with a specific class.
     fn JSValueIsObjectOfClass(ctx: JSContextRef, value: JSValueRef, js_class: JSClassRef) -> bool;
     /// Converts a value with JavaScript `ToBoolean`.
@@ -212,6 +212,17 @@ unsafe extern "C" {
         ctx: JSContextRef,
         class: JSClassRef,
         call_as_constructor: Option<CallAsConstructorCallback>,
+    ) -> JSObjectRef;
+    /// Creates a JavaScript function from trusted parameter and body strings.
+    fn JSObjectMakeFunction(
+        ctx: JSContextRef,
+        name: JSStringRef,
+        parameter_count: u32,
+        parameter_names: *const JSStringRef,
+        body: JSStringRef,
+        source_url: JSStringRef,
+        starting_line_number: c_int,
+        exception: *mut JSValueRef,
     ) -> JSObjectRef;
     /// Tests whether an object is callable as a function.
     fn JSObjectIsFunction(ctx: JSContextRef, object: JSObjectRef) -> bool;
@@ -294,6 +305,30 @@ unsafe extern "C" {
     fn JSObjectGetPrivate(object: JSObjectRef) -> *mut c_void;
     /// Replaces an object's private pointer.
     fn JSObjectSetPrivate(object: JSObjectRef, data: *mut c_void) -> bool;
+}
+
+unsafe extern "C" {
+    /// Looks up a symbol in the already-loaded process images (libSystem libc).
+    fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+}
+
+fn bigint_predicate() -> Option<BigIntPredicate> {
+    static PREDICATE: OnceLock<Option<BigIntPredicate>> = OnceLock::new();
+    *PREDICATE.get_or_init(|| {
+        // Darwin defines RTLD_DEFAULT as (void *)-2. JavaScriptCore is already
+        // loaded through the adapter's other framework symbols.
+        let default = (-2_isize) as *mut c_void;
+        // SAFETY: the nul-terminated name is static and dlsym accepts the
+        // process-wide RTLD_DEFAULT pseudo-handle.
+        let symbol = unsafe { dlsym(default, c"JSValueIsBigInt".as_ptr()) };
+        if symbol.is_null() {
+            None
+        } else {
+            // SAFETY: WebKit declares JSValueIsBigInt with exactly the
+            // BigIntPredicate ABI; dlsym returned that symbol's entry address.
+            Some(unsafe { std::mem::transmute::<*mut c_void, BigIntPredicate>(symbol) })
+        }
+    })
 }
 
 /// Adapter result type.
@@ -414,17 +449,30 @@ impl FinalizerState {
     }
 
     fn protect_class_method(&self, ctx: JSContextRef, value: JSValueRef) {
-        if ctx.is_null() || value.is_null() {
+        if ctx.is_null() || value.is_null() || self.tearing_down.load(Ordering::Acquire) {
             return;
         }
-        // SAFETY: class registration runs on the live context's engine thread.
+        // SAFETY: retained helpers are installed on the live context's engine
+        // thread before teardown.
         unsafe { JSValueProtect(ctx, value) };
+        let Ok(mut protected) = self.class_method_protected.lock() else {
+            // SAFETY: without a ledger entry teardown cannot balance this
+            // protection, so undo it immediately on the same engine thread.
+            unsafe { JSValueUnprotect(ctx, value) };
+            return;
+        };
+        if self.tearing_down.load(Ordering::Acquire) {
+            // Teardown may have started between the first guard and this lock.
+            // Leave the value unprotected rather than push into a drained ledger.
+            drop(protected);
+            // SAFETY: this balances the temporary protection above.
+            unsafe { JSValueUnprotect(ctx, value) };
+            return;
+        }
+        protected.push(ProtectedValue(value));
         self.protect_count.fetch_add(1, Ordering::Relaxed);
         self.class_method_protect_count
             .fetch_add(1, Ordering::Relaxed);
-        if let Ok(mut protected) = self.class_method_protected.lock() {
-            protected.push(ProtectedValue(value));
-        }
     }
 
     fn unprotect(&self, ctx: JSContextRef, value: JSValueRef) {
@@ -529,12 +577,14 @@ pub struct State {
     classes: Mutex<BTreeMap<core::ClassId, ClassEntry>>,
     constructors: Mutex<BTreeMap<usize, core::ClassId>>,
     method_class: JSClassRef,
+    bigint_predicate: Option<BigIntPredicate>,
+    bigint_fallback: Option<ProtectedValue>,
     outstanding_deferreds: Arc<Mutex<Vec<DeferredSlot>>>,
     settle_trampoline: Mutex<Option<JSValueRef>>,
 }
 
 impl State {
-    fn new(gpu: core::GpuDispatch) -> Result<Self> {
+    fn new(gpu: core::GpuDispatch, bigint_predicate: Option<BigIntPredicate>) -> Result<Self> {
         let mut definition = JSClassDefinition::empty();
         definition.class_name = c"webgpuNativeMethod".as_ptr();
         definition.finalize = Some(method_finalize);
@@ -550,6 +600,8 @@ impl State {
             classes: Mutex::new(BTreeMap::new()),
             constructors: Mutex::new(BTreeMap::new()),
             method_class,
+            bigint_predicate,
+            bigint_fallback: None,
             outstanding_deferreds: Arc::new(Mutex::new(Vec::new())),
             settle_trampoline: Mutex::new(None),
         })
@@ -749,6 +801,25 @@ impl Runtime {
     }
 
     fn new_with_dispatch(gpu: core::GpuDispatch) -> Result<Self> {
+        #[cfg(test)]
+        {
+            Self::new_with_dispatch_and_bigint_mode(gpu, false)
+        }
+        #[cfg(not(test))]
+        {
+            Self::new_with_dispatch_and_bigint_mode(gpu)
+        }
+    }
+
+    #[cfg(test)]
+    fn new_forcing_bigint_fallback() -> Result<Self> {
+        Self::new_with_dispatch_and_bigint_mode(gpu_dispatch(), true)
+    }
+
+    fn new_with_dispatch_and_bigint_mode(
+        gpu: core::GpuDispatch,
+        #[cfg(test)] force_bigint_fallback: bool,
+    ) -> Result<Self> {
         let mut global_definition = JSClassDefinition::empty();
         global_definition.class_name = c"webgpuNativeGlobal".as_ptr();
         // SAFETY: the class definition contains only static or null pointers.
@@ -762,7 +833,14 @@ impl Runtime {
             unsafe { JSClassRelease(global_class.as_ptr()) };
             return Err(Error::Null("JSGlobalContextCreate"));
         };
-        let state = match State::new(gpu) {
+        let predicate = bigint_predicate();
+        #[cfg(test)]
+        let predicate = if force_bigint_fallback {
+            None
+        } else {
+            predicate
+        };
+        let state = match State::new(gpu, predicate) {
             Ok(state) => Box::new(state),
             Err(error) => {
                 // SAFETY: both handles are live and no state was installed.
@@ -786,11 +864,20 @@ impl Runtime {
             }
             return Err(Error::Null("JSObjectSetPrivate(global)"));
         }
-        let runtime = Self {
+        let mut runtime = Self {
             ctx,
             global_class,
             state,
         };
+        if runtime.state.bigint_predicate.is_none() {
+            let fallback = with_scope(runtime.raw_context(), make_bigint_fallback)
+                .map_err(|error| Error::Exception(value_to_string(runtime.raw_context(), error)))?;
+            runtime
+                .state
+                .finalizer
+                .protect_class_method(runtime.raw_context(), fallback);
+            runtime.state.bigint_fallback = Some(ProtectedValue(fallback));
+        }
         let trampoline = runtime.eval_unprotected(
             "(function(fns, values) { for (let i = 0; i < fns.length; i++) fns[i](values[i]); })",
             "webgpu-native-js-settle-trampoline.js",
@@ -1129,8 +1216,8 @@ impl core::JsEngine for Engine {
     fn to_f64(cx: Self::Context<'_>, value: Self::Value) -> core::Result<f64, Self::Error> {
         // JSValueToNumber follows the explicit `Number(value)` operation, which
         // accepts BigInt. WebIDL ToNumber instead rejects BigInt, so preserve
-        // the boundary's WebIDL contract with the SDK predicate first.
-        if unsafe { JSValueIsBigInt(cx.ctx, value) } {
+        // the boundary's WebIDL contract with the runtime predicate first.
+        if is_bigint(cx, value)? {
             return Err(Self::type_error(
                 cx,
                 "BigInt cannot be converted to a number",
@@ -1200,7 +1287,15 @@ impl core::JsEngine for Engine {
         }
         let mut methods = Vec::with_capacity(spec.methods.len());
         for method in spec.methods {
-            let value = make_method(cx, method.call)?;
+            let value = match make_method(cx, method.call) {
+                Ok(value) => value,
+                Err(error) => {
+                    // SAFETY: the class has not entered the registry, so this
+                    // is the sole create reference and must be released here.
+                    unsafe { JSClassRelease(class) };
+                    return Err(error);
+                }
+            };
             state.finalizer.protect_class_method(cx.ctx, value);
             methods.push(ClassMethod {
                 name: method.name,
@@ -1800,6 +1895,62 @@ fn call_own_method(
     Engine::call(cx, call, method, &[receiver])
 }
 
+fn make_bigint_fallback(cx: Context<'_>) -> core::Result<JSValueRef, JSValueRef> {
+    let name = JsString::new("webgpuNativeIsBigInt")
+        .map_err(|_| Engine::operation_error(cx, "BigInt helper name failed"))?;
+    let parameter = JsString::new("v")
+        .map_err(|_| Engine::operation_error(cx, "BigInt helper parameter failed"))?;
+    let body = JsString::new("return typeof v === \"bigint\";")
+        .map_err(|_| Engine::operation_error(cx, "BigInt helper body failed"))?;
+    let source_url = JsString::new("webgpu-native-js-bigint-predicate.js")
+        .map_err(|_| Engine::operation_error(cx, "BigInt helper source URL failed"))?;
+    let parameter_names = [parameter.as_raw()];
+    let mut exception = ptr::null();
+    // SAFETY: every string and the context are live for this call. The body is
+    // fixed first-party source under CLAUDE.md invariant 8 (trusted scripts),
+    // not script input, and JSObjectMakeFunction copies the source strings.
+    let helper = unsafe {
+        JSObjectMakeFunction(
+            cx.ctx,
+            name.as_raw(),
+            1,
+            parameter_names.as_ptr(),
+            body.as_raw(),
+            source_url.as_raw(),
+            1,
+            &mut exception,
+        )
+    };
+    if !exception.is_null() {
+        Err(exception)
+    } else if helper.is_null() {
+        Err(Engine::operation_error(
+            cx,
+            "JSObjectMakeFunction(BigInt predicate) failed",
+        ))
+    } else {
+        let value = helper.cast_const();
+        cx.scope.track(value);
+        Ok(value)
+    }
+}
+
+fn is_bigint(cx: Context<'_>, value: JSValueRef) -> core::Result<bool, JSValueRef> {
+    let state = state_from_context(cx.ctx);
+    if let Some(predicate) = state.bigint_predicate {
+        // SAFETY: dlsym verified the symbol is present, and both handles belong
+        // to the live context represented by cx.
+        return Ok(unsafe { predicate(cx.ctx, value) });
+    }
+    let helper = state
+        .bigint_fallback
+        .ok_or_else(|| Engine::operation_error(cx, "BigInt predicate is unavailable"))?;
+    let global = Engine::global(cx);
+    let result = Engine::call(cx, helper.0, global, &[value])?;
+    // SAFETY: the helper's result belongs to cx and is a JavaScript boolean.
+    Ok(unsafe { JSValueToBoolean(cx.ctx, result) })
+}
+
 fn make_error(cx: Context<'_>, message: &str, type_error: bool) -> JSValueRef {
     let message = JsString::new(message).ok().map(|message| {
         // SAFETY: cx and message are live for value construction.
@@ -1902,19 +2053,24 @@ unsafe extern "C" fn wrapper_get_property(
             .iter()
             .find(|method| method.name == name)
         {
-            let classes = state_from_context(ctx)
-                .classes
-                .lock()
-                .map_err(|_| Engine::operation_error(cx, "class registry is poisoned"))?;
-            return classes
-                .get(&holder.spec.id)
-                .and_then(|entry| {
-                    entry
-                        .methods
-                        .iter()
-                        .find(|cached| cached.name == method.name)
-                })
-                .map(|cached| cached.value.0)
+            let value = {
+                let classes = state_from_context(ctx)
+                    .classes
+                    .lock()
+                    .map_err(|_| Engine::operation_error(cx, "class registry is poisoned"))?;
+                classes
+                    .get(&holder.spec.id)
+                    .and_then(|entry| {
+                        entry
+                            .methods
+                            .iter()
+                            .find(|cached| cached.name == method.name)
+                    })
+                    .map(|cached| cached.value.0)
+            };
+            // Error construction allocates in JSC and may synchronously run
+            // finalizers, so never retain the class-registry guard across it.
+            return value
                 .ok_or_else(|| Engine::operation_error(cx, "class method is not registered"));
         }
         let Some(getter) = holder
@@ -2386,13 +2542,21 @@ mod tests {
         unsafe { super::JSValueToBoolean(runtime.raw_context(), value) }
     }
 
-    #[test]
-    fn shared_j17_parity_script_matches_expected_output() {
+    fn assert_shared_j17_parity_script_matches_expected_output(force_bigint_fallback: bool) {
         const SCRIPT: &str = include_str!("../../../tests/parity/parity.js");
         const EXPECTED: &str = include_str!("../../../tests/parity/expected.txt");
 
         let setup = native_setup();
-        let runtime = Runtime::new().expect("JSC runtime");
+        let runtime = if force_bigint_fallback {
+            Runtime::new_forcing_bigint_fallback().expect("JSC fallback runtime")
+        } else {
+            Runtime::new().expect("JSC runtime")
+        };
+        assert_eq!(
+            runtime.state.bigint_predicate.is_none(),
+            force_bigint_fallback,
+            "the requested BigInt detection path must be active"
+        );
         let device = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
         let gpu = unsafe { runtime.wrap_gpu(setup.instance) }.expect("wrap gpu");
         runtime
@@ -2426,6 +2590,20 @@ mod tests {
             super::value_to_string(runtime.raw_context(), joined)
         );
         assert_eq!(actual, EXPECTED);
+    }
+
+    #[test]
+    fn shared_j17_parity_script_matches_expected_output() {
+        assert!(
+            super::bigint_predicate().is_some(),
+            "this gate requires the modern JSC runtime symbol"
+        );
+        assert_shared_j17_parity_script_matches_expected_output(false);
+    }
+
+    #[test]
+    fn shared_j17_parity_script_matches_expected_output_with_bigint_fallback() {
+        assert_shared_j17_parity_script_matches_expected_output(true);
     }
 
     #[test]
@@ -3028,10 +3206,18 @@ mod tests {
         );
     }
 
-    #[test]
-    fn bigint_size_throws_a_catchable_type_error() {
+    fn assert_bigint_size_throws_a_catchable_type_error(force_bigint_fallback: bool) {
         let setup = native_setup();
-        let runtime = Runtime::new().expect("JSC runtime");
+        let runtime = if force_bigint_fallback {
+            Runtime::new_forcing_bigint_fallback().expect("JSC fallback runtime")
+        } else {
+            Runtime::new().expect("JSC runtime")
+        };
+        assert_eq!(
+            runtime.state.bigint_predicate.is_none(),
+            force_bigint_fallback,
+            "the requested BigInt detection path must be active"
+        );
         let device = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
         runtime
             .set_global_value("device", device)
@@ -3046,6 +3232,20 @@ mod tests {
             "#,
             "bigint-type-error.js",
         );
+    }
+
+    #[test]
+    fn bigint_size_throws_a_catchable_type_error() {
+        assert!(
+            super::bigint_predicate().is_some(),
+            "this gate requires the modern JSC runtime symbol"
+        );
+        assert_bigint_size_throws_a_catchable_type_error(false);
+    }
+
+    #[test]
+    fn bigint_size_throws_a_catchable_type_error_with_fallback() {
+        assert_bigint_size_throws_a_catchable_type_error(true);
     }
 
     #[test]

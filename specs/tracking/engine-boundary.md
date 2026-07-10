@@ -1266,3 +1266,15 @@ QuickJS gains a WTF-8 sanitizer (quickjs.c's surrogate-preserving
 `utf8_encode` verified at source) collapsing each ill-formed sequence to one
 U+FFFD. `string:lone-surrogate:a\u{FFFD}b` (bytes 61 EF BF BD 62) pinned.
 Suites: quickjs 54, JSC 21+1, core 104.
+
+**Block 08 closed + F9 floor removed (2026-07-10).** The focused part-3
+soundness pass returned zero CRITICAL/MAJOR (the CESU-8 hazard was ruled out
+at source: quickjs merges surrogate pairs into 4-byte UTF-8 before encoding —
+quickjs.c:4564 — so the sanitizer can never split an astral character); its
+three MINORs (class-ref leak on an OOM path, a missing tearing_down guard, an
+error built under the classes lock) are fixed. F9: `JSValueIsBigInt` is now a
+runtime `dlsym` lookup with a retained `typeof`-helper fallback — both paths
+exercised in the suite, `nm` confirms no hard link, the macOS 15 / iOS 18
+deployment floor is gone. Block 08 exit criteria: all four met — 62 lines,
+four divergences found and all fixed at the root, corruption fails both
+adapters, prior suites unchanged.

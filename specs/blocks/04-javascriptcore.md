@@ -47,7 +47,7 @@ observed an off-main-thread finalizer — but the design obligation now rests on
 the header's own words, not on an assumption. Invariant 4 and J21 are load-bearing
 against a documented behaviour.
 
-| **F9** | **`JSValueIsBigInt` is `API_AVAILABLE(macos(15.0), ios(18.0))` and the adapter hard-links it**, so macOS 15 / iOS 18 is the JSC adapter's deployment floor (older systems dyld-abort at load). Measured before accepting: `JSValueToNumber` on a BigInt does **not** raise a TypeError through the exception out-param, so the symbol cannot be dropped without losing the WebIDL BigInt rejection the parity script pins. | Deletion experiment during the Phase 3 review MINOR tier. |
+| **F9** | **`JSValueIsBigInt` is `API_AVAILABLE(macos(15.0), ios(18.0))`** — and hard-linking it made that the adapter's deployment floor (older systems dyld-abort at load). Measured: `JSValueToNumber` on a BigInt does **not** raise, so the check cannot simply be dropped. **Floor removed 2026-07-10 (owner decision, JSC-on-iOS needs a lower floor):** the symbol is resolved at runtime via `dlsym` and, when absent, a once-per-context retained `typeof v === "bigint"` helper (built with `JSObjectMakeFunction` — trusted first-party source, invariant 8) provides identical behavior; both paths run the BigInt-rejection test and the full parity script in the suite. | Deletion experiment (Phase 3 review) + the F9 close-out slice, `nm`-verified no hard link remains. |
 
 ---
 
