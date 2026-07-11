@@ -14,7 +14,13 @@ const GLUE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/glue.mjs");
 
 // Phase A-2 replaces these placeholders with aliases for the discovered CTS
 // build layout. Values are paths relative to --cts-path/CTS_PATH.
-const CTS_MODULE_ALIASES: &[(&str, &str)] = &[("cts", "")];
+const CTS_MODULE_ALIASES: &[(&str, &str)] = &[
+    ("cts/file_loader", "common/internal/file_loader.js"),
+    ("cts/parse_query", "common/internal/query/parseQuery.js"),
+    ("cts/logger", "common/internal/logging/logger.js"),
+    ("cts/log_message", "common/internal/logging/log_message.js"),
+    ("cts/test_config", "common/framework/test_config.js"),
+];
 
 #[derive(Debug)]
 struct Config {
@@ -201,7 +207,7 @@ fn install_config(runtime: &Runtime, config: &Config) -> quickjs_adapter::Result
         .collect::<Vec<_>>()
         .join(",");
     let source = format!(
-        "globalThis.__ctsRunnerConfig = {{ queries: [{queries}], list: {} }};",
+        "globalThis.__query = [{queries}]; globalThis.__listOnly = {};",
         config.list
     );
     let value = runtime.eval(&source, "cts-runner-config.js")?;
@@ -212,6 +218,7 @@ fn install_config(runtime: &Runtime, config: &Config) -> quickjs_adapter::Result
 fn run(config: &Config, instance: wgpu::WGPUInstance) -> Result<Vec<TestResult>, String> {
     let runtime = Runtime::new().map_err(|error| format!("runtime creation failed: {error:?}"))?;
     let results = Rc::new(RefCell::new(Vec::new()));
+    let process_start = Instant::now();
 
     runtime
         .register_host_function("print", |args| {
@@ -226,7 +233,11 @@ fn run(config: &Config, instance: wgpu::WGPUInstance) -> Result<Vec<TestResult>,
         })
         .map_err(|error| format!("could not register print: {error:?}"))?;
     runtime
-        .register_host_function("__perf_now", |_| Ok(()))
+        .register_host_function_with_result("__perf_now", move |_| {
+            Ok(HostValue::Number(
+                process_start.elapsed().as_secs_f64() * 1000.0,
+            ))
+        })
         .map_err(|error| format!("could not register __perf_now: {error:?}"))?;
     let report_results = Rc::clone(&results);
     runtime
@@ -244,6 +255,15 @@ fn run(config: &Config, instance: wgpu::WGPUInstance) -> Result<Vec<TestResult>,
             Ok(())
         })
         .map_err(|error| format!("could not register __report: {error:?}"))?;
+    runtime
+        .register_host_function("__list", |args| {
+            let [HostValue::String(name)] = args else {
+                return Err("__list expects one string".to_owned());
+            };
+            println!("{name}");
+            Ok(())
+        })
+        .map_err(|error| format!("could not register __list: {error:?}"))?;
     runtime
         .register_host_function("__log_shim", |args| {
             let [HostValue::String(name)] = args else {
@@ -267,6 +287,17 @@ fn run(config: &Config, instance: wgpu::WGPUInstance) -> Result<Vec<TestResult>,
     install_config(&runtime, config)
         .map_err(|error| format!("could not install runner configuration: {error:?}"))?;
 
+    let shims = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/shims.js"));
+    let shim_value = runtime
+        .eval(shims, "cts-runner-shims.js")
+        .map_err(|error| format!("could not install shims: {error:?}"))?;
+    runtime
+        .set_global_value("__cts_runner_shims_eval", shim_value)
+        .map_err(|error| format!("could not retain shim evaluation: {error:?}"))?;
+    runtime
+        .clear_global("__cts_runner_shims_eval")
+        .map_err(|error| format!("could not release shim evaluation: {error:?}"))?;
+
     let evaluation = runtime
         .eval_module(Path::new(GLUE_PATH))
         .map_err(|error| format!("glue module failed: {error:?}"))?;
@@ -284,6 +315,15 @@ fn run(config: &Config, instance: wgpu::WGPUInstance) -> Result<Vec<TestResult>,
                         config.timeout.as_secs()
                     ));
                 }
+                let timer_value = runtime
+                    .eval("__runDueTimers(__perf_now())", "cts-runner-timer-tick.js")
+                    .map_err(|error| format!("timer tick failed: {error:?}"))?;
+                runtime
+                    .set_global_value("__cts_runner_timer_eval", timer_value)
+                    .map_err(|error| format!("could not retain timer tick: {error:?}"))?;
+                runtime
+                    .clear_global("__cts_runner_timer_eval")
+                    .map_err(|error| format!("could not release timer tick: {error:?}"))?;
                 unsafe { runtime.tick(instance) }
                     .map_err(|error| format!("runtime tick failed: {error:?}"))?;
                 std::thread::sleep(Duration::from_millis(1));

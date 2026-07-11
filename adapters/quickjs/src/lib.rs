@@ -376,6 +376,18 @@ impl Runtime {
     where
         F: Fn(&[HostValue]) -> std::result::Result<(), String> + 'static,
     {
+        self.register_host_function_with_result(name, move |args| {
+            f(args)?;
+            Ok(HostValue::Undefined)
+        })
+    }
+
+    /// Registers a global JavaScript function backed by a Rust callback that
+    /// returns a primitive JavaScript value.
+    pub fn register_host_function_with_result<F>(&self, name: &str, f: F) -> Result<()>
+    where
+        F: Fn(&[HostValue]) -> std::result::Result<HostValue, String> + 'static,
+    {
         let function_name = CString::new(name)?;
         let magic = {
             let mut functions = self.state.host_functions.borrow_mut();
@@ -840,7 +852,7 @@ struct CallbackTarget {
     index: usize,
 }
 
-type HostFunction = dyn Fn(&[HostValue]) -> std::result::Result<(), String>;
+type HostFunction = dyn Fn(&[HostValue]) -> std::result::Result<HostValue, String>;
 
 /// QuickJS engine marker type.
 pub struct Engine;
@@ -1707,8 +1719,19 @@ unsafe extern "C" fn qjs_host_function(
             .copied()
             .map(|value| qjs_host_value(cx, value))
             .collect::<core::Result<Vec<_>, _>>()?;
-        function(&args).map_err(|message| Engine::type_error(cx, &message))?;
-        Ok(Engine::undefined(cx))
+        let result = function(&args).map_err(|message| Engine::type_error(cx, &message))?;
+        match result {
+            HostValue::String(value) => Engine::string(cx, &value),
+            HostValue::Number(value) => Engine::number(cx, value),
+            HostValue::Bool(value) => Ok(qjs::JSValue {
+                u: qjs::JSValueUnion {
+                    int32: i32::from(value),
+                },
+                tag: qjs::JS_TAG_BOOL as i64,
+            }),
+            HostValue::Null => Ok(Engine::null(cx)),
+            HostValue::Undefined => Ok(Engine::undefined(cx)),
+        }
     })
 }
 
@@ -3028,6 +3051,19 @@ mod tests {
                 super::HostValue::Undefined,
                 super::HostValue::String("coerced object".to_owned()),
             ]]
+        );
+    }
+
+    #[test]
+    fn register_host_function_with_result_returns_primitives() {
+        let runtime = Runtime::new().expect("quickjs runtime");
+        runtime
+            .register_host_function_with_result("hostNumber", |_| Ok(super::HostValue::Number(3.5)))
+            .expect("register host result");
+        eval_drop(
+            &runtime,
+            r#"if (hostNumber() !== 3.5) throw new Error("wrong host result");"#,
+            "register-host-function-result.js",
         );
     }
 
