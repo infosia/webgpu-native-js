@@ -74,3 +74,9 @@ committed.
    backend (owner- or planner-verified) with JS absent from the frame loop.
 3. X2/X3 tested on both engines; standard gates untouched-green.
 4. Review pass on the new host APIs (X2/X3) before declaring done.
+
+**X9 — argument conventions follow yawgpu's examples** (owner directive,
+2026-07-11): the verification flag is `--verify` — windowed examples auto-exit
+success after 60 presented frames, and (in the tiled_deferred spirit) the
+final frame's center pixel is read back and printed, proving rasterization;
+the default runs until the window closes. No `--frames`-style knobs.
