@@ -688,7 +688,7 @@ helper = "query_set_handle"
 
 [[descriptor.skips]]
 member = "timestampWrites"
-reason = "timestamp-query requires requiredFeatures, which requestDevice does not yet plumb"
+reason = "timestamp-query feature not yet requested in tests"
 reject_if_present = true
 
 [[descriptor.skips]]
@@ -1014,7 +1014,7 @@ nullable = false
 
 [[descriptor.skips]]
 member = "timestampWrites"
-reason = "timestamp-query requires requiredFeatures, which requestDevice does not yet plumb"
+reason = "timestamp-query feature not yet requested in tests"
 reject_if_present = true
 
 [[descriptor]]

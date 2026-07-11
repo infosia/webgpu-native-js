@@ -358,6 +358,11 @@ pub trait JsEngine: Sized {
         obj: Self::Value,
         key: &str,
     ) -> Result<Self::Value, Self::Error>;
+    /// Returns an object's own enumerable string-keyed property names.
+    fn own_property_names(
+        cx: Self::Context<'_>,
+        obj: Self::Value,
+    ) -> Result<Vec<String>, Self::Error>;
     /// Returns the engine's global object as a call-scoped owned value.
     fn global(cx: Self::Context<'_>) -> Self::Value;
     /// Gets an object property whose key is itself a JavaScript value.
@@ -1708,12 +1713,12 @@ fn initial_limits() -> (WGPULimits, WGPUCompatibilityModeLimits) {
         maxStorageBuffersPerShaderStage: u32_undefined,
         maxStorageTexturesPerShaderStage: u32_undefined,
         maxUniformBuffersPerShaderStage: u32_undefined,
-        maxUniformBufferBindingSize: u64::MAX,
-        maxStorageBufferBindingSize: u64::MAX,
+        maxUniformBufferBindingSize: WGPU_LIMIT_U64_UNDEFINED as u64,
+        maxStorageBufferBindingSize: WGPU_LIMIT_U64_UNDEFINED as u64,
         minUniformBufferOffsetAlignment: u32_undefined,
         minStorageBufferOffsetAlignment: u32_undefined,
         maxVertexBuffers: u32_undefined,
-        maxBufferSize: u64::MAX,
+        maxBufferSize: WGPU_LIMIT_U64_UNDEFINED as u64,
         maxVertexAttributes: u32_undefined,
         maxVertexBufferArrayStride: u32_undefined,
         maxInterStageShaderVariables: u32_undefined,
@@ -1728,6 +1733,148 @@ fn initial_limits() -> (WGPULimits, WGPUCompatibilityModeLimits) {
         maxImmediateSize: u32_undefined,
     };
     (limits, compatibility)
+}
+
+fn is_known_required_limit(name: &str) -> bool {
+    matches!(
+        name,
+        "maxTextureDimension1D"
+            | "maxTextureDimension2D"
+            | "maxTextureDimension3D"
+            | "maxTextureArrayLayers"
+            | "maxBindGroups"
+            | "maxBindGroupsPlusVertexBuffers"
+            | "maxImmediateSize"
+            | "maxBindingsPerBindGroup"
+            | "maxDynamicUniformBuffersPerPipelineLayout"
+            | "maxDynamicStorageBuffersPerPipelineLayout"
+            | "maxSampledTexturesPerShaderStage"
+            | "maxSamplersPerShaderStage"
+            | "maxStorageBuffersPerShaderStage"
+            | "maxStorageBuffersInVertexStage"
+            | "maxStorageBuffersInFragmentStage"
+            | "maxStorageTexturesPerShaderStage"
+            | "maxStorageTexturesInVertexStage"
+            | "maxStorageTexturesInFragmentStage"
+            | "maxUniformBuffersPerShaderStage"
+            | "maxUniformBufferBindingSize"
+            | "maxStorageBufferBindingSize"
+            | "minUniformBufferOffsetAlignment"
+            | "minStorageBufferOffsetAlignment"
+            | "maxVertexBuffers"
+            | "maxBufferSize"
+            | "maxVertexAttributes"
+            | "maxVertexBufferArrayStride"
+            | "maxInterStageShaderVariables"
+            | "maxColorAttachments"
+            | "maxColorAttachmentBytesPerSample"
+            | "maxComputeWorkgroupStorageSize"
+            | "maxComputeInvocationsPerWorkgroup"
+            | "maxComputeWorkgroupSizeX"
+            | "maxComputeWorkgroupSizeY"
+            | "maxComputeWorkgroupSizeZ"
+            | "maxComputeWorkgroupsPerDimension"
+    )
+}
+
+fn convert_required_limits<E: JsEngine>(
+    cx: E::Context<'_>,
+    value: E::Value,
+    names: &[String],
+) -> Result<(WGPULimits, WGPUCompatibilityModeLimits), E::Error> {
+    let (mut limits, mut compatibility) = initial_limits();
+    for name in names {
+        let value = E::get_property(cx, value, name)?;
+        if E::is_undefined(cx, value) {
+            continue;
+        }
+        macro_rules! set_u32 {
+            ($target:expr) => {
+                $target = enforce_u32::<E>(cx, value, "required limit")?
+            };
+        }
+        macro_rules! set_u64 {
+            ($target:expr) => {
+                $target = enforce_u64::<E>(cx, value, "required limit")?
+            };
+        }
+        match name.as_str() {
+            "maxTextureDimension1D" => set_u32!(limits.maxTextureDimension1D),
+            "maxTextureDimension2D" => set_u32!(limits.maxTextureDimension2D),
+            "maxTextureDimension3D" => set_u32!(limits.maxTextureDimension3D),
+            "maxTextureArrayLayers" => set_u32!(limits.maxTextureArrayLayers),
+            "maxBindGroups" => set_u32!(limits.maxBindGroups),
+            "maxBindGroupsPlusVertexBuffers" => {
+                set_u32!(limits.maxBindGroupsPlusVertexBuffers)
+            }
+            "maxImmediateSize" => set_u32!(limits.maxImmediateSize),
+            "maxBindingsPerBindGroup" => set_u32!(limits.maxBindingsPerBindGroup),
+            "maxDynamicUniformBuffersPerPipelineLayout" => {
+                set_u32!(limits.maxDynamicUniformBuffersPerPipelineLayout)
+            }
+            "maxDynamicStorageBuffersPerPipelineLayout" => {
+                set_u32!(limits.maxDynamicStorageBuffersPerPipelineLayout)
+            }
+            "maxSampledTexturesPerShaderStage" => {
+                set_u32!(limits.maxSampledTexturesPerShaderStage)
+            }
+            "maxSamplersPerShaderStage" => set_u32!(limits.maxSamplersPerShaderStage),
+            "maxStorageBuffersPerShaderStage" => {
+                set_u32!(limits.maxStorageBuffersPerShaderStage)
+            }
+            "maxStorageBuffersInVertexStage" => {
+                set_u32!(compatibility.maxStorageBuffersInVertexStage)
+            }
+            "maxStorageBuffersInFragmentStage" => {
+                set_u32!(compatibility.maxStorageBuffersInFragmentStage)
+            }
+            "maxStorageTexturesPerShaderStage" => {
+                set_u32!(limits.maxStorageTexturesPerShaderStage)
+            }
+            "maxStorageTexturesInVertexStage" => {
+                set_u32!(compatibility.maxStorageTexturesInVertexStage)
+            }
+            "maxStorageTexturesInFragmentStage" => {
+                set_u32!(compatibility.maxStorageTexturesInFragmentStage)
+            }
+            "maxUniformBuffersPerShaderStage" => {
+                set_u32!(limits.maxUniformBuffersPerShaderStage)
+            }
+            "maxUniformBufferBindingSize" => set_u64!(limits.maxUniformBufferBindingSize),
+            "maxStorageBufferBindingSize" => set_u64!(limits.maxStorageBufferBindingSize),
+            "minUniformBufferOffsetAlignment" => {
+                set_u32!(limits.minUniformBufferOffsetAlignment)
+            }
+            "minStorageBufferOffsetAlignment" => {
+                set_u32!(limits.minStorageBufferOffsetAlignment)
+            }
+            "maxVertexBuffers" => set_u32!(limits.maxVertexBuffers),
+            "maxBufferSize" => set_u64!(limits.maxBufferSize),
+            "maxVertexAttributes" => set_u32!(limits.maxVertexAttributes),
+            "maxVertexBufferArrayStride" => set_u32!(limits.maxVertexBufferArrayStride),
+            "maxInterStageShaderVariables" => {
+                set_u32!(limits.maxInterStageShaderVariables)
+            }
+            "maxColorAttachments" => set_u32!(limits.maxColorAttachments),
+            "maxColorAttachmentBytesPerSample" => {
+                set_u32!(limits.maxColorAttachmentBytesPerSample)
+            }
+            "maxComputeWorkgroupStorageSize" => {
+                set_u32!(limits.maxComputeWorkgroupStorageSize)
+            }
+            "maxComputeInvocationsPerWorkgroup" => {
+                set_u32!(limits.maxComputeInvocationsPerWorkgroup)
+            }
+            "maxComputeWorkgroupSizeX" => set_u32!(limits.maxComputeWorkgroupSizeX),
+            "maxComputeWorkgroupSizeY" => set_u32!(limits.maxComputeWorkgroupSizeY),
+            "maxComputeWorkgroupSizeZ" => set_u32!(limits.maxComputeWorkgroupSizeZ),
+            "maxComputeWorkgroupsPerDimension" => {
+                set_u32!(limits.maxComputeWorkgroupsPerDimension)
+            }
+            _ => unreachable!("required-limit names are validated before conversion"),
+        }
+    }
+    Ok((limits, compatibility))
 }
 
 fn new_supported_limits<E: JsEngine + 'static>(
@@ -2790,7 +2937,7 @@ pub fn gpu_request_adapter<E: JsEngine + 'static>(
 pub fn adapter_request_device<E: JsEngine + 'static>(
     cx: E::Context<'_>,
     this: E::Value,
-    _args: &[E::Value],
+    args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
     let Some(payload) = E::payload(cx, this, GPU_ADAPTER_CLASS)
         .and_then(|payload| payload.downcast_ref::<AdapterPayload<E>>())
@@ -2800,6 +2947,51 @@ pub fn adapter_request_device<E: JsEngine + 'static>(
             "GPUAdapter.requestDevice called on an incompatible object",
         ));
     };
+    let descriptor_value = args.first().copied().unwrap_or_else(|| E::undefined(cx));
+    let required_features_value = dictionary_member::<E>(cx, descriptor_value, "requiredFeatures")?;
+    let required_features = if E::is_undefined(cx, required_features_value) {
+        Vec::new()
+    } else {
+        convert_sequence::<E, _>(cx, required_features_value, "requiredFeatures", |value| {
+            convert_gpu_feature_name::<E>(cx, value)
+        })?
+    };
+    let required_limits_value = dictionary_member::<E>(cx, descriptor_value, "requiredLimits")?;
+    let required_limit_names = if E::is_undefined(cx, required_limits_value) {
+        Vec::new()
+    } else {
+        if !E::is_object(cx, required_limits_value) {
+            return Err(E::type_error(cx, "requiredLimits"));
+        }
+        E::own_property_names(cx, required_limits_value)?
+    };
+    if let Some(name) = required_limit_names
+        .iter()
+        .find(|name| !is_known_required_limit(name))
+    {
+        let (promise, deferred) = E::new_promise(cx)?;
+        let message = format!("unknown required limit: {name}");
+        let error = E::async_error_value(cx, "OperationError", &message);
+        E::settle_deferreds(cx, vec![(deferred, Err(error))])?;
+        return Ok(promise);
+    }
+    let (mut required_limits, mut compatibility_limits) =
+        convert_required_limits::<E>(cx, required_limits_value, &required_limit_names)?;
+    required_limits.nextInChain = ptr::from_mut(&mut compatibility_limits.chain);
+
+    let arena = Arena::new();
+    let required_features = arena.alloc_slice(required_features);
+    let required_features_ptr = if required_features.is_empty() {
+        ptr::null()
+    } else {
+        required_features.as_ptr()
+    };
+    let required_limits_ptr = if required_limit_names.is_empty() {
+        ptr::null()
+    } else {
+        ptr::from_ref(&required_limits)
+    };
+
     let (promise, deferred) = E::new_promise(cx)?;
     let events = DeviceEventState::<E>::new(Arc::clone(E::environment(cx).settlements()));
     let mut request = Box::new(DeviceRequest::<E> {
@@ -2830,9 +3022,9 @@ pub fn adapter_request_device<E: JsEngine + 'static>(
     let descriptor = WGPUDeviceDescriptor {
         nextInChain: ptr::null_mut(),
         label: WGPUStringView::from_bytes(b""),
-        requiredFeatureCount: 0,
-        requiredFeatures: ptr::null(),
-        requiredLimits: ptr::null(),
+        requiredFeatureCount: required_features.len(),
+        requiredFeatures: required_features_ptr,
+        requiredLimits: required_limits_ptr,
         defaultQueue: WGPUQueueDescriptor {
             nextInChain: ptr::null_mut(),
             label: WGPUStringView::from_bytes(b""),

@@ -69,3 +69,21 @@ covered by the live CTS run plus targeted shim unit tests, not by a full
 offline harness — acceptable for the spike, stated here. expectations.txt
 deliberately does not exist yet (unittests needed zero entries); Phase B
 creates it with the codegen-deltas-derived initial population per C5.
+
+## Phase B — headless validation subset
+
+**B-1 landed (2026-07-12): requiredFeatures/requiredLimits plumbed (C7).**
+The block-10 recorded gap closes: requestDevice converts the feature-name
+sequence through the generated enum join and the requiredLimits RECORD type
+(a new WebIDL shape — string-keyed open dictionary) through a new additive
+`JsEngine::own_property_names` primitive (both engines + mock, per J13).
+Unknown feature → TypeError; unknown limit key → OperationError (spec wording
+quoted from the pin); undefined values → the header's UINT32/64_MAX
+sentinels; compatibility chain mirrored from block 10 in reverse. Timestamp
+query sets now creatable under a requesting device (tested); the parity
+features line finally observes ordering with two features (block 10's
+rescoped I7 claim can un-rescope) — 123 lines, byte-identical on yawgpu AND
+Dawn (gated run: Dawn's Metal adapter advertises timestamp-query, confirmed).
+timestampWrites conversion itself stays skipped with an updated reason —
+both IDL timestamp dicts join one shared C struct, a name-map shape deferred
+to its own slice. Suites: core 138, JSC 29+1.

@@ -22,6 +22,8 @@ pub enum OpaqueJsValue {}
 pub enum OpaqueJsString {}
 /// Opaque JavaScriptCore class storage.
 pub enum OpaqueJsClass {}
+/// Opaque JavaScriptCore property-name-array storage.
+pub enum OpaqueJsPropertyNameArray {}
 
 /// JavaScriptCore execution-context handle.
 pub type JSContextRef = *mut OpaqueJsContext;
@@ -35,6 +37,8 @@ pub type JSObjectRef = *mut OpaqueJsValue;
 pub type JSStringRef = *mut OpaqueJsString;
 /// JavaScriptCore class handle.
 pub type JSClassRef = *mut OpaqueJsClass;
+/// JavaScriptCore property-name-array handle.
+pub type JSPropertyNameArrayRef = *mut OpaqueJsPropertyNameArray;
 
 type JSChar = u16;
 type JSPropertyAttributes = u32;
@@ -132,6 +136,17 @@ unsafe extern "C" {
     fn JSGlobalContextRelease(ctx: JSGlobalContextRef);
     /// Returns a context's global object.
     fn JSContextGetGlobalObject(ctx: JSContextRef) -> JSObjectRef;
+    /// Copies an object's enumerable property names, including inherited names.
+    fn JSObjectCopyPropertyNames(ctx: JSContextRef, object: JSObjectRef) -> JSPropertyNameArrayRef;
+    /// Releases a property-name array.
+    fn JSPropertyNameArrayRelease(array: JSPropertyNameArrayRef);
+    /// Returns the number of names in a property-name array.
+    fn JSPropertyNameArrayGetCount(array: JSPropertyNameArrayRef) -> usize;
+    /// Borrows a name from a property-name array.
+    fn JSPropertyNameArrayGetNameAtIndex(
+        array: JSPropertyNameArrayRef,
+        index: usize,
+    ) -> JSStringRef;
     /// Creates a JavaScript string by copying a nul-terminated UTF-8 string.
     fn JSStringCreateWithUTF8CString(string: *const c_char) -> JSStringRef;
     /// Returns the number of UTF-16 code units in a JavaScript string.
@@ -148,6 +163,8 @@ unsafe extern "C" {
     ) -> usize;
     /// Releases a JavaScript string.
     fn JSStringRelease(string: JSStringRef);
+    /// Retains a JavaScript string.
+    fn JSStringRetain(string: JSStringRef) -> JSStringRef;
     /// Evaluates a JavaScript source string.
     fn JSEvaluateScript(
         ctx: JSContextRef,
@@ -1189,6 +1206,81 @@ impl core::JsEngine for Engine {
         } else {
             Err(exception)
         }
+    }
+
+    fn own_property_names(
+        cx: Self::Context<'_>,
+        obj: Self::Value,
+    ) -> core::Result<Vec<String>, Self::Error> {
+        let object = value_to_object(cx, obj)?;
+        let global = unsafe { JSContextGetGlobalObject(cx.ctx) };
+        let object_name = JsString::new("Object")
+            .map_err(|_| Self::type_error(cx, "Object property name failed"))?;
+        let prototype_name = JsString::new("prototype")
+            .map_err(|_| Self::type_error(cx, "prototype property name failed"))?;
+        let has_own_name = JsString::new("hasOwnProperty")
+            .map_err(|_| Self::type_error(cx, "hasOwnProperty name failed"))?;
+        let mut exception = ptr::null();
+        let object_ctor =
+            unsafe { JSObjectGetProperty(cx.ctx, global, object_name.as_raw(), &mut exception) };
+        if !exception.is_null() {
+            return Err(exception);
+        }
+        let object_ctor = value_to_object(cx, object_ctor)?;
+        let prototype = unsafe {
+            JSObjectGetProperty(cx.ctx, object_ctor, prototype_name.as_raw(), &mut exception)
+        };
+        if !exception.is_null() {
+            return Err(exception);
+        }
+        let prototype = value_to_object(cx, prototype)?;
+        let has_own = unsafe {
+            JSObjectGetProperty(cx.ctx, prototype, has_own_name.as_raw(), &mut exception)
+        };
+        if !exception.is_null() {
+            return Err(exception);
+        }
+        let has_own = value_to_object(cx, has_own)?;
+        // SAFETY: both handles belong to the live context; Copy follows the Create Rule.
+        let array = unsafe { JSObjectCopyPropertyNames(cx.ctx, object) };
+        if array.is_null() {
+            return Err(Self::operation_error(
+                cx,
+                "JSObjectCopyPropertyNames failed",
+            ));
+        }
+        let count = unsafe { JSPropertyNameArrayGetCount(array) };
+        let mut names = Vec::with_capacity(count);
+        for index in 0..count {
+            let name = unsafe { JSPropertyNameArrayGetNameAtIndex(array, index) };
+            if name.is_null() {
+                unsafe { JSPropertyNameArrayRelease(array) };
+                return Err(Self::operation_error(cx, "property name was null"));
+            }
+            let argument = unsafe { JSValueMakeString(cx.ctx, name) };
+            let own = unsafe {
+                JSObjectCallAsFunction(
+                    cx.ctx,
+                    has_own,
+                    object,
+                    1,
+                    ptr::from_ref(&argument),
+                    &mut exception,
+                )
+            };
+            if !exception.is_null() {
+                unsafe { JSPropertyNameArrayRelease(array) };
+                return Err(exception);
+            }
+            if !unsafe { JSValueToBoolean(cx.ctx, own) } {
+                continue;
+            }
+            // The array owns the borrowed string, so retain it for the JsString drop guard.
+            unsafe { JSStringRetain(name) };
+            names.push(JsString(unsafe { NonNull::new_unchecked(name) }).to_string_lossy());
+        }
+        unsafe { JSPropertyNameArrayRelease(array) };
+        Ok(names)
     }
 
     fn global(cx: Self::Context<'_>) -> Self::Value {
@@ -2525,6 +2617,21 @@ mod tests {
         instance: wgpu::WGPUInstance,
         adapter: wgpu::WGPUAdapter,
         device: wgpu::WGPUDevice,
+    }
+
+    #[test]
+    fn own_property_names_returns_only_own_enumerable_string_keys() {
+        let runtime = Runtime::new().expect("JSC runtime");
+        let object = runtime
+            .eval(
+                "(() => { const inherited = { inherited: 1 }; const value = Object.create(inherited); value.second = 2; value.first = 1; Object.defineProperty(value, 'hidden', { value: 0 }); value[Symbol('ignored')] = 3; return value; })()",
+                "own-property-names.js",
+            )
+            .expect("object");
+        let names = super::with_scope(runtime.raw_context(), |cx| {
+            Engine::own_property_names(cx, object).expect("own names")
+        });
+        assert_eq!(names, ["second", "first"]);
     }
 
     struct SendPtr<T>(*mut T);

@@ -119,4 +119,5 @@ order:same-tick:mapAsync,workDone
 order:promise-all:resolved
 order:then-chain:first,second
 order:await:true,true
+features:requested:core-features-and-limits,timestamp-query
 destroy:ok

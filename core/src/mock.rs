@@ -559,6 +559,16 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
         Ok(cx.runtime.tracked_alias(cx.scope, value))
     }
 
+    fn own_property_names(
+        cx: Self::Context<'_>,
+        obj: Self::Value,
+    ) -> Result<Vec<String>, Self::Error> {
+        match cx.runtime.get(obj) {
+            MockValue::Object(map) => Ok(map.keys().cloned().collect()),
+            _ => Ok(Vec::new()),
+        }
+    }
+
     fn global(cx: Self::Context<'_>) -> Self::Value {
         cx.runtime.tracked_alias(cx.scope, cx.runtime.global)
     }
@@ -1139,6 +1149,8 @@ struct MockGpuState {
     next_pop_error: Option<MockPopError>,
     device_lost_callback: Option<WGPUDeviceLostCallbackInfo>,
     uncaptured_error_callback: Option<WGPUUncapturedErrorCallbackInfo>,
+    requested_features: Vec<Vec<crate::WGPUFeatureName>>,
+    requested_limits: Vec<Option<(WGPULimits, crate::WGPUCompatibilityModeLimits)>>,
     recording_calls: BTreeMap<&'static str, usize>,
     vertex_buffer_ranges: Vec<(u64, u64)>,
     index_buffer_ranges: Vec<(u64, u64)>,
@@ -1316,6 +1328,30 @@ unsafe fn adapter_request_device(
             let mut state = state.borrow_mut();
             state.device_lost_callback = Some(descriptor.deviceLostCallbackInfo);
             state.uncaptured_error_callback = Some(descriptor.uncapturedErrorCallbackInfo);
+            let features = if descriptor.requiredFeatureCount == 0 {
+                Vec::new()
+            } else {
+                // SAFETY: requestDevice keeps the arena-backed feature array live through this call.
+                unsafe {
+                    std::slice::from_raw_parts(
+                        descriptor.requiredFeatures,
+                        descriptor.requiredFeatureCount,
+                    )
+                    .to_vec()
+                }
+            };
+            let limits = unsafe { descriptor.requiredLimits.as_ref() }.map(|limits| {
+                let compatibility = unsafe {
+                    limits
+                        .nextInChain
+                        .cast::<crate::WGPUCompatibilityModeLimits>()
+                        .as_ref()
+                        .expect("required-limits compatibility chain")
+                };
+                (*limits, *compatibility)
+            });
+            state.requested_features.push(features);
+            state.requested_limits.push(limits);
         });
     }
     if let Some(callback) = info.callback {
@@ -6823,6 +6859,138 @@ mod tests {
         rt.promise_result(promise)
             .expect("requestDevice settled")
             .expect("requestDevice resolved")
+    }
+
+    #[test]
+    fn c7_own_names_and_request_device_features_limits_reach_native() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let own = descriptor(
+            &rt,
+            &[("second", rt.number(2.0)), ("first", rt.number(1.0))],
+        );
+        assert_eq!(
+            Engine::own_property_names(cx, own).expect("own names"),
+            ["first", "second"]
+        );
+
+        let adapter = Engine::new_instance(
+            cx,
+            crate::GPU_ADAPTER_CLASS,
+            Box::new(AdapterPayload::<Engine>::new(fake_handle(710))),
+        )
+        .expect("adapter");
+        let feature_values = [
+            rt.string("timestamp-query"),
+            rt.string("depth-clip-control"),
+        ];
+        let required_features = rt.set_like(&feature_values);
+        let required_limits = descriptor(
+            &rt,
+            &[
+                ("maxBufferSize", rt.number(4096.0)),
+                ("maxTextureDimension2D", rt.number(2048.0)),
+                ("maxBindGroups", rt.undefined()),
+                ("maxStorageBuffersInVertexStage", rt.number(7.0)),
+            ],
+        );
+        let request = descriptor(
+            &rt,
+            &[
+                ("requiredFeatures", required_features),
+                ("requiredLimits", required_limits),
+            ],
+        );
+        let promise = adapter_request_device::<Engine>(cx, adapter, &[request]).expect("request");
+        unsafe { crate::tick::<Engine>(cx, fake_handle(711)) }.expect("tick");
+        let device = rt
+            .promise_result(promise)
+            .expect("settled")
+            .expect("resolved");
+
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(
+                state.requested_features.last().expect("features"),
+                &[
+                    crate::WGPUFeatureName_WGPUFeatureName_TimestampQuery,
+                    crate::WGPUFeatureName_WGPUFeatureName_DepthClipControl,
+                ]
+            );
+            let (limits, compatibility) = state
+                .requested_limits
+                .last()
+                .expect("limits request")
+                .as_ref()
+                .expect("limits pointer");
+            assert_eq!(limits.maxBufferSize, 4096);
+            assert_eq!(limits.maxTextureDimension2D, 2048);
+            assert_eq!(limits.maxBindGroups, crate::WGPU_LIMIT_U32_UNDEFINED);
+            assert_eq!(
+                limits.maxUniformBufferBindingSize,
+                crate::WGPU_LIMIT_U64_UNDEFINED as u64
+            );
+            assert_eq!(compatibility.maxStorageBuffersInVertexStage, 7);
+            assert_eq!(
+                compatibility.maxStorageTexturesInFragmentStage,
+                crate::WGPU_LIMIT_U32_UNDEFINED
+            );
+        });
+
+        let timestamp_desc = descriptor(
+            &rt,
+            &[("type", rt.string("timestamp")), ("count", rt.number(2.0))],
+        );
+        device_create_query_set::<Engine>(cx, device, &[timestamp_desc])
+            .expect("timestamp query set");
+        GPU_STATE.with(|state| {
+            assert_eq!(
+                state
+                    .borrow()
+                    .query_set_descriptors
+                    .last()
+                    .expect("query set")
+                    .type_,
+                crate::WGPUQueryType_WGPUQueryType_Timestamp
+            );
+        });
+    }
+
+    #[test]
+    fn c7_request_device_rejects_unknown_feature_and_limit_names() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let adapter = Engine::new_instance(
+            cx,
+            crate::GPU_ADAPTER_CLASS,
+            Box::new(AdapterPayload::<Engine>::new(fake_handle(720))),
+        )
+        .expect("adapter");
+
+        let unknown_feature = rt.set_like(&[rt.string("not-a-feature")]);
+        let request = descriptor(&rt, &[("requiredFeatures", unknown_feature)]);
+        assert_eq!(
+            adapter_request_device::<Engine>(cx, adapter, &[request]).expect_err("unknown feature"),
+            "TypeError: GPUFeatureName"
+        );
+
+        let limits = descriptor(&rt, &[("notALimit", rt.number(1.0))]);
+        let request = descriptor(&rt, &[("requiredLimits", limits)]);
+        let promise = adapter_request_device::<Engine>(cx, adapter, &[request]).expect("promise");
+        let reason = rt
+            .promise_result(promise)
+            .expect("settled")
+            .expect_err("unknown limit rejection");
+        let MockValue::Object(properties) = rt.get(reason) else {
+            panic!("rejection must be named error object");
+        };
+        assert!(matches!(
+            properties.get("name").map(|value| rt.get(*value)),
+            Some(MockValue::String(name)) if name == "OperationError"
+        ));
+        assert!(GPU_STATE.with(|state| state.borrow().requested_limits.is_empty()));
     }
 
     #[test]

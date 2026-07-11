@@ -1038,7 +1038,7 @@ pub(super) fn convert_render_pass_descriptor<E: JsEngine + 'static>(
         },
         depthStencilAttachment: depth_stencil_attachment,
         occlusionQuerySet: occlusion_query_set,
-        // Policy skip: timestamp-query requires requiredFeatures, which requestDevice does not yet plumb.
+        // Policy skip: timestamp-query feature not yet requested in tests.
         timestampWrites: ptr::null(),
     })
 }
@@ -2994,7 +2994,7 @@ pub(super) fn convert_compute_pass_descriptor<E: JsEngine>(
     Ok(WGPUComputePassDescriptor {
         nextInChain: ptr::null_mut(),
         label: WGPUStringView::from_bytes(label.as_bytes()),
-        // Policy skip: timestamp-query requires requiredFeatures, which requestDevice does not yet plumb.
+        // Policy skip: timestamp-query feature not yet requested in tests.
         timestampWrites: ptr::null(),
     })
 }
@@ -3440,6 +3440,36 @@ pub(super) fn convert_gpu_index_format<E: JsEngine>(cx: E::Context<'_>, value: E
         "uint16" => Ok(WGPUIndexFormat_WGPUIndexFormat_Uint16),
         "uint32" => Ok(WGPUIndexFormat_WGPUIndexFormat_Uint32),
         _ => Err(E::type_error(cx, "GPUIndexFormat")),
+    }
+}
+
+pub(super) fn convert_gpu_feature_name<E: JsEngine>(cx: E::Context<'_>, value: E::Value) -> Result<WGPUFeatureName, E::Error> {
+    // B6: generated WebIDL string-enum conversion rejects unknown values.
+    let arena = Arena::new();
+    match E::to_str(cx, value, &arena)? {
+        "core-features-and-limits" => Ok(WGPUFeatureName_WGPUFeatureName_CoreFeaturesAndLimits),
+        "depth-clip-control" => Ok(WGPUFeatureName_WGPUFeatureName_DepthClipControl),
+        "depth32float-stencil8" => Ok(WGPUFeatureName_WGPUFeatureName_Depth32FloatStencil8),
+        "texture-compression-bc" => Ok(WGPUFeatureName_WGPUFeatureName_TextureCompressionBC),
+        "texture-compression-bc-sliced-3d" => Ok(WGPUFeatureName_WGPUFeatureName_TextureCompressionBCSliced3D),
+        "texture-compression-etc2" => Ok(WGPUFeatureName_WGPUFeatureName_TextureCompressionETC2),
+        "texture-compression-astc" => Ok(WGPUFeatureName_WGPUFeatureName_TextureCompressionASTC),
+        "texture-compression-astc-sliced-3d" => Ok(WGPUFeatureName_WGPUFeatureName_TextureCompressionASTCSliced3D),
+        "timestamp-query" => Ok(WGPUFeatureName_WGPUFeatureName_TimestampQuery),
+        "indirect-first-instance" => Ok(WGPUFeatureName_WGPUFeatureName_IndirectFirstInstance),
+        "shader-f16" => Ok(WGPUFeatureName_WGPUFeatureName_ShaderF16),
+        "rg11b10ufloat-renderable" => Ok(WGPUFeatureName_WGPUFeatureName_RG11B10UfloatRenderable),
+        "bgra8unorm-storage" => Ok(WGPUFeatureName_WGPUFeatureName_BGRA8UnormStorage),
+        "float32-filterable" => Ok(WGPUFeatureName_WGPUFeatureName_Float32Filterable),
+        "float32-blendable" => Ok(WGPUFeatureName_WGPUFeatureName_Float32Blendable),
+        "clip-distances" => Ok(WGPUFeatureName_WGPUFeatureName_ClipDistances),
+        "dual-source-blending" => Ok(WGPUFeatureName_WGPUFeatureName_DualSourceBlending),
+        "subgroups" => Ok(WGPUFeatureName_WGPUFeatureName_Subgroups),
+        "texture-formats-tier1" => Ok(WGPUFeatureName_WGPUFeatureName_TextureFormatsTier1),
+        "texture-formats-tier2" => Ok(WGPUFeatureName_WGPUFeatureName_TextureFormatsTier2),
+        "primitive-index" => Ok(WGPUFeatureName_WGPUFeatureName_PrimitiveIndex),
+        "texture-component-swizzle" => Ok(WGPUFeatureName_WGPUFeatureName_TextureComponentSwizzle),
+        _ => Err(E::type_error(cx, "GPUFeatureName")),
     }
 }
 

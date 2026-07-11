@@ -934,6 +934,50 @@ impl core::JsEngine for Engine {
         }
     }
 
+    fn own_property_names(
+        cx: Self::Context<'_>,
+        obj: Self::Value,
+    ) -> core::Result<Vec<String>, Self::Error> {
+        let mut properties = ptr::null_mut();
+        let mut count = 0_u32;
+        let status = unsafe {
+            qjs::JS_GetOwnPropertyNames(
+                cx.ctx,
+                &mut properties,
+                &mut count,
+                obj,
+                (qjs::JS_GPN_STRING_MASK | qjs::JS_GPN_ENUM_ONLY) as c_int,
+            )
+        };
+        if status < 0 {
+            return Err(take_exception_value(cx));
+        }
+        let entries = if count == 0 {
+            &[][..]
+        } else {
+            // SAFETY: QuickJS returned `count` live entries in `properties`.
+            unsafe { std::slice::from_raw_parts(properties, count as usize) }
+        };
+        let mut names = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let mut len = 0_usize;
+            let bytes = unsafe { qjs::JS_AtomToCStringLen(cx.ctx, &mut len, entry.atom) };
+            if bytes.is_null() {
+                unsafe { qjs::JS_FreePropertyEnum(cx.ctx, properties, count) };
+                return Err(take_exception_value(cx));
+            }
+            let name = {
+                // SAFETY: QuickJS returned `len` readable bytes live until JS_FreeCString.
+                let bytes = unsafe { std::slice::from_raw_parts(bytes.cast::<u8>(), len) };
+                usv_string_from_wtf8(bytes)
+            };
+            unsafe { qjs::JS_FreeCString(cx.ctx, bytes) };
+            names.push(name);
+        }
+        unsafe { qjs::JS_FreePropertyEnum(cx.ctx, properties, count) };
+        Ok(names)
+    }
+
     fn global(cx: Self::Context<'_>) -> Self::Value {
         let value = unsafe { qjs::JS_GetGlobalObject(cx.ctx) };
         cx.scope.track(value);
@@ -2375,6 +2419,22 @@ mod tests {
         mixed.extend_from_slice("é".as_bytes());
         mixed.extend_from_slice(&[0xed, 0xb0, 0x80]);
         assert_eq!(usv_string_from_wtf8(&mixed), "日🎮�é�");
+    }
+
+    #[test]
+    fn own_property_names_returns_only_own_enumerable_string_keys() {
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let object = runtime
+            .eval(
+                "(() => { const inherited = { inherited: 1 }; const value = Object.create(inherited); value.second = 2; value.first = 1; Object.defineProperty(value, 'hidden', { value: 0 }); value[Symbol('ignored')] = 3; return value; })()",
+                "own-property-names.js",
+            )
+            .expect("object");
+        let names = super::with_scope(runtime.raw_context(), |cx| {
+            Engine::own_property_names(cx, object).unwrap_or_else(|_| panic!("own names"))
+        });
+        unsafe { qjs::JS_FreeValue(runtime.raw_context(), object) };
+        assert_eq!(names, ["second", "first"]);
     }
 
     struct SendPtr<T>(*mut T);
@@ -5158,6 +5218,60 @@ mod tests {
             "check.js",
         );
         eval_drop(&runtime, "gotDevice = undefined;", "cleanup.js");
+        runtime.clear_global("gpu").expect("clear gpu");
+        runtime.run_gc();
+        let _ = runtime.drain_releases().expect("drain");
+    }
+
+    #[test]
+    fn request_device_plumbs_timestamp_feature_and_creates_timestamp_query_set() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let gpu = unsafe { runtime.wrap_gpu(setup.instance) }.expect("wrap gpu");
+        runtime.set_global_value("gpu", gpu).expect("set gpu");
+        eval_drop(
+            &runtime,
+            r#"
+                var timestampDeviceReady = false;
+                gpu.requestAdapter().then(function (adapter) {
+                    if (!adapter.features.has('timestamp-query')) {
+                        throw new Error('timestamp-query was not advertised');
+                    }
+                    var unknownFeatureWasTypeError = false;
+                    try { adapter.requestDevice({ requiredFeatures: ['not-a-feature'] }); }
+                    catch (error) { unknownFeatureWasTypeError = error instanceof TypeError; }
+                    if (!unknownFeatureWasTypeError) {
+                        throw new Error('unknown feature did not throw TypeError');
+                    }
+                    return adapter.requestDevice({ requiredLimits: { notALimit: 1 } }).then(
+                        function () { throw new Error('unknown limit unexpectedly resolved'); },
+                        function (error) {
+                            if (error.name !== 'OperationError') {
+                                throw new Error('unknown limit did not reject OperationError');
+                            }
+                            return adapter.requestDevice({
+                                requiredFeatures: ['timestamp-query'],
+                                requiredLimits: { maxBindGroups: undefined }
+                            });
+                        }
+                    );
+                }).then(function (requestedDevice) {
+                    if (!requestedDevice.features.has('timestamp-query')) {
+                        throw new Error('requested feature missing from device');
+                    }
+                    var timestampSet = requestedDevice.createQuerySet({ type: 'timestamp', count: 2 });
+                    if (timestampSet.type !== 'timestamp' || timestampSet.count !== 2) {
+                        throw new Error('timestamp query set shape mismatch');
+                    }
+                    timestampSet.destroy();
+                    timestampDeviceReady = true;
+                });
+            "#,
+            "required-features.js",
+        );
+        tick_until(&runtime, setup.instance, 5000, || {
+            global_bool(&runtime, "timestampDeviceReady")
+        });
         runtime.clear_global("gpu").expect("clear gpu");
         runtime.run_gc();
         let _ = runtime.drain_releases().expect("drain");

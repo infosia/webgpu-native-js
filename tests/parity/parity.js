@@ -100,6 +100,20 @@
         });
     }
 
+    function runRequestedFeatureOrdering() {
+        return gpu.requestAdapter().then(function (adapter) {
+            var requested = ["timestamp-query", "core-features-and-limits"];
+            for (var i = 0; i < requested.length; i++) {
+                if (!adapter.features.has(requested[i])) {
+                    throw new Error("parity feature unavailable: " + requested[i]);
+                }
+            }
+            return adapter.requestDevice({ requiredFeatures: requested });
+        }).then(function (requestedDevice) {
+            log("features:requested:" + Array.from(requestedDevice.features).join(","));
+        });
+    }
+
     function runErrorScopes() {
         var scopedBuffer = device.createBuffer({ size: 4, usage: 8 });
         device.pushErrorScope("validation");
@@ -921,6 +935,7 @@
             .then(runRenderBundles)
             .then(runErrorScopes)
             .then(runOrdering)
+            .then(runRequestedFeatureOrdering)
             .then(function () {
                 labelBuffer.destroy();
                 log("destroy:ok");

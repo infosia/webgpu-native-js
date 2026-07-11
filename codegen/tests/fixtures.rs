@@ -415,7 +415,7 @@ fn new_descriptor_policy_reasons_are_surfaced_in_the_report() {
     );
     for reason in [
         "recorded deferral: block 03 section 7",
-        "timestamp-query requires requiredFeatures, which requestDevice does not yet plumb",
+        "timestamp-query feature not yet requested in tests",
         "WebIDL names the reusable programmable stage",
     ] {
         assert!(report.contains(reason), "missing policy reason: {reason}");
@@ -450,8 +450,8 @@ fn new_descriptor_policy_kinds_reject_missing_and_dead_entries() {
         ),
         (
             policy.replace(
-                "member = \"timestampWrites\"\nreason = \"timestamp-query requires requiredFeatures, which requestDevice does not yet plumb\"",
-                "member = \"timestampWrites\"\nreason = \"timestamp-query requires requiredFeatures, which requestDevice does not yet plumb\"\n\n[[descriptor.skips]]\nmember = \"notTimestampWrites\"\nreason = \"dead test entry\"",
+                "member = \"timestampWrites\"\nreason = \"timestamp-query feature not yet requested in tests\"",
+                "member = \"timestampWrites\"\nreason = \"timestamp-query feature not yet requested in tests\"\n\n[[descriptor.skips]]\nmember = \"notTimestampWrites\"\nreason = \"dead test entry\"",
             ),
             "notTimestampWrites",
         ),

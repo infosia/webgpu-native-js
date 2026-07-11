@@ -74,6 +74,24 @@ fn emit_reverse_enums(report: &JoinReport, selected: &[String]) -> String {
             continue;
         };
         let function = format!("{}_to_str", snake_case(name.trim_start_matches("GPU")));
+        let convert_function = format!("convert_{}", snake_case(name));
+        let _ = writeln!(
+            output,
+            "pub(super) fn {convert_function}<E: JsEngine>(cx: E::Context<'_>, value: E::Value) -> Result<{c_type}, E::Error> {{"
+        );
+        output.push_str(
+            "    // B6: generated WebIDL string-enum conversion rejects unknown values.\n",
+        );
+        output.push_str("    let arena = Arena::new();\n");
+        output.push_str("    match E::to_str(cx, value, &arena)? {\n");
+        for value in &pair.enum_values {
+            if let (Some(idl_value), Some(c_value)) = (&value.idl_value, &value.c_value) {
+                let constant = enum_constant(c_type, c_value);
+                let _ = writeln!(output, "        \"{idl_value}\" => Ok({constant}),");
+            }
+        }
+        let _ = writeln!(output, "        _ => Err(E::type_error(cx, \"{name}\")),");
+        output.push_str("    }\n}\n\n");
         let _ = writeln!(
             output,
             "#[allow(non_upper_case_globals)]\npub(super) fn {function}(value: {c_type}) -> Option<&'static str> {{"
