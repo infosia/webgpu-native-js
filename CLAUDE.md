@@ -167,8 +167,28 @@ revisited later purely as a desktop tooling/editor target.
 
 | Tier | Backends | Meaning |
 |---|---|---|
-| **Tier 1 — Supported** | yawgpu | Primary development and CI backend. |
-| **Tier 2 — Experimental (best-effort)** | wgpu-native, Dawn | Selected by Cargo feature. Must link and pass the vertical slice; divergences from canonical `webgpu.h` are catalogued, not worked around. |
+| **Tier 1 — Supported** | yawgpu | Primary development and CI backend (the Noop backend runs every gate headless). |
+| **Oracle** | Dawn | **Promoted from Experimental 2026-07-12 (owner decision)** — the reference arbiter, not a support tier. Dawn passes both engines' full suites with byte-identical parity, is the conformance oracle of `webgpu-native-cts` itself, and — decisively — **our `webgpu-headers` pin IS Dawn's `DEPS` pin**, which is what makes ABI-identical arbitration valid. See "The oracle protocol" below. |
+| **Tier 2 — Experimental (best-effort)** | wgpu-native | Selected by Cargo feature. Must link and pass the vertical slice; divergences from canonical `webgpu.h` are catalogued, not worked around. |
+
+**The oracle protocol.**
+
+- **Presumption, not axiom:** when the binding disagrees with Dawn, the
+  presumption is a binding bug — but the D11 lesson stands: isolate WHERE the
+  paths diverge before assigning blame (D11's "divergence" was an
+  observability gap on our side, not either backend). When Dawn disagrees
+  with the pinned header or spec text, **the pins win** and the disagreement
+  is investigated and recorded, never blindly followed.
+- **Pin lockstep:** the oracle status rests on the shared header pin. When
+  the `webgpu-headers` pin moves, it follows Dawn's `DEPS` (the standing
+  policy), and the local Dawn build must match before oracle runs resume.
+- **When oracle runs happen:** gated real-GPU runs (never CI): every slice
+  that extends the parity suite or the API surface gets a gated Dawn parity
+  run before it lands (the de-facto practice, now the rule), and the CTS
+  runner's real-GPU phase uses Dawn as its arbiter (fail-on-Dawn = presumed
+  binding bug; fail-on-yawgpu-only = backend delta, catalogued).
+- yawgpu-vs-Dawn disagreements are yawgpu findings, handled by the owner's
+  handoff flow — never worked around in the binding.
 
 **Operational rule (backend-independent core).** `core/`, `codegen/`, and the
 engine adapters must contain **zero** backend-specific branches. All GPU calls

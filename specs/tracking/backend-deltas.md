@@ -452,3 +452,13 @@ the gated `--verify` evidence was produced against Dawn (commit `bf6d7db`).
 Capabilities are allowed to vary per backend, so this is catalogued as a floor,
 not a divergence. The example now checks the advertised usages up front and
 fails `--verify` with a clear message instead of the silent status-6 loop.
+
+**Dawn promoted to Oracle (2026-07-12, owner decision).** The classification
+catches up with practice: Dawn has been the arbiter since the backend-swap
+verification (byte-identical parity on both engines, the D11 arbitration, the
+CTS plan's fail-on-Dawn-is-a-binding-bug rule). The oracle protocol lives in
+CLAUDE.md: presumption-not-axiom (isolate the divergence point first — the
+D11 lesson), pins-win-over-implementations, pin lockstep with Dawn's DEPS,
+gated Dawn parity runs required for surface-extending slices, and
+yawgpu-vs-Dawn disagreements remain owner-handoff findings. wgpu-native stays
+Tier 2 Experimental.

@@ -100,7 +100,8 @@ below).
 | Tier | Backend | Notes |
 |---|---|---|
 | **1 — Supported** | [yawgpu](https://github.com/infosia/yawgpu) | Primary development and CI backend. Its Noop backend runs the full suite headless — no GPU, no window. |
-| **2 — Experimental** | [wgpu-native](https://github.com/gfx-rs/wgpu-native), [Dawn](https://dawn.googlesource.com/dawn) | Selected by cargo feature. Divergences from canonical `webgpu.h` are catalogued in `specs/tracking/backend-deltas.md`, never worked around above the FFI layer. |
+| **Oracle** | [Dawn](https://dawn.googlesource.com/dawn) | The reference arbiter: this project's `webgpu-headers` pin is Dawn's own `DEPS` pin, Dawn passes both engines' full suites with byte-identical parity, and disagreements with Dawn are presumed binding bugs (investigated, not assumed — the pins win over any implementation). Gated real-GPU runs, not CI. |
+| **2 — Experimental** | [wgpu-native](https://github.com/gfx-rs/wgpu-native) | Selected by cargo feature. Divergences from canonical `webgpu.h` are catalogued in `specs/tracking/backend-deltas.md`, never worked around above the FFI layer. |
 
 Backend conformance itself is out of scope here — it is owned by
 [webgpu-native-cts](https://github.com/infosia/webgpu-native-cts), which
