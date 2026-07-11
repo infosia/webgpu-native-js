@@ -200,7 +200,7 @@ fn generated_dispatch_macro_matches_focused_shape_fixture() {
     let expected =
         fs::read_to_string(fixtures().join("dispatch_surface.rs")).expect("dispatch snapshot");
     assert_eq!(dispatch_macro_surface(&emitted), expected);
-    assert_eq!(expected.matches(", unsafe fn(").count(), 117);
+    assert_eq!(expected.matches(", unsafe fn(").count(), 119);
 }
 
 #[test]
@@ -311,7 +311,7 @@ fn generated_lifecycle_covers_every_selected_class_and_retention_set() {
     }
 
     assert!(emitted.contains(
-        "pub struct BindGroupPayload {\n    pub(super) bind_group: WGPUBindGroup,\n    pub(super) layout: WGPUBindGroupLayout,\n    pub(super) buffers: Vec<WGPUBuffer>,\n    pub(super) samplers: Vec<WGPUSampler>,\n    pub(super) texture_views: Vec<WGPUTextureView>,\n}"
+        "pub struct BindGroupPayload {\n    pub(super) bind_group: WGPUBindGroup,\n    pub(super) layout: WGPUBindGroupLayout,\n    pub(super) buffers: Vec<WGPUBuffer>,\n    pub(super) samplers: Vec<WGPUSampler>,\n    pub(super) texture_views: Vec<WGPUTextureView>,\n    pub(super) created_texture_views: Vec<WGPUTextureView>,\n}"
     ));
     assert!(emitted.contains(
         "pub struct ComputePipelinePayload {\n    pub(super) pipeline: WGPUComputePipeline,\n    pub(super) module: WGPUShaderModule,\n    pub(super) layout: WGPUPipelineLayout,\n}"

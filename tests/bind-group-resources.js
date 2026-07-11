@@ -49,30 +49,37 @@
         throw new Error("externalTexture rejection changed: " + externalError);
     }
 
-    var resourceLayout = device.createBindGroupLayout({ entries: [] });
+    var bufferResourceLayout = device.createBindGroupLayout({
+        entries: [{ binding: 0, visibility: 4, buffer: { type: "uniform" } }]
+    });
+    var textureResourceLayout = device.createBindGroupLayout({
+        entries: [{ binding: 0, visibility: 4, texture: {} }]
+    });
     var directBuffer = device.createBuffer({ size: 4, usage: 8 });
     var directTexture = device.createTexture({
         size: [1], format: "rgba8unorm", usage: 4
     });
-    [
-        { sampler: {} },
-        directBuffer,
-        directTexture
-    ].forEach(function (resource) {
-        var resourceError;
-        try {
-            device.createBindGroup({
-                layout: resourceLayout,
-                entries: [{ binding: 0, resource: resource }]
-            });
-        } catch (caught) {
-            resourceError = caught;
-        }
-        if (!(resourceError instanceof TypeError) ||
-            resourceError.message !== "resource must be a GPUBufferBinding") {
-            throw new Error("wrong resource did not retain the resource TypeError");
-        }
+    device.createBindGroup({
+        layout: bufferResourceLayout,
+        entries: [{ binding: 0, resource: directBuffer }]
     });
+    device.createBindGroup({
+        layout: textureResourceLayout,
+        entries: [{ binding: 0, resource: directTexture }]
+    });
+    var resourceError;
+    try {
+        device.createBindGroup({
+            layout: bufferResourceLayout,
+            entries: [{ binding: 0, resource: { sampler: {} } }]
+        });
+    } catch (caught) {
+        resourceError = caught;
+    }
+    if (!(resourceError instanceof TypeError) ||
+        resourceError.message !== "resource must be a GPUBindingResource") {
+        throw new Error("unknown resource did not retain the resource TypeError");
+    }
     directBuffer.destroy();
     directTexture.destroy();
 }());

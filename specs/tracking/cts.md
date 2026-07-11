@@ -135,3 +135,44 @@ byte-identical on yawgpu AND Dawn (gated). The 467-case seed stays exit 0.
 Remaining from the triage: B-4b (direct buffer/texture binding-resource arms
 + async pipeline methods), B-4c (the gc_decref_child scale investigation),
 Phase C material (transient-attachment arbitration).
+
+**B-4b landed (2026-07-11): the union grows its direct arms; pipelines go
+async.** (1) `GPUBindingResource` accepts a direct `GPUBuffer` (flattened to
+`{buffer, offset: 0, size: WHOLE_SIZE}`) and a direct `GPUTexture` — the
+latter creates an **implicit default view** (`wgpuTextureCreateView(texture,
+NULL)`; the header marks the descriptor `WGPU_NULLABLE` and the result
+`ReturnedWithOwnership`), which the bind-group wrapper owns without an extra
+AddRef and releases through the release queue, failure paths symmetric.
+(2) The same machinery retired the render-attachment view-only delta:
+color/resolve/depth attachments accept `(GPUTexture or GPUTextureView)` per
+the IDL; the delta entry in codegen-deltas.md is annotated RETIRED and the
+TypeError parity pin became a positive line. (3)
+`createComputePipelineAsync`/`createRenderPipelineAsync` ride the standard
+settlement machinery (pure-Rust callback, AllowProcessEvents, retention
+matching the sync paths). Rejections are named `OperationError` carrying
+validation/internal in the message — `GPUPipelineError` is a recorded
+deviation (codegen-deltas.md, Block 13 section). Parity 124 → 127,
+byte-identical on yawgpu AND Dawn (gated). The 467-case seed stays exit 0.
+
+The Dawn parity run caught one divergence — in the *suite*, not a backend:
+`validationScope` discarded its body's returned promise, so the
+`pipelineAsync` settlement line was fire-and-forget and printed wherever each
+backend's CreatePipelineAsync callback happened to land (yawgpu after
+`renderPass:chain-ok`, Dawn after `scope:querySet:null`; both drifted past
+their own section's scope line). Async completion latency across ticks is
+unspecified, so neither backend was wrong — the script was nondeterministic.
+Fix: `validationScope` now chains `Promise.resolve(action())` before popping
+the scope, making every section's async work settle before its scope line.
+Suite-design rule going forward: **a parity line that depends on a settlement
+must be sequenced by an await/then the section chain actually waits on;
+fire-and-forget printing is a determinism bug even while both backends agree.**
+
+CTS shape after B-4b (yawgpu, informational — not yet suite-gated):
+`createBindGroup:*` 1,819/1,901 (all 82 fails are the unsupported
+external-texture binding family); `compute_pipeline:*` lists 274 but aborts
+on the unplumbed `wgslLanguageFeatures` before summarizing
+(`compute_pipeline:basic,*` passes 2/2 incl. async); negative async cases
+also surface the GPUPipelineError deviation. Remaining: B-4c (the
+gc_decref_child scale investigation), Phase C material
+(transient-attachment arbitration), `wgslLanguageFeatures` as a small
+follow-up gap.

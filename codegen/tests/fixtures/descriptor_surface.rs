@@ -2,6 +2,7 @@
 pub(super) fn convert_bind_group_entry<E: JsEngine + 'static>(
     cx: E::Context<'_>,
     value: E::Value,
+    created_texture_views: &mut CreatedTextureViewCapture,
 ) -> Result<WGPUBindGroupEntry, E::Error> {
     // DR-M3: required dictionary members reject undefined.
     let binding_value = required_member::<E>(cx, value, "binding")?;
@@ -14,18 +15,40 @@ pub(super) fn convert_bind_group_entry<E: JsEngine + 'static>(
     let texture_view_resource = E::payload(cx, resource_value, GPU_TEXTURE_VIEW_CLASS)
         .and_then(|payload| payload.downcast_ref::<TextureViewPayload>())
         .map(|payload| payload.texture_view);
+    // B-4b: direct union arms are selected by generated ClassSpec identity.
+    let buffer_direct_resource = E::payload(cx, resource_value, GPU_BUFFER_CLASS)
+        .and_then(|payload| payload.downcast_ref::<BufferPayload<E>>())
+        .map(|_| ())
+        .map(|_| buffer_handle::<E>(cx, resource_value))
+        .transpose()?;
+    // B-4b: direct union arms are selected by generated ClassSpec identity.
+    let texture_direct_resource = E::payload(cx, resource_value, GPU_TEXTURE_CLASS)
+        .and_then(|payload| payload.downcast_ref::<TexturePayload>())
+        .map(|payload| payload.texture);
+    let texture_view_created_resource = if let Some(source) = texture_direct_resource {
+        let created = unsafe { (E::environment(cx).gpu().texture_create_view)(source, ptr::null()) };
+        if created.is_null() {
+            return Err(E::operation_error(cx, "wgpuTextureCreateView returned null"));
+        }
+        created_texture_views.push(created);
+        Some(created)
+    } else {
+        None
+    };
     // B8: flattened handle conversion extracts only the native handle.
-    let buffer = if sampler_resource.is_some() || texture_view_resource.is_some() {
+    let buffer = if let Some(direct) = buffer_direct_resource {
+        direct
+    } else if sampler_resource.is_some() || texture_view_resource.is_some() || buffer_direct_resource.is_some() || texture_direct_resource.is_some() {
         ptr::null_mut()
     } else {
         let buffer_value = E::get_property(cx, resource_value, "buffer")?;
         if E::is_undefined(cx, buffer_value) {
-            return Err(E::type_error(cx, "resource must be a GPUBufferBinding"));
+            return Err(E::type_error(cx, "resource must be a GPUBindingResource"));
         }
         buffer_handle::<E>(cx, buffer_value)?
     };
     // R8: flattened `[EnforceRange]` members keep their WebIDL width.
-    let offset = if sampler_resource.is_some() || texture_view_resource.is_some() {
+    let offset = if sampler_resource.is_some() || texture_view_resource.is_some() || buffer_direct_resource.is_some() || texture_direct_resource.is_some() {
         0
     } else {
         let offset_value = E::get_property(cx, resource_value, "offset")?;
@@ -36,7 +59,7 @@ pub(super) fn convert_bind_group_entry<E: JsEngine + 'static>(
         }
     };
     // R8: flattened `[EnforceRange]` members keep their WebIDL width.
-    let size = if sampler_resource.is_some() || texture_view_resource.is_some() {
+    let size = if sampler_resource.is_some() || texture_view_resource.is_some() || buffer_direct_resource.is_some() || texture_direct_resource.is_some() {
         WGPU_WHOLE_SIZE as u64
     } else {
         let size_value = E::get_property(cx, resource_value, "size")?;
@@ -54,7 +77,7 @@ pub(super) fn convert_bind_group_entry<E: JsEngine + 'static>(
         offset,
         size,
         sampler: sampler_resource.unwrap_or(ptr::null_mut()),
-        textureView: texture_view_resource.unwrap_or(ptr::null_mut()),
+        textureView: texture_view_resource.or(texture_view_created_resource).unwrap_or(ptr::null_mut()),
     })
 }
 

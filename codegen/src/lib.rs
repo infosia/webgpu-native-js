@@ -466,6 +466,10 @@ pub(crate) struct RetentionExtensionPolicy {
     pub(crate) field: String,
     pub(crate) source: String,
     pub(crate) handle_type: String,
+    #[serde(default)]
+    pub(crate) sequence: bool,
+    #[serde(default)]
+    pub(crate) created_by_conversion: bool,
     pub(crate) reason: String,
 }
 
@@ -561,6 +565,7 @@ pub(crate) struct DescriptorEntry {
     #[serde(default)]
     pub(crate) embedded: Vec<EmbeddedDictionaryPolicy>,
     pub(crate) wrapper: Option<WrapperPolicy>,
+    pub(crate) created_view_capture: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -599,6 +604,8 @@ pub(crate) struct EnumValueSkipPolicy {
 pub(crate) struct HandlePolicy {
     pub(crate) member: String,
     pub(crate) helper: String,
+    #[serde(default)]
+    pub(crate) accept_texture: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -611,9 +618,22 @@ pub(crate) struct UnionFlattenPolicy {
     #[serde(default)]
     pub(crate) handle_arms: Vec<String>,
     #[serde(default)]
+    pub(crate) direct_handle_arms: Vec<DirectHandleArmPolicy>,
+    #[serde(default)]
     pub(crate) fields: Vec<UnionFlattenField>,
     #[serde(default)]
     pub(crate) zero_c_members: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DirectHandleArmPolicy {
+    pub(crate) interface: String,
+    pub(crate) c_member: String,
+    pub(crate) payload_field: Option<String>,
+    pub(crate) handle_helper: Option<String>,
+    pub(crate) creator_dispatch: Option<String>,
+    pub(crate) created_capture: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -678,6 +698,8 @@ pub(crate) struct WrapperPolicy {
 pub(crate) struct WrapperCapturePolicy {
     pub(crate) field: String,
     pub(crate) source: String,
+    #[serde(default)]
+    pub(crate) take: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -686,6 +708,7 @@ pub(crate) struct WrapperSequenceCapturePolicy {
     pub(crate) field: String,
     pub(crate) source: String,
     pub(crate) element_field: String,
+    pub(crate) exclude_source: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]

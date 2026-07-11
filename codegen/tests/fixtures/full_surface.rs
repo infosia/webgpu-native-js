@@ -49,6 +49,10 @@ pub struct GpuDispatch {
     pub device_create_compute_pipeline: unsafe fn(WGPUDevice, *const WGPUComputePipelineDescriptor) -> WGPUComputePipeline,
     /// `wgpuDeviceCreateRenderPipeline`.
     pub device_create_render_pipeline: unsafe fn(WGPUDevice, *const WGPURenderPipelineDescriptor) -> WGPURenderPipeline,
+    /// `wgpuDeviceCreateComputePipelineAsync`.
+    pub device_create_compute_pipeline_async: unsafe fn(WGPUDevice, *const WGPUComputePipelineDescriptor, WGPUCreateComputePipelineAsyncCallbackInfo) -> WGPUFuture,
+    /// `wgpuDeviceCreateRenderPipelineAsync`.
+    pub device_create_render_pipeline_async: unsafe fn(WGPUDevice, *const WGPURenderPipelineDescriptor, WGPUCreateRenderPipelineAsyncCallbackInfo) -> WGPUFuture,
     /// `wgpuDeviceCreateQuerySet`.
     pub device_create_query_set: unsafe fn(WGPUDevice, *const WGPUQuerySetDescriptor) -> WGPUQuerySet,
     /// `wgpuDeviceCreateCommandEncoder`.
@@ -267,6 +271,8 @@ macro_rules! for_each_gpu_dispatch_entry {
             (device_create_bind_group, wgpuDeviceCreateBindGroup, unsafe fn(device: $crate::WGPUDevice, descriptor: *const $crate::WGPUBindGroupDescriptor) -> $crate::WGPUBindGroup),
             (device_create_compute_pipeline, wgpuDeviceCreateComputePipeline, unsafe fn(device: $crate::WGPUDevice, descriptor: *const $crate::WGPUComputePipelineDescriptor) -> $crate::WGPUComputePipeline),
             (device_create_render_pipeline, wgpuDeviceCreateRenderPipeline, unsafe fn(device: $crate::WGPUDevice, descriptor: *const $crate::WGPURenderPipelineDescriptor) -> $crate::WGPURenderPipeline),
+            (device_create_compute_pipeline_async, wgpuDeviceCreateComputePipelineAsync, unsafe fn(device: $crate::WGPUDevice, descriptor: *const $crate::WGPUComputePipelineDescriptor, callback_info: $crate::WGPUCreateComputePipelineAsyncCallbackInfo) -> $crate::WGPUFuture),
+            (device_create_render_pipeline_async, wgpuDeviceCreateRenderPipelineAsync, unsafe fn(device: $crate::WGPUDevice, descriptor: *const $crate::WGPURenderPipelineDescriptor, callback_info: $crate::WGPUCreateRenderPipelineAsyncCallbackInfo) -> $crate::WGPUFuture),
             (device_create_query_set, wgpuDeviceCreateQuerySet, unsafe fn(device: $crate::WGPUDevice, descriptor: *const $crate::WGPUQuerySetDescriptor) -> $crate::WGPUQuerySet),
             (device_create_command_encoder, wgpuDeviceCreateCommandEncoder, unsafe fn(device: $crate::WGPUDevice, descriptor: *const $crate::WGPUCommandEncoderDescriptor) -> $crate::WGPUCommandEncoder),
             (device_create_render_bundle_encoder, wgpuDeviceCreateRenderBundleEncoder, unsafe fn(device: $crate::WGPUDevice, descriptor: *const $crate::WGPURenderBundleEncoderDescriptor) -> $crate::WGPURenderBundleEncoder),
@@ -821,6 +827,7 @@ pub(super) fn convert_color_dict<E: JsEngine>(
 pub(super) fn convert_render_pass_color_attachment<E: JsEngine + 'static>(
     cx: E::Context<'_>,
     value: E::Value,
+    created_texture_views: &mut CreatedTextureViewCapture,
 ) -> Result<WGPURenderPassColorAttachment, E::Error> {
     // DR-M3: required dictionary members reject undefined.
     let view_value = required_member::<E>(cx, value, "view")?;
@@ -829,11 +836,25 @@ pub(super) fn convert_render_pass_color_attachment<E: JsEngine + 'static>(
     let clear_value_value = dictionary_member::<E>(cx, value, "clearValue")?;
     let load_op_value = required_member::<E>(cx, value, "loadOp")?;
     let store_op_value = required_member::<E>(cx, value, "storeOp")?;
-    let view = texture_view_handle::<E>(cx, view_value)?;
+    let view = if let Some(texture) = E::payload(cx, view_value, GPU_TEXTURE_CLASS).and_then(|payload| payload.downcast_ref::<TexturePayload>()).map(|payload| payload.texture) {
+        let created = unsafe { (E::environment(cx).gpu().texture_create_view)(texture, ptr::null()) };
+        if created.is_null() { return Err(E::operation_error(cx, "wgpuTextureCreateView returned null")); }
+        created_texture_views.push(created);
+        created
+    } else {
+        texture_view_handle::<E>(cx, view_value)?
+    };
     let resolve_target = if E::is_undefined(cx, resolve_target_value) {
         ptr::null_mut()
     } else {
-        texture_view_handle::<E>(cx, resolve_target_value)?
+        if let Some(texture) = E::payload(cx, resolve_target_value, GPU_TEXTURE_CLASS).and_then(|payload| payload.downcast_ref::<TexturePayload>()).map(|payload| payload.texture) {
+            let created = unsafe { (E::environment(cx).gpu().texture_create_view)(texture, ptr::null()) };
+            if created.is_null() { return Err(E::operation_error(cx, "wgpuTextureCreateView returned null")); }
+            created_texture_views.push(created);
+            created
+        } else {
+            texture_view_handle::<E>(cx, resolve_target_value)?
+        }
     };
     let clear_value = if E::is_undefined(cx, clear_value_value) {
         // The pinned C initializer uses the all-zero value for an absent numeric union.
@@ -879,6 +900,7 @@ pub(super) fn convert_render_pass_color_attachment<E: JsEngine + 'static>(
 pub(super) fn convert_render_pass_depth_stencil_attachment<E: JsEngine + 'static>(
     cx: E::Context<'_>,
     value: E::Value,
+    created_texture_views: &mut CreatedTextureViewCapture,
 ) -> Result<WGPURenderPassDepthStencilAttachment, E::Error> {
     // DR-M3: required dictionary members reject undefined.
     let view_value = required_member::<E>(cx, value, "view")?;
@@ -890,7 +912,14 @@ pub(super) fn convert_render_pass_depth_stencil_attachment<E: JsEngine + 'static
     let stencil_load_op_value = dictionary_member::<E>(cx, value, "stencilLoadOp")?;
     let stencil_store_op_value = dictionary_member::<E>(cx, value, "stencilStoreOp")?;
     let stencil_read_only_value = dictionary_member::<E>(cx, value, "stencilReadOnly")?;
-    let view = texture_view_handle::<E>(cx, view_value)?;
+    let view = if let Some(texture) = E::payload(cx, view_value, GPU_TEXTURE_CLASS).and_then(|payload| payload.downcast_ref::<TexturePayload>()).map(|payload| payload.texture) {
+        let created = unsafe { (E::environment(cx).gpu().texture_create_view)(texture, ptr::null()) };
+        if created.is_null() { return Err(E::operation_error(cx, "wgpuTextureCreateView returned null")); }
+        created_texture_views.push(created);
+        created
+    } else {
+        texture_view_handle::<E>(cx, view_value)?
+    };
     // B6: string enums are joined to C values; absence uses the IDL default or C sentinel.
     let depth_load_op = if E::is_undefined(cx, depth_load_op_value) {
         WGPULoadOp_WGPULoadOp_Undefined
@@ -974,6 +1003,7 @@ pub(super) fn convert_render_pass_descriptor<E: JsEngine + 'static>(
     cx: E::Context<'_>,
     value: E::Value,
     arena: &Arena,
+    created_texture_views: &mut CreatedTextureViewCapture,
 ) -> Result<WGPURenderPassDescriptor, E::Error> {
     let label_value = dictionary_member::<E>(cx, value, "label")?;
     // DR-M3: required dictionary members reject undefined.
@@ -1013,7 +1043,7 @@ pub(super) fn convert_render_pass_descriptor<E: JsEngine + 'static>(
                     clearValue: unsafe { std::mem::zeroed() },
                 })
             } else {
-                convert_render_pass_color_attachment::<E>(cx, item)
+                convert_render_pass_color_attachment::<E>(cx, item, created_texture_views)
             }
         })?;
         arena.alloc_slice(converted)
@@ -1022,7 +1052,7 @@ pub(super) fn convert_render_pass_descriptor<E: JsEngine + 'static>(
     let depth_stencil_attachment = if E::is_undefined(cx, depth_stencil_attachment_value) {
         ptr::null()
     } else {
-        let converted = convert_render_pass_depth_stencil_attachment::<E>(cx, depth_stencil_attachment_value)?;
+        let converted = convert_render_pass_depth_stencil_attachment::<E>(cx, depth_stencil_attachment_value, created_texture_views)?;
         arena.alloc_slice(vec![converted]).as_ptr()
     };
     let occlusion_query_set = if E::is_undefined(cx, occlusion_query_set_value) {
@@ -1768,6 +1798,7 @@ pub(super) fn convert_sampler_descriptor<E: JsEngine>(
 pub(super) fn convert_bind_group_entry<E: JsEngine + 'static>(
     cx: E::Context<'_>,
     value: E::Value,
+    created_texture_views: &mut CreatedTextureViewCapture,
 ) -> Result<WGPUBindGroupEntry, E::Error> {
     // DR-M3: required dictionary members reject undefined.
     let binding_value = required_member::<E>(cx, value, "binding")?;
@@ -1780,18 +1811,40 @@ pub(super) fn convert_bind_group_entry<E: JsEngine + 'static>(
     let texture_view_resource = E::payload(cx, resource_value, GPU_TEXTURE_VIEW_CLASS)
         .and_then(|payload| payload.downcast_ref::<TextureViewPayload>())
         .map(|payload| payload.texture_view);
+    // B-4b: direct union arms are selected by generated ClassSpec identity.
+    let buffer_direct_resource = E::payload(cx, resource_value, GPU_BUFFER_CLASS)
+        .and_then(|payload| payload.downcast_ref::<BufferPayload<E>>())
+        .map(|_| ())
+        .map(|_| buffer_handle::<E>(cx, resource_value))
+        .transpose()?;
+    // B-4b: direct union arms are selected by generated ClassSpec identity.
+    let texture_direct_resource = E::payload(cx, resource_value, GPU_TEXTURE_CLASS)
+        .and_then(|payload| payload.downcast_ref::<TexturePayload>())
+        .map(|payload| payload.texture);
+    let texture_view_created_resource = if let Some(source) = texture_direct_resource {
+        let created = unsafe { (E::environment(cx).gpu().texture_create_view)(source, ptr::null()) };
+        if created.is_null() {
+            return Err(E::operation_error(cx, "wgpuTextureCreateView returned null"));
+        }
+        created_texture_views.push(created);
+        Some(created)
+    } else {
+        None
+    };
     // B8: flattened handle conversion extracts only the native handle.
-    let buffer = if sampler_resource.is_some() || texture_view_resource.is_some() {
+    let buffer = if let Some(direct) = buffer_direct_resource {
+        direct
+    } else if sampler_resource.is_some() || texture_view_resource.is_some() || buffer_direct_resource.is_some() || texture_direct_resource.is_some() {
         ptr::null_mut()
     } else {
         let buffer_value = E::get_property(cx, resource_value, "buffer")?;
         if E::is_undefined(cx, buffer_value) {
-            return Err(E::type_error(cx, "resource must be a GPUBufferBinding"));
+            return Err(E::type_error(cx, "resource must be a GPUBindingResource"));
         }
         buffer_handle::<E>(cx, buffer_value)?
     };
     // R8: flattened `[EnforceRange]` members keep their WebIDL width.
-    let offset = if sampler_resource.is_some() || texture_view_resource.is_some() {
+    let offset = if sampler_resource.is_some() || texture_view_resource.is_some() || buffer_direct_resource.is_some() || texture_direct_resource.is_some() {
         0
     } else {
         let offset_value = E::get_property(cx, resource_value, "offset")?;
@@ -1802,7 +1855,7 @@ pub(super) fn convert_bind_group_entry<E: JsEngine + 'static>(
         }
     };
     // R8: flattened `[EnforceRange]` members keep their WebIDL width.
-    let size = if sampler_resource.is_some() || texture_view_resource.is_some() {
+    let size = if sampler_resource.is_some() || texture_view_resource.is_some() || buffer_direct_resource.is_some() || texture_direct_resource.is_some() {
         WGPU_WHOLE_SIZE as u64
     } else {
         let size_value = E::get_property(cx, resource_value, "size")?;
@@ -1820,7 +1873,7 @@ pub(super) fn convert_bind_group_entry<E: JsEngine + 'static>(
         offset,
         size,
         sampler: sampler_resource.unwrap_or(ptr::null_mut()),
-        textureView: texture_view_resource.unwrap_or(ptr::null_mut()),
+        textureView: texture_view_resource.or(texture_view_created_resource).unwrap_or(ptr::null_mut()),
     })
 }
 
@@ -1841,12 +1894,14 @@ pub(super) fn convert_bind_group_descriptor<E: JsEngine + 'static>(
         E::to_str(cx, label_value, arena)?
     };
     let layout = bind_group_layout_handle::<E>(cx, layout_value)?;
+    let mut created_texture_views = CreatedTextureViewCapture::new::<E>(cx);
     let entries = {
         let converted = convert_sequence::<E, _>(cx, entries_value, "entries", |item| {
-            convert_bind_group_entry::<E>(cx, item)
+            convert_bind_group_entry::<E>(cx, item, &mut created_texture_views)
         })?;
         arena.alloc_slice(converted)
     };
+    let created_texture_views = created_texture_views.take();
     let buffers = entries
         .iter()
         .filter_map(|item| (!item.buffer.is_null()).then_some(item.buffer))
@@ -1857,7 +1912,7 @@ pub(super) fn convert_bind_group_descriptor<E: JsEngine + 'static>(
         .collect();
     let texture_views = entries
         .iter()
-        .filter_map(|item| (!item.textureView.is_null()).then_some(item.textureView))
+        .filter_map(|item| (!item.textureView.is_null() && !created_texture_views.contains(&item.textureView)).then_some(item.textureView))
         .collect();
     let native = WGPUBindGroupDescriptor {
         nextInChain: ptr::null_mut(),
@@ -1873,6 +1928,7 @@ pub(super) fn convert_bind_group_descriptor<E: JsEngine + 'static>(
     Ok(ConvertedBindGroupDescriptor {
         native,
         layout,
+        created_texture_views,
         buffers,
         samplers,
         texture_views,
@@ -3624,6 +3680,7 @@ pub struct BindGroupPayload {
     pub(super) buffers: Vec<WGPUBuffer>,
     pub(super) samplers: Vec<WGPUSampler>,
     pub(super) texture_views: Vec<WGPUTextureView>,
+    pub(super) created_texture_views: Vec<WGPUTextureView>,
 }
 
 // SAFETY: `BindGroupPayload` stores WGPU handle values. Finalization only moves those values
@@ -3769,6 +3826,8 @@ pub enum ReleaseRequest {
         samplers: Vec<WGPUSampler>,
         /// Retained descriptor handle or handles.
         texture_views: Vec<WGPUTextureView>,
+        /// Retained descriptor handle or handles.
+        created_texture_views: Vec<WGPUTextureView>,
         /// Dispatch table used on the drain thread.
         gpu: GpuDispatch,
     },
@@ -3817,6 +3876,10 @@ pub enum ReleaseRequest {
         /// Dispatch table used on the drain thread.
         gpu: GpuDispatch,
     },
+    /// Release a conversion-created texture view without a wrapper parent.
+    TextureViewOnly { /// Texture-view handle.
+        texture_view: WGPUTextureView, /// Dispatch table.
+        gpu: GpuDispatch },
     /// Release a command buffer.
     CommandBuffer { /// Command-buffer handle.
         command_buffer: WGPUCommandBuffer, /// Dispatch table.
@@ -3870,12 +3933,13 @@ impl ReleaseRequest {
             Self::PipelineLayout { layout, gpu } => unsafe {
                 (gpu.pipeline_layout_release)(layout);
             },
-            Self::BindGroup { bind_group, layout, buffers, samplers, texture_views, gpu } => unsafe {
+            Self::BindGroup { bind_group, layout, buffers, samplers, texture_views, created_texture_views, gpu } => unsafe {
                 (gpu.bind_group_release)(bind_group);
                 (gpu.bind_group_layout_release)(layout);
                 for handle in buffers { (gpu.buffer_release)(handle); }
                 for handle in samplers { (gpu.sampler_release)(handle); }
                 for handle in texture_views { (gpu.texture_view_release)(handle); }
+                for handle in created_texture_views { (gpu.texture_view_release)(handle); }
             },
             Self::ComputePipeline { pipeline, module, layout, gpu } => unsafe {
                 (gpu.compute_pipeline_release)(pipeline);
@@ -3897,6 +3961,7 @@ impl ReleaseRequest {
             Self::RenderBundleEncoder { render_bundle_encoder, gpu } => unsafe {
                 (gpu.render_bundle_encoder_release)(render_bundle_encoder);
             },
+            Self::TextureViewOnly { texture_view, gpu } => unsafe { (gpu.texture_view_release)(texture_view) },
             Self::CommandBuffer { command_buffer, gpu } => unsafe { (gpu.command_buffer_release)(command_buffer) },
             Self::ComputePassEncoder { pass, gpu } => unsafe { (gpu.compute_pass_encoder_release)(pass) },
             Self::RenderPassEncoder { pass, gpu } => unsafe { (gpu.render_pass_encoder_release)(pass) },
@@ -4381,6 +4446,7 @@ pub fn device_create_bind_group<E: JsEngine + 'static>(
             for handle in &converted.buffers { (gpu.buffer_release)(*handle); }
             for handle in &converted.samplers { (gpu.sampler_release)(*handle); }
             for handle in &converted.texture_views { (gpu.texture_view_release)(*handle); }
+            for handle in &converted.created_texture_views { (gpu.texture_view_release)(*handle); }
         }
         return Err(error);
     }
@@ -4388,12 +4454,14 @@ pub fn device_create_bind_group<E: JsEngine + 'static>(
     let retained_buffers = converted.buffers.clone();
     let retained_samplers = converted.samplers.clone();
     let retained_texture_views = converted.texture_views.clone();
+    let retained_created_texture_views = converted.created_texture_views.clone();
     match E::new_instance(cx, GPU_BIND_GROUP_CLASS, Box::new(BindGroupPayload {
         bind_group,
         layout: converted.layout,
         buffers: converted.buffers,
         samplers: converted.samplers,
         texture_views: converted.texture_views,
+        created_texture_views: converted.created_texture_views,
     })) {
         Ok(value) => Ok(value),
         Err(error) => {
@@ -4403,6 +4471,7 @@ pub fn device_create_bind_group<E: JsEngine + 'static>(
                 for handle in &retained_buffers { (gpu.buffer_release)(*handle); }
                 for handle in &retained_samplers { (gpu.sampler_release)(*handle); }
                 for handle in &retained_texture_views { (gpu.texture_view_release)(*handle); }
+                for handle in &retained_created_texture_views { (gpu.texture_view_release)(*handle); }
             }
             Err(error)
         }
@@ -4418,6 +4487,7 @@ pub fn finalize_bind_group(payload: Box<dyn Any + Send>, env: &Environment) {
         buffers: payload.buffers,
         samplers: payload.samplers,
         texture_views: payload.texture_views,
+        created_texture_views: payload.created_texture_views,
         gpu: env.gpu(),
     });
 }
@@ -4756,6 +4826,8 @@ pub(super) fn device_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
         ])),
         methods: Box::leak(Box::new([
             MethodSpec { name: "createBuffer", length: 1, call: device_create_buffer::<E> },
+            MethodSpec { name: "createComputePipelineAsync", length: 1, call: device_create_compute_pipeline_async::<E> },
+            MethodSpec { name: "createRenderPipelineAsync", length: 1, call: device_create_render_pipeline_async::<E> },
             MethodSpec { name: "destroy", length: 0, call: device_destroy::<E> },
             MethodSpec { name: "pushErrorScope", length: 1, call: device_push_error_scope::<E> },
             MethodSpec { name: "popErrorScope", length: 0, call: device_pop_error_scope::<E> },

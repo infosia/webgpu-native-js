@@ -15,6 +15,10 @@ unsafe impl Send for SamplerPayload {}
         /// Dispatch table used on the drain thread.
         gpu: GpuDispatch,
     },
+    /// Release a conversion-created texture view without a wrapper parent.
+    TextureViewOnly { /// Texture-view handle.
+        texture_view: WGPUTextureView, /// Dispatch table.
+        gpu: GpuDispatch },
             Self::Sampler { sampler, gpu } => unsafe {
 /// Implements `GPUDevice.createSampler`.
 pub fn device_create_sampler<E: JsEngine + 'static>(

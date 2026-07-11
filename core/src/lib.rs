@@ -591,6 +591,27 @@ enum SettlementRequest<E: JsEngine + 'static> {
         native: PendingNative,
         events: Arc<DeviceEventState<E>>,
     },
+    ComputePipeline {
+        deferred: Deferred<E>,
+        pipeline: WGPUComputePipeline,
+        status: WGPUCreatePipelineAsyncStatus,
+        message: String,
+        module: WGPUShaderModule,
+        layout: WGPUPipelineLayout,
+        queue: Arc<ReleaseQueue>,
+        gpu: GpuDispatch,
+    },
+    RenderPipeline {
+        deferred: Deferred<E>,
+        pipeline: WGPURenderPipeline,
+        status: WGPUCreatePipelineAsyncStatus,
+        message: String,
+        vertex_module: WGPUShaderModule,
+        fragment_module: WGPUShaderModule,
+        layout: WGPUPipelineLayout,
+        queue: Arc<ReleaseQueue>,
+        gpu: GpuDispatch,
+    },
     Success {
         deferred: Deferred<E>,
     },
@@ -692,6 +713,124 @@ impl<E: JsEngine + 'static> SettlementRequest<E> {
                             device,
                             gpu: native.gpu,
                         });
+                        (deferred, Err(E::error_value_from_error(cx, error)))
+                    }
+                })
+            }
+            Self::ComputePipeline {
+                deferred,
+                pipeline,
+                status,
+                message,
+                module,
+                layout,
+                queue,
+                gpu,
+            } => {
+                if status != WGPUCreatePipelineAsyncStatus_WGPUCreatePipelineAsyncStatus_Success
+                    || pipeline.is_null()
+                {
+                    enqueue_compute_pipeline_release(&queue, pipeline, module, layout, gpu);
+                    // B-4b deviation: the pinned IDL specifies GPUPipelineError,
+                    // but that DOMException subclass is outside this slice's class machinery.
+                    // Preserve the reason in a named OperationError until it lands.
+                    let reason = if status
+                        == WGPUCreatePipelineAsyncStatus_WGPUCreatePipelineAsyncStatus_ValidationError
+                    {
+                        "validation"
+                    } else {
+                        "internal"
+                    };
+                    let message = if message.is_empty() {
+                        format!("{reason}: createComputePipelineAsync failed")
+                    } else {
+                        format!("{reason}: {message}")
+                    };
+                    return SettlementOutcome::Deferred((
+                        deferred,
+                        Err(E::async_error_value(cx, "OperationError", &message)),
+                    ));
+                }
+                let value = E::new_instance(
+                    cx,
+                    GPU_COMPUTE_PIPELINE_CLASS,
+                    Box::new(ComputePipelinePayload {
+                        pipeline,
+                        module,
+                        layout,
+                    }),
+                );
+                SettlementOutcome::Deferred(match value {
+                    Ok(value) => (deferred, Ok(value)),
+                    Err(error) => {
+                        enqueue_compute_pipeline_release(&queue, pipeline, module, layout, gpu);
+                        (deferred, Err(E::error_value_from_error(cx, error)))
+                    }
+                })
+            }
+            Self::RenderPipeline {
+                deferred,
+                pipeline,
+                status,
+                message,
+                vertex_module,
+                fragment_module,
+                layout,
+                queue,
+                gpu,
+            } => {
+                if status != WGPUCreatePipelineAsyncStatus_WGPUCreatePipelineAsyncStatus_Success
+                    || pipeline.is_null()
+                {
+                    enqueue_render_pipeline_release(
+                        &queue,
+                        pipeline,
+                        vertex_module,
+                        fragment_module,
+                        layout,
+                        gpu,
+                    );
+                    // B-4b deviation: the pinned IDL specifies GPUPipelineError,
+                    // but that DOMException subclass is outside this slice's class machinery.
+                    // Preserve the reason in a named OperationError until it lands.
+                    let reason = if status
+                        == WGPUCreatePipelineAsyncStatus_WGPUCreatePipelineAsyncStatus_ValidationError
+                    {
+                        "validation"
+                    } else {
+                        "internal"
+                    };
+                    let message = if message.is_empty() {
+                        format!("{reason}: createRenderPipelineAsync failed")
+                    } else {
+                        format!("{reason}: {message}")
+                    };
+                    return SettlementOutcome::Deferred((
+                        deferred,
+                        Err(E::async_error_value(cx, "OperationError", &message)),
+                    ));
+                }
+                let value = E::new_instance(
+                    cx,
+                    GPU_RENDER_PIPELINE_CLASS,
+                    Box::new(RenderPipelinePayload {
+                        render_pipeline: pipeline,
+                        vertex_module,
+                        fragment_module,
+                        layout,
+                    }),
+                );
+                SettlementOutcome::Deferred(match value {
+                    Ok(value) => (deferred, Ok(value)),
+                    Err(error) => {
+                        enqueue_render_pipeline_release(
+                            &queue,
+                            pipeline,
+                            vertex_module,
+                            fragment_module,
+                            layout,
+                            gpu,
+                        );
                         (deferred, Err(E::error_value_from_error(cx, error)))
                     }
                 })
@@ -874,6 +1013,40 @@ impl SettlementQueue {
                     | SettlementRequest::Error { deferred, .. }
                     | SettlementRequest::PopErrorScope { deferred, .. } => {
                         E::release_deferred(cx, deferred)
+                    }
+                    SettlementRequest::ComputePipeline {
+                        deferred,
+                        pipeline,
+                        status: _,
+                        message: _,
+                        module,
+                        layout,
+                        queue,
+                        gpu,
+                    } => {
+                        E::release_deferred(cx, deferred);
+                        enqueue_compute_pipeline_release(&queue, pipeline, module, layout, gpu);
+                    }
+                    SettlementRequest::RenderPipeline {
+                        deferred,
+                        pipeline,
+                        status: _,
+                        message: _,
+                        vertex_module,
+                        fragment_module,
+                        layout,
+                        queue,
+                        gpu,
+                    } => {
+                        E::release_deferred(cx, deferred);
+                        enqueue_render_pipeline_release(
+                            &queue,
+                            pipeline,
+                            vertex_module,
+                            fragment_module,
+                            layout,
+                            gpu,
+                        );
                     }
                     SettlementRequest::UncapturedError { .. }
                     | SettlementRequest::DeviceLost { .. } => {}
@@ -3121,6 +3294,110 @@ fn adapter_request_device_inner<E: JsEngine + 'static>(
     Ok(())
 }
 
+/// Implements `GPUDevice.createComputePipelineAsync`.
+pub fn device_create_compute_pipeline_async<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    promise_operation::<E>(cx, |deferred| {
+        let device = device_handle::<E>(cx, this)?;
+        let arena = Arena::new();
+        let descriptor = required_argument::<E>(cx, args, 0, "GPUComputePipelineDescriptor")?;
+        let converted = convert_compute_pipeline_descriptor::<E>(cx, descriptor, &arena)?;
+        let gpu = E::environment(cx).gpu();
+        let _ = E::register_class(cx, compute_pipeline_class::<E>())?;
+        unsafe {
+            (gpu.shader_module_add_ref)(converted.module);
+            if !converted.layout.is_null() {
+                (gpu.pipeline_layout_add_ref)(converted.layout);
+            }
+        }
+        let mut request = Box::new(ComputePipelineRequest::<E> {
+            deferred: deferred.take(),
+            settlements: Arc::clone(E::environment(cx).settlements()),
+            release_queue: Arc::clone(E::environment(cx).queue()),
+            gpu,
+            module: converted.module,
+            layout: converted.layout,
+            _registration: None,
+        });
+        request._registration = Some(E::register_deferred(
+            cx,
+            NonNull::from(&mut request.deferred),
+        ));
+        let info = WGPUCreateComputePipelineAsyncCallbackInfo {
+            nextInChain: ptr::null_mut(),
+            mode: WGPUCallbackMode_WGPUCallbackMode_AllowProcessEvents,
+            callback: Some(create_compute_pipeline_callback::<E>),
+            userdata1: Box::into_raw(request).cast(),
+            userdata2: ptr::null_mut(),
+        };
+        unsafe {
+            (gpu.device_create_compute_pipeline_async)(
+                device,
+                ptr::from_ref(&converted.native),
+                info,
+            );
+        }
+        Ok(())
+    })
+}
+
+/// Implements `GPUDevice.createRenderPipelineAsync`.
+pub fn device_create_render_pipeline_async<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    promise_operation::<E>(cx, |deferred| {
+        let device = device_handle::<E>(cx, this)?;
+        let arena = Arena::new();
+        let descriptor = required_argument::<E>(cx, args, 0, "GPURenderPipelineDescriptor")?;
+        let converted = convert_render_pipeline_descriptor::<E>(cx, descriptor, &arena)?;
+        let gpu = E::environment(cx).gpu();
+        let _ = E::register_class(cx, render_pipeline_class::<E>())?;
+        unsafe {
+            (gpu.shader_module_add_ref)(converted.vertex_module);
+            if !converted.fragment_module.is_null() {
+                (gpu.shader_module_add_ref)(converted.fragment_module);
+            }
+            if !converted.layout.is_null() {
+                (gpu.pipeline_layout_add_ref)(converted.layout);
+            }
+        }
+        let mut request = Box::new(RenderPipelineRequest::<E> {
+            deferred: deferred.take(),
+            settlements: Arc::clone(E::environment(cx).settlements()),
+            release_queue: Arc::clone(E::environment(cx).queue()),
+            gpu,
+            vertex_module: converted.vertex_module,
+            fragment_module: converted.fragment_module,
+            layout: converted.layout,
+            _registration: None,
+        });
+        request._registration = Some(E::register_deferred(
+            cx,
+            NonNull::from(&mut request.deferred),
+        ));
+        let info = WGPUCreateRenderPipelineAsyncCallbackInfo {
+            nextInChain: ptr::null_mut(),
+            mode: WGPUCallbackMode_WGPUCallbackMode_AllowProcessEvents,
+            callback: Some(create_render_pipeline_callback::<E>),
+            userdata1: Box::into_raw(request).cast(),
+            userdata2: ptr::null_mut(),
+        };
+        unsafe {
+            (gpu.device_create_render_pipeline_async)(
+                device,
+                ptr::from_ref(&converted.native),
+                info,
+            );
+        }
+        Ok(())
+    })
+}
+
 /// Implements `GPUBuffer.mapAsync`.
 pub fn buffer_map_async<E: JsEngine + 'static>(
     cx: E::Context<'_>,
@@ -4537,10 +4814,12 @@ pub fn command_encoder_begin_render_pass<E: JsEngine + 'static>(
         state.encoder
     };
     let arena = Arena::new();
+    let mut created_texture_views = CreatedTextureViewCapture::new::<E>(cx);
     let descriptor = convert_render_pass_descriptor::<E>(
         cx,
         required_argument::<E>(cx, args, 0, "descriptor")?,
         &arena,
+        &mut created_texture_views,
     )?;
     let pass = unsafe {
         (E::environment(cx).gpu().command_encoder_begin_render_pass)(
@@ -5258,6 +5537,27 @@ struct PopErrorScopeRequest<E: JsEngine + 'static> {
     _registration: Option<E::DeferredRegistration>,
 }
 
+struct ComputePipelineRequest<E: JsEngine + 'static> {
+    deferred: Option<Deferred<E>>,
+    settlements: Arc<SettlementQueue>,
+    release_queue: Arc<ReleaseQueue>,
+    gpu: GpuDispatch,
+    module: WGPUShaderModule,
+    layout: WGPUPipelineLayout,
+    _registration: Option<E::DeferredRegistration>,
+}
+
+struct RenderPipelineRequest<E: JsEngine + 'static> {
+    deferred: Option<Deferred<E>>,
+    settlements: Arc<SettlementQueue>,
+    release_queue: Arc<ReleaseQueue>,
+    gpu: GpuDispatch,
+    vertex_module: WGPUShaderModule,
+    fragment_module: WGPUShaderModule,
+    layout: WGPUPipelineLayout,
+    _registration: Option<E::DeferredRegistration>,
+}
+
 unsafe fn string_view_to_owned(view: WGPUStringView) -> String {
     if view.data.is_null() || view.length == wgpu_strlen() {
         return String::new();
@@ -5289,6 +5589,61 @@ unsafe fn callback_string(message: WGPUStringView) -> String {
             std::slice::from_raw_parts(message.data.cast::<u8>(), message.length)
         })
         .into_owned()
+    }
+}
+
+fn enqueue_compute_pipeline_release(
+    queue: &ReleaseQueue,
+    pipeline: WGPUComputePipeline,
+    module: WGPUShaderModule,
+    layout: WGPUPipelineLayout,
+    gpu: GpuDispatch,
+) {
+    if pipeline.is_null() {
+        let _ = queue.enqueue(ReleaseRequest::ShaderModule { module, gpu });
+        if !layout.is_null() {
+            let _ = queue.enqueue(ReleaseRequest::PipelineLayout { layout, gpu });
+        }
+    } else {
+        let _ = queue.enqueue(ReleaseRequest::ComputePipeline {
+            pipeline,
+            module,
+            layout,
+            gpu,
+        });
+    }
+}
+
+fn enqueue_render_pipeline_release(
+    queue: &ReleaseQueue,
+    pipeline: WGPURenderPipeline,
+    vertex_module: WGPUShaderModule,
+    fragment_module: WGPUShaderModule,
+    layout: WGPUPipelineLayout,
+    gpu: GpuDispatch,
+) {
+    if pipeline.is_null() {
+        let _ = queue.enqueue(ReleaseRequest::ShaderModule {
+            module: vertex_module,
+            gpu,
+        });
+        if !fragment_module.is_null() {
+            let _ = queue.enqueue(ReleaseRequest::ShaderModule {
+                module: fragment_module,
+                gpu,
+            });
+        }
+        if !layout.is_null() {
+            let _ = queue.enqueue(ReleaseRequest::PipelineLayout { layout, gpu });
+        }
+    } else {
+        let _ = queue.enqueue(ReleaseRequest::RenderPipeline {
+            render_pipeline: pipeline,
+            vertex_module,
+            fragment_module,
+            layout,
+            gpu,
+        });
     }
 }
 
@@ -5388,6 +5743,80 @@ unsafe extern "C" fn request_device_callback<E: JsEngine + 'static>(
                 name: "OperationError",
                 message: unsafe { callback_message(message, "requestDevice failed") },
             }
+        };
+        let _ = request.settlements.enqueue::<E>(settlement);
+    }));
+}
+
+unsafe extern "C" fn create_compute_pipeline_callback<E: JsEngine + 'static>(
+    status: WGPUCreatePipelineAsyncStatus,
+    pipeline: WGPUComputePipeline,
+    message: WGPUStringView,
+    userdata1: *mut c_void,
+    _userdata2: *mut c_void,
+) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let Some(raw) = NonNull::new(userdata1.cast::<ComputePipelineRequest<E>>()) else {
+            return;
+        };
+        let mut request = unsafe { Box::from_raw(raw.as_ptr()) };
+        let Some(deferred) = request.deferred.take() else {
+            enqueue_compute_pipeline_release(
+                &request.release_queue,
+                pipeline,
+                request.module,
+                request.layout,
+                request.gpu,
+            );
+            return;
+        };
+        let settlement = SettlementRequest::ComputePipeline {
+            deferred,
+            pipeline,
+            status,
+            message: unsafe { callback_string(message) },
+            module: request.module,
+            layout: request.layout,
+            queue: Arc::clone(&request.release_queue),
+            gpu: request.gpu,
+        };
+        let _ = request.settlements.enqueue::<E>(settlement);
+    }));
+}
+
+unsafe extern "C" fn create_render_pipeline_callback<E: JsEngine + 'static>(
+    status: WGPUCreatePipelineAsyncStatus,
+    pipeline: WGPURenderPipeline,
+    message: WGPUStringView,
+    userdata1: *mut c_void,
+    _userdata2: *mut c_void,
+) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let Some(raw) = NonNull::new(userdata1.cast::<RenderPipelineRequest<E>>()) else {
+            return;
+        };
+        let mut request = unsafe { Box::from_raw(raw.as_ptr()) };
+        let Some(deferred) = request.deferred.take() else {
+            enqueue_render_pipeline_release(
+                &request.release_queue,
+                pipeline,
+                request.vertex_module,
+                request.fragment_module,
+                request.layout,
+                request.gpu,
+            );
+            return;
+        };
+        let settlement = SettlementRequest::RenderPipeline {
+            deferred,
+            pipeline,
+            status,
+            message: unsafe { callback_string(message) },
+            vertex_module: request.vertex_module,
+            fragment_module: request.fragment_module,
+            layout: request.layout,
+            queue: Arc::clone(&request.release_queue),
+            gpu: request.gpu,
         };
         let _ = request.settlements.enqueue::<E>(settlement);
     }));
@@ -5547,6 +5976,42 @@ struct ConvertedBindGroupDescriptor {
     buffers: Vec<WGPUBuffer>,
     samplers: Vec<WGPUSampler>,
     texture_views: Vec<WGPUTextureView>,
+    created_texture_views: Vec<WGPUTextureView>,
+}
+
+struct CreatedTextureViewCapture {
+    views: Vec<WGPUTextureView>,
+    queue: Arc<ReleaseQueue>,
+    gpu: GpuDispatch,
+}
+
+impl CreatedTextureViewCapture {
+    fn new<E: JsEngine>(cx: E::Context<'_>) -> Self {
+        Self {
+            views: Vec::new(),
+            queue: Arc::clone(E::environment(cx).queue()),
+            gpu: E::environment(cx).gpu(),
+        }
+    }
+
+    fn push(&mut self, view: WGPUTextureView) {
+        self.views.push(view);
+    }
+
+    fn take(&mut self) -> Vec<WGPUTextureView> {
+        std::mem::take(&mut self.views)
+    }
+}
+
+impl Drop for CreatedTextureViewCapture {
+    fn drop(&mut self) {
+        for texture_view in self.views.drain(..) {
+            let _ = self.queue.enqueue(ReleaseRequest::TextureViewOnly {
+                texture_view,
+                gpu: self.gpu,
+            });
+        }
+    }
 }
 
 struct ConvertedComputePipelineDescriptor {

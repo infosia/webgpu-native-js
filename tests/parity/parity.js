@@ -47,8 +47,9 @@
     function validationScope(section, action) {
         // This helper observes validation failures only; OOM and internal failures are outside its filter.
         device.pushErrorScope("validation");
-        action();
-        return device.popErrorScope().then(function (error) {
+        return Promise.resolve(action()).then(function () {
+            return device.popErrorScope();
+        }).then(function (error) {
             log("scope:" + section + ":" +
                 (error === null ? "null" : error.constructor.name));
         });
@@ -431,6 +432,16 @@
             ]
         });
         log("bindGroup:resources:buffer,sampler,texture-view:ok");
+        device.createBindGroup({
+            layout: layout,
+            entries: [
+                { binding: 0, resource: resourceBuffer },
+                { binding: 1, resource: resourceSampler },
+                { binding: 2, resource: resourceTexture }
+            ]
+        });
+        log("bindGroup:resources:direct-buffer:ok");
+        log("bindGroup:resources:direct-texture:ok");
 
         var samplerTypeError = caught(function () {
             device.createBindGroupLayout({
@@ -488,6 +499,33 @@
             }
         });
         log("renderPipeline:nullable-holes:ok");
+        var asyncRenderModule = device.createShaderModule({
+            code: "@vertex fn main() -> @builtin(position) vec4f { return vec4f(0); } " +
+                "@fragment fn fs() -> @location(0) vec4f { return vec4f(1); }"
+        });
+        return device.createRenderPipelineAsync({
+            layout: "auto",
+            vertex: { module: asyncRenderModule, entryPoint: "main" },
+            fragment: {
+                module: asyncRenderModule,
+                entryPoint: "fs",
+                targets: [{ format: "rgba8unorm" }]
+            }
+        }).catch(function (error) {
+            throw new Error("async render failed: " + error.message);
+        }).then(function () {
+            var computeModule = device.createShaderModule({
+                code: "@compute @workgroup_size(1) fn main() {}"
+            });
+            return device.createComputePipelineAsync({
+                layout: "auto",
+                compute: { module: computeModule, entryPoint: "main" }
+            }).catch(function (error) {
+                throw new Error("async compute failed: " + error.message);
+            });
+        }).then(function () {
+            log("pipelineAsync:compute,render:ok");
+        });
     }
 
     function runQuerySets() {
@@ -637,16 +675,16 @@
         });
         log("renderPass:clearValue-wrong-length:" + wrongColor.name);
 
-        var textureAsView = caught(function () {
-            device.createCommandEncoder().beginRenderPass({
+        var textureEncoder = device.createCommandEncoder();
+        var textureAsView = textureEncoder.beginRenderPass({
                 colorAttachments: [{
                     view: sourceTexture,
                     loadOp: "load",
                     storeOp: "store"
                 }]
             });
-        });
-        log(errorLine("renderPass:texture-as-view", textureAsView));
+        textureAsView.end();
+        log("renderPass:texture-as-view:ok");
 
         var stateEncoder = device.createCommandEncoder();
         var statePass = stateEncoder.beginRenderPass({

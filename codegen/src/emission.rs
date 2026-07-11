@@ -1159,6 +1159,69 @@ fn validate_union_flatten_policy(
             )));
         }
     }
+    for direct in &policy.direct_handle_arms {
+        let joined = report.interfaces.iter().any(|candidate| {
+            candidate.idl_name.as_deref() == Some(direct.interface.as_str())
+                && candidate.c_name.is_some()
+        });
+        if !joined {
+            return Err(CodegenError::Policy(format!(
+                "dead direct flattened handle arm {}.{}.{}: interface is not joined",
+                descriptor.dictionary, policy.member, direct.interface
+            )));
+        }
+        if !pair
+            .c_only_members
+            .iter()
+            .any(|member| member.name == direct.c_member)
+        {
+            return Err(CodegenError::Policy(format!(
+                "dead direct flattened handle arm {}.{}.{}: C field {} does not exist",
+                descriptor.dictionary, policy.member, direct.interface, direct.c_member
+            )));
+        }
+        if direct.payload_field.is_some() == direct.handle_helper.is_some() {
+            return Err(CodegenError::Policy(format!(
+                "direct flattened handle arm {}.{}.{} needs exactly one payload field or handle helper",
+                descriptor.dictionary, policy.member, direct.interface
+            )));
+        }
+        if let Some(field) = &direct.payload_field {
+            validate_identifier(
+                &descriptor.dictionary,
+                &policy.member,
+                field,
+                "direct handle payload field",
+            )?;
+        }
+        if let Some(helper) = &direct.handle_helper {
+            validate_identifier(
+                &descriptor.dictionary,
+                &policy.member,
+                helper,
+                "direct handle helper",
+            )?;
+        }
+        if let Some(dispatch) = &direct.creator_dispatch {
+            validate_identifier(
+                &descriptor.dictionary,
+                &policy.member,
+                dispatch,
+                "direct handle creator dispatch",
+            )?;
+            if direct.created_capture.is_none() {
+                return Err(CodegenError::Policy(format!(
+                    "created direct handle arm {}.{}.{} has no created capture",
+                    descriptor.dictionary, policy.member, direct.interface
+                )));
+            }
+        } else if direct.created_capture.is_some() {
+            return Err(CodegenError::Policy(format!(
+                "borrowed direct handle arm {}.{}.{} has a created capture",
+                descriptor.dictionary, policy.member, direct.interface
+            )));
+        }
+    }
     for field in &policy.fields {
         if !claimed_idl.insert(field.member.as_str()) || !claimed_c.insert(field.c_member.clone()) {
             return Err(CodegenError::Policy(format!(
@@ -1329,10 +1392,10 @@ fn emit_descriptor(
         .iter()
         .map(|entry| (entry.member.as_str(), entry))
         .collect();
-    let handles: BTreeMap<&str, &str> = descriptor
+    let handles: BTreeMap<&str, &crate::HandlePolicy> = descriptor
         .handles
         .iter()
-        .map(|entry| (entry.member.as_str(), entry.helper.as_str()))
+        .map(|entry| (entry.member.as_str(), entry))
         .collect();
     let handle_sequences: BTreeMap<&str, &str> = descriptor
         .handle_sequences
@@ -1416,6 +1479,18 @@ fn emit_descriptor(
     output.push_str("    value: E::Value,\n");
     if needs_arena {
         output.push_str("    arena: &Arena,\n");
+    }
+    let mut created_captures: BTreeSet<_> = descriptor
+        .union_flatten
+        .iter()
+        .flat_map(|flatten| flatten.direct_handle_arms.iter())
+        .filter_map(|arm| arm.created_capture.as_deref())
+        .collect();
+    if let Some(capture) = descriptor.created_view_capture.as_deref() {
+        created_captures.insert(capture);
+    }
+    for capture in &created_captures {
+        let _ = writeln!(output, "    {capture}: &mut CreatedTextureViewCapture,");
     }
     let _ = writeln!(output, ") -> Result<{return_target}, E::Error> {{");
 
@@ -1539,16 +1614,45 @@ fn emit_descriptor(
         if skips.contains_key(name.as_str()) {
             continue;
         }
-        if let Some(helper) = handles.get(name.as_str()) {
+        if let Some(handle) = handles.get(name.as_str()) {
+            let helper = &handle.helper;
             if idl.required {
-                let _ = writeln!(output, "    let {local} = {helper}::<E>(cx, {value})?;");
+                if handle.accept_texture {
+                    let capture = descriptor
+                        .created_view_capture
+                        .as_deref()
+                        .expect("validated created-view capture");
+                    let _ = writeln!(output, "    let {local} = if let Some(texture) = E::payload(cx, {value}, GPU_TEXTURE_CLASS).and_then(|payload| payload.downcast_ref::<TexturePayload>()).map(|payload| payload.texture) {{");
+                    output.push_str("        let created = unsafe { (E::environment(cx).gpu().texture_create_view)(texture, ptr::null()) };\n");
+                    output.push_str("        if created.is_null() { return Err(E::operation_error(cx, \"wgpuTextureCreateView returned null\")); }\n");
+                    let _ = writeln!(output, "        {capture}.push(created);");
+                    output.push_str("        created\n    } else {\n");
+                    let _ = writeln!(output, "        {helper}::<E>(cx, {value})?");
+                    output.push_str("    };\n");
+                } else {
+                    let _ = writeln!(output, "    let {local} = {helper}::<E>(cx, {value})?;");
+                }
             } else {
                 let _ = writeln!(
                     output,
                     "    let {local} = if E::is_undefined(cx, {value}) {{"
                 );
                 output.push_str("        ptr::null_mut()\n    } else {\n");
-                let _ = writeln!(output, "        {helper}::<E>(cx, {value})?");
+                if handle.accept_texture {
+                    let capture = descriptor
+                        .created_view_capture
+                        .as_deref()
+                        .expect("validated created-view capture");
+                    let _ = writeln!(output, "        if let Some(texture) = E::payload(cx, {value}, GPU_TEXTURE_CLASS).and_then(|payload| payload.downcast_ref::<TexturePayload>()).map(|payload| payload.texture) {{");
+                    output.push_str("            let created = unsafe { (E::environment(cx).gpu().texture_create_view)(texture, ptr::null()) };\n");
+                    output.push_str("            if created.is_null() { return Err(E::operation_error(cx, \"wgpuTextureCreateView returned null\")); }\n");
+                    let _ = writeln!(output, "            {capture}.push(created);");
+                    output.push_str("            created\n        } else {\n");
+                    let _ = writeln!(output, "            {helper}::<E>(cx, {value})?");
+                    output.push_str("        }\n");
+                } else {
+                    let _ = writeln!(output, "        {helper}::<E>(cx, {value})?");
+                }
                 output.push_str("    };\n");
             }
         } else if let Some(helper) = handle_sequences.get(name.as_str()) {
@@ -1604,6 +1708,7 @@ fn emit_descriptor(
                 idl,
                 c,
                 descriptors,
+                descriptor.created_view_capture.as_deref(),
             )?;
         } else if let Some(element) = sequence_element(&idl.type_name) {
             emit_sequence_local(
@@ -1616,6 +1721,7 @@ fn emit_descriptor(
                 element,
                 default_empty.contains(name.as_str()),
                 descriptors,
+                descriptor.created_view_capture.as_deref(),
             )?;
         } else if is_string_double_record(idl, c) {
             emit_string_double_record_local(&mut output, name, &local, &value);
@@ -1634,7 +1740,13 @@ fn emit_descriptor(
 
     if let Some(wrapper) = &descriptor.wrapper {
         for capture in &wrapper.captures {
-            if capture.source != capture.field {
+            if capture.take {
+                let _ = writeln!(
+                    output,
+                    "    let {} = {}.take();",
+                    capture.field, capture.source
+                );
+            } else if capture.source != capture.field {
                 let mut path = capture.source.split('.');
                 let root = path.next().unwrap_or_default();
                 let tail = path.collect::<Vec<_>>();
@@ -1657,10 +1769,18 @@ fn emit_descriptor(
         for capture in &wrapper.sequence_captures {
             let _ = writeln!(output, "    let {} = {}", capture.field, capture.source);
             output.push_str("        .iter()\n");
+            let condition = if let Some(exclude) = &capture.exclude_source {
+                format!(
+                    "!item.{0}.is_null() && !{exclude}.contains(&item.{0})",
+                    capture.element_field
+                )
+            } else {
+                format!("!item.{}.is_null()", capture.element_field)
+            };
             let _ = writeln!(
                 output,
-                "        .filter_map(|item| (!item.{}.is_null()).then_some(item.{}))",
-                capture.element_field, capture.element_field
+                "        .filter_map(|item| ({condition}).then_some(item.{}))",
+                capture.element_field
             );
             output.push_str("        .collect();\n");
         }
@@ -1734,10 +1854,17 @@ fn emit_descriptor(
                 let field = snake_case(object);
                 let resource = format!("{field}_resource");
                 let rust_field = rust_field_name(&field, true);
-                let _ = writeln!(
-                    output,
-                    "        {rust_field}: {resource}.unwrap_or(ptr::null_mut()),"
-                );
+                let created = policy
+                    .direct_handle_arms
+                    .iter()
+                    .find(|direct| direct.c_member == field && direct.creator_dispatch.is_some())
+                    .map(|direct| format!("{}_created_resource", snake_case(&direct.c_member)));
+                let value = if let Some(created) = created {
+                    format!("{resource}.or({created}).unwrap_or(ptr::null_mut())")
+                } else {
+                    format!("{resource}.unwrap_or(ptr::null_mut())")
+                };
+                let _ = writeln!(output, "        {rust_field}: {value},");
             }
             for name in &policy.zero_c_members {
                 let field = rust_field_name(name, true);
@@ -1876,21 +2003,83 @@ fn emit_union_flatten_locals(
         );
         let _ = writeln!(output, "        .map(|payload| payload.{field});");
     }
-    let handle_resource = if policy.handle_arms.is_empty() {
+    for direct in &policy.direct_handle_arms {
+        let object = direct
+            .interface
+            .strip_prefix("GPU")
+            .filter(|value| !value.is_empty())
+            .unwrap_or(&direct.interface);
+        let base = snake_case(object);
+        let payload = if direct.interface == "GPUBuffer" {
+            format!("{object}Payload<E>")
+        } else {
+            format!("{object}Payload")
+        };
+        let class = format!("GPU_{}_CLASS", base.to_ascii_uppercase());
+        let resource = format!("{base}_direct_resource");
+        output.push_str(
+            "    // B-4b: direct union arms are selected by generated ClassSpec identity.\n",
+        );
+        let _ = writeln!(
+            output,
+            "    let {resource} = E::payload(cx, {value}, {class})"
+        );
+        let _ = writeln!(
+            output,
+            "        .and_then(|payload| payload.downcast_ref::<{payload}>())"
+        );
+        if let Some(field) = &direct.payload_field {
+            let _ = writeln!(output, "        .map(|payload| payload.{field});");
+        } else {
+            output.push_str("        .map(|_| ())\n");
+            let helper = direct
+                .handle_helper
+                .as_deref()
+                .expect("validated handle helper");
+            let _ = writeln!(output, "        .map(|_| {helper}::<E>(cx, {value}))");
+            output.push_str("        .transpose()?;\n");
+        }
+        if let Some(dispatch) = &direct.creator_dispatch {
+            let created_resource = format!("{}_created_resource", snake_case(&direct.c_member));
+            let capture = direct
+                .created_capture
+                .as_deref()
+                .expect("validated created capture");
+            let _ = writeln!(
+                output,
+                "    let {created_resource} = if let Some(source) = {resource} {{"
+            );
+            let _ = writeln!(output, "        let created = unsafe {{ (E::environment(cx).gpu().{dispatch})(source, ptr::null()) }};");
+            output.push_str("        if created.is_null() {\n");
+            let _ = writeln!(output, "            return Err(E::operation_error(cx, \"wgpuTextureCreateView returned null\"));");
+            output.push_str("        }\n");
+            let _ = writeln!(output, "        {capture}.push(created);");
+            output.push_str("        Some(created)\n    } else {\n        None\n    };\n");
+        }
+    }
+    let mut resource_checks = policy
+        .handle_arms
+        .iter()
+        .map(|interface| {
+            let object = interface
+                .strip_prefix("GPU")
+                .filter(|value| !value.is_empty())
+                .unwrap_or(interface);
+            format!("{}_resource.is_some()", snake_case(object))
+        })
+        .collect::<Vec<_>>();
+    resource_checks.extend(policy.direct_handle_arms.iter().map(|direct| {
+        let object = direct
+            .interface
+            .strip_prefix("GPU")
+            .filter(|value| !value.is_empty())
+            .unwrap_or(&direct.interface);
+        format!("{}_direct_resource.is_some()", snake_case(object))
+    }));
+    let handle_resource = if resource_checks.is_empty() {
         "false".to_owned()
     } else {
-        policy
-            .handle_arms
-            .iter()
-            .map(|interface| {
-                let object = interface
-                    .strip_prefix("GPU")
-                    .filter(|value| !value.is_empty())
-                    .unwrap_or(interface);
-                format!("{}_resource.is_some()", snake_case(object))
-            })
-            .collect::<Vec<_>>()
-            .join(" || ")
+        resource_checks.join(" || ")
     };
     for field in &policy.fields {
         let idl = idl_dictionary_value(arm, &field.member).ok_or_else(|| {
@@ -1902,7 +2091,26 @@ fn emit_union_flatten_locals(
             output.push_str(
                 "    // B8: flattened handle conversion extracts only the native handle.\n",
             );
-            let _ = writeln!(output, "    let {local} = if {handle_resource} {{");
+            let direct_resource = policy
+                .direct_handle_arms
+                .iter()
+                .find(|direct| {
+                    direct.c_member == field.c_member && direct.creator_dispatch.is_none()
+                })
+                .map(|direct| {
+                    let object = direct
+                        .interface
+                        .strip_prefix("GPU")
+                        .unwrap_or(&direct.interface);
+                    format!("{}_direct_resource", snake_case(object))
+                });
+            let _ = writeln!(
+                output,
+                "    let {local} = if let Some(direct) = {} {{",
+                direct_resource.as_deref().unwrap_or("None")
+            );
+            output.push_str("        direct\n");
+            let _ = writeln!(output, "    }} else if {handle_resource} {{");
             output.push_str("        ptr::null_mut()\n    } else {\n");
             let _ = writeln!(
                 output,
@@ -2292,6 +2500,7 @@ fn emit_nested_local(
     idl: &ValueModel,
     c: &ValueModel,
     descriptors: &BTreeMap<&str, &DescriptorEntry>,
+    outer_created_capture: Option<&str>,
 ) -> Result<(), CodegenError> {
     let nested = descriptors.get(idl.type_name.as_str()).ok_or_else(|| {
         unsupported_shape(
@@ -2319,16 +2528,24 @@ fn emit_nested_local(
         snake_case(idl.type_name.strip_prefix("GPU").unwrap_or(&idl.type_name))
     );
     let nested_needs_arena = descriptor_needs_arena(nested_pair, nested);
+    let capture_arg = nested
+        .created_view_capture
+        .as_deref()
+        .map(|capture| {
+            assert_eq!(outer_created_capture, Some(capture));
+            format!(", {capture}")
+        })
+        .unwrap_or_default();
     if idl.required || default_dictionary {
         if nested_needs_arena {
             let _ = writeln!(
                 output,
-                "    let {local} = {nested_function}::<E>(cx, {value}, arena)?;"
+                "    let {local} = {nested_function}::<E>(cx, {value}, arena{capture_arg})?;"
             );
         } else {
             let _ = writeln!(
                 output,
-                "    let {local} = {nested_function}::<E>(cx, {value})?;"
+                "    let {local} = {nested_function}::<E>(cx, {value}{capture_arg})?;"
             );
         }
         return Ok(());
@@ -2345,12 +2562,12 @@ fn emit_nested_local(
         if nested_needs_arena {
             let _ = writeln!(
                 output,
-                "        let converted = {nested_function}::<E>(cx, {value}, arena)?;"
+                "        let converted = {nested_function}::<E>(cx, {value}, arena{capture_arg})?;"
             );
         } else {
             let _ = writeln!(
                 output,
-                "        let converted = {nested_function}::<E>(cx, {value})?;"
+                "        let converted = {nested_function}::<E>(cx, {value}{capture_arg})?;"
             );
         }
         output.push_str("        arena.alloc_slice(vec![converted]).as_ptr()\n    };\n");
@@ -2368,10 +2585,13 @@ fn emit_nested_local(
     if nested_needs_arena {
         let _ = writeln!(
             output,
-            "        {nested_function}::<E>(cx, {value}, arena)?"
+            "        {nested_function}::<E>(cx, {value}, arena{capture_arg})?"
         );
     } else {
-        let _ = writeln!(output, "        {nested_function}::<E>(cx, {value})?");
+        let _ = writeln!(
+            output,
+            "        {nested_function}::<E>(cx, {value}{capture_arg})?"
+        );
     }
     output.push_str("    };\n");
     Ok(())
@@ -2388,9 +2608,31 @@ fn emit_sequence_local(
     element: &str,
     default_empty: bool,
     descriptors: &BTreeMap<&str, &DescriptorEntry>,
+    outer_created_capture: Option<&str>,
 ) -> Result<(), CodegenError> {
     let element_nullable = element.ends_with('?');
     let element = element.trim_end_matches('?');
+    let mut sequence_created_captures: BTreeSet<_> = descriptors
+        .get(element)
+        .into_iter()
+        .flat_map(|nested| nested.union_flatten.iter())
+        .flat_map(|flatten| flatten.direct_handle_arms.iter())
+        .filter_map(|arm| arm.created_capture.as_deref())
+        .collect();
+    if let Some(capture) = descriptors
+        .get(element)
+        .and_then(|nested| nested.created_view_capture.as_deref())
+    {
+        sequence_created_captures.insert(capture);
+    }
+    for capture in &sequence_created_captures {
+        if outer_created_capture != Some(*capture) {
+            let _ = writeln!(
+                output,
+                "    let mut {capture} = CreatedTextureViewCapture::new::<E>(cx);"
+            );
+        }
+    }
     let _ = writeln!(
         output,
         "    let {local} = {}",
@@ -2443,9 +2685,19 @@ fn emit_sequence_local(
             output.push_str("            } else {\n");
         }
         if descriptor_needs_arena(nested_pair, nested) {
+            let extra = sequence_created_captures
+                .iter()
+                .map(|capture| {
+                    if outer_created_capture == Some(*capture) {
+                        format!(", {capture}")
+                    } else {
+                        format!(", &mut {capture}")
+                    }
+                })
+                .collect::<String>();
             let _ = writeln!(
                 output,
-                "{} {nested_function}::<E>(cx, item, arena)",
+                "{} {nested_function}::<E>(cx, item, arena{extra})",
                 if element_nullable {
                     "               "
                 } else {
@@ -2453,9 +2705,19 @@ fn emit_sequence_local(
                 }
             );
         } else {
+            let extra = sequence_created_captures
+                .iter()
+                .map(|capture| {
+                    if outer_created_capture == Some(*capture) {
+                        format!(", {capture}")
+                    } else {
+                        format!(", &mut {capture}")
+                    }
+                })
+                .collect::<String>();
             let _ = writeln!(
                 output,
-                "{} {nested_function}::<E>(cx, item)",
+                "{} {nested_function}::<E>(cx, item{extra})",
                 if element_nullable {
                     "               "
                 } else {
@@ -2514,7 +2776,7 @@ fn emit_field(
     string_policy: &BTreeMap<&str, bool>,
     unsupported: &BTreeSet<&str>,
     skips: &BTreeMap<&str, &SkipPolicy>,
-    handles: &BTreeMap<&str, &str>,
+    handles: &BTreeMap<&str, &crate::HandlePolicy>,
     handle_sequences: &BTreeMap<&str, &str>,
     handle_or_enum: &BTreeMap<&str, &HandleOrEnumUnionPolicy>,
     required_defaults: &BTreeMap<&str, u64>,

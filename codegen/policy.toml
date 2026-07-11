@@ -102,6 +102,8 @@ members = [
   "createBindGroup",
   "createComputePipeline",
   "createRenderPipeline",
+  "createComputePipelineAsync",
+  "createRenderPipelineAsync",
   "createQuerySet",
   "createCommandEncoder",
   "createRenderBundleEncoder",
@@ -271,6 +273,18 @@ path = "adapter_request_device"
 interface = "GPUDevice"
 member = "createBuffer"
 path = "device_create_buffer"
+
+[[lifecycle.methods]]
+interface = "GPUDevice"
+member = "createComputePipelineAsync"
+path = "device_create_compute_pipeline_async"
+reason = "the async callback settles through the engine-thread settlement queue"
+
+[[lifecycle.methods]]
+interface = "GPUDevice"
+member = "createRenderPipelineAsync"
+path = "device_create_render_pipeline_async"
+reason = "the async callback settles through the engine-thread settlement queue"
 
 [[lifecycle.methods]]
 interface = "GPUDevice"
@@ -651,14 +665,17 @@ dictionary = "GPUColorDict"
 
 [[descriptor]]
 dictionary = "GPURenderPassColorAttachment"
+created_view_capture = "created_texture_views"
 
 [[descriptor.handles]]
 member = "view"
 helper = "texture_view_handle"
+accept_texture = true
 
 [[descriptor.handles]]
 member = "resolveTarget"
 helper = "texture_view_handle"
+accept_texture = true
 
 [[descriptor.absent_constants]]
 member = "depthSlice"
@@ -666,10 +683,12 @@ value = "WGPU_DEPTH_SLICE_UNDEFINED"
 
 [[descriptor]]
 dictionary = "GPURenderPassDepthStencilAttachment"
+created_view_capture = "created_texture_views"
 
 [[descriptor.handles]]
 member = "view"
 helper = "texture_view_handle"
+accept_texture = true
 
 [[descriptor.absent_constants]]
 member = "depthClearValue"
@@ -677,6 +696,7 @@ value = "WGPU_DEPTH_CLEAR_VALUE_UNDEFINED"
 
 [[descriptor]]
 dictionary = "GPURenderPassDescriptor"
+created_view_capture = "created_texture_views"
 
 [[descriptor.strings]]
 member = "label"
@@ -774,8 +794,20 @@ dictionary = "GPUBindGroupEntry"
 member = "resource"
 union_type = "GPUBindingResource"
 arm = "GPUBufferBinding"
-unsupported_error = "resource must be a GPUBufferBinding"
+unsupported_error = "resource must be a GPUBindingResource"
 handle_arms = ["GPUSampler", "GPUTextureView"]
+
+[[descriptor.union_flatten.direct_handle_arms]]
+interface = "GPUBuffer"
+c_member = "buffer"
+handle_helper = "buffer_handle"
+
+[[descriptor.union_flatten.direct_handle_arms]]
+interface = "GPUTexture"
+c_member = "texture_view"
+payload_field = "texture"
+creator_dispatch = "texture_create_view"
+created_capture = "created_texture_views"
 
 [[descriptor.union_flatten.fields]]
 member = "buffer"
@@ -824,6 +856,21 @@ element_field = "sampler"
 field = "texture_views"
 source = "entries"
 element_field = "textureView"
+exclude_source = "created_texture_views"
+
+[[descriptor.wrapper.captures]]
+field = "created_texture_views"
+source = "created_texture_views"
+take = true
+
+[[lifecycle.retention_extensions]]
+interface = "GPUBindGroup"
+field = "created_texture_views"
+source = "created_texture_views"
+handle_type = "WGPUTextureView"
+sequence = true
+created_by_conversion = true
+reason = "implicit default views are created by conversion and transferred into bind-group ownership without AddRef"
 
 [[descriptor]]
 dictionary = "GPUPipelineLayoutDescriptor"

@@ -18,8 +18,9 @@ use crate::{
     WGPUBindGroup, WGPUBindGroupDescriptor, WGPUBindGroupLayout, WGPUBindGroupLayoutDescriptor,
     WGPUCommandBuffer, WGPUCommandBufferDescriptor, WGPUCommandEncoder,
     WGPUCommandEncoderDescriptor, WGPUComputePassDescriptor, WGPUComputePassEncoder,
-    WGPUComputePipeline, WGPUComputePipelineDescriptor, WGPUDeviceLostCallbackInfo,
-    WGPUErrorFilter, WGPUErrorType, WGPUExtent3D, WGPUFuture, WGPUIndexFormat, WGPUPipelineLayout,
+    WGPUComputePipeline, WGPUComputePipelineDescriptor, WGPUCreateComputePipelineAsyncCallbackInfo,
+    WGPUCreateRenderPipelineAsyncCallbackInfo, WGPUDeviceLostCallbackInfo, WGPUErrorFilter,
+    WGPUErrorType, WGPUExtent3D, WGPUFuture, WGPUIndexFormat, WGPUPipelineLayout,
     WGPUPipelineLayoutDescriptor, WGPUPopErrorScopeCallbackInfo, WGPUPopErrorScopeStatus,
     WGPUQuerySet, WGPUQuerySetDescriptor, WGPUQueryType, WGPUQueue, WGPUQueueWorkDoneCallbackInfo,
     WGPURenderBundle, WGPURenderBundleDescriptor, WGPURenderBundleEncoder,
@@ -1143,6 +1144,7 @@ struct MockGpuState {
     sampler_descriptors: Vec<RecordedSamplerDescriptor>,
     texture_descriptors: Vec<RecordedTextureDescriptor>,
     texture_view_descriptors: Vec<RecordedTextureViewDescriptor>,
+    null_texture_view_descriptors: usize,
     query_set_descriptors: Vec<RecordedQuerySetDescriptor>,
     render_bundle_encoder_descriptors: Vec<RecordedRenderBundleEncoderDescriptor>,
     pipeline_constants: Vec<(&'static str, RecordedConstants)>,
@@ -1156,6 +1158,7 @@ struct MockGpuState {
     error_scope_stack: Vec<WGPUErrorFilter>,
     pushed_error_filters: Vec<WGPUErrorFilter>,
     next_pop_error: Option<MockPopError>,
+    next_pipeline_async_error: Option<(crate::WGPUCreatePipelineAsyncStatus, String)>,
     device_lost_callback: Option<WGPUDeviceLostCallbackInfo>,
     uncaptured_error_callback: Option<WGPUUncapturedErrorCallbackInfo>,
     requested_features: Vec<Vec<crate::WGPUFeatureName>>,
@@ -1748,11 +1751,13 @@ unsafe fn texture_create_view(
     texture: WGPUTexture,
     descriptor: *const WGPUTextureViewDescriptor,
 ) -> WGPUTextureView {
-    let Some(descriptor) = (unsafe { descriptor.as_ref() }) else {
-        return ptr::null_mut();
-    };
     GPU_STATE.with(|state| {
         let mut state = state.borrow_mut();
+        let Some(descriptor) = (unsafe { descriptor.as_ref() }) else {
+            state.null_texture_view_descriptors += 1;
+            state.next += 1;
+            return fake_handle(2700 + state.next);
+        };
         state
             .texture_view_descriptors
             .push(RecordedTextureViewDescriptor {
@@ -1889,6 +1894,72 @@ unsafe fn device_create_render_pipeline(
         state.next += 1;
         fake_handle(6500 + state.next)
     })
+}
+
+unsafe fn device_create_compute_pipeline_async(
+    device: WGPUDevice,
+    descriptor: *const WGPUComputePipelineDescriptor,
+    info: WGPUCreateComputePipelineAsyncCallbackInfo,
+) -> WGPUFuture {
+    assert_eq!(
+        info.mode,
+        crate::WGPUCallbackMode_WGPUCallbackMode_AllowProcessEvents
+    );
+    let error = GPU_STATE.with(|state| state.borrow_mut().next_pipeline_async_error.take());
+    let pipeline = if error.is_none() {
+        unsafe { device_create_compute_pipeline(device, descriptor) }
+    } else {
+        ptr::null_mut()
+    };
+    if let Some(callback) = info.callback {
+        let (status, message) = error.unwrap_or((
+            crate::WGPUCreatePipelineAsyncStatus_WGPUCreatePipelineAsyncStatus_Success,
+            String::new(),
+        ));
+        unsafe {
+            callback(
+                status,
+                pipeline,
+                WGPUStringView::from_bytes(message.as_bytes()),
+                info.userdata1,
+                info.userdata2,
+            );
+        }
+    }
+    WGPUFuture { id: 50 }
+}
+
+unsafe fn device_create_render_pipeline_async(
+    device: WGPUDevice,
+    descriptor: *const WGPURenderPipelineDescriptor,
+    info: WGPUCreateRenderPipelineAsyncCallbackInfo,
+) -> WGPUFuture {
+    assert_eq!(
+        info.mode,
+        crate::WGPUCallbackMode_WGPUCallbackMode_AllowProcessEvents
+    );
+    let error = GPU_STATE.with(|state| state.borrow_mut().next_pipeline_async_error.take());
+    let pipeline = if error.is_none() {
+        unsafe { device_create_render_pipeline(device, descriptor) }
+    } else {
+        ptr::null_mut()
+    };
+    if let Some(callback) = info.callback {
+        let (status, message) = error.unwrap_or((
+            crate::WGPUCreatePipelineAsyncStatus_WGPUCreatePipelineAsyncStatus_Success,
+            String::new(),
+        ));
+        unsafe {
+            callback(
+                status,
+                pipeline,
+                WGPUStringView::from_bytes(message.as_bytes()),
+                info.userdata1,
+                info.userdata2,
+            );
+        }
+    }
+    WGPUFuture { id: 51 }
 }
 
 unsafe fn read_constants(
@@ -4815,10 +4886,11 @@ mod tests {
 
         let sampler_entry = descriptor(&rt, &[("binding", rt.number(0.0)), ("resource", sampler)]);
         let view_entry = descriptor(&rt, &[("binding", rt.number(1.0)), ("resource", view)]);
-        let sampler_native =
-            convert_bind_group_entry::<Engine>(cx, sampler_entry).expect("sampler resource");
-        let view_native =
-            convert_bind_group_entry::<Engine>(cx, view_entry).expect("texture view resource");
+        let mut created = crate::CreatedTextureViewCapture::new::<Engine>(cx);
+        let sampler_native = convert_bind_group_entry::<Engine>(cx, sampler_entry, &mut created)
+            .expect("sampler resource");
+        let view_native = convert_bind_group_entry::<Engine>(cx, view_entry, &mut created)
+            .expect("texture view resource");
 
         assert_eq!(sampler_native.sampler, sampler_handle);
         assert!(sampler_native.buffer.is_null());
@@ -4829,7 +4901,114 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_bind_group_resource_kind_throws_a_named_type_error() {
+    fn direct_buffer_and_texture_bindings_flatten_and_own_implicit_views() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let buffer = device_create_buffer::<Engine>(
+            cx,
+            device,
+            &[descriptor(
+                &rt,
+                &[("size", rt.number(64.0)), ("usage", rt.number(8.0))],
+            )],
+        )
+        .expect("buffer");
+        let buffer_handle = crate::buffer_handle::<Engine>(cx, buffer).expect("buffer handle");
+        let texture = Engine::new_instance(
+            cx,
+            crate::GPU_TEXTURE_CLASS,
+            Box::new(TexturePayload {
+                texture: fake_handle(840),
+                destroyed: AtomicBool::new(false),
+            }),
+        )
+        .expect("texture");
+        let layout = Engine::new_instance(
+            cx,
+            crate::GPU_BIND_GROUP_LAYOUT_CLASS,
+            Box::new(BindGroupLayoutPayload {
+                layout: fake_handle(841),
+                parent_pipeline: None,
+            }),
+        )
+        .expect("layout");
+        let entries = rt.set_like(&[
+            descriptor(&rt, &[("binding", rt.number(0.0)), ("resource", buffer)]),
+            descriptor(&rt, &[("binding", rt.number(1.0)), ("resource", texture)]),
+        ]);
+        let desc = descriptor(&rt, &[("layout", layout), ("entries", entries)]);
+        let arena = Arena::new();
+        let converted = convert_bind_group_descriptor::<Engine>(cx, desc, &arena)
+            .expect("direct binding resources");
+        let native_entries = unsafe {
+            std::slice::from_raw_parts(converted.native.entries, converted.native.entryCount)
+        };
+        assert_eq!(native_entries[0].buffer, buffer_handle);
+        assert_eq!(native_entries[0].offset, 0);
+        assert_eq!(native_entries[0].size, crate::WGPU_WHOLE_SIZE as u64);
+        assert!(!native_entries[1].textureView.is_null());
+        assert_eq!(converted.buffers, vec![buffer_handle]);
+        assert!(converted.texture_views.is_empty());
+        assert_eq!(
+            converted.created_texture_views,
+            vec![native_entries[1].textureView]
+        );
+        GPU_STATE.with(|state| assert_eq!(state.borrow().null_texture_view_descriptors, 1));
+        for texture_view in converted.created_texture_views {
+            rt.queue()
+                .enqueue(crate::ReleaseRequest::TextureViewOnly {
+                    texture_view,
+                    gpu: rt.env.gpu(),
+                })
+                .expect("queue converted view release");
+        }
+        assert_eq!(rt.queue().drain().expect("release converted view"), 1);
+
+        let bind_group =
+            device_create_bind_group::<Engine>(cx, device, &[desc]).expect("bind group");
+        GPU_STATE.with(|state| assert_eq!(state.borrow().texture_view_add_refs, 0));
+        let payload = Engine::payload(cx, bind_group, crate::GPU_BIND_GROUP_CLASS)
+            .and_then(|payload| payload.downcast_ref::<BindGroupPayload>())
+            .expect("bind group payload");
+        finalize_bind_group(
+            Box::new(BindGroupPayload {
+                bind_group: payload.bind_group,
+                layout: payload.layout,
+                buffers: payload.buffers.clone(),
+                samplers: payload.samplers.clone(),
+                texture_views: payload.texture_views.clone(),
+                created_texture_views: payload.created_texture_views.clone(),
+            }),
+            &rt.env,
+        );
+        assert_eq!(rt.queue().drain().expect("release bind group"), 1);
+        GPU_STATE.with(|state| assert_eq!(state.borrow().texture_view_releases, 2));
+
+        let bad_entry = descriptor(&rt, &[("binding", rt.number(-1.0)), ("resource", texture)]);
+        let bad_desc = descriptor(
+            &rt,
+            &[("layout", layout), ("entries", rt.set_like(&[bad_entry]))],
+        );
+        assert!(convert_bind_group_descriptor::<Engine>(cx, bad_desc, &arena).is_err());
+        assert_eq!(
+            rt.queue().drain().expect("release failed conversion view"),
+            1
+        );
+        GPU_STATE.with(|state| assert_eq!(state.borrow().texture_view_releases, 3));
+
+        rt.fail_new_instance.set(Some(crate::GPU_BIND_GROUP_CLASS));
+        assert!(device_create_bind_group::<Engine>(cx, device, &[desc]).is_err());
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.texture_view_add_refs, 0);
+            assert_eq!(state.texture_view_releases, 4);
+        });
+    }
+
+    #[test]
+    fn unknown_bind_group_resource_kind_throws_a_named_type_error() {
         reset_gpu();
         let rt = runtime();
         let cx = rt.context();
@@ -4852,49 +5031,7 @@ mod tests {
             convert_bind_group_descriptor::<Engine>(cx, desc, &arena)
                 .err()
                 .expect("sampler resource must be rejected"),
-            "TypeError: resource must be a GPUBufferBinding"
-        );
-
-        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
-        let buffer_desc = descriptor(&rt, &[("size", rt.number(4.0)), ("usage", rt.number(8.0))]);
-        let buffer = device_create_buffer::<Engine>(cx, device, &[buffer_desc]).expect("buffer");
-        let direct_entry = descriptor(&rt, &[("binding", rt.number(0.0)), ("resource", buffer)]);
-        let direct_desc = descriptor(
-            &rt,
-            &[
-                ("layout", layout),
-                ("entries", rt.set_like(&[direct_entry])),
-            ],
-        );
-        assert_eq!(
-            convert_bind_group_descriptor::<Engine>(cx, direct_desc, &arena)
-                .err()
-                .expect("direct buffer resource must be rejected"),
-            "TypeError: resource must be a GPUBufferBinding"
-        );
-
-        let texture = Engine::new_instance(
-            cx,
-            crate::GPU_TEXTURE_CLASS,
-            Box::new(TexturePayload {
-                texture: fake_handle(78),
-                destroyed: AtomicBool::new(false),
-            }),
-        )
-        .expect("texture");
-        let texture_entry = descriptor(&rt, &[("binding", rt.number(0.0)), ("resource", texture)]);
-        let texture_desc = descriptor(
-            &rt,
-            &[
-                ("layout", layout),
-                ("entries", rt.set_like(&[texture_entry])),
-            ],
-        );
-        assert_eq!(
-            convert_bind_group_descriptor::<Engine>(cx, texture_desc, &arena)
-                .err()
-                .expect("direct texture resource must be rejected"),
-            "TypeError: resource must be a GPUBufferBinding"
+            "TypeError: resource must be a GPUBindingResource"
         );
     }
 
@@ -5013,6 +5150,7 @@ mod tests {
                 buffers: payload.buffers.clone(),
                 samplers: payload.samplers.clone(),
                 texture_views: payload.texture_views.clone(),
+                created_texture_views: payload.created_texture_views.clone(),
             }),
             &rt.env,
         );
@@ -5834,6 +5972,144 @@ mod tests {
             assert_eq!(state.pipeline_layout_releases, 1);
             assert_eq!(state.render_pipeline_releases, 1);
         });
+    }
+
+    #[test]
+    fn async_compute_and_render_pipelines_settle_in_one_batch_with_sync_retention() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let compute_module = shader_module(&rt, cx, 201);
+        let vertex_module = shader_module(&rt, cx, 202);
+        let fragment_module = shader_module(&rt, cx, 203);
+        let layout = Engine::new_instance(
+            cx,
+            crate::GPU_PIPELINE_LAYOUT_CLASS,
+            Box::new(PipelineLayoutPayload {
+                layout: fake_handle(204),
+            }),
+        )
+        .expect("pipeline layout");
+        let compute_desc = descriptor(
+            &rt,
+            &[
+                ("layout", layout),
+                ("compute", descriptor(&rt, &[("module", compute_module)])),
+            ],
+        );
+        let render_desc = descriptor(
+            &rt,
+            &[
+                ("layout", layout),
+                ("vertex", descriptor(&rt, &[("module", vertex_module)])),
+                (
+                    "fragment",
+                    descriptor(
+                        &rt,
+                        &[("module", fragment_module), ("targets", rt.set_like(&[]))],
+                    ),
+                ),
+            ],
+        );
+        let compute =
+            crate::device_create_compute_pipeline_async::<Engine>(cx, device, &[compute_desc])
+                .expect("compute promise");
+        let render =
+            crate::device_create_render_pipeline_async::<Engine>(cx, device, &[render_desc])
+                .expect("render promise");
+        assert_eq!(rt.env.settlements().drain::<Engine>(cx), Ok(2));
+        let compute = rt
+            .promise_result(compute)
+            .expect("compute settled")
+            .expect("compute resolved");
+        let render = rt
+            .promise_result(render)
+            .expect("render settled")
+            .expect("render resolved");
+        assert!(Engine::payload(cx, compute, crate::GPU_COMPUTE_PIPELINE_CLASS).is_some());
+        assert!(Engine::payload(cx, render, crate::GPU_RENDER_PIPELINE_CLASS).is_some());
+        assert_eq!(rt.settle_calls.get(), 1);
+        assert_eq!(rt.settlement_batch_sizes.borrow().as_slice(), &[2]);
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.shader_module_add_refs, 3);
+            assert_eq!(state.pipeline_layout_add_refs, 2);
+        });
+        let compute_payload = Engine::payload(cx, compute, crate::GPU_COMPUTE_PIPELINE_CLASS)
+            .and_then(|payload| payload.downcast_ref::<ComputePipelinePayload>())
+            .expect("compute pipeline payload");
+        finalize_compute_pipeline(
+            Box::new(ComputePipelinePayload {
+                pipeline: compute_payload.pipeline,
+                module: compute_payload.module,
+                layout: compute_payload.layout,
+            }),
+            &rt.env,
+        );
+        let render_payload = Engine::payload(cx, render, crate::GPU_RENDER_PIPELINE_CLASS)
+            .and_then(|payload| payload.downcast_ref::<RenderPipelinePayload>())
+            .expect("render pipeline payload");
+        finalize_render_pipeline(
+            Box::new(RenderPipelinePayload {
+                render_pipeline: render_payload.render_pipeline,
+                vertex_module: render_payload.vertex_module,
+                fragment_module: render_payload.fragment_module,
+                layout: render_payload.layout,
+            }),
+            &rt.env,
+        );
+        assert_eq!(rt.queue().drain().expect("release async pipelines"), 2);
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.shader_module_releases, 3);
+            assert_eq!(state.pipeline_layout_releases, 2);
+            assert_eq!(state.compute_pipeline_releases, 1);
+            assert_eq!(state.render_pipeline_releases, 1);
+        });
+    }
+
+    #[test]
+    fn async_pipeline_validation_failure_surfaces_reason_and_releases_retention() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let module = shader_module(&rt, cx, 211);
+        let desc = descriptor(
+            &rt,
+            &[
+                ("layout", rt.string("auto")),
+                ("compute", descriptor(&rt, &[("module", module)])),
+            ],
+        );
+        GPU_STATE.with(|state| {
+            state.borrow_mut().next_pipeline_async_error = Some((
+                crate::WGPUCreatePipelineAsyncStatus_WGPUCreatePipelineAsyncStatus_ValidationError,
+                "bad pipeline descriptor".to_owned(),
+            ));
+        });
+        let promise = crate::device_create_compute_pipeline_async::<Engine>(cx, device, &[desc])
+            .expect("validation promise");
+        assert_eq!(rt.env.settlements().drain::<Engine>(cx), Ok(1));
+        let reason = rt
+            .promise_result(promise)
+            .expect("settled")
+            .expect_err("rejected");
+        let MockValue::Object(properties) = rt.get(reason) else {
+            panic!("rejection reason is not an error object");
+        };
+        assert!(matches!(
+            properties.get("name").copied().map(|value| rt.get(value)),
+            Some(MockValue::String(name)) if name == "OperationError"
+        ));
+        assert!(matches!(
+            properties.get("message").copied().map(|value| rt.get(value)),
+            Some(MockValue::String(message))
+                if message.contains("validation") && message.contains("bad pipeline descriptor")
+        ));
+        assert_eq!(rt.queue().drain().expect("release failed retention"), 1);
+        GPU_STATE.with(|state| assert_eq!(state.borrow().shader_module_releases, 1));
     }
 
     #[test]
@@ -7767,6 +8043,7 @@ mod tests {
 
     #[test]
     fn t6_gpu_color_and_render_pass_descriptors_cover_both_union_arms_and_holes() {
+        reset_gpu();
         let rt = runtime();
         let cx = rt.context();
         let view = Engine::new_instance(
@@ -7840,8 +8117,13 @@ mod tests {
                 ("storeOp", rt.string("discard")),
             ],
         );
-        let color = convert_render_pass_color_attachment::<Engine>(cx, color_attachment)
-            .expect("color attachment");
+        let mut created_texture_views = crate::CreatedTextureViewCapture::new::<Engine>(cx);
+        let color = convert_render_pass_color_attachment::<Engine>(
+            cx,
+            color_attachment,
+            &mut created_texture_views,
+        )
+        .expect("color attachment");
         assert!(color.nextInChain.is_null());
         assert_eq!(color.view, fake_handle(501));
         assert_eq!(color.depthSlice, 7);
@@ -7859,7 +8141,8 @@ mod tests {
         );
         assert!(convert_render_pass_color_attachment::<Engine>(
             cx,
-            descriptor(&rt, &[("view", view), ("storeOp", rt.string("store"))])
+            descriptor(&rt, &[("view", view), ("storeOp", rt.string("store"))]),
+            &mut created_texture_views,
         )
         .is_err());
 
@@ -7877,8 +8160,12 @@ mod tests {
                 ("stencilReadOnly", rt.bool(true)),
             ],
         );
-        let depth = convert_render_pass_depth_stencil_attachment::<Engine>(cx, depth_attachment)
-            .expect("depth attachment");
+        let depth = convert_render_pass_depth_stencil_attachment::<Engine>(
+            cx,
+            depth_attachment,
+            &mut created_texture_views,
+        )
+        .expect("depth attachment");
         assert!(depth.nextInChain.is_null());
         assert_eq!(depth.view, fake_handle(501));
         assert_eq!(depth.depthLoadOp, crate::WGPULoadOp_WGPULoadOp_Clear);
@@ -7900,8 +8187,9 @@ mod tests {
             ],
         );
         let arena = Arena::new();
-        let native = convert_render_pass_descriptor::<Engine>(cx, pass, &arena)
-            .expect("render pass descriptor");
+        let native =
+            convert_render_pass_descriptor::<Engine>(cx, pass, &arena, &mut created_texture_views)
+                .expect("render pass descriptor");
         assert!(native.nextInChain.is_null());
         assert_eq!(read_view(native.label), b"render-pass");
         assert_eq!(native.colorAttachmentCount, 2);
@@ -7923,6 +8211,44 @@ mod tests {
         );
         let native_depth = unsafe { native.depthStencilAttachment.as_ref() }.expect("depth");
         assert_eq!(native_depth.view, fake_handle(501));
+
+        let texture = Engine::new_instance(
+            cx,
+            crate::GPU_TEXTURE_CLASS,
+            Box::new(TexturePayload {
+                texture: fake_handle(503),
+                destroyed: AtomicBool::new(false),
+            }),
+        )
+        .expect("texture");
+        let implicit_color = convert_render_pass_color_attachment::<Engine>(
+            cx,
+            descriptor(
+                &rt,
+                &[
+                    ("view", texture),
+                    ("resolveTarget", texture),
+                    ("loadOp", rt.string("load")),
+                    ("storeOp", rt.string("store")),
+                ],
+            ),
+            &mut created_texture_views,
+        )
+        .expect("texture color attachment");
+        assert!(!implicit_color.view.is_null());
+        assert!(!implicit_color.resolveTarget.is_null());
+        assert_ne!(implicit_color.view, implicit_color.resolveTarget);
+        let implicit_depth = convert_render_pass_depth_stencil_attachment::<Engine>(
+            cx,
+            descriptor(&rt, &[("view", texture)]),
+            &mut created_texture_views,
+        )
+        .expect("texture depth attachment");
+        assert!(!implicit_depth.view.is_null());
+        GPU_STATE.with(|state| assert_eq!(state.borrow().null_texture_view_descriptors, 3));
+        drop(created_texture_views);
+        assert_eq!(rt.queue().drain().expect("release attachment views"), 3);
+        GPU_STATE.with(|state| assert_eq!(state.borrow().texture_view_releases, 3));
     }
 
     #[test]
@@ -8077,6 +8403,7 @@ mod tests {
                 buffers: Vec::new(),
                 samplers: Vec::new(),
                 texture_views: Vec::new(),
+                created_texture_views: Vec::new(),
             }),
         )
         .expect("bind group");
@@ -8206,6 +8533,7 @@ mod tests {
                 buffers: Vec::new(),
                 samplers: Vec::new(),
                 texture_views: Vec::new(),
+                created_texture_views: Vec::new(),
             }),
         )
         .expect("bind group");
@@ -8455,6 +8783,7 @@ mod tests {
                 buffers: Vec::new(),
                 samplers: Vec::new(),
                 texture_views: Vec::new(),
+                created_texture_views: Vec::new(),
             }),
         )
         .expect("bind group");

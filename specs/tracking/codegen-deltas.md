@@ -69,16 +69,36 @@ enum sentinels `Undefined` / `BindingNotUsed` (emitted only for absent optionals
 
 ## Block 09 addition (2026-07-11)
 
-- **Render attachments accept `GPUTextureView` only.** The pinned IDL permits
-  `(GPUTexture or GPUTextureView)` for color/depth attachments; the C
-  descriptor takes only `WGPUTextureView`. Synthesizing a hidden temporary
-  view would create an unowned lifecycle behind the script's back, so a direct
-  `GPUTexture` raises the converter's TypeError (`GPUTextureView is required`).
-  *(Corrected 2026-07-11 by the block 09 review: this entry originally claimed
-  the message "tells the author to call createView()" — an embellishment the
-  planner wrote beyond the agent's report. The message is the generic one; it
-  is now pinned by a parity line on both engines.)* Revisit if implicit-view
-  semantics are ever demanded.
+- **RETIRED 2026-07-11 (B-4b): render attachments now accept
+  `(GPUTexture or GPUTextureView)` per the pinned IDL.** The original entry
+  (below, kept for the record) declined a hidden temporary view as an unowned
+  lifecycle. B-4b built exactly that machinery for `GPUBindingResource`'s
+  direct-`GPUTexture` arm — a conversion-created implicit default view
+  (`wgpuTextureCreateView(texture, NULL)`, null descriptor header-blessed)
+  owned by the converted wrapper and released through the release queue,
+  failure paths symmetric — and the same acceptance now covers render-pass
+  color/resolve/depth attachments. The parity line that pinned the TypeError
+  is now a positive `renderPass:texture-as-view:ok` line on both engines.
+  - *Original entry:* Render attachments accept `GPUTextureView` only; the C
+    descriptor takes only `WGPUTextureView`; synthesizing a hidden temporary
+    view would create an unowned lifecycle behind the script's back, so a
+    direct `GPUTexture` raised the converter's TypeError. *(Corrected
+    2026-07-11 by the block 09 review: this entry originally claimed the
+    message "tells the author to call createView()" — an embellishment the
+    planner wrote beyond the agent's report.)*
+
+## Block 13 / B-4b additions (2026-07-11)
+
+- **Async pipeline rejections use named `OperationError`, not
+  `GPUPipelineError`.** The pinned IDL defines `GPUPipelineError` (a
+  `DOMException` subclass with a `reason` attribute: `"validation"` |
+  `"internal"`) as the rejection type for
+  `createComputePipelineAsync`/`createRenderPipelineAsync`. Implementing the
+  DOMException-subclass machinery was out of B-4b's slice; the rejection is a
+  named `OperationError` whose message carries the `validation`/`internal`
+  distinction. Deviation is visible to CTS cases that assert the class;
+  revisit when a second DOMException-subclass consumer appears or a CTS
+  family blocks on it.
 
 ## Block 10 additions (2026-07-11)
 

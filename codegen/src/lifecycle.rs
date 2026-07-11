@@ -39,6 +39,7 @@ struct RetainedHandle {
     sequence: bool,
     nullable: bool,
     from_creator: bool,
+    created_by_conversion: bool,
 }
 
 pub(super) fn emit_lifecycle(report: &JoinReport, source: &str) -> Result<String, CodegenError> {
@@ -396,6 +397,7 @@ fn standard_interfaces<'a>(
                     sequence: false,
                     nullable: false,
                     from_creator: true,
+                    created_by_conversion: false,
                 },
             );
         }
@@ -499,11 +501,18 @@ fn derived_retention(
                     entry.handle_type == handle && path.ends_with(entry.member.as_str())
                 }),
             from_creator: false,
+            created_by_conversion: false,
         });
     }
     let mut seen = BTreeSet::new();
     retained.retain(|entry| seen.insert(entry.field.clone()));
 
+    let extension_fields: BTreeSet<_> = lifecycle
+        .retention_extensions
+        .iter()
+        .filter(|entry| entry.interface == interface)
+        .map(|entry| entry.field.as_str())
+        .collect();
     let captured: BTreeSet<_> = descriptor
         .wrapper
         .iter()
@@ -518,6 +527,7 @@ fn derived_retention(
                         .iter()
                         .map(|capture| capture.field.as_str()),
                 )
+                .filter(|field| !extension_fields.contains(field))
         })
         .collect();
     let derived: BTreeSet<_> = retained.iter().map(|entry| entry.field.as_str()).collect();
@@ -555,9 +565,10 @@ fn derived_retention(
             source: extension.source.clone(),
             handle_type: extension.handle_type.clone(),
             dispatch: snake_case(extension.handle_type.trim_start_matches("WGPU")),
-            sequence: extension.handle_type.starts_with("Vec<"),
+            sequence: extension.sequence,
             nullable: false,
             from_creator: false,
+            created_by_conversion: extension.created_by_conversion,
         });
     }
     Ok(retained)
@@ -974,7 +985,9 @@ fn emit_create(output: &mut String, standard: &StandardInterface<'_>) -> Result<
         output.push_str("    let gpu = E::environment(cx).gpu();\n");
         output.push_str("    unsafe {\n");
         for retained in &standard.retained {
-            if retained.from_creator {
+            if retained.created_by_conversion {
+                continue;
+            } else if retained.from_creator {
                 let _ = writeln!(
                     output,
                     "        (gpu.{}_add_ref)({});",
@@ -1586,7 +1599,11 @@ const NONSTANDARD_RELEASE_VARIANTS_PREFIX: &str = r#"    /// Release an adapter.
         gpu: GpuDispatch },
 "#;
 
-const NONSTANDARD_RELEASE_VARIANTS_SUFFIX: &str = r#"    /// Release a command buffer.
+const NONSTANDARD_RELEASE_VARIANTS_SUFFIX: &str = r#"    /// Release a conversion-created texture view without a wrapper parent.
+    TextureViewOnly { /// Texture-view handle.
+        texture_view: WGPUTextureView, /// Dispatch table.
+        gpu: GpuDispatch },
+    /// Release a command buffer.
     CommandBuffer { /// Command-buffer handle.
         command_buffer: WGPUCommandBuffer, /// Dispatch table.
         gpu: GpuDispatch },
@@ -1611,7 +1628,8 @@ const NONSTANDARD_RELEASE_ARMS_PREFIX: &str = r#"            Self::Adapter { ada
             Self::Queue { queue, gpu } => unsafe { (gpu.queue_release)(queue) },
 "#;
 
-const NONSTANDARD_RELEASE_ARMS_SUFFIX: &str = r#"            Self::CommandBuffer { command_buffer, gpu } => unsafe { (gpu.command_buffer_release)(command_buffer) },
+const NONSTANDARD_RELEASE_ARMS_SUFFIX: &str = r#"            Self::TextureViewOnly { texture_view, gpu } => unsafe { (gpu.texture_view_release)(texture_view) },
+            Self::CommandBuffer { command_buffer, gpu } => unsafe { (gpu.command_buffer_release)(command_buffer) },
             Self::ComputePassEncoder { pass, gpu } => unsafe { (gpu.compute_pass_encoder_release)(pass) },
             Self::RenderPassEncoder { pass, gpu } => unsafe { (gpu.render_pass_encoder_release)(pass) },
             Self::RenderBundle { render_bundle, gpu } => unsafe { (gpu.render_bundle_release)(render_bundle) },

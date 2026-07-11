@@ -56,30 +56,31 @@ gpu.requestAdapter()
         const pipelineLayout = device.createPipelineLayout({
             bindGroupLayouts: [bindGroupLayout],
         });
-        const pipeline = device.createComputePipeline({
+        return device.createComputePipelineAsync({
             layout: pipelineLayout,
             compute: { module: shader },
-        });
+        }).then(function (pipeline) {
 
-        const encoder = device.createCommandEncoder();
-        const pass = encoder.beginComputePass();
-        pass.setPipeline(pipeline);
-        pass.setBindGroup(0, bindGroup);
-        pass.dispatchWorkgroups(input.length);
-        pass.end();
-        encoder.copyBufferToBuffer(storage, 0, readback, 0, byteLength);
-        device.queue.submit([encoder.finish()]);
+            const encoder = device.createCommandEncoder();
+            const pass = encoder.beginComputePass();
+            pass.setPipeline(pipeline);
+            pass.setBindGroup(0, bindGroup);
+            pass.dispatchWorkgroups(input.length);
+            pass.end();
+            encoder.copyBufferToBuffer(storage, 0, readback, 0, byteLength);
+            device.queue.submit([encoder.finish()]);
 
-        return device.queue.onSubmittedWorkDone().then(function () {
-            return readback.mapAsync(1, 0, byteLength).then(function () {
-                const result = new Uint32Array(readback.getMappedRange(0, byteLength));
-                const numbers = Array.from(result);
-                print("result:", numbers.join(", "));
-                readback.unmap();
-                storage.destroy();
-                readback.destroy();
-                globalThis.ok = true;
-                globalThis.done = true;
+            return device.queue.onSubmittedWorkDone().then(function () {
+                return readback.mapAsync(1, 0, byteLength).then(function () {
+                    const result = new Uint32Array(readback.getMappedRange(0, byteLength));
+                    const numbers = Array.from(result);
+                    print("result:", numbers.join(", "));
+                    readback.unmap();
+                    storage.destroy();
+                    readback.destroy();
+                    globalThis.ok = true;
+                    globalThis.done = true;
+                });
             });
         });
     })
