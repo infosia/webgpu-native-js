@@ -699,3 +699,52 @@ the cleanest path to a binding-free proof.
 3. If confirmed as an engine defect: fork quickjs-ng, fix, add the reduction as
    a regression test in the fork, repoint the submodule (owner runs the network
    ops). The fork decision is already approved in principle.
+
+## Session 4 (2026-07-11 late, planner): the corruption's shape, nailed
+
+Under `FORCE_GC_AT_MALLOC` (fast one-run repro), with the generation-safe
+ledger AND a `close_var_ref` value logger, the underflow decomposes cleanly:
+
+- **Victim:** a class-13 object (a bytecode `Function`, i.e. a JS closure).
+- **Its two live parents at the assertion** (from the parent scan):
+  1. a plain `Object` (`ref=2`) that holds the closure as a property;
+  2. a detached `JSVarRef` (`gc_type 3`) that captured the closure.
+- **The `close_var_ref` log** shows this exact closure value was closed
+  **exactly once**, with `rc_before=1` — i.e. when the capture happened, the
+  stack slot was its ONLY holder. That single close dup'd it (counted).
+
+So the closure is referenced by two owners — a var_ref (counted, via
+`close_var_ref`'s `js_dup`) and an object property — but its refcount at GC
+time is short by exactly one. The object-property edge's reference is the
+uncounted one. (In an earlier normal-GC run the property store WAS seen to dup
+via `JS_CreateProperty` rc 1->2, so the more likely mechanism is a **double
+release** of the property edge rather than a missing increment — an extra
+`JS_FreeValue` on a borrowed alias of the closure somewhere between capture and
+GC.)
+
+**This is now a specific, reproducible engine-level defect signature:** a JS
+closure that is simultaneously (a) captured by a closure var_ref and (b) stored
+as an object property, under GC pressure, ends up under-counted by one. It is
+present on v0.15.0, v0.15.1, and master; Guard Malloc rules out heap
+corruption; and every deletion experiment against the binding's own
+value-handling (rejection tracker, payload `gc_mark`, settlement ownership)
+leaves it untouched. No adapter/core frame appears in the victim's transition
+history.
+
+**What is still not done:** the single extra `JS_FreeValue` has not been caught
+in the act (the victim's address recycles under forced GC before its full
+history prints; the normal-GC history is balanced within its window). Catching
+it needs a value-pinned trap: pick the victim by its known capture signature
+(a closure whose sole pre-close holder is a stack slot, later stored into an
+object property) and log every refcount transition on THAT pointer until GC,
+refusing to retire its ledger. That is the first task next session.
+
+**Binding-free reproduction:** still not achieved (synthetic quiet even under
+forced GC; real harness under plain qjs stalls in fixture init). The signature
+above is now specific enough to write a targeted pure-JS reproducer directly:
+an async function that captures a closure in an inner arrow AND assigns that
+same closure to a long-lived object property, looped under `gc()`.
+
+All temporary instrumentation reverted; tree clean; workspace builds green.
+Instrumentation patches preserved at the session scratchpad
+(`b4c-instrumentation-v{2,3,4}.patch`).
