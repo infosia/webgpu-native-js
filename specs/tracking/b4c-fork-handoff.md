@@ -162,3 +162,53 @@ subcase count is left intact.
 
 Scratch: writable CTS copy at `<scratch>/cts` (disposable); staged reductions
 `stage1..6.js`; standalone reducers `red{2,3,4}.js`; fork qjs `qjs_fork`.
+
+## Session 8 (2026-07-12, planner): the co-owning var_refs are frame-detached for-of loop consts
+
+Instrumented `async_func_free`'s arg/stack free loop to classify each co-owned
+closure: is the detached `JSVarRef` that also owns it present in THIS frame's
+`sf->var_refs` (i.e. one `close_var_refs` just closed) or not?
+
+Result on the forced-GC CTS case: **94/94 co-owned closures are owned by
+var_refs with `in_frame=0`** — none are in the teardown frame's `sf->var_refs`.
+Zero `in_frame=1`.
+
+This nails the `for...of` connection mechanically. `close_lexical_var`
+(quickjs.c ~L17335), invoked by `OP_close_loc` at every for-of iteration
+boundary to give the loop `const` fresh-per-iteration semantics, does:
+
+```c
+close_var_ref(rt, var_ref);        // dup value into var_ref->value, detach, add to gc_obj_list
+sf->var_refs[var_ref_idx] = NULL;  // <-- clears the slot
+```
+
+So after a loop iteration the loop-const's var_ref is **detached and in
+`gc_obj_list` but no longer in `sf->var_refs`**. At async teardown,
+`close_var_refs` therefore does NOT touch it (correct — it's already closed),
+but the free loop still frees the corresponding `var_buf` slot. For a single
+capture this is balanced (close_var_ref's +1 vs the slot free's −1). The crash
+is a rarer imbalance layered on this structure — the victim closure ends one
+reference short of its two gc-edges (the frame-detached var_ref + an object
+property).
+
+**Where the fix work must focus (fork):** the fresh-per-iteration `const`
+lifecycle in `close_lexical_var` / `close_var_ref` and its interaction with
+`async_func_free`'s `var_buf` free loop, when the loop-const value (or a
+closure co-captured in the same iteration) is ALSO referenced by an object
+property. The imbalance is one extra release along that path. Candidate-fix
+strategy: instrument the exact sequence for ONE victim (pin its pointer at
+`close_lexical_var` time, log every subsequent refcount transition and every
+gc-edge holder until the assert), or bisect a targeted edit (e.g. auditing
+whether the `var_buf` slot for a closed loop-const should be cleared to
+`JS_UNDEFINED` at `close_lexical_var` time rather than freed again at teardown)
+against the CTS oracle (5/5 → 0/N).
+
+## Analytical status
+
+Every single-capture path traced analytically balances; the crash is a rare
+timing/aliasing imbalance on the for-of-loop-const + async-teardown +
+object-property structure. Pinning the one extra release is the remaining work
+and is best done as edit-and-test in the fork against the CTS oracle, not by
+further read-only tracing (which has now reached its ceiling: the mechanism,
+the construct, the opcodes, and the frame-detached-var_ref fact are all
+established).
