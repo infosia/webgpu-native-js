@@ -1416,3 +1416,19 @@ JS never executing in the loop. Gated Dawn run on real Metal:
 architecture's two halves: compute (JS authors and reads back through the
 async machinery) and triangle (JS authors once; the host renders forever).
 Gates: workspace 283, all exit 0.
+
+**Android cross-compile VERIFIED (2026-07-11).** `cargo build -p quickjs-adapter
+-p javascriptcore-adapter --target aarch64-linux-android` passes from the macOS
+host — core + ffi (bindgen against the pinned header with the NDK sysroot via
+`BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android`, the same load-bearing
+variable yawgpu's recipe documents), quickjs-ng compiled by NDK clang (the
+same three vendored sign-compare warnings as every other platform), and the
+JSC adapter compiling to its intended empty crate off Apple platforms.
+Toolchain: NDK 30.0.14904198 (the exact version yawgpu verified), target
+aarch64-linux-android, API 24. Runtime verification on a device remains
+block 06. The 32-bit `armv7-linux-androideabi` COMPILE check is available for
+one `rustup target add` if wanted — A21's truncation guards are already
+tested-by-construction on 64-bit hosts.
+
+Platform status after today: macOS (both engines, tested) · Windows (QuickJS,
+tested by the owner's session) · iOS (compiles) · Android (compiles).
