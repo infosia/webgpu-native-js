@@ -212,3 +212,34 @@ and is best done as edit-and-test in the fork against the CTS oracle, not by
 further read-only tracing (which has now reached its ceiling: the mechanism,
 the construct, the opcodes, and the frame-detached-var_ref fact are all
 established).
+
+## Session 8 addendum: first candidate fix tested and REJECTED
+
+Hypothesis: after `close_lexical_var` closes a for-of loop-const's var_ref, the
+`var_buf` slot still holds the (now dup'd) value, and a fresh per-iteration
+binding could alias that stale value before the next store. Candidate: free the
+slot immediately in `close_lexical_var`
+(`set_value(ctx, &sf->var_buf[var_idx], JS_UNDEFINED)` after the close).
+
+Result: **still 5/5 crashes** on the CTS oracle. Rejected — the imbalance is not
+a stale `var_buf` alias at the close point. (Semantically the edit only moves
+the slot's release earlier, which the crash rate confirms is a no-op for this
+bug.) Search narrowed: the extra release is elsewhere than the loop-const
+slot's own lifetime.
+
+Remaining suspects, reordered after this negative result:
+1. The **object-property edge** (the second co-owner): the store that puts the
+   closure on an object may consume a reference the var_ref path also assumes it
+   owns. Trace the property-store opcode for the victim, not just the var_ref.
+2. The **inner-iterator** teardown (`JS_IteratorClose` / `OP_iterator_close`)
+   freeing a value still referenced by a captured var_ref.
+3. `get_var_ref`'s reuse path (`var_ref->header.ref_count++` without touching
+   the value) interacting with a closure value that migrated slots.
+
+Recommended next tactic (fork): a **value-pinned trap** — at the moment a
+closure first becomes co-owned (detected via the `async_func_free` co-owned
+trap, but pin the pointer EARLIER, at `close_lexical_var` or the property
+store), log EVERY refcount transition on that exact pointer with a full
+backtrace until the assert, and refuse to retire its ledger. That directly
+catches the one unmatched release. This is edit-and-test territory in the fork
+with the CTS oracle; read-only aggregate tracing has reached its ceiling.
