@@ -66,9 +66,12 @@ generated attribute read back, status-failure path, adapterInfo strings copied
 release balance + pipeline retention (per I6's verified answer). Script (both
 engines): `device.features.has(...)`, `[...device.features]` iteration,
 `device.limits.maxBindGroups` (or a limit the pin names) numeric, identity
-lines. Parity: features-iteration line (sorted join — Set order is insertion
-order, which is OUR insertion: sort before inserting for determinism across
-backends), one limits line with a backend-stable limit (verify yawgpu/Dawn
+lines. Parity: features-iteration line — *(scoped honestly, 2026-07-11, after a
+deletion experiment proved the line order-blind: a default-requested device
+carries ONE feature on yawgpu, and a one-element join cannot observe order.
+Core's sort-before-insert is pinned by the mock's deliberately-unsorted
+two-name list; parity will observe ordering only when `requiredFeatures`
+plumbing lands and devices can carry several features — the recorded gap.)*, one limits line with a backend-stable limit (verify yawgpu/Dawn
 agree on at least one value — if none agree, log only `typeof`), identity
 lines, a getBindGroupLayout create/release line.
 

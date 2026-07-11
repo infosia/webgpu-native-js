@@ -110,6 +110,8 @@ renderPass:clearValue-dict-sequence:no-validation-error
 copy:texture-validation:no-validation-error
 renderBundle:format-rejection:TypeError:GPUTextureFormat
 renderBundle:use-after-finish:OperationError:GPURenderBundleEncoder is finished
+renderBundle:type-confusion:TypeError:GPURenderBundle is required
+renderBundle:sparse-colorFormats:null
 renderBundle:chain:null
 scope:nested:null,GPUValidationError
 reject:popErrorScope:OperationError:popErrorScope failed:[backend-detail]

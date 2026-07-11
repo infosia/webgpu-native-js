@@ -729,6 +729,7 @@
         log(errorLine("renderBundle:format-rejection", formatError));
 
         device.pushErrorScope("validation");
+        device.createRenderBundleEncoder({ colorFormats: ["rgba8unorm", ,] });
         var module = device.createShaderModule({
             code: "@vertex fn main(@builtin(vertex_index) i: u32) -> " +
                 "@builtin(position) vec4f { var p = array(vec2f(-1,-1), " +
@@ -765,10 +766,16 @@
                 storeOp: "store"
             }]
         });
+        var bundleTypeError = caught(function () {
+            pass.executeBundles([pipeline]);
+        });
+        log(errorLine("renderBundle:type-confusion", bundleTypeError));
         pass.executeBundles([bundle, bundle]);
         pass.end();
         device.queue.submit([encoder.finish()]);
         return device.popErrorScope().then(function (error) {
+            log("renderBundle:sparse-colorFormats:" +
+                (error === null ? "null" : error.constructor.name));
             log("renderBundle:chain:" +
                 (error === null ? "null" : error.constructor.name));
         });

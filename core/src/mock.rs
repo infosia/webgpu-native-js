@@ -71,6 +71,7 @@ pub struct Runtime {
     call_history: RefCell<Vec<Vec<Value>>>,
     construct_history: RefCell<Vec<Vec<Value>>>,
     coercion_unmap: Cell<Option<Value>>,
+    iterator_end_pass: Cell<Option<Value>>,
     settle_calls: Cell<usize>,
     settlement_batch_sizes: RefCell<Vec<usize>>,
     settlement_attempts: RefCell<BTreeMap<Value, usize>>,
@@ -125,6 +126,7 @@ impl Runtime {
             call_history: RefCell::new(Vec::new()),
             construct_history: RefCell::new(Vec::new()),
             coercion_unmap: Cell::new(None),
+            iterator_end_pass: Cell::new(None),
             settle_calls: Cell::new(0),
             settlement_batch_sizes: RefCell::new(Vec::new()),
             settlement_attempts: RefCell::new(BTreeMap::new()),
@@ -195,6 +197,10 @@ impl Runtime {
         self.coercion_unmap.set(Some(buffer));
     }
 
+    fn end_pass_on_next_iteration(&self, pass: Value) {
+        self.iterator_end_pass.set(Some(pass));
+    }
+
     fn live_scoped_values(&self) -> usize {
         self.values
             .borrow()
@@ -245,6 +251,14 @@ impl Runtime {
 
     fn set_like(&self, values: &[Value]) -> Value {
         self.iterable(values, None)
+    }
+
+    fn sparse_array(&self, length: usize, entries: &[(usize, Value)]) -> Value {
+        let mut values = vec![self.undefined(); length];
+        for &(index, value) in entries {
+            values[index] = value;
+        }
+        self.iterable(&values, None)
     }
 
     fn throwing_iterable(&self, values: &[Value], throw_on_next: usize) -> Value {
@@ -623,6 +637,9 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
                     return Err("TypeError: invalid next receiver".to_owned());
                 };
                 let index = next_index.get();
+                if let Some(pass) = cx.runtime.iterator_end_pass.take() {
+                    crate::render_pass_end::<Self>(cx, pass, &[])?;
+                }
                 if throw_on_next == Some(index) {
                     return Err(format!("iterator next {index} failed"));
                 }
@@ -5281,6 +5298,61 @@ mod tests {
     }
 
     #[test]
+    fn t5_vertex_buffers_accept_undefined_as_a_nullable_element_hole() {
+        let rt = runtime();
+        let cx = rt.context();
+        let module = shader_module(&rt, cx, 81);
+        let value = descriptor(
+            &rt,
+            &[
+                ("module", module),
+                ("buffers", rt.set_like(&[rt.undefined()])),
+            ],
+        );
+        let arena = Arena::new();
+        let native = crate::convert_vertex_state::<Engine>(cx, value, &arena)
+            .expect("undefined vertex-buffer hole");
+
+        assert_eq!(native.bufferCount, 1);
+        let hole = unsafe { &*native.buffers };
+        assert!(hole.nextInChain.is_null());
+        assert_eq!(
+            hole.stepMode,
+            crate::WGPUVertexStepMode_WGPUVertexStepMode_Undefined
+        );
+        assert_eq!(hole.arrayStride, 0);
+        assert_eq!(hole.attributeCount, 0);
+        assert!(hole.attributes.is_null());
+    }
+
+    #[test]
+    fn t5_fragment_targets_accept_undefined_as_a_nullable_element_hole() {
+        let rt = runtime();
+        let cx = rt.context();
+        let module = shader_module(&rt, cx, 82);
+        let value = descriptor(
+            &rt,
+            &[
+                ("module", module),
+                ("targets", rt.set_like(&[rt.undefined()])),
+            ],
+        );
+        let arena = Arena::new();
+        let native = crate::convert_fragment_state::<Engine>(cx, value, &arena)
+            .expect("undefined color-target hole");
+
+        assert_eq!(native.targetCount, 1);
+        let hole = unsafe { &*native.targets };
+        assert!(hole.nextInChain.is_null());
+        assert_eq!(
+            hole.format,
+            crate::WGPUTextureFormat_WGPUTextureFormat_Undefined
+        );
+        assert!(hole.blend.is_null());
+        assert_eq!(hole.writeMask, 0);
+    }
+
+    #[test]
     fn t5_render_enum_families_reject_unknown_values_and_required_members() {
         let rt = runtime();
         let cx = rt.context();
@@ -5375,6 +5447,26 @@ mod tests {
             );
             assert!(convert_depth_stencil_state::<Engine>(cx, depth).is_err());
         }
+    }
+
+    #[test]
+    fn held_value_set_if_empty_keeps_first_value_and_one_release_owed() {
+        let rt = runtime();
+        let cx = rt.context();
+        let first = rt.string("first");
+        let second = rt.string("second");
+        let held = crate::HeldValue::<Engine>::empty();
+
+        assert_eq!(held.set_if_empty(Engine::duplicate_value(cx, first)), None);
+        let duplicate = Engine::duplicate_value(cx, second);
+        assert_eq!(held.set_if_empty(duplicate), Some(first));
+        Engine::release_value(cx, duplicate);
+
+        assert_eq!(held.get(), Some(first));
+        assert_eq!(rt.duplicated_values.borrow().get(&first), Some(&1));
+        assert!(!rt.duplicated_values.borrow().contains_key(&second));
+        Engine::release_value(cx, held.take().expect("incumbent hold"));
+        assert!(rt.duplicated_values.borrow().is_empty());
     }
 
     #[test]
@@ -7811,7 +7903,7 @@ mod tests {
                 ("label", rt.string("bundle encoder")),
                 (
                     "colorFormats",
-                    rt.set_like(&[rt.string("rgba8unorm"), rt.null()]),
+                    rt.set_like(&[rt.string("rgba8unorm"), rt.null(), rt.undefined()]),
                 ),
                 ("depthStencilFormat", rt.string("depth24plus-stencil8")),
                 ("sampleCount", rt.number(4.0)),
@@ -7830,6 +7922,7 @@ mod tests {
                     color_formats: vec![
                         crate::WGPUTextureFormat_WGPUTextureFormat_RGBA8Unorm,
                         crate::WGPUTextureFormat_WGPUTextureFormat_Undefined,
+                        crate::WGPUTextureFormat_WGPUTextureFormat_Undefined,
                     ],
                     depth_stencil_format:
                         crate::WGPUTextureFormat_WGPUTextureFormat_Depth24PlusStencil8,
@@ -7837,6 +7930,30 @@ mod tests {
                     depth_read_only: 1,
                     stencil_read_only: 1,
                 }]
+            );
+        });
+
+        let sparse_descriptor = descriptor(
+            &rt,
+            &[(
+                "colorFormats",
+                rt.sparse_array(2, &[(0, rt.string("rgba8unorm"))]),
+            )],
+        );
+        crate::device_create_render_bundle_encoder::<Engine>(cx, device, &[sparse_descriptor])
+            .expect("sparse colorFormats array");
+        GPU_STATE.with(|state| {
+            assert_eq!(
+                state
+                    .borrow()
+                    .render_bundle_encoder_descriptors
+                    .last()
+                    .expect("sparse descriptor")
+                    .color_formats,
+                vec![
+                    crate::WGPUTextureFormat_WGPUTextureFormat_RGBA8Unorm,
+                    crate::WGPUTextureFormat_WGPUTextureFormat_Undefined,
+                ]
             );
         });
 
@@ -7987,6 +8104,51 @@ mod tests {
             assert_eq!(state.recording_calls.get("execute_bundles"), Some(&2));
             assert_eq!(state.render_bundle_encoder_releases, 1);
             assert_eq!(state.render_bundle_releases, 1);
+        });
+        release_device_held_values(&rt, cx, device);
+    }
+
+    #[test]
+    fn r25_execute_bundles_rechecks_liveness_after_iterator_conversion() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let command_encoder =
+            device_create_command_encoder::<Engine>(cx, device, &[]).expect("command encoder");
+        let pass_descriptor = descriptor(&rt, &[("colorAttachments", rt.set_like(&[]))]);
+        let pass = crate::command_encoder_begin_render_pass::<Engine>(
+            cx,
+            command_encoder,
+            &[pass_descriptor],
+        )
+        .expect("render pass");
+        let bundle = Engine::new_instance(
+            cx,
+            crate::GPU_RENDER_BUNDLE_CLASS,
+            Box::new(crate::RenderBundlePayload {
+                render_bundle: fake_handle(15_100),
+            }),
+        )
+        .expect("render bundle");
+        let bundles = rt.set_like(&[bundle]);
+        rt.end_pass_on_next_iteration(pass);
+
+        assert_eq!(
+            crate::render_pass_execute_bundles::<Engine>(cx, pass, &[bundles])
+                .expect_err("iterator ended pass"),
+            "OperationError: GPURenderPassEncoder is ended"
+        );
+        GPU_STATE.with(|state| {
+            assert_eq!(
+                state
+                    .borrow()
+                    .recording_calls
+                    .get("execute_bundles")
+                    .copied()
+                    .unwrap_or(0),
+                0
+            );
         });
         release_device_held_values(&rt, cx, device);
     }

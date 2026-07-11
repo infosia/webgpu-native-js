@@ -2399,7 +2399,7 @@ fn emit_sequence_local(
         );
         if element_nullable {
             output.push_str("            // T5: nullable sequence elements are C sentinel-filled struct holes.\n");
-            output.push_str("            if E::is_null(cx, item) {\n");
+            output.push_str("            if E::is_null(cx, item) || E::is_undefined(cx, item) {\n");
             if element == "GPURenderPassColorAttachment" {
                 output.push_str("                // The pinned webgpu.h INIT macro defines a hole with a null view,\n");
                 output.push_str("                // undefined depth slice/load/store values, and a zero color.\n");
@@ -2452,7 +2452,7 @@ fn emit_sequence_local(
         })?;
         if element_nullable {
             output.push_str("            // Nullable enum elements use the C enum's Undefined sentinel as holes.\n");
-            output.push_str("            if E::is_null(cx, item) {\n");
+            output.push_str("            if E::is_null(cx, item) || E::is_undefined(cx, item) {\n");
             let undefined = enum_constant(c_type, "undefined");
             let _ = writeln!(output, "                Ok({undefined})");
             output.push_str("            } else {\n");

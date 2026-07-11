@@ -1022,3 +1022,47 @@ Final gates (exit codes all 0, quoted per the new rule): core 125 (env
 unset), quickjs 53, JSC 24+1, codegen 41, workspace green, both clippys
 `-D warnings`, fmt, parity **95 lines byte-identical** on both engines.
 Exit criteria: all five met.
+
+---
+
+## Plan-A Review — 2026-07-11 ("Clean Review Then Fix")
+
+Three lenses over `5fc9013^..HEAD` (block 10 introspection + querySet +
+renderBundle + validity parity). The first soundness/deletion launches died at
+a session ceiling and were relaunched on the fixed tree — the compliance lens
+landed first and its five MAJORs were fixed before the other two ran.
+
+**CRITICAL: none, from all three lenses.**
+
+### Fixed (all tiers)
+- Compliance: value-blind limits tests (36 exact values now, field-swap seen
+  red); `features.has()` finally asserted; AdapterPayload SAFETY completed;
+  the mandated codegen-deltas block-10 records written (mutable Set,
+  isFallbackAdapter derivation, requiredFeatures gap); stale timestampWrites
+  reason and its fixture; oversized-limit error branch tested; parity stopped
+  re-sorting at the log site.
+- Soundness: **nullable enum sequence elements now accept `undefined` as
+  null** (WebIDL: null OR undefined; a sparse array's holes iterate as
+  undefined — the binding was rejecting valid descriptors; all four
+  nullable-element paths shared the fixed emitter branch); `HeldValue`
+  gained `set_if_empty` (re-entrant [SameObject] fills neither leak nor break
+  identity); `executeBundles` converts before its liveness check (the one
+  method where re-entrant iteration could slip past the ended-state error).
+- Deletion: parity pins for the two gaps it exposed (sparse-hole acceptance;
+  executeBundles type confusion).
+
+### Recorded, not coded
+- **Feature-order determinism is unobservable in parity today** (one-feature
+  default devices) — the I7 claim rescoped in the spec; the mock's unsorted
+  two-name list is the real orderer oracle until requiredFeatures lands.
+- **The missing-AddRef class fails as a ~20%-of-parallel-runs SIGTRAP with no
+  test name at the engine level** — the mock's exact counters are the
+  designated oracle, re-affirming both the exit-code gate rule and the
+  JSC-cannot-see-finalizer-bugs limitation.
+- QuickJS-side leak detection leans on quickjs-ng's own `gc_obj_list` debug
+  assert; an NDEBUG build of the pin would silently remove that oracle class.
+
+### Gate — PASSED. Plan item A is COMPLETE.
+Workspace 277 (exit 0), core 136 env-unset, quickjs/JSC suites green, both
+clippys `-D warnings`, fmt clean; parity **122 lines byte-identical on yawgpu
+and (gated) Dawn**, two engines each.

@@ -1302,6 +1302,19 @@ impl<E: JsEngine> HeldValue<E> {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(value);
     }
 
+    fn set_if_empty(&self, value: E::Value) -> Option<E::Value> {
+        let mut held = self
+            .value
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(incumbent) = *held {
+            Some(incumbent)
+        } else {
+            *held = Some(value);
+            None
+        }
+    }
+
     fn take(&self) -> Option<E::Value> {
         self.value
             .lock()
@@ -1310,9 +1323,9 @@ impl<E: JsEngine> HeldValue<E> {
     }
 }
 
-// SAFETY: `set`/`get` on the engine thread and `take` from a potentially
-// arbitrary finalizer thread all acquire `value`, so the mutex release/acquire
-// operations establish the required happens-before edges for the slot itself.
+// SAFETY: `set`/`set_if_empty`/`get` on the engine thread and `take` from a
+// potentially arbitrary finalizer thread all acquire `value`, so the mutex
+// release/acquire operations establish the required happens-before edges for the slot itself.
 // The finalizer only copies the opaque engine value into the adapter-provided
 // release closure; it never dereferences it or calls a context-taking engine API.
 unsafe impl<E: JsEngine> Send for HeldValue<E> {}
@@ -3046,7 +3059,11 @@ pub fn adapter_features_get<E: JsEngine + 'static>(
         return Ok(E::return_held_value(cx, value));
     }
     let value = new_feature_set::<E>(cx, FeatureSource::Adapter(payload.adapter))?;
-    payload.features.set(E::duplicate_value(cx, value));
+    let duplicate = E::duplicate_value(cx, value);
+    if let Some(incumbent) = payload.features.set_if_empty(duplicate) {
+        E::release_value(cx, duplicate);
+        return Ok(E::return_held_value(cx, incumbent));
+    }
     Ok(value)
 }
 
@@ -3060,7 +3077,11 @@ pub fn device_features_get<E: JsEngine + 'static>(
         return Ok(E::return_held_value(cx, value));
     }
     let value = new_feature_set::<E>(cx, FeatureSource::Device(payload.device))?;
-    payload.features.set(E::duplicate_value(cx, value));
+    let duplicate = E::duplicate_value(cx, value);
+    if let Some(incumbent) = payload.features.set_if_empty(duplicate) {
+        E::release_value(cx, duplicate);
+        return Ok(E::return_held_value(cx, incumbent));
+    }
     Ok(value)
 }
 
@@ -3076,7 +3097,11 @@ pub fn adapter_limits_get<E: JsEngine + 'static>(
         return Ok(E::return_held_value(cx, value));
     }
     let value = new_supported_limits::<E>(cx, LimitsSource::Adapter(payload.adapter))?;
-    payload.limits.set(E::duplicate_value(cx, value));
+    let duplicate = E::duplicate_value(cx, value);
+    if let Some(incumbent) = payload.limits.set_if_empty(duplicate) {
+        E::release_value(cx, duplicate);
+        return Ok(E::return_held_value(cx, incumbent));
+    }
     Ok(value)
 }
 
@@ -3090,7 +3115,11 @@ pub fn device_limits_get<E: JsEngine + 'static>(
         return Ok(E::return_held_value(cx, value));
     }
     let value = new_supported_limits::<E>(cx, LimitsSource::Device(payload.device))?;
-    payload.limits.set(E::duplicate_value(cx, value));
+    let duplicate = E::duplicate_value(cx, value);
+    if let Some(incumbent) = payload.limits.set_if_empty(duplicate) {
+        E::release_value(cx, duplicate);
+        return Ok(E::return_held_value(cx, incumbent));
+    }
     Ok(value)
 }
 
@@ -3106,7 +3135,11 @@ pub fn adapter_info_get<E: JsEngine + 'static>(
         return Ok(E::return_held_value(cx, value));
     }
     let value = new_adapter_info::<E>(cx, AdapterInfoSource::Adapter(payload.adapter))?;
-    payload.info.set(E::duplicate_value(cx, value));
+    let duplicate = E::duplicate_value(cx, value);
+    if let Some(incumbent) = payload.info.set_if_empty(duplicate) {
+        E::release_value(cx, duplicate);
+        return Ok(E::return_held_value(cx, incumbent));
+    }
     Ok(value)
 }
 
@@ -3120,7 +3153,11 @@ pub fn device_adapter_info_get<E: JsEngine + 'static>(
         return Ok(E::return_held_value(cx, value));
     }
     let value = new_adapter_info::<E>(cx, AdapterInfoSource::Device(payload.device))?;
-    payload.adapter_info.set(E::duplicate_value(cx, value));
+    let duplicate = E::duplicate_value(cx, value);
+    if let Some(incumbent) = payload.adapter_info.set_if_empty(duplicate) {
+        E::release_value(cx, duplicate);
+        return Ok(E::return_held_value(cx, incumbent));
+    }
     Ok(value)
 }
 
@@ -4723,9 +4760,9 @@ pub fn render_pass_execute_bundles<E: JsEngine + 'static>(
     this: E::Value,
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
-    let pass = live_render_pass::<E>(cx, this)?;
     let value = required_argument::<E>(cx, args, 0, "bundles")?;
     let bundles = convert_render_bundle_sequence::<E>(cx, value)?;
+    let pass = live_render_pass::<E>(cx, this)?;
     unsafe {
         (E::environment(cx).gpu().render_pass_encoder_execute_bundles)(
             pass,

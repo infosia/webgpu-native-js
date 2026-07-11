@@ -460,7 +460,7 @@ pub(super) fn convert_render_bundle_encoder_descriptor<E: JsEngine>(
     let color_formats = {
         let converted = convert_sequence::<E, _>(cx, color_formats_value, "colorFormats", |item| {
             // Nullable enum elements use the C enum's Undefined sentinel as holes.
-            if E::is_null(cx, item) {
+            if E::is_null(cx, item) || E::is_undefined(cx, item) {
                 Ok(WGPUTextureFormat_WGPUTextureFormat_Undefined)
             } else {
             let enum_arena = Arena::new();
@@ -996,7 +996,7 @@ pub(super) fn convert_render_pass_descriptor<E: JsEngine + 'static>(
     let color_attachments = {
         let converted = convert_sequence::<E, _>(cx, color_attachments_value, "colorAttachments", |item| {
             // T5: nullable sequence elements are C sentinel-filled struct holes.
-            if E::is_null(cx, item) {
+            if E::is_null(cx, item) || E::is_undefined(cx, item) {
                 // The pinned webgpu.h INIT macro defines a hole with a null view,
                 // undefined depth slice/load/store values, and a zero color.
                 Ok(WGPURenderPassColorAttachment {
@@ -2166,7 +2166,7 @@ pub(super) fn convert_vertex_state<E: JsEngine + 'static>(
     } else {
         let converted = convert_sequence::<E, _>(cx, buffers_value, "buffers", |item| {
             // T5: nullable sequence elements are C sentinel-filled struct holes.
-            if E::is_null(cx, item) {
+            if E::is_null(cx, item) || E::is_undefined(cx, item) {
                 // SAFETY: the pinned C ABI defines the all-zero element as the hole sentinel.
                 Ok(unsafe { std::mem::zeroed() })
             } else {
@@ -2833,7 +2833,7 @@ pub(super) fn convert_fragment_state<E: JsEngine + 'static>(
     let targets = {
         let converted = convert_sequence::<E, _>(cx, targets_value, "targets", |item| {
             // T5: nullable sequence elements are C sentinel-filled struct holes.
-            if E::is_null(cx, item) {
+            if E::is_null(cx, item) || E::is_undefined(cx, item) {
                 // SAFETY: the pinned C ABI defines the all-zero element as the hole sentinel.
                 Ok(unsafe { std::mem::zeroed() })
             } else {
