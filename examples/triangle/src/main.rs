@@ -17,6 +17,8 @@ use winit::window::{Window, WindowId};
 
 const TRIANGLE_SOURCE: &str = include_str!("../triangle.js");
 const INIT_DEADLINE: Duration = Duration::from_secs(10);
+const VERIFY_FRAMES: u64 = 60;
+const READBACK_BYTES_PER_ROW: u32 = 256;
 
 fn host_value_text(value: &HostValue) -> String {
     match value {
@@ -67,6 +69,29 @@ struct DeviceRequest {
     status: Cell<wgpu::WGPURequestDeviceStatus>,
     device: Cell<wgpu::WGPUDevice>,
     message: RefCell<String>,
+}
+
+struct MapRequest {
+    done: Cell<bool>,
+    status: Cell<wgpu::WGPUMapAsyncStatus>,
+    message: RefCell<String>,
+}
+
+unsafe extern "C" fn map_callback(
+    status: wgpu::WGPUMapAsyncStatus,
+    message: wgpu::WGPUStringView,
+    userdata1: *mut c_void,
+    _userdata2: *mut c_void,
+) {
+    if userdata1.is_null() {
+        return;
+    }
+    let state = unsafe { Rc::from_raw(userdata1.cast::<MapRequest>()) };
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        state.status.set(status);
+        *state.message.borrow_mut() = string_view_lossy(message);
+        state.done.set(true);
+    }));
 }
 
 unsafe extern "C" fn device_callback(
@@ -288,6 +313,7 @@ struct Renderer {
     bundle: wgpu::WGPURenderBundle,
     format: wgpu::WGPUTextureFormat,
     size: PhysicalSize<u32>,
+    verify: bool,
 }
 
 struct InitialNativeHandles {
@@ -317,7 +343,7 @@ impl Drop for InitialNativeHandles {
 }
 
 impl Renderer {
-    fn new(window: &Window) -> Result<Self, String> {
+    fn new(window: &Window, verify: bool) -> Result<Self, String> {
         let instance = unsafe { wgpu::wgpuCreateInstance(ptr::null()) };
         if instance.is_null() {
             return Err("wgpuCreateInstance returned null".to_owned());
@@ -342,7 +368,7 @@ impl Renderer {
             unsafe { wgpu::wgpuInstanceRelease(instance) };
             return Err(format!("{error:?}"));
         }
-        let result = Self::new_with_instance(instance, window, runtime);
+        let result = Self::new_with_instance(instance, window, runtime, verify);
         if result.is_err() {
             unsafe { wgpu::wgpuInstanceRelease(instance) };
         }
@@ -353,6 +379,7 @@ impl Renderer {
         instance: wgpu::WGPUInstance,
         window: &Window,
         runtime: Runtime,
+        verify: bool,
     ) -> Result<Self, String> {
         let platform_surface = create_surface(instance, window)?;
         let surface = platform_surface.surface;
@@ -415,6 +442,7 @@ impl Renderer {
                     bundle,
                     format,
                     size,
+                    verify,
                 };
                 renderer.configure();
                 std::mem::forget(handles);
@@ -444,7 +472,12 @@ impl Renderer {
             nextInChain: ptr::null_mut(),
             device: self.device,
             format: self.format,
-            usage: wgpu::WGPUTextureUsage_RenderAttachment,
+            usage: wgpu::WGPUTextureUsage_RenderAttachment
+                | if self.verify {
+                    wgpu::WGPUTextureUsage_CopySrc
+                } else {
+                    0
+                },
             width: self.size.width,
             height: self.size.height,
             viewFormatCount: 0,
@@ -460,7 +493,112 @@ impl Renderer {
         self.configure();
     }
 
-    fn render(&mut self) -> Result<bool, String> {
+    fn read_center_pixel(
+        &self,
+        encoder: wgpu::WGPUCommandEncoder,
+        texture: wgpu::WGPUTexture,
+    ) -> Result<wgpu::WGPUBuffer, String> {
+        let descriptor = wgpu::WGPUBufferDescriptor {
+            nextInChain: ptr::null_mut(),
+            label: wgpu::WGPUStringView {
+                data: ptr::null(),
+                length: usize::MAX,
+            },
+            usage: wgpu::WGPUBufferUsage_CopyDst | wgpu::WGPUBufferUsage_MapRead,
+            size: u64::from(READBACK_BYTES_PER_ROW),
+            mappedAtCreation: wgpu::WGPU_FALSE,
+        };
+        let buffer = unsafe { wgpu::wgpuDeviceCreateBuffer(self.device, &descriptor) };
+        if buffer.is_null() {
+            return Err("wgpuDeviceCreateBuffer returned null for pixel readback".to_owned());
+        }
+        let source = wgpu::WGPUTexelCopyTextureInfo {
+            texture,
+            mipLevel: 0,
+            origin: wgpu::WGPUOrigin3D {
+                x: self.size.width / 2,
+                y: self.size.height / 2,
+                z: 0,
+            },
+            aspect: wgpu::WGPUTextureAspect_WGPUTextureAspect_All,
+        };
+        let destination = wgpu::WGPUTexelCopyBufferInfo {
+            layout: wgpu::WGPUTexelCopyBufferLayout {
+                offset: 0,
+                bytesPerRow: READBACK_BYTES_PER_ROW,
+                rowsPerImage: 1,
+            },
+            buffer,
+        };
+        let copy_size = wgpu::WGPUExtent3D {
+            width: 1,
+            height: 1,
+            depthOrArrayLayers: 1,
+        };
+        unsafe {
+            wgpu::wgpuCommandEncoderCopyTextureToBuffer(encoder, &source, &destination, &copy_size)
+        };
+        Ok(buffer)
+    }
+
+    fn map_and_print_center_pixel(&self, buffer: wgpu::WGPUBuffer) -> Result<(), String> {
+        let state = Rc::new(MapRequest {
+            done: Cell::new(false),
+            status: Cell::new(wgpu::WGPUMapAsyncStatus_WGPUMapAsyncStatus_Error),
+            message: RefCell::new(String::new()),
+        });
+        let callback = wgpu::WGPUBufferMapCallbackInfo {
+            nextInChain: ptr::null_mut(),
+            mode: wgpu::WGPUCallbackMode_WGPUCallbackMode_AllowProcessEvents,
+            callback: Some(map_callback),
+            userdata1: Rc::into_raw(Rc::clone(&state)).cast_mut().cast(),
+            userdata2: ptr::null_mut(),
+        };
+        unsafe {
+            wgpu::wgpuBufferMapAsync(
+                buffer,
+                wgpu::WGPUMapMode_Read,
+                0,
+                READBACK_BYTES_PER_ROW as usize,
+                callback,
+            )
+        };
+        wait_for(self.instance, || state.done.get())?;
+        if state.status.get() != wgpu::WGPUMapAsyncStatus_WGPUMapAsyncStatus_Success {
+            return Err(format!(
+                "center-pixel map failed: {}",
+                state.message.borrow()
+            ));
+        }
+        let mapped = unsafe {
+            wgpu::wgpuBufferGetConstMappedRange(buffer, 0, READBACK_BYTES_PER_ROW as usize)
+        };
+        if mapped.is_null() {
+            unsafe { wgpu::wgpuBufferUnmap(buffer) };
+            return Err("center-pixel mapped range was null".to_owned());
+        }
+        let bytes = unsafe { std::slice::from_raw_parts(mapped.cast::<u8>(), 4) };
+        let rgba = match self.format {
+            wgpu::WGPUTextureFormat_WGPUTextureFormat_BGRA8Unorm
+            | wgpu::WGPUTextureFormat_WGPUTextureFormat_BGRA8UnormSrgb => {
+                Ok([bytes[2], bytes[1], bytes[0], bytes[3]])
+            }
+            wgpu::WGPUTextureFormat_WGPUTextureFormat_RGBA8Unorm
+            | wgpu::WGPUTextureFormat_WGPUTextureFormat_RGBA8UnormSrgb => {
+                Ok([bytes[0], bytes[1], bytes[2], bytes[3]])
+            }
+            _ => Err("center-pixel readback requires an 8-bit surface format".to_owned()),
+        };
+        unsafe { wgpu::wgpuBufferUnmap(buffer) };
+        let rgba = rgba?;
+        println!(
+            "center pixel: {},{},{},{}",
+            rgba[0], rgba[1], rgba[2], rgba[3]
+        );
+        Ok(())
+    }
+
+    fn render(&mut self, readback: bool) -> Result<bool, String> {
         if self.size.width == 0 || self.size.height == 0 {
             return Ok(false);
         }
@@ -540,10 +678,28 @@ impl Renderer {
             wgpu::wgpuRenderPassEncoderEnd(pass);
             wgpu::wgpuRenderPassEncoderRelease(pass);
         }
+        let readback_buffer = if readback {
+            match self.read_center_pixel(encoder, current.texture) {
+                Ok(buffer) => Some(buffer),
+                Err(error) => {
+                    unsafe {
+                        wgpu::wgpuCommandEncoderRelease(encoder);
+                        wgpu::wgpuTextureViewRelease(view);
+                        wgpu::wgpuTextureRelease(current.texture);
+                    }
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
         let command = unsafe { wgpu::wgpuCommandEncoderFinish(encoder, ptr::null()) };
         unsafe { wgpu::wgpuCommandEncoderRelease(encoder) };
         if command.is_null() {
             unsafe {
+                if let Some(buffer) = readback_buffer {
+                    wgpu::wgpuBufferRelease(buffer);
+                }
                 wgpu::wgpuTextureViewRelease(view);
                 wgpu::wgpuTextureRelease(current.texture);
             }
@@ -552,6 +708,17 @@ impl Renderer {
         unsafe {
             wgpu::wgpuQueueSubmit(self.queue, 1, ptr::from_ref(&command));
             wgpu::wgpuCommandBufferRelease(command);
+        }
+        if let Some(buffer) = readback_buffer {
+            let result = self.map_and_print_center_pixel(buffer);
+            unsafe { wgpu::wgpuBufferRelease(buffer) };
+            if let Err(error) = result {
+                unsafe {
+                    wgpu::wgpuTextureViewRelease(view);
+                    wgpu::wgpuTextureRelease(current.texture);
+                }
+                return Err(error);
+            }
         }
         let present_status = unsafe { wgpu::wgpuSurfacePresent(self.surface) };
         unsafe {
@@ -581,7 +748,7 @@ impl Drop for Renderer {
 }
 
 struct App {
-    frame_limit: Option<u64>,
+    verify: bool,
     frames: u64,
     window: Option<Window>,
     renderer: Option<Renderer>,
@@ -611,7 +778,7 @@ impl ApplicationHandler for App {
                 return;
             }
         };
-        match Renderer::new(&window) {
+        match Renderer::new(&window, self.verify) {
             Ok(renderer) => {
                 window.request_redraw();
                 self.renderer = Some(renderer);
@@ -641,11 +808,11 @@ impl ApplicationHandler for App {
                 let Some(renderer) = &mut self.renderer else {
                     return;
                 };
-                match renderer.render() {
+                let final_verify_frame = self.verify && self.frames + 1 == VERIFY_FRAMES;
+                match renderer.render(final_verify_frame) {
                     Ok(true) => {
                         self.frames += 1;
-                        if self.frame_limit == Some(self.frames) {
-                            println!("rendered {} frames", self.frames);
+                        if final_verify_frame {
                             event_loop.exit();
                             return;
                         }
@@ -665,32 +832,23 @@ impl ApplicationHandler for App {
     }
 }
 
-fn parse_frame_limit() -> Result<Option<u64>, String> {
+fn parse_verify() -> Result<bool, String> {
     let mut args = std::env::args().skip(1);
     let Some(flag) = args.next() else {
-        return Ok(None);
+        return Ok(false);
     };
-    if flag != "--frames" {
+    if flag != "--verify" {
         return Err(format!("unknown argument: {flag}"));
     }
-    let value = args
-        .next()
-        .ok_or_else(|| "--frames requires a positive integer".to_owned())?;
     if args.next().is_some() {
-        return Err("unexpected arguments after --frames N".to_owned());
+        return Err("unexpected arguments after --verify".to_owned());
     }
-    let frames = value
-        .parse::<u64>()
-        .map_err(|_| "--frames requires a positive integer".to_owned())?;
-    if frames == 0 {
-        return Err("--frames requires a positive integer".to_owned());
-    }
-    Ok(Some(frames))
+    Ok(true)
 }
 
 fn main() -> ExitCode {
-    let frame_limit = match parse_frame_limit() {
-        Ok(limit) => limit,
+    let verify = match parse_verify() {
+        Ok(verify) => verify,
         Err(error) => {
             eprintln!("triangle example failed: {error}");
             return ExitCode::FAILURE;
@@ -704,7 +862,7 @@ fn main() -> ExitCode {
         }
     };
     let mut app = App {
-        frame_limit,
+        verify,
         frames: 0,
         window: None,
         renderer: None,

@@ -12,11 +12,12 @@ Build the selected real backend first and point the loader at its library
 directory:
 
 ```sh
-WEBGPU_NATIVE_JS_BACKEND_LIB_DIR=/path/to/backend/lib cargo run -p example-triangle -- --frames 120
+WEBGPU_NATIVE_JS_BACKEND_LIB_DIR=/path/to/backend/lib cargo run -p example-triangle -- --verify
 ```
 
-With `--frames N`, a successful run exits after N presented frames and prints
-`rendered N frames`. Without it, the window runs until closed. The default
+With `--verify`, a successful run exits after 60 presented frames, reads back
+the final frame's center pixel, and prints `center pixel: R,G,B,A` with decimal
+8-bit channel values. Without it, the window runs until closed. The default
 feature selects yawgpu; `--no-default-features --features backend-wgpu-native`
 and `backend-dawn` select the experimental alternatives. A real Metal-capable
 backend is required—yawgpu's Noop backend cannot display the triangle.
