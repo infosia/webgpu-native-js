@@ -172,20 +172,56 @@ pub fn summarize(results: &[TestResult], expectations: &[Expectation]) -> (Summa
 
 pub fn format_summary(summary: Summary) -> String {
     format!(
-        "pass  fail  skip  warn  expected-fail  unexpected-pass\n\
-         {:>4}  {:>4}  {:>4}  {:>4}  {:>13}  {:>15}",
+        "pass  fail  skip  warn  expected-fail  unexpected-pass  expectation-mismatch  unexpected-warn\n\
+         {:>4}  {:>4}  {:>4}  {:>4}  {:>13}  {:>15}  {:>20}  {:>15}",
         summary.pass,
         summary.fail,
         summary.skip,
         summary.warn,
         summary.expected_fail,
-        summary.unexpected_pass
+        summary.unexpected_pass,
+        summary.expectation_mismatch,
+        summary.unexpected_warn
     )
 }
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    use quickjs_adapter::{HostValue, Runtime};
+
     use super::*;
+
+    fn eval_drop(runtime: &Runtime, source: &str, name: &str) {
+        let value = runtime.eval(source, name).expect(name);
+        runtime
+            .set_global_value("__cts_runner_test_eval", value)
+            .expect("retain test evaluation");
+        runtime
+            .clear_global("__cts_runner_test_eval")
+            .expect("release test evaluation");
+    }
+
+    fn shim_runtime() -> Runtime {
+        let runtime = Runtime::new().expect("bare QuickJS runtime");
+        runtime
+            .register_host_function("print", |_| Ok(()))
+            .expect("register print");
+        runtime
+            .register_host_function("__log_shim", |_| Ok(()))
+            .expect("register shim logger");
+        runtime
+            .register_host_function_with_result("__perf_now", |_| Ok(HostValue::Number(0.0)))
+            .expect("register clock");
+        eval_drop(
+            &runtime,
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/shims.js")),
+            "cts-runner-shims-test.js",
+        );
+        runtime
+    }
 
     #[test]
     fn expectations_parser_accepts_reasoned_entries() {
@@ -217,6 +253,82 @@ mod tests {
         assert_eq!(
             parse_suite("# smoke\nsynthetic:*\n\nwebgpu:api,* # core\n"),
             ["synthetic:*", "webgpu:api,*"]
+        );
+    }
+
+    #[test]
+    fn zero_delay_interval_runs_once_per_timer_drain_and_remains_pending() {
+        let runtime = shim_runtime();
+        let calls = Rc::new(Cell::new(0));
+        let captured = Rc::clone(&calls);
+        runtime
+            .register_host_function("recordInterval", move |_| {
+                captured.set(captured.get() + 1);
+                Ok(())
+            })
+            .expect("register interval callback");
+
+        eval_drop(
+            &runtime,
+            "globalThis.intervalId = setInterval(recordInterval, 0); __runDueTimers(0);",
+            "zero-delay-interval-first-drain.js",
+        );
+        assert_eq!(calls.get(), 1);
+
+        eval_drop(
+            &runtime,
+            "__runDueTimers(0); clearInterval(intervalId); __runDueTimers(Infinity);",
+            "zero-delay-interval-second-drain.js",
+        );
+        assert_eq!(calls.get(), 2, "the repeating timer must remain pending");
+    }
+
+    #[test]
+    fn clearing_unknown_timer_handle_does_not_cancel_a_future_timer() {
+        let runtime = shim_runtime();
+        let calls = Rc::new(Cell::new(0));
+        let captured = Rc::clone(&calls);
+        runtime
+            .register_host_function("recordTimeout", move |_| {
+                captured.set(captured.get() + 1);
+                Ok(())
+            })
+            .expect("register timeout callback");
+
+        eval_drop(
+            &runtime,
+            "clearTimeout(1); setTimeout(recordTimeout, 0); __runDueTimers(0);",
+            "clear-unknown-timer.js",
+        );
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn discarded_timer_removes_its_cancellation_entry() {
+        let runtime = Runtime::new().expect("bare QuickJS runtime");
+        runtime
+            .register_host_function("print", |_| Ok(()))
+            .expect("register print");
+        runtime
+            .register_host_function("__log_shim", |_| Ok(()))
+            .expect("register shim logger");
+        runtime
+            .register_host_function_with_result("__perf_now", |_| Ok(HostValue::Number(0.0)))
+            .expect("register clock");
+        eval_drop(
+            &runtime,
+            "const NativeSet = Set; globalThis.trackedSets = []; globalThis.Set = class extends NativeSet { constructor(...args) { super(...args); trackedSets.push(this); } };",
+            "track-shim-sets.js",
+        );
+        eval_drop(
+            &runtime,
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/shims.js")),
+            "cts-runner-shims-test.js",
+        );
+        eval_drop(
+            &runtime,
+            "const id = setTimeout(() => {}, 0); clearTimeout(id); if (trackedSets[1].size !== 1) throw new Error('missing cancellation entry'); __runDueTimers(0); if (trackedSets[1].size !== 0) throw new Error('stale cancellation entry');",
+            "cancelled-timer-cleanup.js",
         );
     }
 
@@ -277,5 +389,44 @@ mod tests {
         assert_eq!(summary.warn, 1);
         assert!(!summary.exit_success());
         assert!(lines.contains("WARN warn:case"));
+    }
+
+    #[test]
+    fn expectation_mismatch_is_counted_reported_and_fails() {
+        let expectation = Expectation {
+            query_prefix: "known:".to_owned(),
+            expected: Status::Fail,
+            reason: "known failure".to_owned(),
+        };
+        let result = TestResult {
+            query: "known:skipped".to_owned(),
+            status: Status::Skip,
+            message: "not applicable".to_owned(),
+        };
+
+        let (summary, lines) = summarize(&[result], &[expectation]);
+        assert_eq!(summary.expectation_mismatch, 1);
+        assert!(!summary.exit_success());
+        assert!(lines.contains("EXPECTATION-MISMATCH known:skipped"));
+    }
+
+    #[test]
+    fn formatted_summary_includes_all_counters() {
+        let formatted = format_summary(Summary {
+            pass: 1,
+            fail: 2,
+            skip: 3,
+            warn: 4,
+            expected_fail: 5,
+            unexpected_pass: 6,
+            expectation_mismatch: 7,
+            unexpected_warn: 8,
+        });
+        assert!(formatted.contains("expectation-mismatch"));
+        assert!(formatted.contains("unexpected-warn"));
+        assert!(formatted.lines().nth(1).is_some_and(|line| {
+            line.split_whitespace()
+                .eq(["1", "2", "3", "4", "5", "6", "7", "8"])
+        }));
     }
 }

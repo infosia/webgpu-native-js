@@ -3060,9 +3060,29 @@ mod tests {
         runtime
             .register_host_function_with_result("hostNumber", |_| Ok(super::HostValue::Number(3.5)))
             .expect("register host result");
+        runtime
+            .register_host_function_with_result("hostString", |_| {
+                Ok(super::HostValue::String("host text".to_owned()))
+            })
+            .expect("register string result");
+        runtime
+            .register_host_function_with_result("hostTrue", |_| Ok(super::HostValue::Bool(true)))
+            .expect("register true result");
+        runtime
+            .register_host_function_with_result("hostFalse", |_| Ok(super::HostValue::Bool(false)))
+            .expect("register false result");
+        runtime
+            .register_host_function_with_result("hostNull", |_| Ok(super::HostValue::Null))
+            .expect("register null result");
         eval_drop(
             &runtime,
-            r#"if (hostNumber() !== 3.5) throw new Error("wrong host result");"#,
+            r#"
+                if (hostNumber() !== 3.5) throw new Error("wrong number result");
+                if (hostString() !== "host text") throw new Error("wrong string result");
+                if (hostTrue() !== true) throw new Error("wrong true result");
+                if (hostFalse() !== false) throw new Error("wrong false result");
+                if (hostNull() !== null) throw new Error("wrong null result");
+            "#,
             "register-host-function-result.js",
         );
     }

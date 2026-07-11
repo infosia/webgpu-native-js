@@ -30,6 +30,7 @@
   let nextTimerId = 1;
   const timers = [];
   const cancelledTimerIds = new Set();
+  const pendingTimerIds = new Set();
   const less = (a, b) => a.due < b.due || (a.due === b.due && a.id < b.id);
   const push = timer => {
     timers.push(timer);
@@ -63,6 +64,7 @@
     const id = nextTimerId++;
     delay = Math.max(0, Number(delay) || 0);
     __shimLog(repeat ? "setInterval" : "setTimeout");
+    pendingTimerIds.add(id);
     push({ id, callback, args, due: __perf_now() + delay, delay, repeat, cancelled: false });
     return id;
   };
@@ -73,21 +75,31 @@
   const cancel = id => {
     __shimLog("clearTimeout/clearInterval");
     id = Number(id);
+    if (!pendingTimerIds.has(id)) return;
     cancelledTimerIds.add(id);
     for (const timer of timers) if (timer.id === id) timer.cancelled = true;
   };
   globalThis.clearTimeout = cancel;
   globalThis.clearInterval = cancel;
   globalThis.__runDueTimers = now => {
+    const repeating = [];
     while (timers.length && timers[0].due <= now) {
       const timer = pop();
-      if (timer.cancelled || cancelledTimerIds.delete(timer.id)) continue;
+      const cancelled = cancelledTimerIds.delete(timer.id);
+      if (timer.cancelled || cancelled) {
+        pendingTimerIds.delete(timer.id);
+        continue;
+      }
+      if (!timer.repeat) pendingTimerIds.delete(timer.id);
       timer.callback(...timer.args);
       if (timer.repeat && !timer.cancelled && !cancelledTimerIds.delete(timer.id)) {
-        timer.due = now + timer.delay;
-        push(timer);
+        timer.due = __perf_now() + timer.delay;
+        repeating.push(timer);
+      } else if (timer.repeat) {
+        pendingTimerIds.delete(timer.id);
       }
     }
+    for (const timer of repeating) push(timer);
   };
 
   const scalarValues = value => {

@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -12,8 +12,8 @@ use webgpu_native_js_ffi::native as wgpu;
 const DEFAULT_TIMEOUT_SECS: u64 = 300;
 const GLUE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/glue.mjs");
 
-// Phase A-2 replaces these placeholders with aliases for the discovered CTS
-// build layout. Values are paths relative to --cts-path/CTS_PATH.
+// Validated against the pinned CTS standalone build documented in the README.
+// Values are paths relative to --cts-path/CTS_PATH.
 const CTS_MODULE_ALIASES: &[(&str, &str)] = &[
     ("cts/file_loader", "common/internal/file_loader.js"),
     ("cts/parse_query", "common/internal/query/parseQuery.js"),
@@ -29,6 +29,12 @@ struct Config {
     expectations: Option<PathBuf>,
     list: bool,
     timeout: Duration,
+}
+
+#[derive(Debug)]
+struct RunOutput {
+    results: Vec<TestResult>,
+    listed: usize,
 }
 
 fn usage() -> &'static str {
@@ -49,7 +55,7 @@ fn parse_args() -> Result<Config, String> {
             "--cts-path" => cts_path = Some(PathBuf::from(next_value(&mut args, &arg)?)),
             "--query" => queries.push(next_value(&mut args, &arg)?),
             "--suite" => {
-                let path = PathBuf::from(next_value(&mut args, &arg)?);
+                let path = cwd_path(PathBuf::from(next_value(&mut args, &arg)?))?;
                 queries.extend(load_suite(&path)?);
             }
             "--expectations" => {
@@ -86,6 +92,18 @@ fn parse_args() -> Result<Config, String> {
         list,
         timeout: Duration::from_secs(timeout_secs),
     })
+}
+
+fn cwd_path(path: PathBuf) -> Result<PathBuf, String> {
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .map_err(|error| {
+                format!("could not resolve path relative to current directory: {error}")
+            })
+    }
 }
 
 fn next_value(args: &mut impl Iterator<Item = String>, option: &str) -> Result<String, String> {
@@ -215,9 +233,10 @@ fn install_config(runtime: &Runtime, config: &Config) -> quickjs_adapter::Result
     runtime.clear_global("__cts_runner_config_eval")
 }
 
-fn run(config: &Config, instance: wgpu::WGPUInstance) -> Result<Vec<TestResult>, String> {
+fn run(config: &Config, instance: wgpu::WGPUInstance) -> Result<RunOutput, String> {
     let runtime = Runtime::new().map_err(|error| format!("runtime creation failed: {error:?}"))?;
     let results = Rc::new(RefCell::new(Vec::new()));
+    let listed = Rc::new(Cell::new(0));
     let process_start = Instant::now();
 
     runtime
@@ -255,11 +274,13 @@ fn run(config: &Config, instance: wgpu::WGPUInstance) -> Result<Vec<TestResult>,
             Ok(())
         })
         .map_err(|error| format!("could not register __report: {error:?}"))?;
+    let list_count = Rc::clone(&listed);
     runtime
-        .register_host_function("__list", |args| {
+        .register_host_function("__list", move |args| {
             let [HostValue::String(name)] = args else {
                 return Err("__list expects one string".to_owned());
             };
+            list_count.set(list_count.get() + 1);
             println!("{name}");
             Ok(())
         })
@@ -332,7 +353,10 @@ fn run(config: &Config, instance: wgpu::WGPUInstance) -> Result<Vec<TestResult>,
     }
     drop(evaluation);
     let collected = results.borrow().clone();
-    Ok(collected)
+    Ok(RunOutput {
+        results: collected,
+        listed: listed.get(),
+    })
 }
 
 fn main() -> ExitCode {
@@ -363,21 +387,25 @@ fn main() -> ExitCode {
     let run_result = run(&config, instance);
     unsafe { wgpu::wgpuInstanceRelease(instance) };
 
-    let results = match run_result {
-        Ok(results) => results,
+    let output = match run_result {
+        Ok(output) => output,
         Err(error) => {
             eprintln!("{error}");
             return ExitCode::FAILURE;
         }
     };
     if config.list {
+        if output.listed == 0 {
+            eprintln!("CTS glue completed without listing any selected cases");
+            return ExitCode::FAILURE;
+        }
         return ExitCode::SUCCESS;
     }
-    if results.is_empty() {
+    if output.results.is_empty() {
         eprintln!("CTS glue completed without reporting any selected cases");
         return ExitCode::FAILURE;
     }
-    let (summary, failure_lines) = summarize(&results, &expectations);
+    let (summary, failure_lines) = summarize(&output.results, &expectations);
     println!("{}", format_summary(summary));
     if !failure_lines.is_empty() {
         eprint!("{failure_lines}");

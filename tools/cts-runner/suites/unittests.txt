@@ -1,0 +1,3 @@
+# Phase A framework self-tests. Keep the suite economical per C6: one named,
+# versioned upstream query; grow coverage by adding intentional query lines.
+unittests:*

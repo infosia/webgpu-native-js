@@ -36,7 +36,7 @@ QuickJS on this binding's module loader and shims.
 
 CTS checkout at Dawn's DEPS pin (lockstep with the oracle protocol):
 `e8389d86` (local short: e8389d86fc5). Built with `npm ci && npm run
-standalone` by the owner. Recorded in tools/cts-runner/README.md.
+standalone` by the owner. Recorded in tools/cts-runner/README.md (verified present after the review fixes).
 
 ### Runner shape (as landed)
 
@@ -47,3 +47,25 @@ A-2: real glue (parseQuery → loadCases → Logger → per-case run → __repor
 shims per C3, five exact aliases. Planner decision: `call_global_function`
 was NOT restored — JS→host reporting suffices (recorded against the block's
 inventory note).
+
+### Phase A review (one focused lens) — closed 2026-07-12
+
+0 CRITICAL / 3 MAJOR / 8 MINOR. The MAJORs: the README pin was missing while
+this file claimed it existed (the recurring record-honesty class — fixed, and
+the false claim above is annotated rather than erased); the acceptance suite
+file was not committed (now `suites/unittests.txt` — the 1,031-case run is
+reproducible from the tree); and `setInterval(0)` looped forever inside one
+eval, unreachable by `--timeout-secs` (repeating timers now re-arm after the
+drain with a fresh now — a bare-Runtime regression test pins it). Selected
+minors fixed: clearTimeout no-op semantics + cancellation-set hygiene, the
+exit-code deviation from C2's letter documented as deliberate
+(skip-under-expected-fail = mismatch, stale-expectation hygiene), all eight
+summary counters printed, empty `--list` exits nonzero, the Bool/String/Null
+host-return paths tested. Recorded approximations (from the review, kept):
+expectations are Rust-side query-prefix matching, NOT the framework's
+subcase-level expectations — a case failing 1 of 100 subcases can only be
+expected wholesale (revisit if Phase B needs finer grain); glue/shims are
+covered by the live CTS run plus targeted shim unit tests, not by a full
+offline harness — acceptable for the spike, stated here. expectations.txt
+deliberately does not exist yet (unittests needed zero entries); Phase B
+creates it with the codegen-deltas-derived initial population per C5.
