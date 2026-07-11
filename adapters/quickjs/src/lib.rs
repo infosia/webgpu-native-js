@@ -450,6 +450,18 @@ impl Runtime {
         Ok(())
     }
 
+    /// Sets the source transform applied before every module is compiled.
+    ///
+    /// The callback is trusted host code and must not re-enter this runtime.
+    pub fn set_module_transform<F>(&self, transform: F)
+    where
+        F: Fn(&str, &Path) -> std::result::Result<String, String> + 'static,
+    {
+        self.state
+            .module_transform
+            .replace(Some(Rc::new(transform)));
+    }
+
     /// Reads and evaluates a file as an ES module.
     ///
     /// QuickJS returns a promise for module evaluation. A synchronously
@@ -464,6 +476,12 @@ impl Runtime {
         let source = std::fs::read_to_string(&path).map_err(|source| Error::Io {
             path: path.clone(),
             source,
+        })?;
+        let source = transform_module_source(&self.state, source, &path).map_err(|message| {
+            Error::Exception(format!(
+                "could not load module '{}': transform failed: {message}",
+                path.display()
+            ))
         })?;
         let input = CString::new(source.as_bytes())?;
         let name_text = path.to_string_lossy();
@@ -573,6 +591,8 @@ impl Drop for Runtime {
     }
 }
 
+type ModuleTransform = dyn Fn(&str, &Path) -> std::result::Result<String, String>;
+
 struct State {
     env: core::Environment,
     classes: Mutex<BTreeMap<core::ClassId, ClassEntry>>,
@@ -580,6 +600,7 @@ struct State {
     callbacks: Mutex<Vec<CallbackTarget>>,
     host_functions: RefCell<Vec<Rc<HostFunction>>>,
     module_aliases: RefCell<BTreeMap<String, PathBuf>>,
+    module_transform: RefCell<Option<Rc<ModuleTransform>>>,
     module_origins: RefCell<BTreeMap<PathBuf, (String, String)>>,
     outstanding_deferreds: Arc<Mutex<Vec<DeferredSlot>>>,
     unhandled_rejections: Mutex<Vec<UnhandledRejection>>,
@@ -628,6 +649,7 @@ impl State {
             callbacks: Mutex::new(Vec::new()),
             host_functions: RefCell::new(Vec::new()),
             module_aliases: RefCell::new(BTreeMap::new()),
+            module_transform: RefCell::new(None),
             module_origins: RefCell::new(BTreeMap::new()),
             outstanding_deferreds: Arc::new(Mutex::new(Vec::new())),
             unhandled_rejections: Mutex::new(Vec::new()),
@@ -1894,11 +1916,11 @@ extern "C" fn module_normalize(
 ) -> *mut c_char {
     catch_unwind(AssertUnwindSafe(|| {
         let Some(state) = NonNull::new(opaque.cast::<State>()) else {
-            throw_message(ctx, "module loader state is unavailable", false);
+            throw_module_message(ctx, "module loader state is unavailable");
             return ptr::null_mut();
         };
         if module_base_name.is_null() || module_name.is_null() {
-            throw_message(ctx, "module resolution received a null name", false);
+            throw_module_message(ctx, "module resolution received a null name");
             return ptr::null_mut();
         }
         let importer = unsafe { CStr::from_ptr(module_base_name) }
@@ -1908,7 +1930,7 @@ extern "C" fn module_normalize(
             .to_string_lossy()
             .into_owned();
         let state = unsafe { state.as_ref() };
-        let resolved = state
+        let base = state
             .module_aliases
             .borrow()
             .get(&specifier)
@@ -1920,6 +1942,21 @@ extern "C" fn module_normalize(
                     .unwrap_or_else(|| Path::new(""))
                     .join(Path::new(&specifier))
             });
+        let probes = module_resolution_probes(&base);
+        let Some(resolved) = probes.iter().find(|path| path.is_file()).cloned() else {
+            let probed = probes
+                .iter()
+                .map(|path| format!("'{}'", path.display()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            throw_module_message(
+                ctx,
+                &format!(
+                    "could not resolve module '{specifier}' imported from '{importer}': probed paths: {probed}"
+                ),
+            );
+            return ptr::null_mut();
+        };
         state.module_origins.borrow_mut().insert(
             resolved.clone(),
             (specifier.clone(), importer.clone()),
@@ -1928,12 +1965,11 @@ extern "C" fn module_normalize(
         let normalized = resolved.to_string_lossy();
         let bytes = normalized.as_bytes();
         if bytes.contains(&0) {
-            throw_message(
+            throw_module_message(
                 ctx,
                 &format!(
                     "could not resolve module '{specifier}' imported from '{importer}': resolved path contains NUL"
                 ),
-                false,
             );
             return ptr::null_mut();
         }
@@ -1948,7 +1984,7 @@ extern "C" fn module_normalize(
         output.cast()
     }))
     .unwrap_or_else(|_| {
-        throw_message(ctx, "Rust module normalizer panicked", false);
+        throw_module_message(ctx, "Rust module normalizer panicked");
         ptr::null_mut()
     })
 }
@@ -1960,11 +1996,11 @@ extern "C" fn module_loader(
 ) -> *mut qjs::JSModuleDef {
     catch_unwind(AssertUnwindSafe(|| {
         let Some(state) = NonNull::new(opaque.cast::<State>()) else {
-            throw_message(ctx, "module loader state is unavailable", false);
+            throw_module_message(ctx, "module loader state is unavailable");
             return ptr::null_mut();
         };
         if module_name.is_null() {
-            throw_message(ctx, "module loader received a null name", false);
+            throw_module_message(ctx, "module loader received a null name");
             return ptr::null_mut();
         }
         let name = unsafe { CStr::from_ptr(module_name) }
@@ -1985,17 +2021,34 @@ extern "C" fn module_loader(
                     ),
                     None => format!("could not load module '{}': {error}", path.display()),
                 };
-                throw_message(ctx, &message, false);
+                throw_module_message(ctx, &message);
+                return ptr::null_mut();
+            }
+        };
+        let state = unsafe { state.as_ref() };
+        let source = match transform_module_source(state, source, &path) {
+            Ok(source) => source,
+            Err(message) => {
+                let message = match origin {
+                    Some((specifier, importer)) => format!(
+                        "could not load module '{specifier}' imported from '{importer}': transform failed for '{}': {message}",
+                        path.display()
+                    ),
+                    None => format!(
+                        "could not load module '{}': transform failed: {message}",
+                        path.display()
+                    ),
+                };
+                throw_module_message(ctx, &message);
                 return ptr::null_mut();
             }
         };
         let input = match CString::new(source.as_bytes()) {
             Ok(input) => input,
             Err(_) => {
-                throw_message(
+                throw_module_message(
                     ctx,
                     &format!("could not load module '{}': source contains NUL", path.display()),
-                    false,
                 );
                 return ptr::null_mut();
             }
@@ -2019,9 +2072,36 @@ extern "C" fn module_loader(
         module
     }))
     .unwrap_or_else(|_| {
-        throw_message(ctx, "Rust module loader panicked", false);
+        throw_module_message(ctx, "Rust module loader panicked");
         ptr::null_mut()
     })
+}
+
+fn module_resolution_probes(base: &Path) -> [PathBuf; 4] {
+    [
+        base.to_path_buf(),
+        path_with_suffix(base, ".js"),
+        path_with_suffix(base, ".mjs"),
+        base.join("index.js"),
+    ]
+}
+
+fn path_with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(suffix);
+    PathBuf::from(value)
+}
+
+fn transform_module_source(
+    state: &State,
+    source: String,
+    path: &Path,
+) -> std::result::Result<String, String> {
+    let transform = state.module_transform.borrow().clone();
+    match transform {
+        Some(transform) => transform(&source, path),
+        None => Ok(source),
+    }
 }
 
 fn absolute_path(path: &Path) -> std::io::Result<PathBuf> {
@@ -2089,6 +2169,25 @@ fn throw_message(ctx: *mut qjs::JSContext, message: &str, type_error: bool) -> q
         Ok(message) => unsafe { qjs::JS_ThrowInternalError(ctx, message.as_ptr()) },
         Err(_) => unsafe { qjs::JS_ThrowInternalError(ctx, fallback.as_ptr()) },
     }
+}
+
+fn throw_module_message(ctx: *mut qjs::JSContext, message: &str) -> qjs::JSValue {
+    let error = unsafe { qjs::JS_NewError(ctx) };
+    if unsafe { qjs::JS_IsException(error) } {
+        return error;
+    }
+    for (key, text) in [(c"name", "InternalError"), (c"message", message)] {
+        let value = unsafe { qjs::JS_NewStringLen(ctx, text.as_ptr().cast(), text.len()) };
+        if unsafe { qjs::JS_IsException(value) } {
+            unsafe { qjs::JS_FreeValue(ctx, error) };
+            return value;
+        }
+        if unsafe { qjs::JS_SetPropertyStr(ctx, error, key.as_ptr(), value) } < 0 {
+            unsafe { qjs::JS_FreeValue(ctx, error) };
+            return qjs_value_with_tag(qjs::JS_TAG_EXCEPTION as i64);
+        }
+    }
+    unsafe { qjs::JS_Throw(ctx, error) }
 }
 
 fn set_error_name(cx: Context<'_>, error: qjs::JSValue, name: &str) -> qjs::JSValue {
@@ -2333,6 +2432,9 @@ mod tests {
 
         fn write(&self, name: &str, source: &str) -> PathBuf {
             let path = self.0.join(name);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("create module fixture parent");
+            }
             fs::write(&path, source).expect("write module fixture");
             path
         }
@@ -2399,6 +2501,206 @@ mod tests {
             &runtime,
             "if (globalThis.aliasRevision !== 'owner') throw new Error('wrong alias');",
             "alias-result.js",
+        );
+    }
+
+    #[test]
+    fn module_transform_identity_preserves_behavior_for_root_and_imports() {
+        let files = TempModules::new();
+        files.write("identity-value.mjs", "export const value = 17;");
+        let entry = files.write(
+            "identity-entry.mjs",
+            "import { value } from './identity-value.mjs'; globalThis.identityValue = value;",
+        );
+        let transformed_paths = Rc::new(RefCell::new(Vec::new()));
+        let captured_paths = Rc::clone(&transformed_paths);
+        let runtime = Runtime::new().expect("quickjs runtime");
+        runtime.set_module_transform(move |source, path| {
+            captured_paths.borrow_mut().push(path.to_path_buf());
+            Ok(source.to_owned())
+        });
+
+        let evaluation = runtime
+            .eval_module(&entry)
+            .expect("evaluate identity graph");
+
+        assert_eq!(
+            evaluation.status().expect("identity status"),
+            ModuleEvaluationStatus::Fulfilled
+        );
+        eval_drop(
+            &runtime,
+            "if (globalThis.identityValue !== 17) throw new Error('identity changed behavior');",
+            "identity-result.js",
+        );
+        let transformed_paths = transformed_paths.borrow();
+        assert_eq!(transformed_paths.len(), 2);
+        assert!(transformed_paths.contains(&entry));
+        assert!(transformed_paths.contains(&files.path().join("identity-value.mjs")));
+    }
+
+    #[test]
+    fn module_transform_rewrites_an_imported_module_marker() {
+        let files = TempModules::new();
+        files.write("marker-value.mjs", "export const value = __MARKER__;");
+        let entry = files.write(
+            "marker-entry.mjs",
+            "import { value } from './marker-value.mjs'; globalThis.markerValue = value;",
+        );
+        let runtime = Runtime::new().expect("quickjs runtime");
+        runtime.set_module_transform(|source, _path| Ok(source.replace("__MARKER__", "29")));
+
+        let evaluation = runtime.eval_module(&entry).expect("evaluate marker graph");
+
+        assert_eq!(
+            evaluation.status().expect("marker status"),
+            ModuleEvaluationStatus::Fulfilled
+        );
+        eval_drop(
+            &runtime,
+            "if (globalThis.markerValue !== 29) throw new Error('marker was not transformed');",
+            "marker-result.js",
+        );
+    }
+
+    #[test]
+    fn module_transform_is_applied_to_the_root_file() {
+        let files = TempModules::new();
+        let entry = files.write(
+            "root-marker.mjs",
+            "globalThis.rootMarkerValue = __ROOT_MARKER__;",
+        );
+        let runtime = Runtime::new().expect("quickjs runtime");
+        runtime.set_module_transform(|source, _path| Ok(source.replace("__ROOT_MARKER__", "31")));
+
+        let evaluation = runtime
+            .eval_module(&entry)
+            .expect("evaluate transformed root");
+
+        assert_eq!(
+            evaluation.status().expect("root transform status"),
+            ModuleEvaluationStatus::Fulfilled
+        );
+        eval_drop(
+            &runtime,
+            "if (globalThis.rootMarkerValue !== 31) throw new Error('root was not transformed');",
+            "root-marker-result.js",
+        );
+    }
+
+    #[test]
+    fn module_transform_error_names_the_loaded_path_and_message() {
+        let files = TempModules::new();
+        let rejected = files.write("rejected.mjs", "export const value = 1;");
+        let entry = files.write("transform-error-entry.mjs", "import './rejected.mjs';");
+        let runtime = Runtime::new().expect("quickjs runtime");
+        runtime.set_module_transform(move |source, path| {
+            if path == rejected {
+                Err("synthetic transform failure".to_owned())
+            } else {
+                Ok(source.to_owned())
+            }
+        });
+
+        let error = runtime
+            .eval_module(&entry)
+            .expect_err("reject imported transform");
+        let super::Error::Exception(message) = error else {
+            panic!("expected module exception, got {error:?}");
+        };
+        assert!(
+            message.contains(&files.path().join("./rejected.mjs").display().to_string()),
+            "{message}"
+        );
+        assert!(message.contains("synthetic transform failure"), "{message}");
+    }
+
+    #[test]
+    fn module_resolution_probes_exact_then_js_then_mjs() {
+        let files = TempModules::new();
+        files.write("exact", "export const exact = 1;");
+        files.write("util.js", "export const javascript = 2;");
+        files.write("module.mjs", "export const module = 4;");
+        let entry = files.write(
+            "probe-files-entry.mjs",
+            "import { exact } from './exact'; import { javascript } from './util'; import { module } from './module'; globalThis.probeFiles = exact + javascript + module;",
+        );
+        let runtime = Runtime::new().expect("quickjs runtime");
+
+        let evaluation = runtime.eval_module(&entry).expect("evaluate probed files");
+
+        assert_eq!(
+            evaluation.status().expect("probe files status"),
+            ModuleEvaluationStatus::Fulfilled
+        );
+        eval_drop(
+            &runtime,
+            "if (globalThis.probeFiles !== 7) throw new Error('wrong probed files');",
+            "probe-files-result.js",
+        );
+    }
+
+    #[test]
+    fn module_resolution_probes_directory_index_js() {
+        let files = TempModules::new();
+        files.write("util/index.js", "export const value = 43;");
+        let entry = files.write(
+            "probe-index-entry.mjs",
+            "import { value } from './util'; globalThis.probeIndexValue = value;",
+        );
+        let runtime = Runtime::new().expect("quickjs runtime");
+
+        let evaluation = runtime.eval_module(&entry).expect("evaluate index probe");
+
+        assert_eq!(
+            evaluation.status().expect("index probe status"),
+            ModuleEvaluationStatus::Fulfilled
+        );
+        eval_drop(
+            &runtime,
+            "if (globalThis.probeIndexValue !== 43) throw new Error('wrong index probe');",
+            "probe-index-result.js",
+        );
+    }
+
+    #[test]
+    fn module_resolution_miss_lists_every_probe() {
+        let files = TempModules::new();
+        let entry = files.write("probe-miss-entry.mjs", "import './absent';");
+        let runtime = Runtime::new().expect("quickjs runtime");
+
+        let error = runtime.eval_module(&entry).expect_err("missing probes");
+        let super::Error::Exception(message) = error else {
+            panic!("expected module exception, got {error:?}");
+        };
+        for path in super::module_resolution_probes(&files.path().join("./absent")) {
+            assert!(message.contains(&path.display().to_string()), "{message}");
+        }
+    }
+
+    #[test]
+    fn module_alias_target_is_used_as_the_probe_base() {
+        let files = TempModules::new();
+        files.write("aliased-util.js", "export const value = 47;");
+        let entry = files.write(
+            "alias-probe-entry.mjs",
+            "import { value } from 'utility'; globalThis.aliasProbeValue = value;",
+        );
+        let runtime = Runtime::new().expect("quickjs runtime");
+        runtime
+            .set_module_alias("utility", &files.path().join("aliased-util"))
+            .expect("set extensionless alias");
+
+        let evaluation = runtime.eval_module(&entry).expect("evaluate alias probe");
+
+        assert_eq!(
+            evaluation.status().expect("alias probe status"),
+            ModuleEvaluationStatus::Fulfilled
+        );
+        eval_drop(
+            &runtime,
+            "if (globalThis.aliasProbeValue !== 47) throw new Error('wrong alias probe');",
+            "alias-probe-result.js",
         );
     }
 
@@ -2478,6 +2780,50 @@ mod tests {
         });
 
         assert!(global_bool(&runtime, "moduleAwaitDone"));
+    }
+
+    #[test]
+    fn ts_shaped_graph_transforms_resolves_and_completes_binding_await() {
+        let setup = native_setup();
+        let files = TempModules::new();
+        files.write(
+            "support.js",
+            "export const answer: number = __TRANSPILED_VALUE__;",
+        );
+        let entry = files.write(
+            "ts-shaped-entry.mjs",
+            "import { answer } from './support'; globalThis.tsShapedDone = false; const adapter: unknown = await gpu.requestAdapter(); globalThis.tsShapedAnswer = adapter ? answer : -1; globalThis.tsShapedDone = true;",
+        );
+        let runtime = Runtime::new().expect("quickjs runtime");
+        runtime.set_module_transform(|source, _path| {
+            Ok(source
+                .replace(": number", "")
+                .replace(": unknown", "")
+                .replace("__TRANSPILED_VALUE__", "53"))
+        });
+        let gpu = unsafe { runtime.wrap_gpu(setup.instance) }.expect("wrap gpu");
+        runtime.set_global_value("gpu", gpu).expect("set gpu");
+
+        let evaluation = runtime
+            .eval_module(&entry)
+            .expect("evaluate TS-shaped graph");
+        assert_eq!(
+            evaluation.status().expect("initial TS-shaped status"),
+            ModuleEvaluationStatus::Pending
+        );
+        assert!(!global_bool(&runtime, "tsShapedDone"));
+
+        tick_until(&runtime, setup.instance, 5000, || {
+            evaluation.status().expect("ticked TS-shaped status")
+                == ModuleEvaluationStatus::Fulfilled
+        });
+
+        assert!(global_bool(&runtime, "tsShapedDone"));
+        eval_drop(
+            &runtime,
+            "if (globalThis.tsShapedAnswer !== 53) throw new Error('wrong TS-shaped export');",
+            "ts-shaped-result.js",
+        );
     }
 
     #[test]
