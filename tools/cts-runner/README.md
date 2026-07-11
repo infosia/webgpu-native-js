@@ -45,6 +45,10 @@ kept in a JavaScript min-heap; while module evaluation is pending, the host
 checks due timers before each WebGPU/microtask tick. Canvas, the DOM, and fetch
 are intentionally absent.
 
+For GC/ownership debugging, set `CTS_RUNNER_GC_EVERY` to a positive case count.
+The runner calls QuickJS's collector after each multiple of that many reported
+cases. This environment-only diagnostic knob has no effect when unset.
+
 ## Exit codes and summary
 
 | Exit code | Meaning |

@@ -30,6 +30,7 @@ struct Config {
     expectations: Option<PathBuf>,
     list: bool,
     timeout: Duration,
+    force_gc_every: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -50,6 +51,19 @@ fn parse_args() -> Result<Config, String> {
     let mut expectations = None;
     let mut list = false;
     let mut timeout_secs = DEFAULT_TIMEOUT_SECS;
+    let force_gc_every = match env::var("CTS_RUNNER_GC_EVERY") {
+        Ok(value) => {
+            let interval = value.parse::<usize>().map_err(|_| {
+                format!("invalid CTS_RUNNER_GC_EVERY value {value:?}; expected a positive integer")
+            })?;
+            if interval == 0 {
+                return Err("CTS_RUNNER_GC_EVERY must be greater than zero".to_owned());
+            }
+            Some(interval)
+        }
+        Err(env::VarError::NotPresent) => None,
+        Err(error) => return Err(format!("CTS_RUNNER_GC_EVERY is not readable: {error}")),
+    };
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -92,6 +106,7 @@ fn parse_args() -> Result<Config, String> {
         expectations,
         list,
         timeout: Duration::from_secs(timeout_secs),
+        force_gc_every,
     })
 }
 
@@ -324,6 +339,7 @@ fn run(config: &Config, instance: wgpu::WGPUInstance) -> Result<RunOutput, Strin
         .eval_module(Path::new(GLUE_PATH))
         .map_err(|error| format!("glue module failed: {error:?}"))?;
     let deadline = Instant::now() + config.timeout;
+    let mut next_forced_gc = config.force_gc_every;
     loop {
         match evaluation
             .status()
@@ -348,6 +364,13 @@ fn run(config: &Config, instance: wgpu::WGPUInstance) -> Result<RunOutput, Strin
                     .map_err(|error| format!("could not release timer tick: {error:?}"))?;
                 unsafe { runtime.tick(instance) }
                     .map_err(|error| format!("runtime tick failed: {error:?}"))?;
+                if let (Some(interval), Some(next)) = (config.force_gc_every, next_forced_gc) {
+                    let reported = results.borrow().len();
+                    if reported >= next {
+                        runtime.run_gc();
+                        next_forced_gc = Some(next.saturating_add(interval));
+                    }
+                }
                 std::thread::sleep(Duration::from_millis(1));
             }
         }
