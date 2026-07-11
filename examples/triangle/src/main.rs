@@ -38,6 +38,92 @@ fn string_view_lossy(view: wgpu::WGPUStringView) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
+#[cfg(feature = "backend-yawgpu")]
+mod yawgpu_backend {
+    use std::ptr;
+
+    use webgpu_native_js_ffi::native as wgpu;
+
+    // Mirrored from yawgpu's vendor header `yawgpu/ffi/webgpu-headers/yawgpu.h`
+    // (https://github.com/infosia/yawgpu); the canonical webgpu-headers
+    // bindings stay vendor-free.
+    const YAWGPU_STYPE_INSTANCE_BACKEND_SELECT: wgpu::WGPUSType = 0x70000001;
+    const YAWGPU_BACKEND_NOOP: u32 = 0;
+    const YAWGPU_BACKEND_METAL: u32 = 1;
+    const YAWGPU_BACKEND_VULKAN: u32 = 2;
+    const YAWGPU_BACKEND_GLES: u32 = 3;
+
+    #[repr(C)]
+    struct YaWGPUInstanceBackendSelect {
+        chain: wgpu::WGPUChainedStruct,
+        backend: u32,
+    }
+
+    pub fn create_instance() -> Result<wgpu::WGPUInstance, String> {
+        let requested = match std::env::var("YAWGPU_BACKEND") {
+            Ok(value) => value,
+            Err(std::env::VarError::NotPresent) => String::new(),
+            Err(error) => return Err(format!("YAWGPU_BACKEND is not readable: {error}")),
+        };
+        let backend = match requested.as_str() {
+            "" | "noop" => YAWGPU_BACKEND_NOOP,
+            "metal" => YAWGPU_BACKEND_METAL,
+            "vulkan" => YAWGPU_BACKEND_VULKAN,
+            "gles" => YAWGPU_BACKEND_GLES,
+            other => {
+                return Err(format!(
+                    "unknown YAWGPU_BACKEND value {other:?}; accepted values are \
+                     noop, metal, vulkan, and gles"
+                ));
+            }
+        };
+        if backend == YAWGPU_BACKEND_NOOP {
+            let instance = unsafe { wgpu::wgpuCreateInstance(ptr::null()) };
+            return if instance.is_null() {
+                Err("wgpuCreateInstance returned null".to_owned())
+            } else {
+                Ok(instance)
+            };
+        }
+        let mut select = YaWGPUInstanceBackendSelect {
+            chain: wgpu::WGPUChainedStruct {
+                next: ptr::null_mut(),
+                sType: YAWGPU_STYPE_INSTANCE_BACKEND_SELECT,
+            },
+            backend,
+        };
+        let descriptor = wgpu::WGPUInstanceDescriptor {
+            nextInChain: ptr::from_mut(&mut select.chain),
+            requiredFeatureCount: 0,
+            requiredFeatures: ptr::null(),
+            requiredLimits: ptr::null(),
+        };
+        let instance = unsafe { wgpu::wgpuCreateInstance(&descriptor) };
+        if instance.is_null() {
+            Err(format!(
+                "wgpuCreateInstance returned null (YAWGPU_BACKEND={requested})"
+            ))
+        } else {
+            Ok(instance)
+        }
+    }
+}
+
+#[cfg(feature = "backend-yawgpu")]
+fn create_instance() -> Result<wgpu::WGPUInstance, String> {
+    yawgpu_backend::create_instance()
+}
+
+#[cfg(not(feature = "backend-yawgpu"))]
+fn create_instance() -> Result<wgpu::WGPUInstance, String> {
+    let instance = unsafe { wgpu::wgpuCreateInstance(ptr::null()) };
+    if instance.is_null() {
+        Err("wgpuCreateInstance returned null".to_owned())
+    } else {
+        Ok(instance)
+    }
+}
+
 struct AdapterRequest {
     done: Cell<bool>,
     status: Cell<wgpu::WGPURequestAdapterStatus>,
@@ -198,7 +284,12 @@ struct PlatformSurface {
     _metal_layer: raw_window_metal::Layer,
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+struct PlatformSurface {
+    surface: wgpu::WGPUSurface,
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 struct PlatformSurface {
     surface: wgpu::WGPUSurface,
 }
@@ -238,13 +329,47 @@ fn create_surface(
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+fn create_surface(
+    instance: wgpu::WGPUInstance,
+    window: &Window,
+) -> Result<PlatformSurface, String> {
+    let handle = window.window_handle().map_err(|error| error.to_string())?;
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return Err("winit did not provide a Win32 window handle".to_owned());
+    };
+    let mut source = wgpu::WGPUSurfaceSourceWindowsHWND {
+        chain: wgpu::WGPUChainedStruct {
+            next: ptr::null_mut(),
+            sType: wgpu::WGPUSType_WGPUSType_SurfaceSourceWindowsHWND,
+        },
+        hinstance: handle
+            .hinstance
+            .map_or(ptr::null_mut(), |hinstance| hinstance.get() as *mut c_void),
+        hwnd: handle.hwnd.get() as *mut c_void,
+    };
+    let descriptor = wgpu::WGPUSurfaceDescriptor {
+        nextInChain: ptr::from_mut(&mut source.chain),
+        label: wgpu::WGPUStringView {
+            data: ptr::null(),
+            length: usize::MAX,
+        },
+    };
+    let surface = unsafe { wgpu::wgpuInstanceCreateSurface(instance, &descriptor) };
+    if surface.is_null() {
+        Err("wgpuInstanceCreateSurface returned null".to_owned())
+    } else {
+        Ok(PlatformSurface { surface })
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn create_surface(
     _instance: wgpu::WGPUInstance,
     window: &Window,
 ) -> Result<PlatformSurface, String> {
     let _ = window.window_handle().map_err(|error| error.to_string())?;
-    Err("triangle surface creation is currently implemented for macOS only".to_owned())
+    Err("triangle surface creation is currently implemented for macOS and Windows only".to_owned())
 }
 
 fn idl_texture_format(format: wgpu::WGPUTextureFormat) -> Option<&'static str> {
@@ -259,10 +384,17 @@ fn idl_texture_format(format: wgpu::WGPUTextureFormat) -> Option<&'static str> {
     }
 }
 
-fn preferred_format(
+struct SurfaceSelection {
+    format: wgpu::WGPUTextureFormat,
+    format_name: &'static str,
+    alpha_mode: wgpu::WGPUCompositeAlphaMode,
+    usages: wgpu::WGPUTextureUsage,
+}
+
+fn surface_selection(
     surface: wgpu::WGPUSurface,
     adapter: wgpu::WGPUAdapter,
-) -> Result<(wgpu::WGPUTextureFormat, &'static str), String> {
+) -> Result<SurfaceSelection, String> {
     let mut capabilities = wgpu::WGPUSurfaceCapabilities {
         nextInChain: ptr::null_mut(),
         usages: wgpu::WGPUTextureUsage_None,
@@ -286,8 +418,25 @@ fn preferred_format(
         .first()
         .copied()
         .and_then(|format| idl_texture_format(format).map(|name| (format, name)));
+    let alpha_modes = if capabilities.alphaModeCount == 0 || capabilities.alphaModes.is_null() {
+        &[][..]
+    } else {
+        unsafe { std::slice::from_raw_parts(capabilities.alphaModes, capabilities.alphaModeCount) }
+    };
+    let alpha_mode = alpha_modes
+        .first()
+        .copied()
+        .unwrap_or(wgpu::WGPUCompositeAlphaMode_WGPUCompositeAlphaMode_Auto);
+    let usages = capabilities.usages;
     unsafe { wgpu::wgpuSurfaceCapabilitiesFreeMembers(capabilities) };
-    preferred.ok_or_else(|| "surface exposes no texture format mapped by this example".to_owned())
+    let (format, format_name) = preferred
+        .ok_or_else(|| "surface exposes no texture format mapped by this example".to_owned())?;
+    Ok(SurfaceSelection {
+        format,
+        format_name,
+        alpha_mode,
+        usages,
+    })
 }
 
 fn eval_discard(runtime: &Runtime, source: &str, name: &str) -> Result<(), String> {
@@ -312,6 +461,7 @@ struct Renderer {
     queue: wgpu::WGPUQueue,
     bundle: wgpu::WGPURenderBundle,
     format: wgpu::WGPUTextureFormat,
+    alpha_mode: wgpu::WGPUCompositeAlphaMode,
     size: PhysicalSize<u32>,
     verify: bool,
 }
@@ -344,10 +494,7 @@ impl Drop for InitialNativeHandles {
 
 impl Renderer {
     fn new(window: &Window, verify: bool) -> Result<Self, String> {
-        let instance = unsafe { wgpu::wgpuCreateInstance(ptr::null()) };
-        if instance.is_null() {
-            return Err("wgpuCreateInstance returned null".to_owned());
-        }
+        let instance = create_instance()?;
         let runtime = match Runtime::new() {
             Ok(runtime) => runtime,
             Err(error) => {
@@ -398,14 +545,21 @@ impl Renderer {
             return Err("wgpuDeviceGetQueue returned null".to_owned());
         }
         handles.queue = queue;
-        let (format, format_name) = preferred_format(surface, adapter)?;
+        let selection = surface_selection(surface, adapter)?;
+        if verify && (selection.usages & wgpu::WGPUTextureUsage_CopySrc) == 0 {
+            return Err(
+                "--verify requires CopySrc surface usage, which this backend's surface \
+                 capabilities do not advertise"
+                    .to_owned(),
+            );
+        }
         eval_discard(
             &runtime,
             "globalThis.console = { log: (...args) => print(...args) };",
             "console-shim.js",
         )?;
         let js_format = runtime
-            .eval(&format!("{format_name:?}"), "surface-format.js")
+            .eval(&format!("{:?}", selection.format_name), "surface-format.js")
             .map_err(|error| format!("{error:?}"))?;
         runtime
             .set_global_value("surfaceFormat", js_format)
@@ -440,7 +594,8 @@ impl Renderer {
                     device,
                     queue,
                     bundle,
-                    format,
+                    format: selection.format,
+                    alpha_mode: selection.alpha_mode,
                     size,
                     verify,
                 };
@@ -482,7 +637,7 @@ impl Renderer {
             height: self.size.height,
             viewFormatCount: 0,
             viewFormats: ptr::null(),
-            alphaMode: wgpu::WGPUCompositeAlphaMode_WGPUCompositeAlphaMode_Auto,
+            alphaMode: self.alpha_mode,
             presentMode: wgpu::WGPUPresentMode_WGPUPresentMode_Fifo,
         };
         unsafe { wgpu::wgpuSurfaceConfigure(self.surface, &configuration) };

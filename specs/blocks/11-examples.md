@@ -80,3 +80,66 @@ committed.
 success after 60 presented frames, and (in the tiled_deferred spirit) the
 final frame's center pixel is read back and printed, proving rasterization;
 the default runs until the window closes. No `--frames`-style knobs.
+
+**X10 — Windows joins the supported example platforms** (owner directive,
+2026-07-11). The compute example already runs unmodified (verified: real
+yawgpu backend prints the doubled sequence). The triangle example gains a
+Windows surface branch: winit's `RawWindowHandle::Win32` provides the `HWND`
+and `HINSTANCE`, chained as `WGPUSurfaceSourceWindowsHWND` onto the surface
+descriptor — the header documents both fields, and yawgpu recognizes the
+chain (its own Windows example framework uses it). The macOS Metal-layer
+path is untouched; platforms with neither branch keep the clear
+unsupported-surface error. READMEs must say how to run on Windows: MSVC has
+no rpath, so the backend DLL's directory must be on `PATH` at runtime in
+addition to `WEBGPU_NATIVE_JS_BACKEND_LIB_DIR` at build time.
+
+Bring-up findings that reshape this rule (2026-07-11, planner-measured):
+
+- **The X6 handshake was too narrow.** The example consulted capabilities
+  for the format but hard-coded `alphaMode: Auto` and requested `CopySrc`
+  unconditionally under `--verify`. yawgpu rejects both at configure
+  (advertised alpha modes `[Opaque]`, usages `RenderAttachment` only — see
+  `../tracking/backend-deltas.md` → D12/D13), and the failure surfaces only
+  as a status-6 `GetCurrentTexture` loop. X6 therefore now covers **format,
+  alphaMode, and usages**: pick alphaMode from capabilities, and fail
+  `--verify` early with a clear message when the surface does not advertise
+  `CopySrc`.
+- **`--verify`'s readback is Dawn-verified, not yawgpu-verified** (commit
+  `bf6d7db` says so; D13 explains why it cannot pass on yawgpu on any
+  platform today).
+- **Real rendering on Windows needs yawgpu built with its `vulkan` feature**
+  (yawgpu block 85: Vulkan is the one real Windows backend; the default
+  feature set is Noop-only, which configures but returns `Lost` from
+  acquire).
+
+- **yawgpu never auto-selects a real backend.** `wgpuCreateInstance(NULL)`
+  returns a Noop instance even in a Vulkan-enabled build; a real backend is
+  requested by chaining the vendor extension `YaWGPUInstanceBackendSelect`
+  (sType `0x70000001`) onto the instance descriptor — see
+  [yawgpu](https://github.com/infosia/yawgpu), header
+  `yawgpu/ffi/webgpu-headers/yawgpu.h`. yawgpu's own examples read a
+  `YAWGPU_BACKEND` environment variable and chain the struct; ours follow
+  the same convention. **X11:** both examples, under
+  `#[cfg(feature = "backend-yawgpu")]` (examples are backend-aware hosts —
+  X8's boundary applies to core/adapters/ffi, which stay untouched), read
+  `YAWGPU_BACKEND` (`noop`/absent, `metal`, `vulkan`, `gles`) and chain the
+  hand-declared `#[repr(C)]` vendor struct; an unrecognised value is a
+  clear early error, not a silent Noop. The struct and constants are
+  mirrored from the vendor header with a citation comment — canonical
+  bindings stay vendor-free.
+
+Exit (amended): `cargo run -p example-triangle` with `YAWGPU_BACKEND=vulkan`
+renders on Windows against yawgpu+Vulkan (planner-verified); the compute
+example under the same selection prints the doubled sequence on a real GPU;
+`--verify` passes wherever the backend advertises `CopySrc` and fails with
+the clear early error where it does not.
+
+**Verified on Windows, 2026-07-11 (planner, real GPU via Vulkan):** compute
+prints `result: 2, 4, 6, 8, 10, 12, 14, 16` (exit 0); the triangle window's
+center pixel screen-captures as `145,120,113` — byte-identical to the macOS
+Dawn `--verify` readback in the X9 commit — over the `4,6,20` clear color,
+so the same bundle rasterizes identically on both platforms. Regressions
+held: default (Noop) compute prints the un-doubled input and exits 0;
+`--verify` against yawgpu fails with the CopySrc message; an unknown
+`YAWGPU_BACKEND` value fails naming the accepted ones; the full workspace
+test suite stays green.

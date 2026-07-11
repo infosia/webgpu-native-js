@@ -12,11 +12,26 @@ Set the backend library directory and run the workspace package:
 WEBGPU_NATIVE_JS_BACKEND_LIB_DIR=/path/to/backend/lib cargo run -p example-compute
 ```
 
+On Windows, MSVC has no rpath, so the backend DLL's directory must also be on
+`PATH` at runtime:
+
+```powershell
+$env:WEBGPU_NATIVE_JS_BACKEND_LIB_DIR = 'C:\path\to\backend\lib'
+$env:PATH = "$env:WEBGPU_NATIVE_JS_BACKEND_LIB_DIR;$env:PATH"
+cargo run -p example-compute
+```
+
 The default feature selects yawgpu. Use `--no-default-features` with
 `--features backend-wgpu-native` or `--features backend-dawn` for another
 supported backend. If the environment variable is absent and pkg-config cannot
 locate the selected backend, the existing FFI build error explains which
 dynamic library and variable are required.
+
+yawgpu never auto-selects a real backend: with `YAWGPU_BACKEND` absent (or set
+to `noop`) the instance is Noop. `YAWGPU_BACKEND=vulkan` (Windows/Linux,
+requires a yawgpu build with the `vulkan` feature) or `YAWGPU_BACKEND=metal`
+(macOS) selects real execution; any other value fails with an early error
+naming the accepted ones.
 
 A real compute backend prints:
 
@@ -25,4 +40,8 @@ result: 2, 4, 6, 8, 10, 12, 14, 16
 ```
 
 yawgpu's Noop backend validates the command stream but does not execute the
-compute or copy commands, so its expected mapped result is eight zeros.
+compute pass, so its mapped result is the un-doubled input:
+
+```text
+result: 1, 2, 3, 4, 5, 6, 7, 8
+```

@@ -413,3 +413,42 @@ closed with a retraction note. The reflection worth keeping: the planner
 inferred "backend A accepts, backend B rejects" from "suite green on A, loud
 on B" without isolating WHERE the paths diverge — a green line proves only
 what it observes, and this project had already written that rule down twice.
+
+---
+
+## D12 — yawgpu surface configure rejects `WGPUCompositeAlphaMode_Auto`
+
+**Status: OPEN (upstream candidate, catalogued per the no-reports owner
+decision). Found 2026-07-11 during Windows example bring-up.**
+
+`webgpu.h` defines `WGPUCompositeAlphaMode_Auto` as "Lets the WebGPU
+implementation choose the best mode (supported, and with the best performance)
+between Opaque or Inherit" — i.e. always satisfiable. yawgpu's
+`wgpuSurfaceConfigure` validates `alphaMode` against its advertised list
+(`[Opaque]` only), which does not contain `Auto`, so a configuration passing
+`Auto` is rejected as a validation error and the surface stays unconfigured.
+Dawn accepts `Auto` (the triangle example's gated Dawn run configured with it).
+
+The failure mode is quiet: the validation error goes to the device error sink,
+and every later `wgpuSurfaceGetCurrentTexture` returns `Error` (status 6) with
+no message anywhere unless the host installed an error callback.
+
+**Host-side consequence (correct regardless of the delta):** the triangle
+example now selects `alphaMode` from `wgpuSurfaceGetCapabilities` instead of
+hard-coding `Auto` — the same handshake it already did for the format. That is
+proper host behaviour, not a workaround; the delta stands on the `Auto`
+semantics alone.
+
+## D13 — yawgpu surface capabilities advertise `RenderAttachment` usage only
+
+**Status: RECORDED (capability floor, not a header divergence). Found
+2026-07-11.**
+
+`wgpuSurfaceGetCapabilities` reports `usages = RenderAttachment` and configure
+enforces it, so a surface texture can never carry `CopySrc` against yawgpu —
+on any platform. Consequence: the triangle example's `--verify` center-pixel
+readback (which copies from the surface texture) cannot run against yawgpu;
+the gated `--verify` evidence was produced against Dawn (commit `bf6d7db`).
+Capabilities are allowed to vary per backend, so this is catalogued as a floor,
+not a divergence. The example now checks the advertised usages up front and
+fails `--verify` with a clear message instead of the silent status-6 loop.
