@@ -4,10 +4,10 @@
 
 use std::any::Any;
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::ptr::{self, NonNull};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -198,6 +198,11 @@ impl Runtime {
     #[cfg(test)]
     fn new_with_dispatch(gpu: core::GpuDispatch) -> Result<Self> {
         Self::new_with_state(State::new_with_dispatch(gpu))
+    }
+
+    #[cfg(test)]
+    fn module_origins_len(&self) -> usize {
+        self.state.module_origins.borrow().len()
     }
 
     fn new_with_state(state: State) -> Result<Self> {
@@ -469,10 +474,10 @@ impl Runtime {
     /// Otherwise the returned handle reports `Pending` until callers pump
     /// [`Runtime::tick`], or `Fulfilled` after evaluation completes.
     pub fn eval_module(&self, path: &Path) -> Result<ModuleEvaluation<'_>> {
-        let path = absolute_path(path).map_err(|source| Error::Io {
+        let path = lexical_normalize_path(&absolute_path(path).map_err(|source| Error::Io {
             path: path.to_path_buf(),
             source,
-        })?;
+        })?);
         let source = std::fs::read_to_string(&path).map_err(|source| Error::Io {
             path: path.clone(),
             source,
@@ -501,6 +506,7 @@ impl Runtime {
                 "JS_Eval module",
             )));
         }
+        self.state.loaded_modules.borrow_mut().insert(path);
         let evaluation = ModuleEvaluation {
             runtime: self,
             promise,
@@ -602,6 +608,7 @@ struct State {
     module_aliases: RefCell<BTreeMap<String, PathBuf>>,
     module_transform: RefCell<Option<Rc<ModuleTransform>>>,
     module_origins: RefCell<BTreeMap<PathBuf, (String, String)>>,
+    loaded_modules: RefCell<BTreeSet<PathBuf>>,
     outstanding_deferreds: Arc<Mutex<Vec<DeferredSlot>>>,
     unhandled_rejections: Mutex<Vec<UnhandledRejection>>,
     settle_trampoline: Mutex<Option<qjs::JSValue>>,
@@ -651,6 +658,7 @@ impl State {
             module_aliases: RefCell::new(BTreeMap::new()),
             module_transform: RefCell::new(None),
             module_origins: RefCell::new(BTreeMap::new()),
+            loaded_modules: RefCell::new(BTreeSet::new()),
             outstanding_deferreds: Arc::new(Mutex::new(Vec::new())),
             unhandled_rejections: Mutex::new(Vec::new()),
             settle_trampoline: Mutex::new(None),
@@ -708,6 +716,9 @@ impl State {
             if same_js_value(rejections[index].promise, promise)
                 || same_js_value(rejections[index].reason, reason)
             {
+                // Reason matching can also clear an unrelated rejection that
+                // reused the same Error object; keep it for QuickJS's paired
+                // inner/outer module-evaluation promises.
                 let entry = rejections.swap_remove(index);
                 unsafe {
                     qjs::JS_FreeValue(ctx, entry.promise);
@@ -1957,10 +1968,15 @@ extern "C" fn module_normalize(
             );
             return ptr::null_mut();
         };
-        state.module_origins.borrow_mut().insert(
-            resolved.clone(),
-            (specifier.clone(), importer.clone()),
-        );
+        let resolved = lexical_normalize_path(&resolved);
+        if state.loaded_modules.borrow().contains(&resolved) {
+            state.module_origins.borrow_mut().remove(&resolved);
+        } else {
+            state.module_origins.borrow_mut().insert(
+                resolved.clone(),
+                (specifier.clone(), importer.clone()),
+            );
+        }
 
         let normalized = resolved.to_string_lossy();
         let bytes = normalized.as_bytes();
@@ -2069,6 +2085,7 @@ extern "C" fn module_loader(
         // Compiled module values carry an extra reference; the loaded-module
         // registry owns the module after compilation, as in quickjs-libc.c.
         unsafe { qjs::JS_FreeValue(ctx, compiled) };
+        state.loaded_modules.borrow_mut().insert(path);
         module
     }))
     .unwrap_or_else(|_| {
@@ -2090,6 +2107,30 @@ fn path_with_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut value = path.as_os_str().to_os_string();
     value.push(suffix);
     PathBuf::from(value)
+}
+
+fn lexical_normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                let can_pop = matches!(
+                    normalized.components().next_back(),
+                    Some(Component::Normal(_))
+                );
+                if can_pop {
+                    normalized.pop();
+                } else if !normalized.has_root() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+        }
+    }
+    normalized
 }
 
 fn transform_module_source(
@@ -2479,6 +2520,68 @@ mod tests {
     }
 
     #[test]
+    fn module_identity_normalizes_dot_spellings_in_a_diamond() {
+        let files = TempModules::new();
+        files.write(
+            "sub/x.mjs",
+            "globalThis.diamondEvaluations = (globalThis.diamondEvaluations ?? 0) + 1; export const shared = {};",
+        );
+        files.write(
+            "sub/y.mjs",
+            "import { shared } from './x.mjs'; export { shared };",
+        );
+        let entry = files.write(
+            "diamond-entry.mjs",
+            "import { shared as direct } from './sub/x.mjs'; import { shared as indirect } from './sub/y.mjs'; globalThis.diamondSame = direct === indirect;",
+        );
+        let runtime = Runtime::new().expect("quickjs runtime");
+
+        let evaluation = runtime.eval_module(&entry).expect("evaluate diamond");
+
+        assert_eq!(
+            evaluation.status().expect("diamond status"),
+            ModuleEvaluationStatus::Fulfilled
+        );
+        eval_drop(
+            &runtime,
+            "if (globalThis.diamondEvaluations !== 1) throw new Error(`shared module evaluated ${globalThis.diamondEvaluations} times`); if (!globalThis.diamondSame) throw new Error('shared export identity differs');",
+            "diamond-result.js",
+        );
+    }
+
+    #[test]
+    fn module_identity_normalizes_parent_spellings_in_a_diamond() {
+        let files = TempModules::new();
+        files.write(
+            "sub/x.mjs",
+            "globalThis.parentDiamondEvaluations = (globalThis.parentDiamondEvaluations ?? 0) + 1; export const shared = {};",
+        );
+        files.write(
+            "sub/nested/y.mjs",
+            "import { shared } from '../x.mjs'; export { shared };",
+        );
+        let entry = files.write(
+            "parent-diamond-entry.mjs",
+            "import { shared as direct } from './sub/x.mjs'; import { shared as indirect } from './sub/nested/y.mjs'; globalThis.parentDiamondSame = direct === indirect;",
+        );
+        let runtime = Runtime::new().expect("quickjs runtime");
+
+        let evaluation = runtime
+            .eval_module(&entry)
+            .expect("evaluate parent diamond");
+
+        assert_eq!(
+            evaluation.status().expect("parent diamond status"),
+            ModuleEvaluationStatus::Fulfilled
+        );
+        eval_drop(
+            &runtime,
+            "if (globalThis.parentDiamondEvaluations !== 1) throw new Error(`shared module evaluated ${globalThis.parentDiamondEvaluations} times`); if (!globalThis.parentDiamondSame) throw new Error('shared export identity differs');",
+            "parent-diamond-result.js",
+        );
+    }
+
+    #[test]
     fn eval_module_resolves_exact_owner_alias_before_relative_paths() {
         let files = TempModules::new();
         let aliased = files.write("owner-three.mjs", "export const revision = 'owner';");
@@ -2589,6 +2692,29 @@ mod tests {
     }
 
     #[test]
+    fn eval_module_root_transform_error_names_path_and_message() {
+        let files = TempModules::new();
+        let entry = files.write("rejected-root.mjs", "export const value = 1;");
+        let runtime = Runtime::new().expect("quickjs runtime");
+        runtime.set_module_transform(|_, _| Err("synthetic root failure".to_owned()));
+
+        let error = runtime
+            .eval_module(&entry)
+            .expect_err("reject root transform");
+
+        let super::Error::Exception(message) = error else {
+            panic!("expected module exception, got {error:?}");
+        };
+        assert_eq!(
+            message,
+            format!(
+                "could not load module '{}': transform failed: synthetic root failure",
+                entry.display()
+            )
+        );
+    }
+
+    #[test]
     fn module_transform_error_names_the_loaded_path_and_message() {
         let files = TempModules::new();
         let rejected = files.write("rejected.mjs", "export const value = 1;");
@@ -2609,7 +2735,7 @@ mod tests {
             panic!("expected module exception, got {error:?}");
         };
         assert!(
-            message.contains(&files.path().join("./rejected.mjs").display().to_string()),
+            message.contains(&files.path().join("rejected.mjs").display().to_string()),
             "{message}"
         );
         assert!(message.contains("synthetic transform failure"), "{message}");
@@ -2619,6 +2745,7 @@ mod tests {
     fn module_resolution_probes_exact_then_js_then_mjs() {
         let files = TempModules::new();
         files.write("exact", "export const exact = 1;");
+        files.write("exact.js", "export const exact = 100;");
         files.write("util.js", "export const javascript = 2;");
         files.write("module.mjs", "export const module = 4;");
         let entry = files.write(
@@ -2681,7 +2808,8 @@ mod tests {
     #[test]
     fn module_alias_target_is_used_as_the_probe_base() {
         let files = TempModules::new();
-        files.write("aliased-util.js", "export const value = 47;");
+        files.write("aliased-util", "export const value = 47;");
+        files.write("aliased-util.js", "export const value = 99;");
         let entry = files.write(
             "alias-probe-entry.mjs",
             "import { value } from 'utility'; globalThis.aliasProbeValue = value;",
@@ -2701,6 +2829,41 @@ mod tests {
             &runtime,
             "if (globalThis.aliasProbeValue !== 47) throw new Error('wrong alias probe');",
             "alias-probe-result.js",
+        );
+    }
+
+    #[test]
+    fn cached_module_normalization_does_not_retain_origins() {
+        let files = TempModules::new();
+        files.write(
+            "shared-cache.mjs",
+            "globalThis.cachedEvaluations = (globalThis.cachedEvaluations ?? 0) + 1;",
+        );
+        let first = files.write("cache-first.mjs", "import './shared-cache.mjs';");
+        let second = files.write("cache-second.mjs", "import './shared-cache.mjs';");
+        let runtime = Runtime::new().expect("quickjs runtime");
+
+        let first_evaluation = runtime
+            .eval_module(&first)
+            .expect("evaluate first importer");
+        assert_eq!(
+            first_evaluation.status().expect("first importer status"),
+            ModuleEvaluationStatus::Fulfilled
+        );
+        assert_eq!(runtime.module_origins_len(), 0);
+
+        let second_evaluation = runtime
+            .eval_module(&second)
+            .expect("evaluate cached importer");
+        assert_eq!(
+            second_evaluation.status().expect("cached importer status"),
+            ModuleEvaluationStatus::Fulfilled
+        );
+        assert_eq!(runtime.module_origins_len(), 0);
+        eval_drop(
+            &runtime,
+            "if (globalThis.cachedEvaluations !== 1) throw new Error('cached module evaluated again');",
+            "cache-result.js",
         );
     }
 

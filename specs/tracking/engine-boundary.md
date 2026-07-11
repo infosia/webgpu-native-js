@@ -1432,3 +1432,20 @@ tested-by-construction on 64-bit hosts.
 
 Platform status after today: macOS (both engines, tested) · Windows (QuickJS,
 tested by the owner's session) · iOS (compiles) · Android (compiles).
+
+**Block 12 COMPLETE (2026-07-12): the module loading system.** The ES-module
+core (eval_module, alias map, TLA completing through tick — mechanics read
+from the vendored quickjs source), the host transform hook (the TS enabler:
+the binding ships no transpiler), and compiled-TS resolution probing landed
+on main; the Three.js-specific work was reverted with its branch by owner
+decision, and this system was extracted first. The close-out review found no
+CRITICAL and one real MAJOR, empirically reproduced: the custom normalizer
+kept `./`/`..` in module names, so equivalent import spellings loaded the
+same file as SEPARATE instances (side effects twice, identity split) — the
+exact hazard quickjs's own default normalizer lexically strips. Fixed with a
+pure-lexical component walk (no filesystem canonicalization), the diamond
+repro seen red then green; probe precedence pinned with conflicting fixtures,
+the root transform-error message asserted, the origin map no longer
+accumulates, and the rejection-matching caveat documented. QuickJS-first is
+the recorded posture (JSC's C API has no module loader). Suites: quickjs 76,
+workspace 302, all exit 0. The TS CTS runner's first brick is in place.
