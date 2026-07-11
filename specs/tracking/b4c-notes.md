@@ -571,3 +571,71 @@ timeout race (os-timer semantics vs the shims' host-pumped heap),
 DevicePool's device.lost interaction (forever-pending here), or an
 EventTarget wait. The binding-free question therefore remains OPEN; nothing
 in this attempt contradicts the engine-defect suspicion.
+
+## Session 2 (2026-07-11 evening, planner): four deletion experiments, one new technique, one methodology trap
+
+**Methodology trap, recorded because it invalidated three earlier conclusions:**
+a failing `cargo build` leaves the PREVIOUS binary in place, and the runner
+still runs. Two "results" in this investigation (and at least one from an
+earlier coding session) were produced by stale binaries. **Every deletion
+experiment must now assert a fresh build (`cargo build` exit 0) before its
+runs count.**
+
+**New technique — parent scan.** At the underflow, walk `rt->gc_obj_list` and
+`rt->tmp_obj_list`, run `mark_children` with a read-only probe, and print
+every parent that holds an edge to the victim (plus, for plain objects, the
+property atom that holds it). This finally shows the shape of the corruption
+directly instead of inferring it.
+
+**What the parent scan shows.** The victim's refcount is short by exactly
+one, and it is held by exactly TWO parents of the same kind:
+- run A: two detached `JSVarRef`s (gc type 3) → victim a plain Object;
+- run B: two `Array`s → victim an `Error`;
+- earlier runs: a plain Object → victim a bytecode function.
+So an edge exists whose reference was never counted: one insertion took
+ownership without a duplicate, or one release ran twice. The victim's own
+transition history (now 256 first + 256 last events, full backtraces) is
+regular: dup/release pairs from `js_promise_then_finally_func` and
+`JS_ToBoolFree`, ending in `free_var_ref` at zero. No adapter frame appears
+anywhere in it, in ANY of the captured victims.
+
+**Deletion experiments (all on verified-fresh builds):**
+1. **Unhandled-rejection tracker disabled** (`JS_SetHostPromiseRejectionTracker`
+   → NULL): still aborts (134/139). The tracker is the only place the binding
+   holds and frees Errors/promises — **exonerated**.
+2. **Binding `gc_mark` reports nothing** (our class's tracing disabled
+   entirely): still aborts. Our payload tracing — **exonerated**. (This also
+   kills the "our mark over-reports edges" theory that the assertion's
+   semantics first suggest.)
+3. **Settlement path instrumented** (every settled object value: tracked in
+   scope? refcount?): only 4 object settlements in a failing run, all
+   correctly tracked and owned. **Not the hot path here.**
+4. **`Scope::escape` miss counter**: 1,247 misses per run, ALL from
+   `catch_callback`'s return path — and all benign: they are values duplicated
+   by `return_held_value` (owned, never tracked). A red herring, recorded so
+   the next session does not re-chase it. (A real invariant does hang off
+   this: a returned value must be owned. It is.)
+5. **Fake-GPU run** (runner installs a pure-JS Proxy instead of `wrap_gpu`, so
+   zero WebGPU wrappers exist): does not abort — but the harness also does not
+   complete the same work (it stalls/times out in fixture init, exactly as the
+   plain-qjs harness did), so this is **inconclusive**, not exculpatory.
+
+**Where this leaves the fork decision.** The binding's three plausible
+mechanisms (rejection tracker, payload tracing, settlement ownership) are now
+individually excluded by experiment, and no adapter frame appears in any
+victim's full transition history. That is a strong — not yet conclusive —
+case for an engine defect, and it is alive on quickjs-ng master. The one
+un-excluded binding surface is the tick pump's *interleave* (ProcessEvents →
+settlements → JS_ExecutePendingJob loop → release queue) and the host-function
+call path, neither of which touches the victims directly.
+
+**Next session's first three moves:**
+1. Reduce inside the engine: make the parent scan run at EVERY `free_var_ref`
+   / array-element release of a value whose refcount is about to hit zero, and
+   report any live parent — that catches the corruption at creation time, not
+   at GC time.
+2. Bisect quickjs-ng between v0.15.0 and v0.15.1 (and against Bellard's
+   quickjs) with the single CTS case, to date the defect.
+3. If (1) names an engine line: fork, fix, regression-test in the fork, point
+   the submodule at it (owner runs the network ops). If it names a binding
+   line after all, fix it here.
