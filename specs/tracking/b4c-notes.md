@@ -484,3 +484,90 @@ adapter's pump interleave (tick: ProcessEvents → settlements → pending jobs 
 release queue) becomes the prime ingredient and gets instrumented next.
 Instrumentation patch preserved at the session scratchpad
 (`b4c-instrumentation.patch`) and re-applied to the restored pin checkout.
+
+## Plain-qjs CTS harness attempt (2026-07-11, coding pass)
+
+The requested binding-free CTS port was built in the supplied scratchpad as
+`qjs-cts-driver.mjs` plus `qjs-cts-glue.mjs`. It runs the real
+`DefaultTestFileLoader -> parseQuery -> Logger -> testcase.run` path under
+`qjs --std -m`; the four runner host functions are JavaScript functions,
+`performance.now()` uses `os.now()`, and timers use qjs's `os.setTimeout` /
+`os.setInterval`. The existing runner shims provide the text, event, console,
+and DOM pieces. `navigator.gpu` is entirely JavaScript: one fake adapter and
+device expose empty `Set` features, plain limits/info, a queue, error scopes,
+buffers, textures/views, shader modules, render/compute pipelines, command and
+render-bundle encoders, render/compute passes, draw/drawIndexed, finish,
+submit, cleanup, and the other no-op methods reached by this case. No Rust,
+WebGPU binding, wgpu-native object, native GPU resource, ProcessEvents call,
+settlement trampoline, or release queue participates.
+
+The exact query expands to one CTS case with 375 subcases (5 × 5 × 5 × 3).
+The fake was sufficient to reach the real concurrent subcase execution and
+its chained `Promise.prototype.finally` finalizers, but the case did **not**
+reach `__report`. At the stock `maxSubcasesInFlight = 100` boundary, identical
+fresh processes had three different outcomes. Runs were bounded by SIGALRM at
+10 seconds so a tight loop could not consume the session indefinitely:
+
+```text
+run       exit   output
+fresh-1   142    none (10-second SIGALRM; qjs at ~100% CPU)
+fresh-2   139    none
+fresh-3   1      397 x "Possibly unhandled promise rejection: TypeError: not a function"
+fresh-4   139    none
+fresh-5   139    none
+fresh-6   139    none
+fresh-7   142    none (10-second SIGALRM; qjs at ~100% CPU)
+fresh-8   1      the same 397 TypeErrors
+repeat-3  142    none (15-second SIGALRM before the first report)
+```
+
+The TypeError stack was consistently:
+
+```text
+Possibly unhandled promise rejection: TypeError: not a function
+    at subcaseFinishedCallback (.../common/internal/test_group.js:610:15)
+    at <anonymous> (native)
+```
+
+Line 610 calls the promise resolver stored by the CTS's 100-in-flight
+backpressure gate. In those runs it was truthy but no longer callable. Raising
+the gate above all 375 subcases avoided that particular callback but instead
+entered a sustained 100%-CPU loop, also before a report. The captured logs are
+`bounded-fresh-{1..8}.log` and `bounded-repeat-3.log` in the same scratchpad.
+All exit-139 and timeout logs were empty. Across every captured run there were
+zero lines matching `gc_decref_child` or `GC UNDERFLOW`.
+
+This is a binding-free abnormal reproduction of the broader runtime-stability
+problem (including four spontaneous SIGSEGV exits), so the Rust pump
+interleave is **not** required for runtime failure. However, the requested
+marker-specific result is not claimed as **CONFIRMED without the binding**:
+no underflow diagnostic appeared, and the query never completed, so the
+normal-completion repetition ladder could not be run. The next frontier is to
+capture a stack for the silent exit 139 or let a bounded run continue under a
+debugger until it reaches the existing GC ledger assertion. Preserve the
+native `Promise.prototype.finally` path while reducing the CTS
+`subcaseFinishedCallback`/backpressure sequence; replacing that machinery to
+force completion would remove the sequence under investigation.
+
+## Harness-under-plain-qjs attempt (2026-07-11, planner; incomplete)
+
+A scratch driver (`b4c_harness.mjs` in the session scratchpad, alongside the
+plain `qjs`) loads the REAL CTS framework modules directly from the CTS out/
+tree (same six entry points as glue.mjs), installs a minimal environment
+(os-based timers, performance, console, DOMException, EventTarget,
+MessageEvent, TextEncoder/Decoder) and a Proxy-based pure-JS WebGPU fake
+(never thenable; popErrorScope/*Async/request* return resolved Promises;
+features is a real Set; device.lost is a forever-pending Promise), then
+drives parseQuery → DefaultTestFileLoader → testcase.run for the single
+failing query.
+
+Progress: imports OK, listing/loadCases OK, `case-start` reached — then
+`testcase.run` hangs with ZERO accesses to the WebGPU fake (an
+instrumentation counter on every Proxy get stayed at 0), i.e. the fixture
+machinery stalls before it ever asks for an adapter. Next probe: instrument
+the fixture init path (common/framework fixture + webgpu/gpu_test.ts
+equivalents in out/) to find the pending await — candidates: the case
+timeout race (os-timer semantics vs the shims' host-pumped heap),
+DevicePool's device.lost interaction (forever-pending here), or an
+EventTarget wait. The binding-free question therefore remains OPEN; nothing
+in this attempt contradicts the engine-defect suspicion.
