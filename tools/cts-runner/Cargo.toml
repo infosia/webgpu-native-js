@@ -1,0 +1,29 @@
+[package]
+name = "cts-runner"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[[bin]]
+name = "cts-runner"
+path = "src/main.rs"
+test = false
+
+[features]
+default = ["backend-yawgpu"]
+backend-yawgpu = [
+    "quickjs-adapter/backend-yawgpu",
+    "webgpu-native-js-ffi/backend-yawgpu",
+]
+backend-wgpu-native = [
+    "quickjs-adapter/backend-wgpu-native",
+    "webgpu-native-js-ffi/backend-wgpu-native",
+]
+backend-dawn = [
+    "quickjs-adapter/backend-dawn",
+    "webgpu-native-js-ffi/backend-dawn",
+]
+
+[dependencies]
+quickjs-adapter = { path = "../../adapters/quickjs", default-features = false }
+webgpu-native-js-ffi = { path = "../../ffi", default-features = false }
