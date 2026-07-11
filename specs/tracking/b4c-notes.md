@@ -845,3 +845,57 @@ test will target.
 Instrumentation preserved at scratchpad `b4c-instrumentation-v5.patch`
 (FORCE_GC + class-13 ledger + closure-leak + close_var_ref logger + parent
 scan + premature-free trap). Tree clean; workspace builds green.
+
+## Session 6 (2026-07-12, planner): the opcodes, named
+
+Recording the executing bytecode opcode (`b4c_last_op`, stashed in the SWITCH
+dispatch) into each ledger transition finally annotates the victim closure's
+two real reference operations:
+
+```
+event  2  duplicate  rc 1->2   op=217  (OP_get_arg2)
+event 15  release     rc 2->1   op=41   (OP_return_undef)
+```
+
+- **op 217 = `OP_get_arg2`**: the closure is read as **argument #2 of a
+  function** (the dup pushes it on the operand stack).
+- **op 41 = `OP_return_undef`**: an **async function returning undefined**;
+  its frame teardown performs the release that brings the closure to rc 1.
+
+After that release the closure's real refcount is **1**, yet **two** gc-edges
+persist (the parent scan's object-property + detached `JSVarRef`). The next GC
+decrefs twice against a refcount of one -> underflow.
+
+**Refined mechanism:** a closure passed as an **argument to an async
+function**, which inside that function is co-owned by a captured `JSVarRef` and
+an object property, is over-released by one during the async frame's
+`OP_return_undef` teardown. The closure's history contains **no `close_var_ref`
+dup and no property-store dup** — only `OP_get_arg2`'s dup — so the two
+persistent edges were established by ownership *transfer* (consume) rather than
+duplication, and the frame teardown then frees a slot whose reference one of
+those edges still depends on. A cross-check confirms it is NOT inside
+`async_func_resume` (a dedicated flag logged zero class-13 releases-to-rc>=1 for
+Function victims there): the fatal release is the return/teardown path, not the
+resume path — correcting session 5's frame-only reading.
+
+**This is a specific, engine-internal defect** in quickjs-ng's async-function
+argument / var_ref / frame-teardown reference accounting, reproducible on
+v0.15.0/v0.15.1/master, heap-clean under Guard Malloc, with no binding frame in
+the victim's history. It is now localized precisely enough to fix in a fork:
+the fix target is the `OP_return_undef` / `async_func_free` teardown's handling
+of arguments that were captured (var_ref) or transferred out, and the
+regression test is the `FORCE_GC_AT_MALLOC` build running the single CTS case
+(or a minimal reducer of "closure passed as async-fn arg, captured by an inner
+closure AND stored on an object, under forced GC").
+
+**Recommendation to owner:** the diagnosis has reached the point of maximum
+value as pure observation. The remaining step — pinning the exact off-by-one
+line in the teardown/var_ref interaction — is most efficiently done AS the fork
+fix (edit + rebuild + rerun the forced-GC case), not as more read-only
+instrumentation. Proposed next: fork quickjs-ng, reproduce the minimal reducer
+in the fork's test harness, bisect the teardown accounting to the exact line,
+fix, add the reducer as a regression test, repoint the submodule (owner runs
+the network ops).
+
+All six instrumentation patches saved at scratchpad
+(`b4c-instrumentation-v{2..6}.patch`). Tree clean; workspace builds green.
