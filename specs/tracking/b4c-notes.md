@@ -790,3 +790,58 @@ engine-internal reduction (multi-session, needs a C harness), or land the
 engine-crash skips in `expectations.txt` so validation suites can grow around
 them — which delivers unblocking value while the engine fix proceeds as a
 tracked workstream in the (already-approved) fork.
+
+## Session 5 (2026-07-12, planner): the mechanism, pinned to the async-resume path
+
+Method that finally worked: (a) `FORCE_GC_AT_MALLOC` for a one-run repro;
+(b) restrict the transition ledger to class-13 (`JS_CLASS_BYTECODE_FUNCTION`)
+so it never churns; (c) **leak freed closures** during diagnosis (skip
+`js_free_rt` + the `class_id=0` fail-safe for class 13) so a recycled address
+can never impersonate the victim and its full ledger survives to the assertion.
+
+With the victim's identity preserved, its COMPLETE reference history is:
+
+```
+event  0  gc-decref       rc 1->0     (cycle-collector decref phase)
+event  1  gc-scan-incref  rc 0->1     (cycle-collector restore phase)
+event  2  duplicate       rc 1->2     js_dup < JS_CallInternal(+21460) < ... < async_func_resume
+events 3-14  gc-decref / gc-scan-incref pairs, oscillating 0<->2   (each forced GC sees TWO edges)
+event 15  release         rc 2->1     js_decref < JS_FreeValue < JS_CallInternal(+11288) < ... < async_func_resume
+event 16  gc-decref       rc 1->0
+         (next gc-decref would go to -1 -> ASSERT)
+```
+
+Read: the closure's only two REAL reference operations are a `js_dup` and a
+`js_decref`, both inside `JS_CallInternal` executing **under
+`async_func_resume`** (the engine resuming a suspended async function). Between
+them the cycle collector consistently sees **two** gc-edges to the closure
+(refcount oscillates 0<->2 across forced GCs — events 3-14). After event 15's
+release the real refcount is **1**, but the two edges remain. The next full GC
+decrefs twice against a refcount of one -> underflow.
+
+**The two edges** (from the parent scan, on the leak-preserved victim): a plain
+`Object` that holds the closure as a property, and a detached `JSVarRef` that
+captured it. Decisively, **that var_ref never appears in the `close_var_ref`
+log** (302 closure closes recorded; this var_ref is not among them), and the
+victim's history contains **no `close_var_ref` dup and no property-store dup** —
+only the one opcode-level dup/release pair under `async_func_resume`.
+
+**Mechanism (specific):** a closure that is co-owned by a captured `JSVarRef`
+and an object property has, on the async function's **resume**, one of those
+owning references released by the interpreter (`JS_FreeValue` at
+`JS_CallInternal+11288`) even though the corresponding gc-edge persists. That
+is a use-after-free: the reference count drops below the number of live edges,
+and the cycle collector trips on it at the next GC. Every frame is engine
+code (`async_func_resume` / `JS_CallInternal`); no adapter/core frame appears.
+
+**Still open — the exact opcode.** `JS_CallInternal+11288` (the over-release)
+and `+21460` (the dup) are specific bytecode handlers; naming them needs a
+`set_value`/`OP_put_var_ref`-level instrument (the store into a captured
+variable is the prime suspect: an ownership transfer into `var_ref->value`
+that leaves the source stack slot to be freed again on frame teardown). That
+is the first task of session 6, and it is what the fork's fix + regression
+test will target.
+
+Instrumentation preserved at scratchpad `b4c-instrumentation-v5.patch`
+(FORCE_GC + class-13 ledger + closure-leak + close_var_ref logger + parent
+scan + premature-free trap). Tree clean; workspace builds green.
