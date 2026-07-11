@@ -966,6 +966,23 @@ impl Runtime {
         Ok(value)
     }
 
+    /// Returns the native handle borrowed by a `GPURenderBundle` wrapper.
+    ///
+    /// This is class-checked through the registered `ClassSpec`; any value of
+    /// the wrong JavaScript class returns `None`.
+    ///
+    /// # Lifetime
+    ///
+    /// The returned handle is **not retained**. The host must keep `value`
+    /// alive (normally in a JavaScript global) for the entire native use, or
+    /// call the backend's render-bundle AddRef function and own that reference.
+    #[must_use]
+    pub fn native_render_bundle(&self, value: JSValueRef) -> Option<ffi_wgpu::WGPURenderBundle> {
+        with_scope(self.raw_context(), |cx| {
+            core::native_render_bundle::<Engine>(cx, value)
+        })
+    }
+
     /// Sets a global property and adopts any adapter protection on `value`.
     // SAFETY: `JSValueRef` is the engine's required associated value type, and
     // this API mirrors the safe engine-handle surface used by core. Values
@@ -2712,6 +2729,42 @@ mod tests {
             "#,
             "register-host-function-panic.js",
         );
+    }
+
+    #[test]
+    fn native_render_bundle_is_class_checked_and_borrows_the_native_handle() {
+        unsafe fn finish_bundle(
+            _encoder: wgpu::WGPURenderBundleEncoder,
+            _descriptor: *const wgpu::WGPURenderBundleDescriptor,
+        ) -> wgpu::WGPURenderBundle {
+            13_001usize as wgpu::WGPURenderBundle
+        }
+        unsafe fn release_bundle(_bundle: wgpu::WGPURenderBundle) {}
+
+        let setup = native_setup();
+        let mut dispatch = super::gpu_dispatch();
+        dispatch.render_bundle_encoder_finish = finish_bundle;
+        dispatch.render_bundle_release = release_bundle;
+        let runtime = Runtime::new_with_dispatch(dispatch).expect("JSC runtime");
+        let device = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("device", device)
+            .expect("set device");
+        let bundle = runtime
+            .eval(
+                "device.createRenderBundleEncoder({ colorFormats: ['rgba8unorm'] }).finish()",
+                "native-render-bundle.js",
+            )
+            .expect("create render bundle");
+        let wrong = runtime
+            .eval("device", "wrong-render-bundle.js")
+            .expect("device");
+
+        assert_eq!(
+            runtime.native_render_bundle(bundle),
+            Some(13_001usize as wgpu::WGPURenderBundle)
+        );
+        assert_eq!(runtime.native_render_bundle(wrong), None);
     }
 
     fn tick_until<F>(

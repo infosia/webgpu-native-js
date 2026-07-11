@@ -1404,3 +1404,15 @@ dispatches, reads back through mapAsync, and prints. Gated run against Dawn
 on real Metal: `result: 2, 4, 6, 8, 10, 12, 14, 16` — exit 0, via rpath alone
 (the example needed the same rpath build.rs lesson as the adapters). The
 triangle manifest is scaffolded; winit awaits the owner's fetch.
+
+**Block 11 part 2 landed (2026-07-11): the windowed triangle runs.** X3
+(`native_render_bundle`, class-checked on both adapters, handle-borrows-wrapper
+documented and tested) and X5/X6/X7: a winit host that creates the surface
+(CAMetalLayer via raw-window-metal), hands the preferred format to JS as a
+string global, runs `triangle.js` once — the script builds the pipeline and
+records a GPURenderBundle — then presents natively, frame after frame, with
+JS never executing in the loop. Gated Dawn run on real Metal:
+`rendered 120 frames`, exit 0. Both examples now demonstrate the
+architecture's two halves: compute (JS authors and reads back through the
+async machinery) and triangle (JS authors once; the host renders forever).
+Gates: workspace 283, all exit 0.

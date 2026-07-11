@@ -1892,6 +1892,28 @@ pub struct RenderBundlePayload {
     render_bundle: WGPURenderBundle,
 }
 
+/// Returns the native handle stored by a `GPURenderBundle` wrapper.
+///
+/// The engine payload lookup includes the wrapper's registered `ClassSpec`
+/// identity, so values of every other JavaScript class return `None` rather
+/// than being interpreted as render-bundle payloads.
+///
+/// # Lifetime
+///
+/// The returned handle is **borrowed from `value`**. It has no independent
+/// native reference. The host must keep the JavaScript wrapper alive for every
+/// native use of this handle (for example, by retaining it in a global), or
+/// take its own native reference before allowing the wrapper to be collected.
+#[must_use]
+pub fn native_render_bundle<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    value: E::Value,
+) -> Option<WGPURenderBundle> {
+    E::payload(cx, value, GPU_RENDER_BUNDLE_CLASS)
+        .and_then(|payload| payload.downcast_ref::<RenderBundlePayload>())
+        .map(|payload| payload.render_bundle)
+}
+
 // SAFETY: the native bundle handle is only copied into the release queue by
 // finalization and passed to native render-pass recording on the engine thread.
 unsafe impl Send for RenderBundlePayload {}
