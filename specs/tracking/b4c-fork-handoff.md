@@ -104,3 +104,61 @@ bytecode-gen bug emitting a store-to-two-places with a single dup.
 Once a minimal reducer reproduces under the fork's `-DFORCE_GC_AT_MALLOC` qjs,
 add it as a `tests/` script the fork runs under forced GC in CI; the fix must
 turn it green. Mirror it as a binding-level script test here once it exists.
+
+## Session 7 (2026-07-12, planner): CTS delta-debugging — the `for...of` iterator is central
+
+Delta-debugged the actual `buffer_binding_overlap` test in a writable copy of
+the CTS `out/` tree (the owner's checkout was never modified — sandbox blocks
+writes there, so the tree was copied to scratch and edited there), forced-GC
+build, crash rate measured over 3–5 processes per variant.
+
+Findings (each a real deletion experiment):
+- Removing the draw calls: **still crashes** — the draw is irrelevant.
+- Removing `renderPipeline` + `setPipeline`: **still crashes**.
+- Replacing `validateFinishAndSubmit(true,true)` with a plain
+  `encoder.finish()`: **still crashes** — the async error-scope expectation is
+  NOT the trigger.
+- Removing all buffer binds (the "overlap" the test is named for): **still
+  crashes** — the shared-buffer binding is NOT the trigger.
+- The `calcAttributeBufferSize`/`calcSetBufferOffset` local arrow closures
+  (which capture `arrayStride`): inlining them away — **still crashes** — not
+  the trigger.
+- **Decisive:** the trigger is the **nested `for...of` loop**. A `for (let
+  i=0; i<4; i++)` count loop over `createEncoder()+finish()` does **not**
+  crash; the original **`for (const encoderType of [...]) { for (const x of
+  [...]) { ... } }`** does. A single (un-nested) `for...of` does not; the
+  nested pair does.
+
+`for...of` compiles to an iterator protocol: an iterator object with a `next`
+closure, and a fresh per-iteration `const` binding that the loop body captures.
+Nested, the inner loop body references the **outer** loop's `const`
+(`encoderType`, passed to `createEncoder`) — a closure/var_ref capturing a
+loop variable across an inner iterator, exactly the co-ownership the engine
+mis-frees. This finally connects the engine-side finding (async_func_free
+over-releases a co-owned closure) to a source-level construct.
+
+**Caveat that blocks a clean minimal repro:** the crash is **probabilistic**
+and scales with total allocation/GC volume even under `FORCE_GC_AT_MALLOC`.
+Aggressively reduced variants drop below the trigger threshold (0/5) without
+being true non-triggers, which makes further pure-deletion delta-debugging
+unreliable, and is why every low-volume synthetic reducer (now eight attempts,
+including nested `for...of` + captured loop var + closure-on-object + async +
+2000 iterations in standalone qjs) stays quiet. The reliable repro remains the
+full CTS case; the reduction narrowed the *construct* (nested `for...of` +
+captured outer loop var + a framework closure like `createEncoder`'s `finish`)
+but not to a standalone artifact.
+
+**Updated fix-development guidance for the fork:** the bug lives in the
+interaction of the **iterator/`for...of` desugaring**, **var_ref capture of a
+loop `const`**, and **frame teardown** under GC. Suspect opcodes/paths:
+`OP_for_of_start`/`OP_for_of_next` iterator objects, the per-iteration `const`
+var_ref, and `async_func_free`/`close_var_refs`. The oracle stays the full CTS
+case under `-DFORCE_GC_AT_MALLOC`; a fix must take it from 5/5 crashes to 0/N.
+The reduced CTS body (nested `for...of` + `createEncoder(encoderType)` +
+`finish()`, no binds/pipeline/draw/async-expectation) is the smallest
+*in-framework* repro found and is a good fix-verification target because it
+isolates the construct while staying above the probability threshold when the
+subcase count is left intact.
+
+Scratch: writable CTS copy at `<scratch>/cts` (disposable); staged reductions
+`stage1..6.js`; standalone reducers `red{2,3,4}.js`; fork qjs `qjs_fork`.
