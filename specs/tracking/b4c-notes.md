@@ -450,3 +450,37 @@ See the session scratchpad `b4c_repro.js`; shape: 400 rounds × 50 cases,
 4 finally-modes rotated, gc() every 8 rounds, closures kept in a 64-entry
 ring of plain objects.
 </details>
+
+## Pin-vs-master experiment (2026-07-11, planner; owner ran the fetch)
+
+quickjs-ng `master` (3c8f3d6, "Fix reference leak in Iterator.prototype.filter",
+2026-07-04) was checked out locally in the submodule working tree (the
+committed pin was not moved) and the single CTS case was rerun 8 times:
+**8/8 aborted** — plain runs die with SIGSEGV in `get_shape_prop(sh=NULL)`
+during the GC walk (with a one-frame, unwind-hostile stack); under macOS
+Guard Malloc (`libgmalloc`) the run instead reaches the SAME
+`gc_decref_child` `JS_REF_COUNT(p) > 0` assertion (master line 7323).
+
+Two conclusions:
+
+1. **Not fixed upstream.** The behavior is alive on current master; a pin
+   bump is not a fix. (No upstream filing, per the standing owner rule.)
+2. **No foreign memory write.** Guard Malloc places every allocation on its
+   own guarded page and faults on any touch of freed memory; the run reached
+   the refcount-underflow assertion with no guard fault first. So the heap is
+   not being stomped — the reference COUNTS themselves go inconsistent while
+   every access touches live memory. Combined with the full engine-internal
+   transition history (previous section), this narrows the defect to
+   refcount/edge bookkeeping logic, engine-internal or engine-adjacent, not
+   wild writes from any code.
+
+Frontier (next session): run the CTS framework itself under the plain
+vendored `qjs` with WebGPU fully stubbed in pure JS (the harness's async
+machinery is the remaining un-exercised ingredient of the failing workload —
+the shaped 100k-case synthetic stayed quiet, but the real harness code may
+carry the exact trigger). If that aborts binding-free, the engine defect is
+confirmed and reducible from a pure-JS artifact; if it stays quiet, the
+adapter's pump interleave (tick: ProcessEvents → settlements → pending jobs →
+release queue) becomes the prime ingredient and gets instrumented next.
+Instrumentation patch preserved at the session scratchpad
+(`b4c-instrumentation.patch`) and re-applied to the restored pin checkout.
