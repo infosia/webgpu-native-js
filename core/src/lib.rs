@@ -40,6 +40,21 @@ use generated::*;
 /// Result type used by the core crate.
 pub type Result<T, E> = std::result::Result<T, E>;
 
+/// Engine-neutral argument passed to a host-registered JavaScript function.
+#[derive(Clone, Debug, PartialEq)]
+pub enum HostValue {
+    /// A JavaScript string, or the string coercion of a non-primitive value.
+    String(String),
+    /// A JavaScript number.
+    Number(f64),
+    /// A JavaScript boolean.
+    Bool(bool),
+    /// JavaScript `null`.
+    Null,
+    /// JavaScript `undefined`.
+    Undefined,
+}
+
 const GPU_BUFFER_CLASS: ClassId = ClassId(1);
 const GPU_DEVICE_CLASS: ClassId = ClassId(2);
 const GPU_CLASS: ClassId = ClassId(3);

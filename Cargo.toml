@@ -1,4 +1,4 @@
 [workspace]
-members = ["adapters/javascriptcore", "adapters/quickjs", "codegen", "core", "ffi", "spikes/event-loop-pump", "spikes/release-queue"]
+members = ["adapters/javascriptcore", "adapters/quickjs", "codegen", "core", "examples/compute", "examples/triangle", "ffi", "spikes/event-loop-pump", "spikes/release-queue"]
 exclude = ["spikes/jsc-detach", "spikes/quickjs-detach", "third_party/*"]
 resolver = "2"

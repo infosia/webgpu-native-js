@@ -1393,3 +1393,14 @@ workspace 272.
 **Correction (plan-A review, MINOR-7):** the block-10 entry above says
 "adapterInfo copies its seven strings" — GPUAdapterInfo has seven ATTRIBUTES,
 of which four are strings. The FreeMembers pairing claims are unaffected.
+
+**Block 11 part 1 landed (2026-07-11): the compute example runs.** X2
+(`register_host_function`, the HostValue v1 contract — String/Number/Bool/
+Null/Undefined, everything else via ToString; host errors surface as catchable
+JS exceptions per R26; tested on both engines) and X4 (`examples/compute`):
+a host that creates the instance, registers `print`, and ticks while a JS
+script requests the adapter and device, authors a WGSL doubling kernel,
+dispatches, reads back through mapAsync, and prints. Gated run against Dawn
+on real Metal: `result: 2, 4, 6, 8, 10, 12, 14, 16` — exit 0, via rpath alone
+(the example needed the same rpath build.rs lesson as the adapters). The
+triangle manifest is scaffolded; winit awaits the owner's fetch.

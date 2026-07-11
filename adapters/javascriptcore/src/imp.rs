@@ -12,6 +12,8 @@ use webgpu_native_js_core::__gpu_dispatch_from_ffi;
 use webgpu_native_js_core::JsEngine;
 use webgpu_native_js_ffi::native as ffi_wgpu;
 
+pub use core::HostValue;
+
 /// Opaque JavaScriptCore context storage.
 pub enum OpaqueJsContext {}
 /// Opaque JavaScriptCore value storage.
@@ -159,6 +161,10 @@ unsafe extern "C" {
     fn JSValueIsUndefined(ctx: JSContextRef, value: JSValueRef) -> bool;
     /// Tests whether a value is JavaScript `null`.
     fn JSValueIsNull(ctx: JSContextRef, value: JSValueRef) -> bool;
+    /// Tests whether a value is a JavaScript boolean.
+    fn JSValueIsBoolean(ctx: JSContextRef, value: JSValueRef) -> bool;
+    /// Tests whether a value is a JavaScript number.
+    fn JSValueIsNumber(ctx: JSContextRef, value: JSValueRef) -> bool;
     /// Tests whether a value is a JavaScript object.
     fn JSValueIsObject(ctx: JSContextRef, value: JSValueRef) -> bool;
     // F9 owner decision: JSValueIsBigInt is intentionally not hard-linked.
@@ -560,10 +566,12 @@ struct ObjectPayload {
     finalizer: Arc<FinalizerState>,
 }
 
-#[derive(Clone, Copy)]
-struct MethodTarget {
-    call: core::MethodFn<Engine>,
+enum MethodTarget {
+    Method(core::MethodFn<Engine>),
+    Host(Box<HostFunction>),
 }
+
+type HostFunction = dyn Fn(&[HostValue]) -> std::result::Result<(), String>;
 
 #[derive(Clone, Copy)]
 struct ClassMethod {
@@ -988,6 +996,28 @@ impl Runtime {
         }
         self.state.finalizer.unprotect(self.raw_context(), value);
         Ok(())
+    }
+
+    /// Registers a global JavaScript function backed by a Rust callback.
+    ///
+    /// Primitive arguments preserve their type. Every other argument is
+    /// converted with JavaScript `ToString`. The v1 callback is side-effect
+    /// only; returning `Err` throws a JavaScript `TypeError` with that message.
+    pub fn register_host_function<F>(&self, name: &str, f: F) -> Result<()>
+    where
+        F: Fn(&[HostValue]) -> std::result::Result<(), String> + 'static,
+    {
+        let _ = JsString::new(name)?;
+        let target = Box::new(MethodTarget::Host(Box::new(f)));
+        let raw = Box::into_raw(target).cast();
+        let object = unsafe { JSObjectMake(self.raw_context(), self.state.method_class, raw) };
+        if object.is_null() {
+            unsafe { drop(Box::from_raw(raw.cast::<MethodTarget>())) };
+            return Err(Error::Null("JSObjectMake(host function)"));
+        }
+        let value = object.cast_const();
+        self.state.finalizer.protect(self.raw_context(), value);
+        self.set_global_value(name, value)
     }
 
     /// Clears a global property by assigning JavaScript `undefined`.
@@ -2203,7 +2233,18 @@ unsafe extern "C" fn method_call(
             // SAFETY: JSC provides argument_count live values for this callback.
             unsafe { std::slice::from_raw_parts(arguments, argument_count) }
         };
-        (target.call)(cx, this_object.cast_const(), args)
+        match target {
+            MethodTarget::Method(call) => call(cx, this_object.cast_const(), args),
+            MethodTarget::Host(call) => {
+                let args = args
+                    .iter()
+                    .copied()
+                    .map(|value| jsc_host_value(cx, value))
+                    .collect::<core::Result<Vec<_>, _>>()?;
+                call(&args).map_err(|message| Engine::type_error(cx, &message))?;
+                Ok(Engine::undefined(cx))
+            }
+        }
     })) {
         Ok(Ok(value)) => {
             scope.escape(value);
@@ -2221,6 +2262,39 @@ unsafe extern "C" fn method_call(
             ptr::null()
         }
     }
+}
+
+fn jsc_host_value(cx: Context<'_>, value: JSValueRef) -> core::Result<HostValue, JSValueRef> {
+    if unsafe { JSValueIsUndefined(cx.ctx, value) } {
+        return Ok(HostValue::Undefined);
+    }
+    if unsafe { JSValueIsNull(cx.ctx, value) } {
+        return Ok(HostValue::Null);
+    }
+    if unsafe { JSValueIsBoolean(cx.ctx, value) } {
+        return Ok(HostValue::Bool(unsafe { JSValueToBoolean(cx.ctx, value) }));
+    }
+    if unsafe { JSValueIsNumber(cx.ctx, value) } {
+        let mut exception = ptr::null();
+        let number = unsafe { JSValueToNumber(cx.ctx, value, &mut exception) };
+        if !exception.is_null() {
+            return Err(exception);
+        }
+        return Ok(HostValue::Number(number));
+    }
+
+    let mut exception = ptr::null();
+    let string = unsafe { JSValueToStringCopy(cx.ctx, value, &mut exception) };
+    if !exception.is_null() {
+        return Err(exception);
+    }
+    let Some(string) = NonNull::new(string) else {
+        return Err(Engine::operation_error(
+            cx,
+            "value string conversion failed",
+        ));
+    };
+    Ok(HostValue::String(JsString(string).to_string_lossy()))
 }
 
 unsafe extern "C" fn wrapper_construct(
@@ -2344,7 +2418,7 @@ fn make_method(
     cx: Context<'_>,
     call: core::MethodFn<Engine>,
 ) -> core::Result<JSValueRef, JSValueRef> {
-    let target = Box::new(MethodTarget { call });
+    let target = Box::new(MethodTarget::Method(call));
     let raw = Box::into_raw(target).cast();
     let state = state_from_context(cx.ctx);
     // SAFETY: method_class is live and adopts raw as private data.
@@ -2406,7 +2480,7 @@ fn gpu_dispatch() -> core::GpuDispatch {
 }
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::ptr;
     use std::rc::Rc;
@@ -2577,6 +2651,67 @@ mod tests {
         };
         assert!(exception.is_null(), "global lookup threw");
         unsafe { super::JSValueToBoolean(runtime.raw_context(), value) }
+    }
+
+    #[test]
+    fn register_host_function_converts_arguments_and_surfaces_errors() {
+        let runtime = Runtime::new().expect("JSC runtime");
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let captured = Rc::clone(&calls);
+        runtime
+            .register_host_function("record", move |args| {
+                captured.borrow_mut().push(args.to_vec());
+                Ok(())
+            })
+            .expect("register record");
+        runtime
+            .register_host_function("fail", |_| Err("host rejected call".to_owned()))
+            .expect("register fail");
+
+        eval(
+            &runtime,
+            r#"
+                record("text", 3.5, true, null, undefined, {
+                    toString() { return "coerced object"; }
+                });
+                let caught = false;
+                try { fail(); } catch (error) {
+                    caught = error instanceof TypeError && error.message === "host rejected call";
+                }
+                if (!caught) throw new Error("host error was not a catchable TypeError");
+            "#,
+            "register-host-function.js",
+        );
+        assert_eq!(
+            calls.borrow().as_slice(),
+            &[vec![
+                super::HostValue::String("text".to_owned()),
+                super::HostValue::Number(3.5),
+                super::HostValue::Bool(true),
+                super::HostValue::Null,
+                super::HostValue::Undefined,
+                super::HostValue::String("coerced object".to_owned()),
+            ]]
+        );
+    }
+
+    #[test]
+    fn register_host_function_contains_panics() {
+        let runtime = Runtime::new().expect("JSC runtime");
+        runtime
+            .register_host_function("panicHost", |_| panic!("host panic"))
+            .expect("register panic host");
+        eval(
+            &runtime,
+            r#"
+                let caught = false;
+                try { panicHost(); } catch (error) {
+                    caught = String(error).includes("Rust callback panicked");
+                }
+                if (!caught) throw new Error("host panic escaped its callback boundary");
+            "#,
+            "register-host-function-panic.js",
+        );
     }
 
     fn tick_until<F>(

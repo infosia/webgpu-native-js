@@ -16,6 +16,8 @@ use webgpu_native_js_core::__gpu_dispatch_from_ffi;
 use webgpu_native_js_core::JsEngine;
 use webgpu_native_js_ffi::native as ffi_wgpu;
 
+pub use core::HostValue;
+
 #[allow(
     dead_code,
     clippy::all,
@@ -287,6 +289,45 @@ impl Runtime {
         }
     }
 
+    /// Registers a global JavaScript function backed by a Rust callback.
+    ///
+    /// Primitive arguments preserve their type. Every other argument is
+    /// converted with JavaScript `ToString`. The v1 callback is side-effect
+    /// only; returning `Err` throws a JavaScript `TypeError` with that message.
+    pub fn register_host_function<F>(&self, name: &str, f: F) -> Result<()>
+    where
+        F: Fn(&[HostValue]) -> std::result::Result<(), String> + 'static,
+    {
+        let function_name = CString::new(name)?;
+        let magic = {
+            let mut functions = self.state.host_functions.borrow_mut();
+            if functions.len() >= c_int::MAX as usize {
+                return Err(Error::Exception(
+                    "too many registered host functions".to_owned(),
+                ));
+            }
+            functions.push(Rc::new(f));
+            functions.len() as c_int
+        };
+        let function = unsafe {
+            qjs::JS_NewCFunctionMagic(
+                self.raw_context(),
+                Some(qjs_host_function),
+                function_name.as_ptr(),
+                0,
+                qjs::JSCFunctionEnum_JS_CFUNC_generic_magic,
+                magic,
+            )
+        };
+        if unsafe { qjs::JS_IsException(function) } {
+            return Err(Error::Exception(take_exception(
+                self.raw_context(),
+                "JS_NewCFunctionMagic",
+            )));
+        }
+        self.set_global_value(name, function)
+    }
+
     /// Clears a global property by assigning `undefined`.
     pub fn clear_global(&self, name: &str) -> Result<()> {
         with_scope(self.raw_context(), |cx| {
@@ -400,6 +441,7 @@ struct State {
     classes: Mutex<BTreeMap<core::ClassId, ClassEntry>>,
     quickjs_to_core: Mutex<BTreeMap<qjs::JSClassID, core::ClassId>>,
     callbacks: Mutex<Vec<CallbackTarget>>,
+    host_functions: RefCell<Vec<Rc<HostFunction>>>,
     outstanding_deferreds: Arc<Mutex<Vec<DeferredSlot>>>,
     unhandled_rejections: Mutex<Vec<UnhandledRejection>>,
     settle_trampoline: Mutex<Option<qjs::JSValue>>,
@@ -445,6 +487,7 @@ impl State {
             classes: Mutex::new(BTreeMap::new()),
             quickjs_to_core: Mutex::new(BTreeMap::new()),
             callbacks: Mutex::new(Vec::new()),
+            host_functions: RefCell::new(Vec::new()),
             outstanding_deferreds: Arc::new(Mutex::new(Vec::new())),
             unhandled_rejections: Mutex::new(Vec::new()),
             settle_trampoline: Mutex::new(None),
@@ -597,6 +640,8 @@ struct CallbackTarget {
     kind: CallbackKind,
     index: usize,
 }
+
+type HostFunction = dyn Fn(&[HostValue]) -> std::result::Result<(), String>;
 
 /// QuickJS engine marker type.
 pub struct Engine;
@@ -1408,6 +1453,66 @@ fn callback_target(
     Ok(target)
 }
 
+fn qjs_host_value(cx: Context<'_>, value: qjs::JSValue) -> core::Result<HostValue, qjs::JSValue> {
+    if unsafe { qjs::JS_IsUndefined(value) } {
+        return Ok(HostValue::Undefined);
+    }
+    if unsafe { qjs::JS_IsNull(value) } {
+        return Ok(HostValue::Null);
+    }
+    if unsafe { qjs::JS_IsBool(value) } {
+        return Ok(HostValue::Bool(
+            unsafe { qjs::JS_ToBool(cx.ctx, value) } != 0,
+        ));
+    }
+    if unsafe { qjs::JS_IsNumber(value) } {
+        let mut number = 0.0;
+        if unsafe { qjs::JS_ToFloat64(cx.ctx, &mut number, value) } < 0 {
+            return Err(take_exception_value(cx));
+        }
+        return Ok(HostValue::Number(number));
+    }
+
+    let mut len = 0;
+    let raw = unsafe { qjs::JS_ToCStringLen(cx.ctx, &mut len, value) };
+    if raw.is_null() {
+        return Err(take_exception_value(cx));
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(raw.cast::<u8>(), len) };
+    let string = usv_string_from_wtf8(bytes);
+    unsafe { qjs::JS_FreeCString(cx.ctx, raw) };
+    Ok(HostValue::String(string))
+}
+
+unsafe extern "C" fn qjs_host_function(
+    ctx: *mut qjs::JSContext,
+    _this_val: qjs::JSValue,
+    argc: c_int,
+    argv: *mut qjs::JSValue,
+    magic_value: c_int,
+) -> qjs::JSValue {
+    catch_callback(ctx, |cx| {
+        let function = state_from_context(ctx)
+            .host_functions
+            .borrow()
+            .get(magic_value.checked_sub(1).unwrap_or(-1) as usize)
+            .cloned()
+            .ok_or_else(|| Engine::operation_error(cx, "host function is not registered"))?;
+        let raw_args = if argc <= 0 || argv.is_null() {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(argv, argc as usize) }
+        };
+        let args = raw_args
+            .iter()
+            .copied()
+            .map(|value| qjs_host_value(cx, value))
+            .collect::<core::Result<Vec<_>, _>>()?;
+        function(&args).map_err(|message| Engine::type_error(cx, &message))?;
+        Ok(Engine::undefined(cx))
+    })
+}
+
 unsafe extern "C" fn qjs_method(
     ctx: *mut qjs::JSContext,
     this_val: qjs::JSValue,
@@ -1867,6 +1972,67 @@ mod tests {
     fn eval_drop(runtime: &Runtime, source: &str, name: &str) {
         let value = runtime.eval(source, name).expect(name);
         unsafe { qjs::JS_FreeValue(runtime.raw_context(), value) };
+    }
+
+    #[test]
+    fn register_host_function_converts_arguments_and_surfaces_errors() {
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let captured = Rc::clone(&calls);
+        runtime
+            .register_host_function("record", move |args| {
+                captured.borrow_mut().push(args.to_vec());
+                Ok(())
+            })
+            .expect("register record");
+        runtime
+            .register_host_function("fail", |_| Err("host rejected call".to_owned()))
+            .expect("register fail");
+
+        eval_drop(
+            &runtime,
+            r#"
+                record("text", 3.5, true, null, undefined, {
+                    toString() { return "coerced object"; }
+                });
+                let caught = false;
+                try { fail(); } catch (error) {
+                    caught = error instanceof TypeError && error.message === "host rejected call";
+                }
+                if (!caught) throw new Error("host error was not a catchable TypeError");
+            "#,
+            "register-host-function.js",
+        );
+        assert_eq!(
+            calls.borrow().as_slice(),
+            &[vec![
+                super::HostValue::String("text".to_owned()),
+                super::HostValue::Number(3.5),
+                super::HostValue::Bool(true),
+                super::HostValue::Null,
+                super::HostValue::Undefined,
+                super::HostValue::String("coerced object".to_owned()),
+            ]]
+        );
+    }
+
+    #[test]
+    fn register_host_function_contains_panics() {
+        let runtime = Runtime::new().expect("quickjs runtime");
+        runtime
+            .register_host_function("panicHost", |_| panic!("host panic"))
+            .expect("register panic host");
+        eval_drop(
+            &runtime,
+            r#"
+                let caught = false;
+                try { panicHost(); } catch (error) {
+                    caught = String(error).includes("Rust callback panicked");
+                }
+                if (!caught) throw new Error("host panic escaped its callback boundary");
+            "#,
+            "register-host-function-panic.js",
+        );
     }
 
     fn engine_ok<T>(result: core::Result<T, qjs::JSValue>, message: &str) -> T {
