@@ -79,3 +79,22 @@ enum sentinels `Undefined` / `BindingNotUsed` (emitted only for absent optionals
   planner wrote beyond the agent's report. The message is the generic one; it
   is now pinned by a parity line on both engines.)* Revisit if implicit-view
   semantics are ever demanded.
+
+## Block 10 additions (2026-07-11)
+
+- **`features` is a real (mutable) JS `Set`** where the IDL's setlike is
+  read-only (block 10 → I2). Every read behavior is conformant; a script CAN
+  `.add()` to it, which the spec's interface would forbid. Trusted scripts
+  (invariant 8); freezing Sets does not exist in JS. Names are sorted before
+  insertion for cross-backend determinism.
+- **`isFallbackAdapter` derives from `adapterType == CPU`.** The C ABI has no
+  direct fallback field; CPU adapters are what the fallback request yields.
+  A conformant-enough proxy, recorded as a derivation rather than a fact.
+- **`requiredFeatures`/`requiredLimits` are unplumbed in `requestDevice`**
+  (`requiredFeatureCount` is hard-coded 0). Consequences, all recorded at
+  their sites: `timestamp` query sets cannot be created (untested),
+  `timestampWrites` stays policy-skipped for this reason (both policy twins
+  now carry the same reason). The plumbing is a known, deliberate gap.
+- **Compute-pass `timestampWrites` reason corrected** — it read "out of scope
+  until query sets" after query sets shipped; both twins now cite the
+  requiredFeatures gap.

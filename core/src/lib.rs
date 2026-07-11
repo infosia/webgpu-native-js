@@ -1551,11 +1551,11 @@ impl<E: JsEngine> AdapterPayload<E> {
     }
 }
 
-// SAFETY: `AdapterPayload` stores a `WGPUAdapter`. If a finalizer runs off the
-// engine thread, it only moves the adapter handle into `ReleaseRequest::Adapter`;
-// `wgpuAdapterRelease` is called later by release-queue drain on the creating
-// `tick()` thread.
-// SAFETY: The `WGPUAdapter` is only enqueued off-thread and released during `tick()` drain.
+// SAFETY: `AdapterPayload` stores an adopted `WGPUAdapter` and cached engine
+// values. A finalizer only copies the native handle into
+// `ReleaseRequest::Adapter` and passes opaque values to adapter release
+// closures; native release and all engine access run on the creating `tick()`
+// thread.
 unsafe impl<E: JsEngine> Send for AdapterPayload<E> {}
 
 struct SupportedLimitsPayload {

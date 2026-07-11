@@ -1014,7 +1014,7 @@ nullable = false
 
 [[descriptor.skips]]
 member = "timestampWrites"
-reason = "out of scope until query sets"
+reason = "timestamp-query requires requiredFeatures, which requestDevice does not yet plumb"
 reject_if_present = true
 
 [[descriptor]]

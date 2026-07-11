@@ -45,6 +45,7 @@
     }
 
     function validationScope(section, action) {
+        // This helper observes validation failures only; OOM and internal failures are outside its filter.
         device.pushErrorScope("validation");
         action();
         return device.popErrorScope().then(function (error) {
@@ -929,7 +930,9 @@
         log("buffer:" + nullLabel + "," + labelBuffer.label + ";method:" + stableMethod);
         log("identity:queue:" + (device.queue === device.queue));
         log("identity:lost:" + (device.lost === device.lost));
-        log("features:" + Array.from(device.features).sort().join(","));
+        log("features:" + Array.from(device.features).join(","));
+        log("features:has:" + device.features.has("core-features-and-limits") +
+            "," + device.features.has("definitely-not-a-webgpu-feature"));
         log("limits:minUniformBufferOffsetAlignment:" +
             device.limits.minUniformBufferOffsetAlignment);
         log("identity:features:" + (device.features === device.features));

@@ -1088,6 +1088,7 @@ struct MockGpuState {
     supported_features_free_members: usize,
     adapter_info_free_members: usize,
     limits_fail: bool,
+    limits_oversized: bool,
     command_encoder_releases: usize,
     command_buffer_releases: usize,
     compute_pass_encoder_releases: usize,
@@ -1441,6 +1442,9 @@ unsafe fn write_mock_limits(limits: *mut WGPULimits) -> WGPUStatus {
     limits.maxComputeWorkgroupSizeY = 30;
     limits.maxComputeWorkgroupSizeZ = 31;
     limits.maxComputeWorkgroupsPerDimension = 32;
+    if GPU_STATE.with(|state| state.borrow().limits_oversized) {
+        limits.maxBufferSize = 9_007_199_254_740_992;
+    }
     if !limits.nextInChain.is_null() {
         let compatibility = limits
             .nextInChain
@@ -8027,20 +8031,57 @@ mod tests {
             rt.canonical(crate::device_limits_get::<Engine>(cx, device).expect("cached limits"))
         );
         let limit_spec = crate::supported_limits_class::<Engine>();
-        assert_eq!(limit_spec.properties.len(), 36);
-        for property in limit_spec.properties {
+        let expected_limits = [
+            ("maxTextureDimension1D", 1.0),
+            ("maxTextureDimension2D", 2.0),
+            ("maxTextureDimension3D", 3.0),
+            ("maxTextureArrayLayers", 4.0),
+            ("maxBindGroups", 5.0),
+            ("maxBindGroupsPlusVertexBuffers", 6.0),
+            ("maxImmediateSize", 7.0),
+            ("maxBindingsPerBindGroup", 8.0),
+            ("maxDynamicUniformBuffersPerPipelineLayout", 9.0),
+            ("maxDynamicStorageBuffersPerPipelineLayout", 10.0),
+            ("maxSampledTexturesPerShaderStage", 11.0),
+            ("maxSamplersPerShaderStage", 12.0),
+            ("maxStorageBuffersPerShaderStage", 13.0),
+            ("maxStorageBuffersInVertexStage", 33.0),
+            ("maxStorageBuffersInFragmentStage", 35.0),
+            ("maxStorageTexturesPerShaderStage", 14.0),
+            ("maxStorageTexturesInVertexStage", 34.0),
+            ("maxStorageTexturesInFragmentStage", 36.0),
+            ("maxUniformBuffersPerShaderStage", 15.0),
+            ("maxUniformBufferBindingSize", 16.0),
+            ("maxStorageBufferBindingSize", 17.0),
+            ("minUniformBufferOffsetAlignment", 256.0),
+            ("minStorageBufferOffsetAlignment", 19.0),
+            ("maxVertexBuffers", 20.0),
+            ("maxBufferSize", 21.0),
+            ("maxVertexAttributes", 22.0),
+            ("maxVertexBufferArrayStride", 23.0),
+            ("maxInterStageShaderVariables", 24.0),
+            ("maxColorAttachments", 25.0),
+            ("maxColorAttachmentBytesPerSample", 26.0),
+            ("maxComputeWorkgroupStorageSize", 27.0),
+            ("maxComputeInvocationsPerWorkgroup", 28.0),
+            ("maxComputeWorkgroupSizeX", 29.0),
+            ("maxComputeWorkgroupSizeY", 30.0),
+            ("maxComputeWorkgroupSizeZ", 31.0),
+            ("maxComputeWorkgroupsPerDimension", 32.0),
+        ];
+        assert_eq!(limit_spec.properties.len(), expected_limits.len());
+        for (property, (expected_name, expected_value)) in
+            limit_spec.properties.iter().zip(expected_limits)
+        {
+            assert_eq!(property.name, expected_name);
             let value =
                 property.get.expect("limit getter")(cx, device_limits).expect(property.name);
             assert!(
-                matches!(rt.get(value), MockValue::Number(_)),
-                "{}",
+                matches!(rt.get(value), MockValue::Number(value) if value == expected_value),
+                "{} must equal {expected_value}",
                 property.name
             );
         }
-        let alignment =
-            crate::limit_min_uniform_buffer_offset_alignment::<Engine>(cx, device_limits)
-                .expect("alignment");
-        assert!(matches!(rt.get(alignment), MockValue::Number(256.0)));
 
         let device_info =
             crate::device_adapter_info_get::<Engine>(cx, device).expect("adapterInfo");
@@ -8111,6 +8152,28 @@ mod tests {
             crate::device_limits_get::<Engine>(cx, device).expect_err("limits must fail"),
             "OperationError: native limits query failed"
         );
+    }
+
+    #[test]
+    fn i3_oversized_limit_is_operation_error() {
+        reset_gpu();
+        GPU_STATE.with(|state| state.borrow_mut().limits_oversized = true);
+        let rt = runtime();
+        let cx = rt.context();
+        let events = DeviceEventState::<Engine>::new(Arc::clone(rt.env.settlements()));
+        let device = Engine::new_instance(
+            cx,
+            crate::GPU_DEVICE_CLASS,
+            Box::new(DevicePayload::<Engine>::new(fake_device(), events)),
+        )
+        .expect("device");
+        let limits = crate::device_limits_get::<Engine>(cx, device).expect("limits query");
+        assert_eq!(
+            crate::limit_max_buffer_size::<Engine>(cx, limits)
+                .expect_err("oversized limit must fail loudly"),
+            "OperationError: WebGPU limit exceeds JavaScript's exact integer range"
+        );
+        release_device_held_values(&rt, cx, device);
     }
 
     #[test]

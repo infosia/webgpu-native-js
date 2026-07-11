@@ -1389,3 +1389,7 @@ through convert_sequence, retention mirroring the pass's set* discipline
 (gated). Owner plan item A is COMPLETE: introspection, getBindGroupLayout,
 querySet, renderBundle, and validity-observing parity all landed. Suites:
 workspace 272.
+
+**Correction (plan-A review, MINOR-7):** the block-10 entry above says
+"adapterInfo copies its seven strings" — GPUAdapterInfo has seven ATTRIBUTES,
+of which four are strings. The FreeMembers pairing claims are unaffected.

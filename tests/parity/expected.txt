@@ -2,6 +2,7 @@ buffer:null,round-trip;method:true
 identity:queue:true
 identity:lost:true
 features:core-features-and-limits
+features:has:true,false
 limits:minUniformBufferOffsetAlignment:256
 identity:features:true
 identity:limits:true

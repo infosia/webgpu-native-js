@@ -2994,7 +2994,7 @@ pub(super) fn convert_compute_pass_descriptor<E: JsEngine>(
     Ok(WGPUComputePassDescriptor {
         nextInChain: ptr::null_mut(),
         label: WGPUStringView::from_bytes(label.as_bytes()),
-        // Policy skip: out of scope until query sets.
+        // Policy skip: timestamp-query requires requiredFeatures, which requestDevice does not yet plumb.
         timestampWrites: ptr::null(),
     })
 }
