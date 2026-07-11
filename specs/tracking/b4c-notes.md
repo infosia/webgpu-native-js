@@ -639,3 +639,63 @@ call path, neither of which touches the victims directly.
 3. If (1) names an engine line: fork, fix, regression-test in the fork, point
    the submodule at it (owner runs the network ops). If it names a binding
    line after all, fix it here.
+
+## Session 3 (2026-07-11 late, planner): a fast reproduction, and the corruption's true shape
+
+**1. The reproduction is now fast and near-deterministic.** quickjs ships its
+own knob, `FORCE_GC_AT_MALLOC` (see `js_trigger_gc`). Building the adapter's
+C compile with `-DFORCE_GC_AT_MALLOC` (a one-line `build.rs` `.define(...)`,
+never committed) makes the single CTS case abort on the FIRST run, in one
+pass, instead of once every few runs. **This is the tool the next session
+should start from** — it shrinks the window between the corrupting operation
+and the assertion to almost nothing.
+
+**2. The defect predates our pin.** v0.15.0 reproduces the abort exactly like
+v0.15.1 (3/6 runs, same assertion). The six commits between the two tags touch
+nothing related. Bisecting that range is pointless; if a bisection is ever
+wanted it must span a much longer history.
+
+**3. Under forced GC the victim is one of OUR wrappers — but its history is
+still engine-only.** A clean, generation-safe ledger (the reclamation path now
+retires the live record even when the free table is full — the earlier mixed
+histories were two objects sharing one recycled address) gives, for the
+underflowing object, exactly two transitions:
+
+```
+event 0  duplicate  rc 1 -> 2   close_var_ref < close_var_refs < async_func_free < js_async_function_terminate
+event 1  release    rc 2 -> 1   async_func_free < js_async_function_terminate < js_async_function_free0
+```
+
+i.e. `async_func_free()` closes the frame's captured variables (each
+`close_var_ref` duplicates the stack value) and then frees the frame's stack
+slots — locally balanced, ending with the detached `JSVarRef` holding the one
+remaining reference. Yet at the next GC the object's refcount is already 0
+while that same `JSVarRef` still points at it, and the memory has been
+recycled (its gc type reads as garbage). **The var_ref outlives a value whose
+count reached zero** — a use-after-free, with the extra release happening
+outside this object's recorded transitions (i.e. through a path that does not
+pass the refcount hooks, or on a stale copy of the value).
+
+Victims observed under forced GC include `GPUTextureView` (one of our class
+instances) as well as plain Errors, closures, and promise-resolve functions —
+consistent with "whatever the async frame happened to capture", not with a
+specific binding object.
+
+**4. Still not reproduced binding-free.** The synthetic pure-JS workload
+(async + finally + captured closures + rejections), re-run under a plain qjs
+built with `FORCE_GC_AT_MALLOC`, stays quiet. The real CTS harness under plain
+qjs still stalls in fixture init (see session 1) — finishing that port remains
+the cleanest path to a binding-free proof.
+
+**Next session, in order:**
+1. Rebuild with `FORCE_GC_AT_MALLOC` (fast repro) and instrument
+   `async_func_free` / `close_var_refs` / `js_async_function_resume` to dump
+   the frame's var_refs, their `is_detached` flags, `pvalue` targets, and the
+   stack slot range being freed — the imbalance must be visible there.
+2. Specifically test the hypothesis that a captured slot is freed twice, or
+   that a var_ref's `pvalue` still points into `arg_buf` after the buffer is
+   released (a var_ref that was created but not closed, or closed against a
+   stale frame).
+3. If confirmed as an engine defect: fork quickjs-ng, fix, add the reduction as
+   a regression test in the fork, repoint the submodule (owner runs the network
+   ops). The fork decision is already approved in principle.
