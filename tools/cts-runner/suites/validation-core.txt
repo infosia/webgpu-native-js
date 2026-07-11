@@ -11,3 +11,12 @@ webgpu:api,validation,createTexture:zero_size_and_usage:*
 # Layout and sampler descriptor conversion.
 webgpu:api,validation,createBindGroupLayout:*
 webgpu:api,validation,createSampler:*
+
+# Phase B-4 growth (2026-07-12). Added families verified crash-free (>=6 runs)
+# and passing under yawgpu Noop. The engine crash that blocks broader growth is
+# tracked in specs/tracking/b4c-fork-handoff.md; families that trip it (e.g.
+# encoding,cmds,render,draw:buffer_binding_overlap and other for-of-heavy
+# validation cases) are deliberately excluded until the fork fix lands.
+webgpu:api,validation,encoding,cmds,copyBufferToBuffer:*
+webgpu:api,validation,render_pipeline,vertex_state:*
+webgpu:api,validation,encoding,createRenderBundleEncoder:*

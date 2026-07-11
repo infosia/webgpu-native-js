@@ -176,3 +176,33 @@ also surface the GPUPipelineError deviation. Remaining: B-4c (the
 gc_decref_child scale investigation), Phase C material
 (transient-attachment arbitration), `wgslLanguageFeatures` as a small
 follow-up gap.
+
+**Phase B-4 suite growth + engine-crash exclusion policy (2026-07-12).** The
+validation-core suite grew from 467 to **1,312 cases** by adding three families
+verified crash-free over >=6 isolated runs and passing under yawgpu Noop:
+`encoding,cmds,copyBufferToBuffer:*` (+16), `render_pipeline,vertex_state:*`
+(+679), `encoding,createRenderBundleEncoder:*` (+150). The grown suite runs 3/3
+byte-stable, exit 0, 1,312 pass / 0 fail; the workspace gate stays green (331).
+
+**Why growth is curated, not wholesale.** The B-4c engine defect
+(specs/tracking/b4c-fork-handoff.md) makes for-of-heavy validation cases crash
+QuickJS *probabilistically* — measured in isolation: `draw:buffer_binding_overlap`
+~8/10, `createView` ~1/3 even for a single case, `draw:vertex_buffer_OOB` ~1/4.
+The crash aborts the whole one-process suite run, so a suite that includes any
+such family is a flaky gate. Until the fork fix lands, families are added to
+the curated (reliable) suite only after passing a multi-run crash screen;
+known-crashing families are deliberately excluded and listed here:
+- `webgpu:api,validation,encoding,cmds,render,draw:buffer_binding_overlap:*`
+- `webgpu:api,validation,encoding,cmds,render,draw:vertex_buffer_OOB:*`
+- `webgpu:api,validation,createView:*`
+(others likely exist; screen before adding.) These are excluded for an ENGINE
+crash, distinct from binding-bug exclusions (which go in expectations.txt as
+`fail`) and from `clearBuffer:*`/`beginRenderPass:*`/`error_scope:*` which have
+real test *failures* (not crashes) to be triaged separately.
+
+**Robust broad coverage remains future work.** Running the excluded families
+needs per-case process isolation with retry (the crash is retry-recoverable:
+the same case often passes on a re-run), so a crash aborts only one unit
+instead of the gate. That driver is deferred until the fork fix is attempted;
+if the fix lands first it is moot. Recorded so the next agent does not mistake
+the curated suite's exclusions for missing coverage.
