@@ -87,3 +87,35 @@ Dawn (gated run: Dawn's Metal adapter advertises timestamp-query, confirmed).
 timestampWrites conversion itself stays skipped with an updated reason —
 both IDL timestamp dicts join one shared C struct, a name-map shape deferred
 to its own slice. Suites: core 138, JSC 29+1.
+
+**B-2/B-3 landed (2026-07-12): 467 real validation cases green, and the
+oracle starts earning.** The CTS's DevicePool drives our binding through the
+navigator.gpu shim unchanged; constants namespaces come from the CTS's own
+canonical module; a non-constructible GPUDevice global satisfies fixture
+cleanup. `suites/validation-core.txt` (467 cases: buffer create/mapping,
+texture create, bind group family, pipeline, sampler) runs green at ~111
+cases/s with `expectations.txt` carrying three reasoned entries (the
+nullable-layout-element delta). **The triage found six suspected binding
+bugs and one scale blocker** — planner-confirmed against the pins:
+
+1. createBuffer mappedAtCreation size%4 must throw RangeError synchronously
+   (spec) — missing. FIX.
+2. mapAsync on a destroyed buffer throws synchronously where a
+   promise-returning method must reject — FIX + audit every promise-returning
+   method for the same class.
+3. `GPUDevice.destroy()` — in the IDL, never implemented. FIX.
+4. `GPUBindingResource` in the pinned IDL includes **direct GPUBuffer and
+   GPUTexture** (the modern shorthand; verified at webgpu.idl:588) — our
+   union rejects both. Texture-direct needs implicit-default-view machinery
+   (which could also retire the render-attachment view-only delta). FIX.
+5. `createComputePipelineAsync`/`createRenderPipelineAsync` — missing;
+   implementable on the standard settlement machinery. FIX.
+6. Pipeline `constants` — the deferral reason expired the moment
+   own_property_names landed (B-1); record<USVString, double> →
+   WGPUConstantEntry array. FIX.
+7. Transient-attachment validation: yawgpu passes cases it should reject —
+   needs Dawn arbitration (Phase C material), catalogued not fixed.
+8. **Scale blocker: QuickJS `gc_decref_child` assertions (exit 134/139) at
+   ~1.3k–3.2k cases in one process** — either a binding refcount imbalance
+   that only manifests at scale or an engine bug; dedicated investigation
+   slice before suites broaden.

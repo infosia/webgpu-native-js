@@ -249,6 +249,28 @@ mod tests {
     }
 
     #[test]
+    fn gpu_device_interface_shim_is_non_constructible_and_supports_cleanup_checks() {
+        let runtime = shim_runtime();
+        eval_drop(
+            &runtime,
+            r#"
+              const fakeDevice = {
+                createBuffer() {},
+                pushErrorScope() {},
+                queue: {},
+                lost: Promise.resolve(),
+              };
+              if (!(fakeDevice instanceof GPUDevice)) throw new Error('device not recognized');
+              if ({} instanceof GPUDevice) throw new Error('plain object recognized as device');
+              let threw = false;
+              try { new GPUDevice(); } catch (e) { threw = e instanceof TypeError; }
+              if (!threw) throw new Error('GPUDevice shim was constructible');
+            "#,
+            "cts-runner-gpu-device-shim-test.js",
+        );
+    }
+
+    #[test]
     fn suite_parser_ignores_comments_and_blank_lines() {
         assert_eq!(
             parse_suite("# smoke\nsynthetic:*\n\nwebgpu:api,* # core\n"),

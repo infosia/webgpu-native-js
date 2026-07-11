@@ -1,0 +1,13 @@
+# Buffer creation: omit mappedAtCreation=true, which currently misses the required synchronous RangeError.
+webgpu:api,validation,buffer,create:size:mappedAtCreation=false
+webgpu:api,validation,buffer,create:limit:*
+webgpu:api,validation,buffer,create:usage:*
+webgpu:api,validation,buffer,create:new_usages:*
+webgpu:api,validation,buffer,create:createBuffer_invalid_and_oom:*
+
+# Texture creation groups that run cleanly on yawgpu Noop.
+webgpu:api,validation,createTexture:zero_size_and_usage:*
+
+# Layout and sampler descriptor conversion.
+webgpu:api,validation,createBindGroupLayout:*
+webgpu:api,validation,createSampler:*
