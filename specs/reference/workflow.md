@@ -234,8 +234,13 @@ the coding agent never commits.
 Commit message convention: `phase-N: <area> — <short>`, e.g.
 `phase-0: engine-boundary — resolve JSC ArrayBuffer detach`.
 
-Network operations (`git push` / `git pull`, submodule fetches) are invoked by
-the **user** via the `!` prompt, never by Claude with the sandbox disabled.
+**Network git operations (`git push` / `git pull` / `git fetch`, submodule
+fetches) are run by the project owner via the `!` prompt — NEVER by Claude.**
+No qualifier: not sandboxed, not because a host is allowlisted, not for a
+"small" commit. (Hardened 2026-07-11 after Claude pushed autonomously by
+reading the previous wording's "with the sandbox disabled" as permission when
+the sandbox was enabled. It was not permission.) When the remote matters,
+Claude says so and asks.
 
 ## Gate on exit codes, not on result lines
 
