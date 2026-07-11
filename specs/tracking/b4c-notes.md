@@ -144,3 +144,309 @@ which is why every large release run "passed"):
 Next session's first move: a red adapter test looping
 `createRenderPipeline` with `var a = []; a[1] = layout; a[7] = layout;`
 (holes in between) plus `run_gc()`, per the dispatch already drafted.
+
+## Coding-agent sparse-array follow-up (2026-07-11)
+
+The planner's proposed sparse-array adapter repro is unexpectedly **green**, so
+the sparse construction is not sufficient to reproduce the imbalance outside
+the CTS framework. A DEBUG QuickJS+yawgpu test created 500 pipelines followed
+by two explicit GCs and exited 0. The first version used holes at 0 and 2--6,
+two valid layouts at slots 1 and 7, and nested attribute arrays. The exact CTS
+descriptor shape also stayed green: vertex/instance step modes, shader
+locations 2 and 6, inline separately-created vertex and fragment modules,
+`layout: 'auto'`, fragment target/writeMask, and triangle-list primitive. The
+temporary green test was removed because it cannot guard a fix.
+
+The original CTS query remains nondeterministically red. Consecutive runs of
+the unchanged binary produced an expected-operation rejection (exit 1), then
+the GC assertion (exit 134). The latter diagnostic was more concrete than the
+earlier samples: a VAR_REF retained the stale edge, and the child had been
+reclaimed as binding class id 82 while `JS_ExecutePendingJob` released it.
+Another run exited 139. This keeps the async CTS framework/promise-job portion
+as the live differentiator, not the pipeline descriptor conversion itself.
+
+Two settlement counterfactuals were tried and fully reverted:
+
+1. Replacing the QuickJS settlement arrays/trampoline with direct calls to each
+   promise resolver stopped the assertion in two attempts, but changed the
+   required batching/timing and made the runner report the CTS's temporarily
+   unhandled `GPURenderPassEncoder is ended` rejection (exit 1). This is not a
+   valid fix.
+2. Keeping the trampoline but making its `fns` and `values` arrays explicitly
+   owned and freed immediately after `JS_Call`, instead of scope-owned through
+   microtask draining, still produced `TypeError: not a function` and then exit
+   139. Array lifetime alone is therefore not the defect.
+
+The QuickJS VALUE-SCOPE implementation and all adapter consuming-write sites
+were audited. `get_property`, computed property access, `call`, constructors,
+new instances, strings/numbers, and exceptions each insert their owned result
+once. `JS_SetPropertyUint32` settlement inputs are escaped before the consuming
+write; resolver functions are owned by `Deferred` and consumed once. Class
+prototype/global installation likewise follows the consuming API contracts.
+No coherent double insertion or missing escape was found on the sparse
+pipeline path.
+
+Frontier: reduce the CTS promise/error-scope job sequence, including
+`validateFinishAndSubmit`, into the adapter test. The red shape must include the
+framework's expected rejection handling and ticking; descriptor-only stress is
+now disproved. Instrument binding class registration so diagnostic class id 82
+has a stable name, then record every native decrement of that object's address
+before its final `JS_ExecutePendingJob` decrement. No adapter/core fix is
+claimed, and standard gates were not run because the tree has no fix. The
+uncommitted `quickjs.c` GC diagnostics remain in place.
+
+## Coding-agent decrement follow-up (2026-07-11, later)
+
+The single CTS query remains immediately red on the current debug binary: one
+run exited 139 after the shims, and the next exited 134 in `gc_decref_child`.
+After extending the uncommitted QuickJS diagnostic to retain the registered
+class name at reclamation, another pair produced the existing
+`TypeError: not a function` symptom and then an assertion. In that assertion,
+the stale child had been reclaimed as QuickJS's built-in `Function` class.
+`JS_ExecutePendingJob` performed the final decrement which reclaimed it. A
+plain Object still retained the stale edge. The diagnostic's earlier-zero
+parent was also a Function, reclaimed from `Scope::drop` inside `qjs_method`
+during a promise-reaction/async-function resume.
+
+Temporary adapter logging (fully removed after use) recorded each value-scope
+insertion with its source line and each native method entered. It showed no
+scope mutation during a live `RefCell` borrow and no duplicate insertion of the
+same owned result in the failing settlement frame. The outer `Runtime::tick`
+scope contained exactly the expected values: values constructed while
+converting settlements, followed by the `fns` and `values` arrays created at
+`adapters/quickjs/src/lib.rs`'s `settle_deferreds`. Reentrant WebGPU methods used
+distinct callback scopes. This rules out scope-vector reallocation and shared
+outer/callback scope identity as mechanisms.
+
+The audit also noticed that `DeviceEventJs::lost_deferred` resolving functions
+are not visited by `trace_payload_values`. That is not a coherent explanation
+for this under-count: omitting a native-held edge from QuickJS's cycle marker
+leaves an extra apparent external reference (a leak/non-collection), whereas
+the observed referent is short by one. No speculative marker change was kept.
+
+The remaining high-value diagnostic is an ownership ledger keyed by object
+address in the uncommitted QuickJS C diagnostics: record every `JS_DupValue`
+and `JS_FreeValue` caller for runtime-registered binding objects and Functions,
+then print that ring when `gc_decref_child` finds the address at zero. The
+current reclamation backtrace proves only the final legitimate decrement; the
+ledger must identify the earlier extra native release. The reduced adapter test
+still needs the CTS expected-rejection/error-scope sequence; descriptor-only
+tests remain green. No production fix or standard gates are claimed.
+
+That external-API ledger was then added to the uncommitted QuickJS diagnostic
+and the runner rebuilt. It records the last 16 `JS_DupValue`/`JS_FreeValue`
+events for Functions and runtime binding classes. The next run exited 134. Its
+surviving ledger contained only QuickJS-internal promise-finally/`JS_ToBoolFree`
+decrements at refcount 2 and the terminal `free_var_ref` decrement at refcount
+1; none of the retained events had an adapter/Rust frame. The child address had
+already been reused (its class/type were garbage and its free record had
+collided), so this does not exonerate an earlier native release: the 16-event
+ring was overwritten by later internal promise activity. Next pass should
+either increase the per-address history or tag object allocation generations,
+and should distinguish calls entering `JS_FreeValue` from inside QuickJS from
+calls whose first non-C frame is the adapter. The ledger remains only in the
+uncommitted `quickjs.c` diagnostics.
+
+## Decisive per-address transition history (2026-07-11)
+
+The diagnostic ledger now records the central object transitions rather than
+only exported API entry points: every `js_dup` increment and every
+`JS_FreeValue`/`JS_FreeValueRT` decrement records operation, resulting
+refcount, and 16 frames in a 4096-slot table with eight events per address.
+Because the 4096-slot live table was repeatedly claimed by another allocation
+after reclamation but before the stale edge was walked, `free_object` also
+snapshots that object's eight events into the existing uncommitted reclamation
+record. This is diagnostic-only and remains confined to `quickjs.c`.
+
+The rebuilt single-case runner produced exits 139, 139, then 134. The decisive
+underflow parent was a QuickJS Array. The stale child had been reclaimed as
+runtime class 80, whose registered name was `GPUTexture`. Its last eight
+transitions were:
+
+1. release -> 1: `JS_ToBoolFree -> JS_CallInternal -> JS_Call ->
+   js_promise_then_finally_func -> promise_reaction_job`;
+2. duplicate -> 2: `js_dup -> JS_CallInternal -> JS_Call ->
+   js_promise_then_finally_func -> promise_reaction_job`;
+3. release -> 1: `JS_CallInternal -> JS_Call ->
+   js_promise_then_finally_func -> promise_reaction_job`;
+4. duplicate -> 2: the same `js_dup`/`JS_CallInternal` promise-finally path;
+5. release -> 1: the same `JS_ToBoolFree` promise-finally path;
+6. duplicate -> 2: the same `js_dup`/`JS_CallInternal` promise-finally path;
+7. release -> 1: the same `JS_CallInternal` promise-finally path;
+8. release -> 0: `JS_FreeValueRT -> free_var_ref ->
+   js_bytecode_function_finalizer -> free_object -> free_zero_refcount ->
+   js_free_value_rt -> JS_FreeValue -> JS_ExecutePendingJob`.
+
+There is no adapter, core, or CTS frame in any of these transition call sites;
+the first Rust frame is only `Engine::drain_microtasks`, above
+`JS_ExecutePendingJob`. In particular, the terminal release is QuickJS freeing
+the value owned by a detached captured-variable reference while finalizing a
+bytecode function. The preceding promise-finally transitions pair perfectly at
+1 -> 2 -> 1. The final `free_var_ref` 1 -> 0 is locally balanced with the
+`js_dup(*pvalue)` performed when QuickJS creates a detached var-ref, yet an
+Array still retains the value afterward. This points to QuickJS engine
+bookkeeping (an earlier missing edge increment or an engine-internal extra
+release), not a binding release call.
+
+The vendored engine is quickjs-ng v0.15.1 (`fd0a021`). The locally available
+`origin/master` (`3c8f3d6`) keeps the same `Promise.prototype.finally`
+ownership protocol: `JS_NewCFunctionData` duplicates captured data and its
+finalizer releases it once; the finally value thunk returns `js_dup`; and
+`js_promise_then_finally_func` passes borrowed arguments, consumes only the
+promise through `JS_InvokeFree`, then releases `then_func` once. Master also
+retains the same `free_var_ref` decrement/release, apart from refcount-access
+macro changes. The observed transition sequence therefore matches upstream's
+intended local pairs but still reaches zero with a live Array edge. Treat this
+as a suspected quickjs-ng engine defect; do not add a binding workaround and do
+not file it externally without a standalone engine-only reduction.
+
+No production fix or verification ladder is claimed. The next frontier is an
+engine-only reproduction of a captured object passing through nested
+`Promise.prototype.finally` while also stored in an Array, followed by forced
+GC. It should remove WebGPU entirely and determine whether the missing edge is
+introduced by promise-finally/var-ref handling or only after prior heap
+corruption in the CTS workload.
+
+## B-4c full release-path history (2026-07-11, final coding pass)
+
+The temporary, uncommitted `quickjs.c` ledger was extended again. `js_dup` is
+the single ordinary increment hook; both `JS_FreeValue` and `JS_FreeValueRT`
+now delegate to one `js_decref_value` decrement hook, so engine-internal calls
+through either exported form cannot bypass recording. Cycle-collector
+decrements and both restore-increment paths remain recorded in
+`gc_decref_child`, `gc_scan_incref_child`, and `gc_scan_incref_child2`.
+This quickjs-ng revision has no separate `__JS_FreeValue` implementation.
+
+Each address still retains the requested last 16 events with 16 frames per
+event. The live-history hash now probes its entire 16,384-entry static table,
+instead of giving up after four colliding entries, and never evicts a live
+record. At reclamation the history is copied into a 65,536-entry open-addressed
+free-record table; an unprinted reclamation record cannot be overwritten by a
+collision and becomes reusable only after its history is printed. These are
+diagnostic-only changes and must not be committed.
+
+After rebuilding, the single-case retry results were exit 1, exit 134 with a
+live history but a collided older reclamation snapshot, then exit 134 with the
+real reclamation history. The decisive child was address `0xb3a625e00`, built-in
+class 13 (`Function`, `JS_CLASS_BYTECODE_FUNCTION`). A plain `Object` at
+`0xb3a627b10` still marked it as a child after it had been reclaimed.
+
+The retained events 394--407 are seven locally balanced pairs, each
+`duplicate: 1 -> 2` followed by `release: 2 -> 1`. The duplicate reads a
+captured value (`OP_get_var_ref_check`, `quickjs.c:18839`); the releases
+alternate between boolean conversion and exception-stack unwinding inside the
+same `Promise.prototype.finally` reaction. The final pair's interesting stacks
+were (verbatim symbol names, addresses omitted):
+
+```text
+event=406 operation=duplicate resulting_ref_count=2
+gc_debug_record_transition
+js_dup
+JS_CallInternal                         (quickjs.c:18839, OP_get_var_ref_check)
+JS_Call
+js_promise_then_finally_func
+js_call_c_function_data
+JS_CallInternal
+JS_Call
+promise_reaction_job
+JS_ExecutePendingJob
+
+event=407 operation=release resulting_ref_count=1
+gc_debug_record_transition
+js_decref_value
+JS_FreeValue
+JS_CallInternal                         (quickjs.c:20639, exception stack unwind)
+JS_Call
+js_promise_then_finally_func
+js_call_c_function_data
+JS_CallInternal
+JS_Call
+promise_reaction_job
+JS_ExecutePendingJob
+```
+
+The only release in the retained ring without a corresponding duplicate in
+that ring is event 408, the known final end-of-job cleanup. Its call site is
+`free_var_ref` (called by `js_bytecode_function_finalizer`):
+
+```text
+event=408 operation=release resulting_ref_count=0
+gc_debug_record_transition
+js_decref_value
+JS_FreeValueRT
+free_var_ref
+js_bytecode_function_finalizer
+free_object
+free_gc_object
+free_zero_refcount
+js_free_value_rt
+js_decref_value
+JS_FreeValue
+JS_ExecutePendingJob
+```
+
+The corresponding ownership increment is necessarily older than this hot
+16-event window: QuickJS duplicates the captured stack value when detaching
+the reference in `close_var_ref` (`var_ref->value = js_dup(*var_ref->pvalue)`,
+`quickjs.c:17624`), and `free_var_ref` releases that one owned value when the
+last closure reference disappears (`quickjs.c:6507`). Thus event 408 is the
+locally expected release, not evidence of a binding `Scope` double-free.
+Events 406/407 are also balanced. Every frame below the job pump is QuickJS
+engine code; the first Rust frame is only `Engine::drain_microtasks` above
+`JS_ExecutePendingJob`. The incidental parent reclamation still shows
+`Scope::drop -> catch_callback -> qjs_method`, but it is a different object and
+does not occur in the failing child's transition history.
+
+The exact observed engine sequence is therefore: a promise-finally reaction
+loads the captured closure (duplicate), an exception path unwinds that stack
+slot (release), the pending job releases its result and thereby finalizes a
+bytecode function, that finalizer drops its last detached `JSVarRef`, and
+`free_var_ref` releases the captured closure to zero. Later cycle marking finds
+the already-reclaimed closure still referenced by a live plain Object. The
+local promise/stack pairs and detached-var-ref pair are balanced, so the
+remaining defect is an engine-internal missing edge increment or earlier
+engine-internal bookkeeping corruption, not a named adapter/core/runner
+release. Record `free_var_ref` as the unmatched-ring call site and
+`JS_CallInternal`'s exception unwind as the immediately preceding release
+site. Treat this as a suspected quickjs-ng defect. No workaround and no
+external filing were made.
+
+Because the decisive path is entirely engine-internal, no production code or
+regression test was changed and the requested adapter-fix verification ladder
+does not apply. The frontier remains an engine-only reduction of the sequence
+above, ideally retaining enough generation-aware history to connect the plain
+Object property insertion to the closure's detached-var-ref lifetime.
+
+## Binding-free reproduction attempt (2026-07-11, planner)
+
+A plain `qjs` was built from the vendored tree (stub repl/standalone arrays;
+assert live; the temporary ledger included). A pure-JS workload modeled on the
+recorded sequence — async fns capturing locals across `await`; chains ending
+in `.finally()` whose closure callback throws; pre-rejected promises through
+`finally`; late `.catch` attachment; `Promise.race`; involved closures stored
+in long-lived plain objects; periodic `gc()` — ran 5 × 20,000 cases: **no
+assertion, no underflow**. The scratch script is preserved verbatim below so
+the attempt is reproducible; it is NOT committed anywhere else.
+
+Status therefore remains: **suspected quickjs-ng defect, not yet confirmed
+binding-free.** What the pure-JS shape lacks vs the real workload: the
+adapter's job pump interleaving (`tick` = ProcessEvents → settlement
+trampoline → `JS_ExecutePendingJob` loop → release queue) and host-function
+re-entry — the corruption may need that interleave even if no adapter frame
+ever touches the miscounted value.
+
+Owner decision points (in order of information value):
+1. Test the pin question: build the same single CTS case against quickjs-ng
+   master (submodule fetch = owner-run) — if master is quiet, bisect upstream
+   fixes; if master also aborts, the reduction must go deeper.
+2. Suite-level mitigation meanwhile: shard broad CTS suites across processes
+   (each process well under the ~1.3k-case floor) so Phase B suite-broadening
+   is unblocked without resolving the engine question first.
+3. No upstream filing (standing owner rule).
+
+<details><summary>scratch reproduction script (not reproduced with it)</summary>
+
+See the session scratchpad `b4c_repro.js`; shape: 400 rounds × 50 cases,
+4 finally-modes rotated, gc() every 8 rounds, closures kept in a 64-entry
+ring of plain objects.
+</details>
