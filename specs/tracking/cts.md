@@ -119,3 +119,19 @@ bugs and one scale blocker** — planner-confirmed against the pins:
    ~1.3k–3.2k cases in one process** — either a binding refcount imbalance
    that only manifests at scale or an engine bug; dedicated investigation
    slice before suites broaden.
+
+**B-4a landed (2026-07-12): four CTS-found bugs fixed.** (1) mappedAtCreation
+size%4 → synchronous RangeError (spec quoted from the pinned gpuweb build;
+the error rides the block-08 name mechanism, name="RangeError"). (2) The
+promise-uniformity audit: requestAdapter, requestDevice, mapAsync,
+onSubmittedWorkDone, popErrorScope now convert EVERY post-dispatch
+synchronous error into a rejection (the WebIDL rule) — five methods changed,
+five existing sync-throw tests flipped and listed. (3) GPUDevice.destroy()
+exists at last (idempotent, R14 split, destroy-then-new-requestDevice tested
+— the CTS DevicePool recovery path). (4) Pipeline constants: the deferral
+died; a shape-driven record emitter (own_property_names) fills
+WGPUConstantEntry arrays for compute/vertex/fragment. Parity 123 → 124,
+byte-identical on yawgpu AND Dawn (gated). The 467-case seed stays exit 0.
+Remaining from the triage: B-4b (direct buffer/texture binding-resource arms
++ async pipeline methods), B-4c (the gc_decref_child scale investigation),
+Phase C material (transient-attachment arbitration).

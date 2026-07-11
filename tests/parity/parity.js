@@ -206,14 +206,19 @@
         log(errorLine("mapping:post-unmap", postUnmapError));
         mapped.destroy();
 
+        var sizeTwoError = caught(function () {
+            device.createBuffer({ size: 2, usage: 2, mappedAtCreation: true });
+        });
+        log("coerce:mappedAtCreation-size-2:" + sizeTwoError.name);
+
         var destroyed = device.createBuffer({ size: 4, usage: 1 });
         destroyed.destroy();
-        var destroyedMapError = caught(function () {
-            destroyed.mapAsync(1, 0, 4);
+        return destroyed.mapAsync(1, 0, 4).then(function () {
+            throw new Error("destroyed mapAsync unexpectedly resolved");
+        }, function (destroyedMapError) {
+            log(errorLine("reject:mapAsync", destroyedMapError));
+            return runMappedAtCreationRoundTrip().then(runOffsetWindowRoundTrip);
         });
-        log(errorLine("reject:mapAsync", destroyedMapError));
-
-        return runMappedAtCreationRoundTrip().then(runOffsetWindowRoundTrip);
     }
 
     function runWriteBufferRoundTrip() {

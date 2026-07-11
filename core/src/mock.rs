@@ -877,6 +877,10 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
         format!("OperationError: {message}")
     }
 
+    fn range_error(_cx: Self::Context<'_>, message: &str) -> Self::Error {
+        format!("RangeError: {message}")
+    }
+
     fn async_error_value(cx: Self::Context<'_>, name: &str, message: &str) -> Self::Value {
         let name = cx.runtime.string(name);
         let message = cx.runtime.string(message);
@@ -884,6 +888,9 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
     }
 
     fn error_value_from_error(cx: Self::Context<'_>, error: Self::Error) -> Self::Value {
+        if let Some((name, message)) = error.split_once(": ") {
+            return Self::async_error_value(cx, name, message);
+        }
         cx.runtime.string(&error)
     }
 
@@ -1099,6 +1106,7 @@ struct MockGpuState {
     bind_group_layout_add_refs: usize,
     pipeline_layout_add_refs: usize,
     device_releases: usize,
+    device_destroys: usize,
     buffer_releases: usize,
     queue_releases: usize,
     shader_module_releases: usize,
@@ -1137,6 +1145,7 @@ struct MockGpuState {
     texture_view_descriptors: Vec<RecordedTextureViewDescriptor>,
     query_set_descriptors: Vec<RecordedQuerySetDescriptor>,
     render_bundle_encoder_descriptors: Vec<RecordedRenderBundleEncoderDescriptor>,
+    pipeline_constants: Vec<(&'static str, RecordedConstants)>,
     query_sets: BTreeMap<WGPUQuerySet, RecordedQuerySetDescriptor>,
     textures: BTreeMap<WGPUTexture, RecordedTextureDescriptor>,
     null_create_buffer: bool,
@@ -1161,6 +1170,8 @@ struct MockPopError {
     type_: WGPUErrorType,
     message: String,
 }
+
+type RecordedConstants = Vec<(Vec<u8>, f64)>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct MockMappedRange {
@@ -1377,6 +1388,14 @@ unsafe fn device_release(_device: WGPUDevice) {
         let mut state = state.borrow_mut();
         state.device_releases += 1;
         state.native_order.push("device_release");
+    });
+}
+
+unsafe fn device_destroy(_device: WGPUDevice) {
+    GPU_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        state.device_destroys += 1;
+        state.native_order.push("device_destroy");
     });
 }
 
@@ -1839,10 +1858,14 @@ unsafe fn device_create_bind_group(
 
 unsafe fn device_create_compute_pipeline(
     _device: WGPUDevice,
-    _descriptor: *const WGPUComputePipelineDescriptor,
+    descriptor: *const WGPUComputePipelineDescriptor,
 ) -> WGPUComputePipeline {
     GPU_STATE.with(|state| {
         let mut state = state.borrow_mut();
+        let compute = unsafe { &(*descriptor).compute };
+        state.pipeline_constants.push(("compute", unsafe {
+            read_constants(compute.constants, compute.constantCount)
+        }));
         state.next += 1;
         fake_handle(6000 + state.next)
     })
@@ -1850,13 +1873,37 @@ unsafe fn device_create_compute_pipeline(
 
 unsafe fn device_create_render_pipeline(
     _device: WGPUDevice,
-    _descriptor: *const WGPURenderPipelineDescriptor,
+    descriptor: *const WGPURenderPipelineDescriptor,
 ) -> WGPURenderPipeline {
     GPU_STATE.with(|state| {
         let mut state = state.borrow_mut();
+        let descriptor = unsafe { &*descriptor };
+        state.pipeline_constants.push(("vertex", unsafe {
+            read_constants(descriptor.vertex.constants, descriptor.vertex.constantCount)
+        }));
+        if let Some(fragment) = unsafe { descriptor.fragment.as_ref() } {
+            state.pipeline_constants.push(("fragment", unsafe {
+                read_constants(fragment.constants, fragment.constantCount)
+            }));
+        }
         state.next += 1;
         fake_handle(6500 + state.next)
     })
+}
+
+unsafe fn read_constants(
+    constants: *const crate::WGPUConstantEntry,
+    count: usize,
+) -> Vec<(Vec<u8>, f64)> {
+    if count == 0 {
+        assert!(constants.is_null());
+        return Vec::new();
+    }
+    assert!(!constants.is_null());
+    unsafe { std::slice::from_raw_parts(constants, count) }
+        .iter()
+        .map(|entry| (read_view(entry.key), entry.value))
+        .collect()
 }
 
 unsafe fn device_create_command_encoder(
@@ -2678,21 +2725,22 @@ mod tests {
         convert_texture_view_descriptor, convert_vertex_attribute, convert_vertex_buffer_layout,
         device_create_bind_group, device_create_buffer, device_create_command_encoder,
         device_create_compute_pipeline, device_create_query_set, device_create_render_pipeline,
-        device_create_sampler, device_create_texture, device_lost_get,
+        device_create_sampler, device_create_texture, device_destroy, device_lost_get,
         device_lost_info_message_get, device_lost_info_reason_get, device_on_uncaptured_error_get,
         device_on_uncaptured_error_set, device_pop_error_scope, device_push_error_scope,
         device_queue_get, finalize_bind_group, finalize_buffer, finalize_compute_pipeline,
         finalize_device, finalize_query_set, finalize_queue, finalize_render_pipeline,
-        finalize_sampler, finalize_texture, finalize_texture_view, queue_submit,
-        queue_work_done_callback, queue_write_buffer, queue_write_texture,
-        request_adapter_callback, request_device_callback, texture_depth_or_array_layers_get,
-        texture_dimension_get, texture_format_get, texture_height_get, texture_mip_level_count_get,
-        texture_sample_count_get, texture_usage_get, texture_width_get, wrap_device,
-        AdapterPayload, AdapterRequest, BindGroupLayoutPayload, BindGroupPayload, BufferPayload,
-        ComputePipelinePayload, DeviceEventState, DevicePayload, DeviceRequest, ErrorPayload,
-        JsEngine, PendingNative, PendingNativeHandle, PipelineLayoutPayload, QuerySetPayload,
-        QueueError, QueuePayload, QueueWorkDoneRequest, RenderPipelinePayload, SamplerPayload,
-        SettlementRequest, ShaderModulePayload, TexturePayload, TextureViewPayload,
+        finalize_sampler, finalize_texture, finalize_texture_view, gpu_request_adapter,
+        queue_on_submitted_work_done, queue_submit, queue_work_done_callback, queue_write_buffer,
+        queue_write_texture, request_adapter_callback, request_device_callback,
+        texture_depth_or_array_layers_get, texture_dimension_get, texture_format_get,
+        texture_height_get, texture_mip_level_count_get, texture_sample_count_get,
+        texture_usage_get, texture_width_get, wrap_device, AdapterPayload, AdapterRequest,
+        BindGroupLayoutPayload, BindGroupPayload, BufferPayload, ComputePipelinePayload,
+        DeviceEventState, DevicePayload, DeviceRequest, ErrorPayload, JsEngine, PendingNative,
+        PendingNativeHandle, PipelineLayoutPayload, QuerySetPayload, QueueError, QueuePayload,
+        QueueWorkDoneRequest, RenderPipelinePayload, SamplerPayload, SettlementRequest,
+        ShaderModulePayload, TexturePayload, TextureViewPayload,
     };
     use std::sync::atomic::AtomicBool;
     use std::sync::{Mutex, Weak};
@@ -2716,6 +2764,24 @@ mod tests {
 
     fn descriptor(rt: &Runtime, fields: &[(&str, Value)]) -> Value {
         rt.object(fields)
+    }
+
+    fn assert_rejection(rt: &Runtime, promise: Value, name: &str, message: &str) {
+        let reason = rt
+            .promise_result(promise)
+            .expect("promise must settle")
+            .expect_err("promise must reject");
+        let MockValue::Object(properties) = rt.get(reason) else {
+            panic!("rejection reason is not an error object");
+        };
+        assert!(matches!(
+            properties.get("name").copied().map(|value| rt.get(value)),
+            Some(MockValue::String(actual)) if actual == name
+        ));
+        assert!(matches!(
+            properties.get("message").copied().map(|value| rt.get(value)),
+            Some(MockValue::String(actual)) if actual == message
+        ));
     }
 
     fn shader_module(_rt: &Runtime, cx: Context<'_>, handle: usize) -> Value {
@@ -3922,26 +3988,6 @@ mod tests {
             convert_shader_module_descriptor::<Engine>(cx, shader, &arena)
                 .expect_err("present compilationHints must fail"),
             "TypeError: compilationHints are not supported yet"
-        );
-
-        let module = Engine::new_instance(
-            cx,
-            crate::GPU_SHADER_MODULE_CLASS,
-            Box::new(ShaderModulePayload {
-                module: fake_handle(42),
-            }),
-        )
-        .expect("shader module");
-        let stage = descriptor(
-            &rt,
-            &[("module", module), ("constants", descriptor(&rt, &[]))],
-        );
-        let pipeline = descriptor(&rt, &[("layout", rt.string("auto")), ("compute", stage)]);
-        assert_eq!(
-            convert_compute_pipeline_descriptor::<Engine>(cx, pipeline, &arena)
-                .err()
-                .expect("present constants must fail"),
-            "TypeError: constants are not supported yet"
         );
 
         let pass = descriptor(&rt, &[("timestampWrites", descriptor(&rt, &[]))]);
@@ -5630,6 +5676,110 @@ mod tests {
     }
 
     #[test]
+    fn pipeline_constants_reach_compute_vertex_and_fragment_c_structs() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let module = shader_module(&rt, cx, 99);
+
+        let compute_constants =
+            descriptor(&rt, &[("alpha", rt.number(1.5)), ("beta", rt.number(-2.0))]);
+        let compute = descriptor(&rt, &[("module", module), ("constants", compute_constants)]);
+        let compute_desc = descriptor(&rt, &[("layout", rt.string("auto")), ("compute", compute)]);
+        device_create_compute_pipeline::<Engine>(cx, device, &[compute_desc])
+            .expect("compute constants");
+
+        let vertex = descriptor(
+            &rt,
+            &[
+                ("module", module),
+                (
+                    "constants",
+                    descriptor(&rt, &[("vertexValue", rt.number(3.0))]),
+                ),
+            ],
+        );
+        let fragment = descriptor(
+            &rt,
+            &[
+                ("module", module),
+                (
+                    "constants",
+                    descriptor(&rt, &[("fragmentValue", rt.number(4.0))]),
+                ),
+                ("targets", rt.set_like(&[])),
+            ],
+        );
+        let render_desc = descriptor(
+            &rt,
+            &[
+                ("layout", rt.string("auto")),
+                ("vertex", vertex),
+                ("fragment", fragment),
+            ],
+        );
+        device_create_render_pipeline::<Engine>(cx, device, &[render_desc])
+            .expect("render constants");
+
+        GPU_STATE.with(|state| {
+            assert_eq!(
+                state.borrow().pipeline_constants,
+                [
+                    (
+                        "compute",
+                        vec![(b"alpha".to_vec(), 1.5), (b"beta".to_vec(), -2.0)]
+                    ),
+                    ("vertex", vec![(b"vertexValue".to_vec(), 3.0)]),
+                    ("fragment", vec![(b"fragmentValue".to_vec(), 4.0)]),
+                ]
+            );
+        });
+    }
+
+    #[test]
+    fn pipeline_constants_accept_empty_record_and_reject_non_numeric_value() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let module = shader_module(&rt, cx, 100);
+
+        let empty_stage = descriptor(
+            &rt,
+            &[("module", module), ("constants", descriptor(&rt, &[]))],
+        );
+        let empty_desc = descriptor(
+            &rt,
+            &[("layout", rt.string("auto")), ("compute", empty_stage)],
+        );
+        device_create_compute_pipeline::<Engine>(cx, device, &[empty_desc])
+            .expect("empty constants");
+        GPU_STATE.with(|state| {
+            assert_eq!(state.borrow().pipeline_constants, [("compute", Vec::new())]);
+        });
+
+        let invalid_stage = descriptor(
+            &rt,
+            &[
+                ("module", module),
+                (
+                    "constants",
+                    descriptor(&rt, &[("value", rt.string("not-a-number"))]),
+                ),
+            ],
+        );
+        let invalid_desc = descriptor(
+            &rt,
+            &[("layout", rt.string("auto")), ("compute", invalid_stage)],
+        );
+        assert!(
+            device_create_compute_pipeline::<Engine>(cx, device, &[invalid_desc]).is_err(),
+            "non-numeric constant must be a TypeError in real engines"
+        );
+    }
+
+    #[test]
     fn t5_render_pipeline_retention_is_vertex_module_fragment_module_and_layout() {
         reset_gpu();
         let rt = runtime();
@@ -6154,6 +6304,138 @@ mod tests {
     }
 
     #[test]
+    fn mapped_at_creation_non_multiple_of_four_throws_range_error_before_native_call() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let desc = descriptor(
+            &rt,
+            &[
+                ("size", rt.number(2.0)),
+                ("usage", rt.number(2.0)),
+                ("mappedAtCreation", rt.bool(true)),
+            ],
+        );
+
+        assert_eq!(
+            device_create_buffer::<Engine>(cx, device, &[desc]).expect_err("size 2 must fail"),
+            "RangeError: mappedAtCreation buffer size must be a multiple of 4"
+        );
+        GPU_STATE.with(|state| assert!(state.borrow().descriptors.is_empty()));
+    }
+
+    #[test]
+    fn promise_returning_operations_reject_conversion_and_receiver_errors() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let incompatible = rt.undefined();
+
+        let request_adapter = gpu_request_adapter::<Engine>(cx, incompatible, &[])
+            .expect("requestAdapter must return a promise");
+        assert_rejection(
+            &rt,
+            request_adapter,
+            "TypeError",
+            "GPU.requestAdapter called on an incompatible object",
+        );
+
+        let adapter = Engine::new_instance(
+            cx,
+            crate::GPU_ADAPTER_CLASS,
+            Box::new(AdapterPayload::<Engine>::new(fake_handle(800))),
+        )
+        .expect("adapter");
+        let invalid_request = descriptor(
+            &rt,
+            &[(
+                "requiredFeatures",
+                rt.set_like(&[rt.string("not-a-feature")]),
+            )],
+        );
+        let request_device = adapter_request_device::<Engine>(cx, adapter, &[invalid_request])
+            .expect("requestDevice must return a promise");
+        assert_rejection(&rt, request_device, "TypeError", "GPUFeatureName");
+
+        let pop = device_pop_error_scope::<Engine>(cx, incompatible, &[])
+            .expect("popErrorScope must return a promise");
+        assert_rejection(
+            &rt,
+            pop,
+            "TypeError",
+            "GPUDevice method called on an incompatible object",
+        );
+
+        let work = queue_on_submitted_work_done::<Engine>(cx, incompatible, &[])
+            .expect("onSubmittedWorkDone must return a promise");
+        assert_rejection(
+            &rt,
+            work,
+            "TypeError",
+            "GPUQueue.onSubmittedWorkDone called on an incompatible object",
+        );
+
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let desc = descriptor(&rt, &[("size", rt.number(4.0)), ("usage", rt.number(1.0))]);
+        let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("buffer");
+        let map =
+            buffer_map_async::<Engine>(cx, buffer, &[]).expect("mapAsync must return a promise");
+        assert_rejection(&rt, map, "TypeError", "GPUMapModeFlags is required");
+    }
+
+    #[test]
+    fn map_async_on_destroyed_buffer_rejects_operation_error_with_message() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let desc = descriptor(&rt, &[("size", rt.number(4.0)), ("usage", rt.number(1.0))]);
+        let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("buffer");
+        buffer_destroy::<Engine>(cx, buffer, &[]).expect("destroy");
+
+        let promise = buffer_map_async::<Engine>(cx, buffer, &[rt.number(1.0)])
+            .expect("destroyed mapAsync must return a promise");
+        assert_rejection(&rt, promise, "OperationError", "GPUBuffer is destroyed");
+    }
+
+    #[test]
+    fn device_destroy_calls_native_destroy_and_new_request_device_still_resolves() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let adapter = Engine::new_instance(
+            cx,
+            crate::GPU_ADAPTER_CLASS,
+            Box::new(AdapterPayload::<Engine>::new(fake_handle(810))),
+        )
+        .expect("adapter");
+
+        let first = adapter_request_device::<Engine>(cx, adapter, &[]).expect("first request");
+        unsafe { crate::tick::<Engine>(cx, fake_handle(811)) }.expect("first tick");
+        let first_device = rt
+            .promise_result(first)
+            .expect("first settled")
+            .expect("first resolved");
+        device_destroy::<Engine>(cx, first_device, &[]).expect("destroy device");
+        device_destroy::<Engine>(cx, first_device, &[]).expect("destroy device again");
+
+        let new_adapter = Engine::new_instance(
+            cx,
+            crate::GPU_ADAPTER_CLASS,
+            Box::new(AdapterPayload::<Engine>::new(fake_handle(813))),
+        )
+        .expect("new adapter");
+        let second =
+            adapter_request_device::<Engine>(cx, new_adapter, &[]).expect("second request");
+        unsafe { crate::tick::<Engine>(cx, fake_handle(812)) }.expect("second tick");
+        rt.promise_result(second)
+            .expect("second settled")
+            .expect("second resolved");
+        GPU_STATE.with(|state| assert_eq!(state.borrow().device_destroys, 1));
+    }
+
+    #[test]
     fn r14_destroy_is_idempotent_and_release_is_queued_later() {
         reset_gpu();
         let rt = runtime();
@@ -6662,10 +6944,9 @@ mod tests {
         let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("buffer");
         let too_large = rt.number(4_294_967_296.0);
 
-        assert!(
-            buffer_map_async::<Engine>(cx, buffer, &[rt.number(2.0), too_large]).is_err(),
-            "mapAsync offset=2^32 must be rejected on 64-bit hosts too"
-        );
+        let promise = buffer_map_async::<Engine>(cx, buffer, &[rt.number(2.0), too_large])
+            .expect("mapAsync conversion error must return a promise");
+        assert_rejection(&rt, promise, "TypeError", "offset");
     }
 
     thread_local! {
@@ -6971,10 +7252,9 @@ mod tests {
 
         let unknown_feature = rt.set_like(&[rt.string("not-a-feature")]);
         let request = descriptor(&rt, &[("requiredFeatures", unknown_feature)]);
-        assert_eq!(
-            adapter_request_device::<Engine>(cx, adapter, &[request]).expect_err("unknown feature"),
-            "TypeError: GPUFeatureName"
-        );
+        let promise = adapter_request_device::<Engine>(cx, adapter, &[request])
+            .expect("unknown feature must return a promise");
+        assert_rejection(&rt, promise, "TypeError", "GPUFeatureName");
 
         let limits = descriptor(&rt, &[("notALimit", rt.number(1.0))]);
         let request = descriptor(&rt, &[("requiredLimits", limits)]);

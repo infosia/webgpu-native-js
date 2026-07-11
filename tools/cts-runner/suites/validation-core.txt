@@ -1,4 +1,4 @@
-# Buffer creation: omit mappedAtCreation=true, which currently misses the required synchronous RangeError.
+# Buffer creation seed slice; mappedAtCreation size coercion is pinned by binding mock/script/parity tests.
 webgpu:api,validation,buffer,create:size:mappedAtCreation=false
 webgpu:api,validation,buffer,create:limit:*
 webgpu:api,validation,buffer,create:usage:*

@@ -1719,6 +1719,11 @@ impl core::JsEngine for Engine {
         set_error_name(cx, error, "OperationError")
     }
 
+    fn range_error(cx: Self::Context<'_>, message: &str) -> Self::Error {
+        let error = make_error(cx, message, false);
+        set_error_name(cx, error, "RangeError")
+    }
+
     fn async_error_value(cx: Self::Context<'_>, name: &str, message: &str) -> Self::Value {
         let error = make_error(cx, message, false);
         cx.scope.track(error);

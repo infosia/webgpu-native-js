@@ -1617,6 +1617,8 @@ fn emit_descriptor(
                 default_empty.contains(name.as_str()),
                 descriptors,
             )?;
+        } else if is_string_double_record(idl, c) {
+            emit_string_double_record_local(&mut output, name, &local, &value);
         }
     }
 
@@ -2604,6 +2606,15 @@ fn emit_field(
         output.push_str("        },\n");
         return Ok(());
     }
+    if is_string_double_record(idl, c) {
+        let count = count_field_name(&c.name);
+        let _ = writeln!(output, "        {count}: {local}.len(),");
+        let _ = writeln!(output, "        {field}: if {local}.is_empty() {{");
+        output.push_str("            ptr::null()\n        } else {\n");
+        let _ = writeln!(output, "            {local}.as_ptr()");
+        output.push_str("        },\n");
+        return Ok(());
+    }
     if idl.type_name == "boolean" && c.type_name == "WGPUOptionalBool" {
         if idl.required || idl.default_value.is_some() {
             return Err(unsupported_shape(
@@ -2835,9 +2846,50 @@ fn descriptor_needs_arena(pair: &TypePair, descriptor: &DescriptorEntry) -> bool
             && !skips.contains(member.member.as_str())
             && (is_idl_string(idl)
                 || is_sequence(&idl.type_name)
+                || is_string_double_record(idl, &member.c.values[0])
                 || (member.c.values[0].pointer.is_some() && !member.c.values[0].count_and_pointer))
     }) || !descriptor.chains.is_empty()
         || !descriptor.handle_sequences.is_empty()
+}
+
+fn is_string_double_record(idl: &ValueModel, c: &ValueModel) -> bool {
+    idl.type_name == "record<…, GPUPipelineConstantValue>"
+        && c.type_name == "WGPUConstantEntry"
+        && c.count_and_pointer
+}
+
+fn emit_string_double_record_local(output: &mut String, name: &str, local: &str, value: &str) {
+    let _ = writeln!(
+        output,
+        "    let {local} = if E::is_undefined(cx, {value}) {{"
+    );
+    output.push_str("        &[][..]\n    } else {\n");
+    let _ = writeln!(
+        output,
+        "        let names = E::own_property_names(cx, {value})?;"
+    );
+    let _ = writeln!(
+        output,
+        "        let mut converted = Vec::with_capacity(names.len());"
+    );
+    output.push_str("        for key in names {\n");
+    let _ = writeln!(
+        output,
+        "            let item = E::get_property(cx, {value}, &key)?;"
+    );
+    let _ = writeln!(
+        output,
+        "            let value = restricted_f64::<E>(cx, item, \"{name}\")?;"
+    );
+    output.push_str("            let key = arena.alloc_str(&key);\n");
+    output.push_str("            converted.push(WGPUConstantEntry {\n");
+    output.push_str("                nextInChain: ptr::null_mut(),\n");
+    output.push_str("                key: WGPUStringView::from_bytes(key.as_bytes()),\n");
+    output.push_str("                value,\n");
+    output.push_str("            });\n");
+    output.push_str("        }\n");
+    output.push_str("        arena.alloc_slice(converted)\n");
+    output.push_str("    };\n");
 }
 
 fn descriptor_needs_static(

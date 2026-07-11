@@ -431,6 +431,8 @@ pub trait JsEngine: Sized {
     fn type_error(cx: Self::Context<'_>, message: &str) -> Self::Error;
     /// Creates a synchronous JavaScript operation error.
     fn operation_error(cx: Self::Context<'_>, message: &str) -> Self::Error;
+    /// Creates a synchronous JavaScript range error.
+    fn range_error(cx: Self::Context<'_>, message: &str) -> Self::Error;
     /// Creates a named rejection error object from a scoped context.
     fn async_error_value(cx: Self::Context<'_>, name: &str, message: &str) -> Self::Value;
     /// Converts an already-created engine error into a rejection value.
@@ -1063,6 +1065,7 @@ pub unsafe fn tick<E: JsEngine + 'static>(
 /// Payload stored by a `GPUDevice` wrapper.
 pub struct DevicePayload<E: JsEngine + 'static> {
     device: WGPUDevice,
+    destroyed: AtomicBool,
     queue: HeldValue<E>,
     features: HeldValue<E>,
     limits: HeldValue<E>,
@@ -1070,10 +1073,39 @@ pub struct DevicePayload<E: JsEngine + 'static> {
     events: Arc<DeviceEventState<E>>,
 }
 
+fn promise_operation<E: JsEngine>(
+    cx: E::Context<'_>,
+    operation: impl FnOnce(&mut Option<Deferred<E>>) -> Result<(), E::Error>,
+) -> Result<E::Value, E::Error> {
+    let (promise, deferred) = E::new_promise(cx)?;
+    let mut deferred = Some(deferred);
+    match operation(&mut deferred) {
+        Ok(()) => {
+            if let Some(deferred) = deferred.take() {
+                E::release_deferred(cx, deferred);
+                return Err(E::operation_error(
+                    cx,
+                    "promise operation did not retain its deferred",
+                ));
+            }
+            Ok(promise)
+        }
+        Err(error) => {
+            let Some(deferred) = deferred.take() else {
+                return Err(error);
+            };
+            let reason = E::error_value_from_error(cx, error);
+            E::settle_deferreds(cx, vec![(deferred, Err(reason))])?;
+            Ok(promise)
+        }
+    }
+}
+
 impl<E: JsEngine + 'static> DevicePayload<E> {
     fn new(device: WGPUDevice, events: Arc<DeviceEventState<E>>) -> Self {
         Self {
             device,
+            destroyed: AtomicBool::new(false),
             queue: HeldValue::empty(),
             features: HeldValue::empty(),
             limits: HeldValue::empty(),
@@ -2742,28 +2774,29 @@ pub fn device_pop_error_scope<E: JsEngine + 'static>(
     this: E::Value,
     _args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
-    let device = device_handle::<E>(cx, this)?;
-    let (promise, deferred) = E::new_promise(cx)?;
-    let mut request = Box::new(PopErrorScopeRequest::<E> {
-        deferred: Some(deferred),
-        settlements: Arc::clone(E::environment(cx).settlements()),
-        _registration: None,
-    });
-    request._registration = Some(E::register_deferred(
-        cx,
-        NonNull::from(&mut request.deferred),
-    ));
-    let info = WGPUPopErrorScopeCallbackInfo {
-        nextInChain: ptr::null_mut(),
-        mode: WGPUCallbackMode_WGPUCallbackMode_AllowProcessEvents,
-        callback: Some(pop_error_scope_callback::<E>),
-        userdata1: Box::into_raw(request).cast(),
-        userdata2: ptr::null_mut(),
-    };
-    unsafe {
-        (E::environment(cx).gpu().device_pop_error_scope)(device, info);
-    }
-    Ok(promise)
+    promise_operation::<E>(cx, |deferred| {
+        let device = device_handle::<E>(cx, this)?;
+        let mut request = Box::new(PopErrorScopeRequest::<E> {
+            deferred: deferred.take(),
+            settlements: Arc::clone(E::environment(cx).settlements()),
+            _registration: None,
+        });
+        request._registration = Some(E::register_deferred(
+            cx,
+            NonNull::from(&mut request.deferred),
+        ));
+        let info = WGPUPopErrorScopeCallbackInfo {
+            nextInChain: ptr::null_mut(),
+            mode: WGPUCallbackMode_WGPUCallbackMode_AllowProcessEvents,
+            callback: Some(pop_error_scope_callback::<E>),
+            userdata1: Box::into_raw(request).cast(),
+            userdata2: ptr::null_mut(),
+        };
+        unsafe {
+            (E::environment(cx).gpu().device_pop_error_scope)(device, info);
+        }
+        Ok(())
+    })
 }
 
 /// Implements `GPUDevice.createBuffer`.
@@ -2786,6 +2819,12 @@ pub fn device_create_buffer<E: JsEngine + 'static>(
 
     let arena = Arena::new();
     let converted = convert_buffer_descriptor::<E>(cx, descriptor, &arena)?;
+    if converted.mapped_at_creation && converted.size % 4 != 0 {
+        return Err(E::range_error(
+            cx,
+            "mappedAtCreation buffer size must be a multiple of 4",
+        ));
+    }
     let env = E::environment(cx);
     let gpu = env.gpu();
     let native = WGPUBufferDescriptor {
@@ -2894,43 +2933,63 @@ pub fn query_set_destroy<E: JsEngine + 'static>(
     Ok(E::undefined(cx))
 }
 
+/// Implements `GPUDevice.destroy`; native destruction is distinct from wrapper release.
+pub fn device_destroy<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    _args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let payload = device_wrapper_payload::<E>(cx, this)?;
+    if !payload.destroyed.swap(true, Ordering::AcqRel) {
+        unsafe {
+            (E::environment(cx).gpu().device_destroy)(payload.device);
+        }
+    }
+    Ok(E::undefined(cx))
+}
+
 /// Implements `GPU.requestAdapter`.
 pub fn gpu_request_adapter<E: JsEngine + 'static>(
     cx: E::Context<'_>,
     this: E::Value,
     _args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
-    let Some(payload) =
-        E::payload(cx, this, GPU_CLASS).and_then(|payload| payload.downcast_ref::<GpuPayload>())
-    else {
-        return Err(E::type_error(
+    promise_operation::<E>(cx, |deferred| {
+        let Some(payload) = E::payload(cx, this, GPU_CLASS)
+            .and_then(|payload| payload.downcast_ref::<GpuPayload>())
+        else {
+            return Err(E::type_error(
+                cx,
+                "GPU.requestAdapter called on an incompatible object",
+            ));
+        };
+        let mut request = Box::new(AdapterRequest::<E> {
+            deferred: deferred.take(),
+            settlements: Arc::clone(E::environment(cx).settlements()),
+            release_queue: Arc::clone(E::environment(cx).queue()),
+            gpu: E::environment(cx).gpu(),
+            _registration: None,
+        });
+        request._registration = Some(E::register_deferred(
             cx,
-            "GPU.requestAdapter called on an incompatible object",
+            NonNull::from(&mut request.deferred),
         ));
-    };
-    let (promise, deferred) = E::new_promise(cx)?;
-    let mut request = Box::new(AdapterRequest::<E> {
-        deferred: Some(deferred),
-        settlements: Arc::clone(E::environment(cx).settlements()),
-        release_queue: Arc::clone(E::environment(cx).queue()),
-        gpu: E::environment(cx).gpu(),
-        _registration: None,
-    });
-    request._registration = Some(E::register_deferred(
-        cx,
-        NonNull::from(&mut request.deferred),
-    ));
-    let info = WGPURequestAdapterCallbackInfo {
-        nextInChain: ptr::null_mut(),
-        mode: WGPUCallbackMode_WGPUCallbackMode_AllowProcessEvents,
-        callback: Some(request_adapter_callback::<E>),
-        userdata1: Box::into_raw(request).cast(),
-        userdata2: ptr::null_mut(),
-    };
-    unsafe {
-        (E::environment(cx).gpu().instance_request_adapter)(payload.instance, ptr::null(), info);
-    }
-    Ok(promise)
+        let info = WGPURequestAdapterCallbackInfo {
+            nextInChain: ptr::null_mut(),
+            mode: WGPUCallbackMode_WGPUCallbackMode_AllowProcessEvents,
+            callback: Some(request_adapter_callback::<E>),
+            userdata1: Box::into_raw(request).cast(),
+            userdata2: ptr::null_mut(),
+        };
+        unsafe {
+            (E::environment(cx).gpu().instance_request_adapter)(
+                payload.instance,
+                ptr::null(),
+                info,
+            );
+        }
+        Ok(())
+    })
 }
 
 /// Implements `GPUAdapter.requestDevice`.
@@ -2939,6 +2998,17 @@ pub fn adapter_request_device<E: JsEngine + 'static>(
     this: E::Value,
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
+    promise_operation::<E>(cx, |deferred| {
+        adapter_request_device_inner::<E>(cx, this, args, deferred)
+    })
+}
+
+fn adapter_request_device_inner<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    args: &[E::Value],
+    deferred: &mut Option<Deferred<E>>,
+) -> Result<(), E::Error> {
     let Some(payload) = E::payload(cx, this, GPU_ADAPTER_CLASS)
         .and_then(|payload| payload.downcast_ref::<AdapterPayload<E>>())
     else {
@@ -2969,11 +3039,10 @@ pub fn adapter_request_device<E: JsEngine + 'static>(
         .iter()
         .find(|name| !is_known_required_limit(name))
     {
-        let (promise, deferred) = E::new_promise(cx)?;
-        let message = format!("unknown required limit: {name}");
-        let error = E::async_error_value(cx, "OperationError", &message);
-        E::settle_deferreds(cx, vec![(deferred, Err(error))])?;
-        return Ok(promise);
+        return Err(E::operation_error(
+            cx,
+            &format!("unknown required limit: {name}"),
+        ));
     }
     let (mut required_limits, mut compatibility_limits) =
         convert_required_limits::<E>(cx, required_limits_value, &required_limit_names)?;
@@ -2992,10 +3061,9 @@ pub fn adapter_request_device<E: JsEngine + 'static>(
         ptr::from_ref(&required_limits)
     };
 
-    let (promise, deferred) = E::new_promise(cx)?;
     let events = DeviceEventState::<E>::new(Arc::clone(E::environment(cx).settlements()));
     let mut request = Box::new(DeviceRequest::<E> {
-        deferred: Some(deferred),
+        deferred: deferred.take(),
         settlements: Arc::clone(E::environment(cx).settlements()),
         release_queue: Arc::clone(E::environment(cx).queue()),
         gpu: E::environment(cx).gpu(),
@@ -3050,7 +3118,7 @@ pub fn adapter_request_device<E: JsEngine + 'static>(
             info,
         );
     }
-    Ok(promise)
+    Ok(())
 }
 
 /// Implements `GPUBuffer.mapAsync`.
@@ -3059,6 +3127,17 @@ pub fn buffer_map_async<E: JsEngine + 'static>(
     this: E::Value,
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
+    promise_operation::<E>(cx, |deferred| {
+        buffer_map_async_inner::<E>(cx, this, args, deferred)
+    })
+}
+
+fn buffer_map_async_inner<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    args: &[E::Value],
+    deferred: &mut Option<Deferred<E>>,
+) -> Result<(), E::Error> {
     let mode_value = args
         .first()
         .copied()
@@ -3089,9 +3168,8 @@ pub fn buffer_map_async<E: JsEngine + 'static>(
         }
         (state.buffer, Arc::clone(&payload.state))
     };
-    let (promise, deferred) = E::new_promise(cx)?;
     let mut request = Box::new(MapRequest::<E> {
-        deferred: Some(deferred),
+        deferred: deferred.take(),
         settlements: Arc::clone(E::environment(cx).settlements()),
         _registration: None,
         mode,
@@ -3111,7 +3189,7 @@ pub fn buffer_map_async<E: JsEngine + 'static>(
     unsafe {
         (E::environment(cx).gpu().buffer_map_async)(buffer, mode, offset, size, info);
     }
-    Ok(promise)
+    Ok(())
 }
 
 /// Implements `GPUBuffer.getMappedRange`.
@@ -4276,35 +4354,36 @@ pub fn queue_on_submitted_work_done<E: JsEngine + 'static>(
     this: E::Value,
     _args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
-    let Some(queue_payload) = E::payload(cx, this, GPU_QUEUE_CLASS)
-        .and_then(|payload| payload.downcast_ref::<QueuePayload>())
-    else {
-        return Err(E::type_error(
+    promise_operation::<E>(cx, |deferred| {
+        let Some(queue_payload) = E::payload(cx, this, GPU_QUEUE_CLASS)
+            .and_then(|payload| payload.downcast_ref::<QueuePayload>())
+        else {
+            return Err(E::type_error(
+                cx,
+                "GPUQueue.onSubmittedWorkDone called on an incompatible object",
+            ));
+        };
+        let mut request = Box::new(QueueWorkDoneRequest::<E> {
+            deferred: deferred.take(),
+            settlements: Arc::clone(E::environment(cx).settlements()),
+            _registration: None,
+        });
+        request._registration = Some(E::register_deferred(
             cx,
-            "GPUQueue.onSubmittedWorkDone called on an incompatible object",
+            NonNull::from(&mut request.deferred),
         ));
-    };
-    let (promise, deferred) = E::new_promise(cx)?;
-    let mut request = Box::new(QueueWorkDoneRequest::<E> {
-        deferred: Some(deferred),
-        settlements: Arc::clone(E::environment(cx).settlements()),
-        _registration: None,
-    });
-    request._registration = Some(E::register_deferred(
-        cx,
-        NonNull::from(&mut request.deferred),
-    ));
-    let info = WGPUQueueWorkDoneCallbackInfo {
-        nextInChain: ptr::null_mut(),
-        mode: WGPUCallbackMode_WGPUCallbackMode_AllowProcessEvents,
-        callback: Some(queue_work_done_callback::<E>),
-        userdata1: Box::into_raw(request).cast(),
-        userdata2: ptr::null_mut(),
-    };
-    unsafe {
-        (E::environment(cx).gpu().queue_on_submitted_work_done)(queue_payload.queue, info);
-    }
-    Ok(promise)
+        let info = WGPUQueueWorkDoneCallbackInfo {
+            nextInChain: ptr::null_mut(),
+            mode: WGPUCallbackMode_WGPUCallbackMode_AllowProcessEvents,
+            callback: Some(queue_work_done_callback::<E>),
+            userdata1: Box::into_raw(request).cast(),
+            userdata2: ptr::null_mut(),
+        };
+        unsafe {
+            (E::environment(cx).gpu().queue_on_submitted_work_done)(queue_payload.queue, info);
+        }
+        Ok(())
+    })
 }
 
 /// Implements `GPUCommandEncoder.copyBufferToBuffer`.

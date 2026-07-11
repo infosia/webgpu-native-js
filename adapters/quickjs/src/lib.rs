@@ -1275,6 +1275,12 @@ impl core::JsEngine for Engine {
         set_error_name(cx, error, "OperationError")
     }
 
+    fn range_error(cx: Self::Context<'_>, message: &str) -> Self::Error {
+        let _ = throw_message(cx.ctx, message, false);
+        let error = take_exception_value(cx);
+        set_error_name(cx, error, "RangeError")
+    }
+
     fn async_error_value(cx: Self::Context<'_>, name: &str, message: &str) -> Self::Value {
         let error = unsafe { qjs::JS_NewError(cx.ctx) };
         if unsafe { qjs::JS_IsException(error) } {
@@ -2402,8 +2408,10 @@ mod tests {
 
     static COUNTED_BUFFER_RELEASES: AtomicUsize = AtomicUsize::new(0);
     static COUNTED_SAMPLER_RELEASES: AtomicUsize = AtomicUsize::new(0);
+    type RecordedConstants = Vec<(Vec<u8>, f64)>;
     thread_local! {
         static RECORDED_ENTRY_POINTS: RefCell<Vec<Option<Vec<u8>>>> = const { RefCell::new(Vec::new()) };
+        static RECORDED_CONSTANTS: RefCell<Vec<RecordedConstants>> = const { RefCell::new(Vec::new()) };
     }
 
     #[test]
@@ -3645,6 +3653,24 @@ mod tests {
             )
         };
         RECORDED_ENTRY_POINTS.with(|values| values.borrow_mut().push(entry_point));
+        let compute = unsafe { &(*descriptor).compute };
+        let constants = if compute.constantCount == 0 {
+            assert!(compute.constants.is_null());
+            Vec::new()
+        } else {
+            assert!(!compute.constants.is_null());
+            unsafe { std::slice::from_raw_parts(compute.constants, compute.constantCount) }
+                .iter()
+                .map(|entry| {
+                    let key = unsafe {
+                        std::slice::from_raw_parts(entry.key.data.cast::<u8>(), entry.key.length)
+                    }
+                    .to_vec();
+                    (key, entry.value)
+                })
+                .collect()
+        };
+        RECORDED_CONSTANTS.with(|values| values.borrow_mut().push(constants));
         1usize as core::WGPUComputePipeline
     }
 
@@ -4243,18 +4269,6 @@ mod tests {
                     }
                 }
 
-                error = undefined;
-                try {
-                    device.createComputePipeline({
-                        layout: 'auto',
-                        compute: { module, constants: {} }
-                    });
-                } catch (caught) { error = caught; }
-                if (!(error instanceof TypeError) ||
-                    error.message !== 'constants are not supported yet') {
-                    throw new Error('constants error was not named: ' + error);
-                }
-
                 const encoder = device.createCommandEncoder();
                 error = undefined;
                 try { encoder.beginComputePass({ timestampWrites: {} }); }
@@ -4276,6 +4290,7 @@ mod tests {
     fn entry_point_null_reaches_c_as_the_string_null_from_script() {
         let setup = native_setup();
         RECORDED_ENTRY_POINTS.with(|values| values.borrow_mut().clear());
+        RECORDED_CONSTANTS.with(|values| values.borrow_mut().clear());
         let runtime =
             Runtime::new_with_dispatch(entry_point_recording_dispatch()).expect("quickjs runtime");
         let wrapped = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
@@ -4294,14 +4309,42 @@ mod tests {
                 device.createComputePipeline({
                     layout: 'auto', compute: { module: entryPointModule, entryPoint: null }
                 });
+                device.createComputePipeline({
+                    layout: 'auto',
+                    compute: { module: entryPointModule, constants: { alpha: 1.5, beta: -2 } }
+                });
+                device.createComputePipeline({
+                    layout: 'auto', compute: { module: entryPointModule, constants: {} }
+                });
+                var constantError;
+                try {
+                    device.createComputePipeline({
+                        layout: 'auto',
+                        compute: { module: entryPointModule, constants: { bad: 'not-a-number' } }
+                    });
+                } catch (error) { constantError = error; }
+                if (!(constantError instanceof TypeError)) {
+                    throw new Error('non-numeric pipeline constant did not throw TypeError');
+                }
             "#,
             "entry-point-null.js",
         );
         RECORDED_ENTRY_POINTS.with(|values| {
             assert_eq!(
                 values.borrow().as_slice(),
-                &[None, Some(b"null".to_vec())],
+                &[None, Some(b"null".to_vec()), None, None],
                 "script omission and present null must reach distinct C string views"
+            );
+        });
+        RECORDED_CONSTANTS.with(|values| {
+            assert_eq!(
+                values.borrow().as_slice(),
+                &[
+                    Vec::new(),
+                    Vec::new(),
+                    vec![(b"alpha".to_vec(), 1.5), (b"beta".to_vec(), -2.0)],
+                    Vec::new(),
+                ]
             );
         });
         runtime.clear_global("device").expect("clear device");
@@ -5224,6 +5267,142 @@ mod tests {
     }
 
     #[test]
+    fn mapped_at_creation_size_two_throws_named_range_error_synchronously() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let wrapped = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("device", wrapped)
+            .expect("set device");
+        eval_drop(
+            &runtime,
+            r#"
+                var error;
+                try {
+                    device.createBuffer({ size: 2, usage: 2, mappedAtCreation: true });
+                } catch (caught) { error = caught; }
+                if (!error || error.name !== 'RangeError' ||
+                    error.message !== 'mappedAtCreation buffer size must be a multiple of 4') {
+                    throw new Error('size-2 mappedAtCreation error mismatch: ' + error);
+                }
+            "#,
+            "mapped-at-creation-range-error.js",
+        );
+        runtime.clear_global("device").expect("clear device");
+        runtime.run_gc();
+        let _ = runtime.drain_releases().expect("drain");
+    }
+
+    #[test]
+    fn promise_operations_reject_instead_of_throwing_and_destroyed_map_message_is_stable() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let gpu = unsafe { runtime.wrap_gpu(setup.instance) }.expect("wrap gpu");
+        let device = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime.set_global_value("gpu", gpu).expect("set gpu");
+        runtime
+            .set_global_value("device", device)
+            .expect("set device");
+        eval_drop(
+            &runtime,
+            r#"
+                var promiseAuditDone = false;
+                function mustReject(call, name, message, label) {
+                    var promise;
+                    try { promise = call(); }
+                    catch (error) { throw new Error(label + ' threw synchronously: ' + error); }
+                    if (!(promise instanceof Promise)) {
+                        throw new Error(label + ' did not return a Promise');
+                    }
+                    return promise.then(
+                        function () { throw new Error(label + ' unexpectedly resolved'); },
+                        function (error) {
+                            if (error.name !== name ||
+                                (message !== undefined && error.message !== message)) {
+                                throw new Error(label + ' rejection mismatch: ' +
+                                    error.name + ':' + error.message);
+                            }
+                        }
+                    );
+                }
+
+                var destroyed = device.createBuffer({ size: 4, usage: 1 });
+                destroyed.destroy();
+                var live = device.createBuffer({ size: 4, usage: 1 });
+                gpu.requestAdapter().then(function (adapter) {
+                    return Promise.all([
+                        mustReject(function () { return gpu.requestAdapter.call({}); },
+                            'TypeError', 'GPU.requestAdapter called on an incompatible object',
+                            'requestAdapter receiver'),
+                        mustReject(function () {
+                            return adapter.requestDevice({ requiredFeatures: ['not-a-feature'] });
+                        }, 'TypeError', 'GPUFeatureName', 'requestDevice argument'),
+                        mustReject(function () { return device.popErrorScope.call({}); },
+                            'TypeError', 'GPUDevice method called on an incompatible object',
+                            'popErrorScope receiver'),
+                        mustReject(function () {
+                            return device.queue.onSubmittedWorkDone.call({});
+                        }, 'TypeError',
+                            'GPUQueue.onSubmittedWorkDone called on an incompatible object',
+                            'onSubmittedWorkDone receiver'),
+                        mustReject(function () { return live.mapAsync(); },
+                            'TypeError', 'GPUMapModeFlags is required', 'mapAsync argument'),
+                        mustReject(function () { return destroyed.mapAsync(1, 0, 4); },
+                            'OperationError', 'GPUBuffer is destroyed', 'mapAsync destroyed')
+                    ]);
+                }).then(function () {
+                    live.destroy();
+                    promiseAuditDone = true;
+                });
+            "#,
+            "promise-rejection-audit.js",
+        );
+        tick_until(&runtime, setup.instance, 5000, || {
+            global_bool(&runtime, "promiseAuditDone")
+        });
+        runtime.clear_global("gpu").expect("clear gpu");
+        runtime.clear_global("device").expect("clear device");
+        runtime.run_gc();
+        let _ = runtime.drain_releases().expect("drain");
+    }
+
+    #[test]
+    fn device_destroy_then_new_request_device_resolves() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let gpu = unsafe { runtime.wrap_gpu(setup.instance) }.expect("wrap gpu");
+        runtime.set_global_value("gpu", gpu).expect("set gpu");
+        eval_drop(
+            &runtime,
+            r#"
+                var destroyRecoveryDone = false;
+                gpu.requestAdapter().then(function (adapter) {
+                    return adapter.requestDevice();
+                }).then(function (first) {
+                    first.destroy();
+                    first.destroy();
+                    return gpu.requestAdapter();
+                }).then(function (newAdapter) {
+                    return newAdapter.requestDevice();
+                }).then(function (second) {
+                    if (!second || typeof second.destroy !== 'function') {
+                        throw new Error('new requestDevice did not return a device');
+                    }
+                    second.destroy();
+                    destroyRecoveryDone = true;
+                });
+            "#,
+            "device-destroy-recovery.js",
+        );
+        tick_until(&runtime, setup.instance, 5000, || {
+            global_bool(&runtime, "destroyRecoveryDone")
+        });
+        runtime.clear_global("gpu").expect("clear gpu");
+        runtime.run_gc();
+        let _ = runtime.drain_releases().expect("drain");
+    }
+
+    #[test]
     fn request_device_plumbs_timestamp_feature_and_creates_timestamp_query_set() {
         let setup = native_setup();
         let runtime = Runtime::new().expect("quickjs runtime");
@@ -5237,13 +5416,15 @@ mod tests {
                     if (!adapter.features.has('timestamp-query')) {
                         throw new Error('timestamp-query was not advertised');
                     }
-                    var unknownFeatureWasTypeError = false;
-                    try { adapter.requestDevice({ requiredFeatures: ['not-a-feature'] }); }
-                    catch (error) { unknownFeatureWasTypeError = error instanceof TypeError; }
-                    if (!unknownFeatureWasTypeError) {
-                        throw new Error('unknown feature did not throw TypeError');
-                    }
-                    return adapter.requestDevice({ requiredLimits: { notALimit: 1 } }).then(
+                    return adapter.requestDevice({ requiredFeatures: ['not-a-feature'] }).then(
+                        function () { throw new Error('unknown feature unexpectedly resolved'); },
+                        function (error) {
+                            if (!(error instanceof TypeError) || error.message !== 'GPUFeatureName') {
+                                throw new Error('unknown feature did not reject TypeError');
+                            }
+                            return adapter.requestDevice({ requiredLimits: { notALimit: 1 } });
+                        }
+                    ).then(
                         function () { throw new Error('unknown limit unexpectedly resolved'); },
                         function (error) {
                             if (error.name !== 'OperationError') {

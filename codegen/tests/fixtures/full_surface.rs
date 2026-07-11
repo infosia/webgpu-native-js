@@ -57,6 +57,8 @@ pub struct GpuDispatch {
     pub device_create_render_bundle_encoder: unsafe fn(WGPUDevice, *const WGPURenderBundleEncoderDescriptor) -> WGPURenderBundleEncoder,
     /// `wgpuDeviceGetQueue`.
     pub device_get_queue: unsafe fn(WGPUDevice) -> WGPUQueue,
+    /// `wgpuDeviceDestroy`.
+    pub device_destroy: unsafe fn(WGPUDevice),
     /// `wgpuDevicePushErrorScope`.
     pub device_push_error_scope: unsafe fn(WGPUDevice, WGPUErrorFilter),
     /// `wgpuDevicePopErrorScope`.
@@ -269,6 +271,7 @@ macro_rules! for_each_gpu_dispatch_entry {
             (device_create_command_encoder, wgpuDeviceCreateCommandEncoder, unsafe fn(device: $crate::WGPUDevice, descriptor: *const $crate::WGPUCommandEncoderDescriptor) -> $crate::WGPUCommandEncoder),
             (device_create_render_bundle_encoder, wgpuDeviceCreateRenderBundleEncoder, unsafe fn(device: $crate::WGPUDevice, descriptor: *const $crate::WGPURenderBundleEncoderDescriptor) -> $crate::WGPURenderBundleEncoder),
             (device_get_queue, wgpuDeviceGetQueue, unsafe fn(device: $crate::WGPUDevice) -> $crate::WGPUQueue),
+            (device_destroy, wgpuDeviceDestroy, unsafe fn(device: $crate::WGPUDevice)),
             (device_push_error_scope, wgpuDevicePushErrorScope, unsafe fn(device: $crate::WGPUDevice, filter: $crate::WGPUErrorFilter)),
             (device_pop_error_scope, wgpuDevicePopErrorScope, unsafe fn(device: $crate::WGPUDevice, callback_info: $crate::WGPUPopErrorScopeCallbackInfo) -> $crate::WGPUFuture),
             (buffer_add_ref, wgpuBufferAddRef, unsafe fn(buffer: $crate::WGPUBuffer)),
@@ -1964,16 +1967,29 @@ pub(super) fn convert_programmable_stage<E: JsEngine + 'static>(
     let module_value = required_member::<E>(cx, value, "module")?;
     let entry_point_value = dictionary_member::<E>(cx, value, "entryPoint")?;
     let constants_value = dictionary_member::<E>(cx, value, "constants")?;
-    // Policy skip: reject present unsupported API instead of ignoring it.
-    if !E::is_undefined(cx, constants_value) {
-        return Err(E::type_error(cx, "constants are not supported yet"));
-    }
     let module = shader_module_handle::<E>(cx, module_value)?;
     // B4: optional non-nullable strings preserve absence; present null is stringified.
     let entry_point = if E::is_undefined(cx, entry_point_value) {
         None
     } else {
         Some(E::to_str(cx, entry_point_value, arena)?)
+    };
+    let constants = if E::is_undefined(cx, constants_value) {
+        &[][..]
+    } else {
+        let names = E::own_property_names(cx, constants_value)?;
+        let mut converted = Vec::with_capacity(names.len());
+        for key in names {
+            let item = E::get_property(cx, constants_value, &key)?;
+            let value = restricted_f64::<E>(cx, item, "constants")?;
+            let key = arena.alloc_str(&key);
+            converted.push(WGPUConstantEntry {
+                nextInChain: ptr::null_mut(),
+                key: WGPUStringView::from_bytes(key.as_bytes()),
+                value,
+            });
+        }
+        arena.alloc_slice(converted)
     };
     Ok(WGPUComputeState {
         nextInChain: ptr::null_mut(),
@@ -1982,9 +1998,12 @@ pub(super) fn convert_programmable_stage<E: JsEngine + 'static>(
             || WGPUStringView { data: ptr::null(), length: wgpu_strlen() },
             |value| WGPUStringView::from_bytes(value.as_bytes()),
         ),
-        // Policy skip: recorded deferral: pipeline constants are outside the block 01-03 surface.
-        constantCount: 0,
-        constants: ptr::null(),
+        constantCount: constants.len(),
+        constants: if constants.is_empty() {
+            ptr::null()
+        } else {
+            constants.as_ptr()
+        },
     })
 }
 
@@ -2149,10 +2168,6 @@ pub(super) fn convert_vertex_state<E: JsEngine + 'static>(
     let module_value = required_member::<E>(cx, value, "module")?;
     let entry_point_value = dictionary_member::<E>(cx, value, "entryPoint")?;
     let constants_value = dictionary_member::<E>(cx, value, "constants")?;
-    // Policy skip: reject present unsupported API instead of ignoring it.
-    if !E::is_undefined(cx, constants_value) {
-        return Err(E::type_error(cx, "constants are not supported yet"));
-    }
     let buffers_value = dictionary_member::<E>(cx, value, "buffers")?;
     let module = shader_module_handle::<E>(cx, module_value)?;
     // B4: optional non-nullable strings preserve absence; present null is stringified.
@@ -2160,6 +2175,23 @@ pub(super) fn convert_vertex_state<E: JsEngine + 'static>(
         None
     } else {
         Some(E::to_str(cx, entry_point_value, arena)?)
+    };
+    let constants = if E::is_undefined(cx, constants_value) {
+        &[][..]
+    } else {
+        let names = E::own_property_names(cx, constants_value)?;
+        let mut converted = Vec::with_capacity(names.len());
+        for key in names {
+            let item = E::get_property(cx, constants_value, &key)?;
+            let value = restricted_f64::<E>(cx, item, "constants")?;
+            let key = arena.alloc_str(&key);
+            converted.push(WGPUConstantEntry {
+                nextInChain: ptr::null_mut(),
+                key: WGPUStringView::from_bytes(key.as_bytes()),
+                value,
+            });
+        }
+        arena.alloc_slice(converted)
     };
     let buffers = if E::is_undefined(cx, buffers_value) {
         &[][..]
@@ -2182,9 +2214,12 @@ pub(super) fn convert_vertex_state<E: JsEngine + 'static>(
             || WGPUStringView { data: ptr::null(), length: wgpu_strlen() },
             |value| WGPUStringView::from_bytes(value.as_bytes()),
         ),
-        // Policy skip: recorded deferral: pipeline constants are outside the block 09 slice-3 surface.
-        constantCount: 0,
-        constants: ptr::null(),
+        constantCount: constants.len(),
+        constants: if constants.is_empty() {
+            ptr::null()
+        } else {
+            constants.as_ptr()
+        },
         bufferCount: buffers.len(),
         buffers: if buffers.is_empty() {
             ptr::null()
@@ -2818,10 +2853,6 @@ pub(super) fn convert_fragment_state<E: JsEngine + 'static>(
     let module_value = required_member::<E>(cx, value, "module")?;
     let entry_point_value = dictionary_member::<E>(cx, value, "entryPoint")?;
     let constants_value = dictionary_member::<E>(cx, value, "constants")?;
-    // Policy skip: reject present unsupported API instead of ignoring it.
-    if !E::is_undefined(cx, constants_value) {
-        return Err(E::type_error(cx, "constants are not supported yet"));
-    }
     let targets_value = required_member::<E>(cx, value, "targets")?;
     let module = shader_module_handle::<E>(cx, module_value)?;
     // B4: optional non-nullable strings preserve absence; present null is stringified.
@@ -2829,6 +2860,23 @@ pub(super) fn convert_fragment_state<E: JsEngine + 'static>(
         None
     } else {
         Some(E::to_str(cx, entry_point_value, arena)?)
+    };
+    let constants = if E::is_undefined(cx, constants_value) {
+        &[][..]
+    } else {
+        let names = E::own_property_names(cx, constants_value)?;
+        let mut converted = Vec::with_capacity(names.len());
+        for key in names {
+            let item = E::get_property(cx, constants_value, &key)?;
+            let value = restricted_f64::<E>(cx, item, "constants")?;
+            let key = arena.alloc_str(&key);
+            converted.push(WGPUConstantEntry {
+                nextInChain: ptr::null_mut(),
+                key: WGPUStringView::from_bytes(key.as_bytes()),
+                value,
+            });
+        }
+        arena.alloc_slice(converted)
     };
     let targets = {
         let converted = convert_sequence::<E, _>(cx, targets_value, "targets", |item| {
@@ -2849,9 +2897,12 @@ pub(super) fn convert_fragment_state<E: JsEngine + 'static>(
             || WGPUStringView { data: ptr::null(), length: wgpu_strlen() },
             |value| WGPUStringView::from_bytes(value.as_bytes()),
         ),
-        // Policy skip: recorded deferral: pipeline constants are outside the block 09 slice-3 surface.
-        constantCount: 0,
-        constants: ptr::null(),
+        constantCount: constants.len(),
+        constants: if constants.is_empty() {
+            ptr::null()
+        } else {
+            constants.as_ptr()
+        },
         targetCount: targets.len(),
         targets: if targets.is_empty() {
             ptr::null()
@@ -4705,6 +4756,7 @@ pub(super) fn device_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
         ])),
         methods: Box::leak(Box::new([
             MethodSpec { name: "createBuffer", length: 1, call: device_create_buffer::<E> },
+            MethodSpec { name: "destroy", length: 0, call: device_destroy::<E> },
             MethodSpec { name: "pushErrorScope", length: 1, call: device_push_error_scope::<E> },
             MethodSpec { name: "popErrorScope", length: 0, call: device_pop_error_scope::<E> },
             MethodSpec { name: "createShaderModule", length: 1, call: device_create_shader_module::<E> },

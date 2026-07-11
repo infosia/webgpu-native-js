@@ -32,6 +32,7 @@ macro_rules! for_each_gpu_dispatch_entry {
             (device_create_command_encoder, wgpuDeviceCreateCommandEncoder, unsafe fn(device: $crate::WGPUDevice, descriptor: *const $crate::WGPUCommandEncoderDescriptor) -> $crate::WGPUCommandEncoder),
             (device_create_render_bundle_encoder, wgpuDeviceCreateRenderBundleEncoder, unsafe fn(device: $crate::WGPUDevice, descriptor: *const $crate::WGPURenderBundleEncoderDescriptor) -> $crate::WGPURenderBundleEncoder),
             (device_get_queue, wgpuDeviceGetQueue, unsafe fn(device: $crate::WGPUDevice) -> $crate::WGPUQueue),
+            (device_destroy, wgpuDeviceDestroy, unsafe fn(device: $crate::WGPUDevice)),
             (device_push_error_scope, wgpuDevicePushErrorScope, unsafe fn(device: $crate::WGPUDevice, filter: $crate::WGPUErrorFilter)),
             (device_pop_error_scope, wgpuDevicePopErrorScope, unsafe fn(device: $crate::WGPUDevice, callback_info: $crate::WGPUPopErrorScopeCallbackInfo) -> $crate::WGPUFuture),
             (buffer_add_ref, wgpuBufferAddRef, unsafe fn(buffer: $crate::WGPUBuffer)),

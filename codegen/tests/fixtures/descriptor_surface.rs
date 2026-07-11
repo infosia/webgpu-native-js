@@ -146,16 +146,29 @@ pub(super) fn convert_programmable_stage<E: JsEngine + 'static>(
     let module_value = required_member::<E>(cx, value, "module")?;
     let entry_point_value = dictionary_member::<E>(cx, value, "entryPoint")?;
     let constants_value = dictionary_member::<E>(cx, value, "constants")?;
-    // Policy skip: reject present unsupported API instead of ignoring it.
-    if !E::is_undefined(cx, constants_value) {
-        return Err(E::type_error(cx, "constants are not supported yet"));
-    }
     let module = shader_module_handle::<E>(cx, module_value)?;
     // B4: optional non-nullable strings preserve absence; present null is stringified.
     let entry_point = if E::is_undefined(cx, entry_point_value) {
         None
     } else {
         Some(E::to_str(cx, entry_point_value, arena)?)
+    };
+    let constants = if E::is_undefined(cx, constants_value) {
+        &[][..]
+    } else {
+        let names = E::own_property_names(cx, constants_value)?;
+        let mut converted = Vec::with_capacity(names.len());
+        for key in names {
+            let item = E::get_property(cx, constants_value, &key)?;
+            let value = restricted_f64::<E>(cx, item, "constants")?;
+            let key = arena.alloc_str(&key);
+            converted.push(WGPUConstantEntry {
+                nextInChain: ptr::null_mut(),
+                key: WGPUStringView::from_bytes(key.as_bytes()),
+                value,
+            });
+        }
+        arena.alloc_slice(converted)
     };
     Ok(WGPUComputeState {
         nextInChain: ptr::null_mut(),
@@ -164,8 +177,11 @@ pub(super) fn convert_programmable_stage<E: JsEngine + 'static>(
             || WGPUStringView { data: ptr::null(), length: wgpu_strlen() },
             |value| WGPUStringView::from_bytes(value.as_bytes()),
         ),
-        // Policy skip: recorded deferral: pipeline constants are outside the block 01-03 surface.
-        constantCount: 0,
-        constants: ptr::null(),
+        constantCount: constants.len(),
+        constants: if constants.is_empty() {
+            ptr::null()
+        } else {
+            constants.as_ptr()
+        },
     })
 }
