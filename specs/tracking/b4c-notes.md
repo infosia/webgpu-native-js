@@ -748,3 +748,45 @@ same closure to a long-lived object property, looped under `gc()`.
 All temporary instrumentation reverted; tree clean; workspace builds green.
 Instrumentation patches preserved at the session scratchpad
 (`b4c-instrumentation-v{2,3,4}.patch`).
+
+## Session 4 addendum: binding-free JS reproduction fails a third way — the trigger is the C-level tick
+
+Two more targeted pure-JS reproducers, both run under the `FORCE_GC_AT_MALLOC`
+plain `qjs`, both **quiet**:
+
+1. **Signature-exact** (`sig.js`): an async fn whose inner arrow captures a
+   closure across `await` while that same closure is stored as a property of a
+   long-lived object; looped 6,000×. No abort.
+2. **External-settlement interleave** (`sig2.js`): the same shape, but the
+   awaited promises are settled by an EXTERNAL driver loop (mimicking
+   `wgpuInstanceProcessEvents` injecting resolutions mid-tick) interleaved with
+   `await Promise.resolve()` pumps; 6,000 launched. No abort.
+
+That three independent JS shapes — including one matching the victim's exact
+capture/store signature and one mimicking the settlement interleave — all stay
+quiet is itself the finding: **the trigger is not expressible in JS alone.** It
+needs the binding's C-level tick: `JS_ExecutePendingJob` driven in our loop,
+the settlement trampoline calling resolve functions via `JS_Call` from native
+code while native holds the `fns`/`values` array references, and GC able to
+fire at any malloc inside that. A binding-free proof therefore requires a
+minimal **C** harness against the quickjs C API that reproduces this call
+pattern — not a JS script. That is the cleanest remaining path to confirm
+"engine defect" beyond doubt, and it doubles as the fork's regression test.
+
+**Consolidated status of B-4c:**
+- Reproduction: fast and deterministic under `FORCE_GC_AT_MALLOC` in the real
+  runner (single CTS case).
+- Localization: a JS closure co-owned by a var_ref and an object property is
+  under-counted by exactly one under GC pressure; all frames engine-internal.
+- Scope: present on v0.15.0/v0.15.1/master; heap-clean (Guard Malloc); three
+  binding value-handling surfaces exonerated by deletion experiments.
+- Open: (a) catch the exact extra `JS_FreeValue` (value-pinned trap), (b) a
+  C-API harness for the binding-free proof, (c) then fork + fix + regression
+  test + submodule repoint.
+
+Given the depth, this is a decision point for the owner: continue the
+engine-internal reduction (multi-session, needs a C harness), or land the
+**Phase-B mitigation** first — mark the known-crashing case family as
+engine-crash skips in `expectations.txt` so validation suites can grow around
+them — which delivers unblocking value while the engine fix proceeds as a
+tracked workstream in the (already-approved) fork.
