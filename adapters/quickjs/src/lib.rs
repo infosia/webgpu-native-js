@@ -7,6 +7,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::path::{Path, PathBuf};
 use std::ptr::{self, NonNull};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -92,6 +93,13 @@ pub enum Error {
     Exception(String),
     /// A Rust string could not be represented as a C string.
     Nul(std::ffi::NulError),
+    /// A module source file could not be read.
+    Io {
+        /// The module path that failed.
+        path: PathBuf,
+        /// The underlying filesystem error.
+        source: std::io::Error,
+    },
 }
 
 impl From<std::ffi::NulError> for Error {
@@ -105,6 +113,48 @@ pub struct Runtime {
     rt: NonNull<qjs::JSRuntime>,
     ctx: NonNull<qjs::JSContext>,
     state: Rc<State>,
+}
+
+/// Observable completion state of an ES module evaluation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ModuleEvaluationStatus {
+    /// Evaluation is suspended, normally at top-level `await`.
+    Pending,
+    /// Evaluation completed successfully.
+    Fulfilled,
+}
+
+/// An owned QuickJS module-evaluation promise.
+///
+/// Pending evaluation advances when the runtime's [`Runtime::tick`] method
+/// drains QuickJS jobs. Dropping this handle releases the promise value.
+pub struct ModuleEvaluation<'runtime> {
+    runtime: &'runtime Runtime,
+    promise: qjs::JSValue,
+}
+
+impl std::fmt::Debug for ModuleEvaluation<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ModuleEvaluation")
+            .finish_non_exhaustive()
+    }
+}
+
+impl ModuleEvaluation<'_> {
+    /// Returns the current evaluation state.
+    ///
+    /// A rejected evaluation is returned as an owned adapter exception rather
+    /// than as a third state, matching other failing adapter operations.
+    pub fn status(&self) -> Result<ModuleEvaluationStatus> {
+        module_evaluation_status(self.runtime, self.promise)
+    }
+}
+
+impl Drop for ModuleEvaluation<'_> {
+    fn drop(&mut self) {
+        unsafe { qjs::JS_FreeValue(self.runtime.raw_context(), self.promise) };
+    }
 }
 
 /// Send + Sync producer handle for events on adopted devices.
@@ -159,6 +209,12 @@ impl Runtime {
         let raw_state = Rc::into_raw(Rc::clone(&state)).cast::<c_void>().cast_mut();
         unsafe {
             qjs::JS_SetRuntimeOpaque(rt.as_ptr(), raw_state);
+            qjs::JS_SetModuleLoaderFunc(
+                rt.as_ptr(),
+                Some(module_normalize),
+                Some(module_loader),
+                raw_state,
+            );
             qjs::JS_SetHostPromiseRejectionTracker(
                 rt.as_ptr(),
                 Some(promise_rejection_tracker),
@@ -375,6 +431,69 @@ impl Runtime {
         }
     }
 
+    /// Maps an exact ES module specifier to a host-owned source file.
+    ///
+    /// Relative alias paths are anchored to the host's current directory at
+    /// registration time. Alias lookup precedes file-relative resolution.
+    pub fn set_module_alias(&self, specifier: &str, path: &Path) -> Result<()> {
+        if specifier.as_bytes().contains(&0) {
+            return Err(Error::Nul(CString::new(specifier).unwrap_err()));
+        }
+        let path = absolute_path(path).map_err(|source| Error::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        self.state
+            .module_aliases
+            .borrow_mut()
+            .insert(specifier.to_owned(), path);
+        Ok(())
+    }
+
+    /// Reads and evaluates a file as an ES module.
+    ///
+    /// QuickJS returns a promise for module evaluation. A synchronously
+    /// rejected evaluation is returned immediately as [`Error::Exception`].
+    /// Otherwise the returned handle reports `Pending` until callers pump
+    /// [`Runtime::tick`], or `Fulfilled` after evaluation completes.
+    pub fn eval_module(&self, path: &Path) -> Result<ModuleEvaluation<'_>> {
+        let path = absolute_path(path).map_err(|source| Error::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let source = std::fs::read_to_string(&path).map_err(|source| Error::Io {
+            path: path.clone(),
+            source,
+        })?;
+        let input = CString::new(source.as_bytes())?;
+        let name_text = path.to_string_lossy();
+        let name = CString::new(name_text.as_bytes())?;
+        let promise = unsafe {
+            qjs::JS_Eval(
+                self.raw_context(),
+                input.as_ptr(),
+                source.len(),
+                name.as_ptr(),
+                qjs::JS_EVAL_TYPE_MODULE as c_int,
+            )
+        };
+        if unsafe { qjs::JS_IsException(promise) } {
+            return Err(Error::Exception(take_exception(
+                self.raw_context(),
+                "JS_Eval module",
+            )));
+        }
+        let evaluation = ModuleEvaluation {
+            runtime: self,
+            promise,
+        };
+        // Parse/link failures and ordinary top-level throws reject the module
+        // evaluation promise before JS_Eval returns. Surface those directly;
+        // top-level await remains pending and is advanced by tick.
+        evaluation.status()?;
+        Ok(evaluation)
+    }
+
     /// Drains the core release queue.
     pub fn drain_releases(&self) -> std::result::Result<usize, core::QueueError> {
         self.state.env.queue().drain()
@@ -428,6 +547,7 @@ impl Runtime {
 impl Drop for Runtime {
     fn drop(&mut self) {
         unsafe {
+            qjs::JS_SetModuleLoaderFunc(self.rt.as_ptr(), None, None, ptr::null_mut());
             qjs::JS_SetHostPromiseRejectionTracker(self.rt.as_ptr(), None, ptr::null_mut());
             let raw = qjs::JS_GetRuntimeOpaque(self.rt.as_ptr()).cast::<State>();
             if let Some(state) = raw.as_ref() {
@@ -459,6 +579,8 @@ struct State {
     quickjs_to_core: Mutex<BTreeMap<qjs::JSClassID, core::ClassId>>,
     callbacks: Mutex<Vec<CallbackTarget>>,
     host_functions: RefCell<Vec<Rc<HostFunction>>>,
+    module_aliases: RefCell<BTreeMap<String, PathBuf>>,
+    module_origins: RefCell<BTreeMap<PathBuf, (String, String)>>,
     outstanding_deferreds: Arc<Mutex<Vec<DeferredSlot>>>,
     unhandled_rejections: Mutex<Vec<UnhandledRejection>>,
     settle_trampoline: Mutex<Option<qjs::JSValue>>,
@@ -505,6 +627,8 @@ impl State {
             quickjs_to_core: Mutex::new(BTreeMap::new()),
             callbacks: Mutex::new(Vec::new()),
             host_functions: RefCell::new(Vec::new()),
+            module_aliases: RefCell::new(BTreeMap::new()),
+            module_origins: RefCell::new(BTreeMap::new()),
             outstanding_deferreds: Arc::new(Mutex::new(Vec::new())),
             unhandled_rejections: Mutex::new(Vec::new()),
             settle_trampoline: Mutex::new(None),
@@ -544,6 +668,31 @@ impl State {
             unsafe {
                 qjs::JS_FreeValue(ctx, entry.promise);
                 qjs::JS_FreeValue(ctx, entry.reason);
+            }
+        }
+    }
+
+    fn mark_module_rejection_handled(
+        &self,
+        ctx: *mut qjs::JSContext,
+        promise: qjs::JSValue,
+        reason: qjs::JSValue,
+    ) {
+        let Ok(mut rejections) = self.unhandled_rejections.lock() else {
+            return;
+        };
+        let mut index = 0;
+        while index < rejections.len() {
+            if same_js_value(rejections[index].promise, promise)
+                || same_js_value(rejections[index].reason, reason)
+            {
+                let entry = rejections.swap_remove(index);
+                unsafe {
+                    qjs::JS_FreeValue(ctx, entry.promise);
+                    qjs::JS_FreeValue(ctx, entry.reason);
+                }
+            } else {
+                index += 1;
             }
         }
     }
@@ -1737,6 +1886,181 @@ extern "C" fn promise_rejection_tracker(
     }));
 }
 
+extern "C" fn module_normalize(
+    ctx: *mut qjs::JSContext,
+    module_base_name: *const c_char,
+    module_name: *const c_char,
+    opaque: *mut c_void,
+) -> *mut c_char {
+    catch_unwind(AssertUnwindSafe(|| {
+        let Some(state) = NonNull::new(opaque.cast::<State>()) else {
+            throw_message(ctx, "module loader state is unavailable", false);
+            return ptr::null_mut();
+        };
+        if module_base_name.is_null() || module_name.is_null() {
+            throw_message(ctx, "module resolution received a null name", false);
+            return ptr::null_mut();
+        }
+        let importer = unsafe { CStr::from_ptr(module_base_name) }
+            .to_string_lossy()
+            .into_owned();
+        let specifier = unsafe { CStr::from_ptr(module_name) }
+            .to_string_lossy()
+            .into_owned();
+        let state = unsafe { state.as_ref() };
+        let resolved = state
+            .module_aliases
+            .borrow()
+            .get(&specifier)
+            .cloned()
+            .unwrap_or_else(|| {
+                let importer_path = PathBuf::from(&importer);
+                importer_path
+                    .parent()
+                    .unwrap_or_else(|| Path::new(""))
+                    .join(Path::new(&specifier))
+            });
+        state.module_origins.borrow_mut().insert(
+            resolved.clone(),
+            (specifier.clone(), importer.clone()),
+        );
+
+        let normalized = resolved.to_string_lossy();
+        let bytes = normalized.as_bytes();
+        if bytes.contains(&0) {
+            throw_message(
+                ctx,
+                &format!(
+                    "could not resolve module '{specifier}' imported from '{importer}': resolved path contains NUL"
+                ),
+                false,
+            );
+            return ptr::null_mut();
+        }
+        let output = unsafe { qjs::js_malloc(ctx, bytes.len() + 1) }.cast::<u8>();
+        if output.is_null() {
+            return ptr::null_mut();
+        }
+        unsafe {
+            ptr::copy_nonoverlapping(bytes.as_ptr(), output, bytes.len());
+            output.add(bytes.len()).write(0);
+        }
+        output.cast()
+    }))
+    .unwrap_or_else(|_| {
+        throw_message(ctx, "Rust module normalizer panicked", false);
+        ptr::null_mut()
+    })
+}
+
+extern "C" fn module_loader(
+    ctx: *mut qjs::JSContext,
+    module_name: *const c_char,
+    opaque: *mut c_void,
+) -> *mut qjs::JSModuleDef {
+    catch_unwind(AssertUnwindSafe(|| {
+        let Some(state) = NonNull::new(opaque.cast::<State>()) else {
+            throw_message(ctx, "module loader state is unavailable", false);
+            return ptr::null_mut();
+        };
+        if module_name.is_null() {
+            throw_message(ctx, "module loader received a null name", false);
+            return ptr::null_mut();
+        }
+        let name = unsafe { CStr::from_ptr(module_name) }
+            .to_string_lossy()
+            .into_owned();
+        let path = PathBuf::from(&name);
+        let origin = unsafe { state.as_ref() }
+            .module_origins
+            .borrow_mut()
+            .remove(&path);
+        let source = match std::fs::read_to_string(&path) {
+            Ok(source) => source,
+            Err(error) => {
+                let message = match origin {
+                    Some((specifier, importer)) => format!(
+                        "could not load module '{specifier}' imported from '{importer}': failed to read '{}': {error}",
+                        path.display()
+                    ),
+                    None => format!("could not load module '{}': {error}", path.display()),
+                };
+                throw_message(ctx, &message, false);
+                return ptr::null_mut();
+            }
+        };
+        let input = match CString::new(source.as_bytes()) {
+            Ok(input) => input,
+            Err(_) => {
+                throw_message(
+                    ctx,
+                    &format!("could not load module '{}': source contains NUL", path.display()),
+                    false,
+                );
+                return ptr::null_mut();
+            }
+        };
+        let compiled = unsafe {
+            qjs::JS_Eval(
+                ctx,
+                input.as_ptr(),
+                source.len(),
+                module_name,
+                (qjs::JS_EVAL_TYPE_MODULE | qjs::JS_EVAL_FLAG_COMPILE_ONLY) as c_int,
+            )
+        };
+        if unsafe { qjs::JS_IsException(compiled) } {
+            return ptr::null_mut();
+        }
+        let module = unsafe { compiled.u.ptr }.cast::<qjs::JSModuleDef>();
+        // Compiled module values carry an extra reference; the loaded-module
+        // registry owns the module after compilation, as in quickjs-libc.c.
+        unsafe { qjs::JS_FreeValue(ctx, compiled) };
+        module
+    }))
+    .unwrap_or_else(|_| {
+        throw_message(ctx, "Rust module loader panicked", false);
+        ptr::null_mut()
+    })
+}
+
+fn absolute_path(path: &Path) -> std::io::Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()?.join(path))
+    }
+}
+
+fn module_evaluation_status(
+    runtime: &Runtime,
+    promise: qjs::JSValue,
+) -> Result<ModuleEvaluationStatus> {
+    let state = unsafe { qjs::JS_PromiseState(runtime.raw_context(), promise) };
+    if state == qjs::JSPromiseStateEnum_JS_PROMISE_PENDING {
+        return Ok(ModuleEvaluationStatus::Pending);
+    }
+    if state == qjs::JSPromiseStateEnum_JS_PROMISE_FULFILLED {
+        return Ok(ModuleEvaluationStatus::Fulfilled);
+    }
+    if state == qjs::JSPromiseStateEnum_JS_PROMISE_REJECTED {
+        let reason = unsafe { qjs::JS_PromiseResult(runtime.raw_context(), promise) };
+        // quickjs-ng tracks both its inner and outer module-evaluation
+        // promises. They reject with the same reason; consuming the public
+        // evaluation must clear both tracker entries.
+        runtime
+            .state
+            .mark_module_rejection_handled(runtime.raw_context(), promise, reason);
+        return Err(Error::Exception(exception_or_value(
+            runtime.raw_context(),
+            reason,
+        )));
+    }
+    Err(Error::Exception(
+        "QuickJS module evaluation did not return a promise".to_owned(),
+    ))
+}
+
 fn state_from_context(ctx: *mut qjs::JSContext) -> &'static State {
     let rt = unsafe { qjs::JS_GetRuntime(ctx) };
     state_from_runtime(rt)
@@ -1854,7 +2178,9 @@ fn release_arraybuffer_owner(owner: &mut ArrayBufferOwner) {
 #[cfg(test)]
 mod tests {
     use std::cell::{Cell, RefCell};
+    use std::fs;
     use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::path::{Path, PathBuf};
     use std::ptr;
     use std::rc::Rc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1863,7 +2189,7 @@ mod tests {
 
     use super::{
         c_int, core, ffi_wgpu as wgpu, qjs, usv_string_from_wtf8, CallbackKind, Context, Engine,
-        Runtime,
+        ModuleEvaluationStatus, Runtime,
     };
     use webgpu_native_js_core::JsEngine;
 
@@ -1989,6 +2315,169 @@ mod tests {
     fn eval_drop(runtime: &Runtime, source: &str, name: &str) {
         let value = runtime.eval(source, name).expect(name);
         unsafe { qjs::JS_FreeValue(runtime.raw_context(), value) };
+    }
+
+    struct TempModules(PathBuf);
+
+    impl TempModules {
+        fn new() -> Self {
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "webgpu-native-js-quickjs-modules-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir(&path).expect("create module temp directory");
+            Self(path)
+        }
+
+        fn write(&self, name: &str, source: &str) -> PathBuf {
+            let path = self.0.join(name);
+            fs::write(&path, source).expect("write module fixture");
+            path
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempModules {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn eval_module_loads_a_relative_import_chain() {
+        let files = TempModules::new();
+        files.write("b.mjs", "export const answer = 42;");
+        let entry = files.write(
+            "a.mjs",
+            "import { answer } from './b.mjs'; globalThis.moduleAnswer = answer;",
+        );
+        let runtime = Runtime::new().expect("quickjs runtime");
+
+        let evaluation = runtime.eval_module(&entry).expect("evaluate a.mjs");
+
+        assert_eq!(
+            evaluation.status().expect("module status"),
+            ModuleEvaluationStatus::Fulfilled
+        );
+        let answer = runtime
+            .eval("globalThis.moduleAnswer", "relative-result.js")
+            .expect("read relative result");
+        let mut number = 0;
+        assert_eq!(
+            unsafe { qjs::JS_ToInt32(runtime.raw_context(), &mut number, answer) },
+            0
+        );
+        assert_eq!(number, 42);
+        unsafe { qjs::JS_FreeValue(runtime.raw_context(), answer) };
+    }
+
+    #[test]
+    fn eval_module_resolves_exact_owner_alias_before_relative_paths() {
+        let files = TempModules::new();
+        let aliased = files.write("owner-three.mjs", "export const revision = 'owner';");
+        let entry = files.write(
+            "alias-entry.mjs",
+            "import { revision } from 'three'; globalThis.aliasRevision = revision;",
+        );
+        let runtime = Runtime::new().expect("quickjs runtime");
+        runtime
+            .set_module_alias("three", &aliased)
+            .expect("set three alias");
+
+        let evaluation = runtime.eval_module(&entry).expect("evaluate alias entry");
+
+        assert_eq!(
+            evaluation.status().expect("module status"),
+            ModuleEvaluationStatus::Fulfilled
+        );
+        eval_drop(
+            &runtime,
+            "if (globalThis.aliasRevision !== 'owner') throw new Error('wrong alias');",
+            "alias-result.js",
+        );
+    }
+
+    #[test]
+    fn eval_module_missing_import_names_specifier_and_importer() {
+        let files = TempModules::new();
+        let entry = files.write("missing-entry.mjs", "import './absent.mjs';");
+        let runtime = Runtime::new().expect("quickjs runtime");
+
+        let error = runtime.eval_module(&entry).expect_err("missing import");
+        let super::Error::Exception(message) = error else {
+            panic!("expected module exception, got {error:?}");
+        };
+        assert!(message.contains("./absent.mjs"), "{message}");
+        assert!(
+            message.contains(&entry.to_string_lossy().to_string()),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn eval_module_surfaces_top_level_throw() {
+        let files = TempModules::new();
+        let entry = files.write("throw.mjs", "throw new Error('module evaluation boom');");
+        let runtime = Runtime::new().expect("quickjs runtime");
+
+        let error = runtime.eval_module(&entry).expect_err("throwing module");
+
+        assert!(format!("{error:?}").contains("module evaluation boom"));
+        assert!(
+            runtime
+                .state
+                .unhandled_rejections
+                .lock()
+                .expect("rejection tracker")
+                .is_empty(),
+            "a surfaced module rejection must not remain unhandled"
+        );
+    }
+
+    #[test]
+    fn eval_module_root_read_error_has_path_and_io_context() {
+        let files = TempModules::new();
+        let missing = files.path().join("missing-root.mjs");
+        let runtime = Runtime::new().expect("quickjs runtime");
+
+        let error = runtime.eval_module(&missing).expect_err("missing root");
+
+        let super::Error::Io { path, source } = error else {
+            panic!("expected io error, got {error:?}");
+        };
+        assert_eq!(path, missing);
+        assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn eval_module_top_level_await_binding_promise_completes_after_ticks() {
+        let setup = native_setup();
+        let files = TempModules::new();
+        let entry = files.write(
+            "binding-await.mjs",
+            "globalThis.moduleAwaitDone = false; const adapter = await gpu.requestAdapter(); globalThis.moduleAwaitDone = !!adapter;",
+        );
+        let runtime = Runtime::new().expect("quickjs runtime");
+        let gpu = unsafe { runtime.wrap_gpu(setup.instance) }.expect("wrap gpu");
+        runtime.set_global_value("gpu", gpu).expect("set gpu");
+
+        let evaluation = runtime.eval_module(&entry).expect("evaluate await module");
+        assert_eq!(
+            evaluation.status().expect("initial module status"),
+            ModuleEvaluationStatus::Pending
+        );
+        assert!(!global_bool(&runtime, "moduleAwaitDone"));
+
+        tick_until(&runtime, setup.instance, 5000, || {
+            evaluation.status().expect("ticked module status") == ModuleEvaluationStatus::Fulfilled
+        });
+
+        assert!(global_bool(&runtime, "moduleAwaitDone"));
     }
 
     #[test]

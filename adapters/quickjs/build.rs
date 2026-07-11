@@ -44,6 +44,7 @@ fn main() {
         .wrap_static_fns(true)
         .wrap_static_fns_path(&static_wrappers)
         .allowlist_function("JS_.*")
+        .allowlist_function("js_malloc")
         .allowlist_type("JS.*")
         .allowlist_var("JS_.*")
         .allowlist_var("JS_EVAL_.*")
