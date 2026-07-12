@@ -120,8 +120,13 @@ The plan's §7 has the full evidence. These are the conclusions that are now
    allocation and cannot wrap external memory. Copying at `unmap()` is
    spec-conformant (WebGPU defines mapped contents as becoming visible to the
    GPU at `unmap()`), so this is a performance property, not a behavioural one.
-   `ZeroCopyDetach` currently has **no engine selecting it** and is therefore
-   untested by construction — see the open question below.
+   `ZeroCopyDetach` currently has **no shipping engine selecting it** (QuickJS
+   was the one). It is **not** dead code, though: the mock engine is generic over
+   the strategy and its *default* (`MockEngine<false>`) is the zero-copy one, so
+   most core tests exercise that path, with `a15_unmap_detaches_all_mapped_ranges_zero_copy`
+   pinning it directly. What it costs is `new_external_arraybuffer` — an `unsafe`
+   trait method **no real engine implements**, stubbed as an error in both. See
+   the open question below.
 10. **Under JSC, never take the C bytes pointer of a buffer script can see.**
     `JSObjectGetArrayBufferBytesPtr` and `JSObjectGetTypedArrayBytesPtr` invoke
     WebKit's `pinAndLock()`: the buffer becomes permanently non-detachable, and
@@ -349,12 +354,16 @@ harden into assumptions.
 - ~~**Which quickjs-ng revision is pinned?**~~ **MOOT (2026-07-12):** quickjs-ng
   was dropped for Boa (`specs/blocks/14-boa-engine.md`). Boa is pinned exactly
   from crates.io.
-- **Should `ZeroCopyDetach` be deleted?** Both supported engines select
-  `CopyInCopyOut` (invariant 9), so the zero-copy path and
-  `new_external_arraybuffer` now have **no engine exercising them** — untested
-  by construction, which this repo treats as a liability. Keeping them preserves
-  the abstraction for a future zero-copy engine; deleting them shrinks `core/`
-  and removes dead surface. Decide deliberately; do not let it rot unnoticed.
+- **Should `ZeroCopyDetach` be deleted?** Both shipping engines select
+  `CopyInCopyOut` (invariant 9). *(Corrected 2026-07-12: an earlier version of
+  this entry claimed the path was "untested by construction". That was wrong —
+  the mock engine's default is the zero-copy strategy and a named test pins it.
+  The claim was made without checking `core/src/mock.rs`.)* The real trade-off:
+  **keeping** it costs an `unsafe` trait method (`new_external_arraybuffer`) that
+  **no real engine implements** — both stub it as an error — plus a strategy
+  branch in `core/`; **deleting** it shrinks the trait and removes that wart, but
+  a future zero-copy-capable engine would have to re-add the abstraction. Decide
+  deliberately; do not let it rot unnoticed.
 - **Full WebIDL coverage vs. a trimmed engine-oriented subset.** Revisit after
   the first codegen pass shows the real effort delta.
 - ~~**Where does `webgpu.idl` come from**, and how is it pinned against the
