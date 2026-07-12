@@ -20,3 +20,23 @@ webgpu:api,validation,createSampler:*
 webgpu:api,validation,encoding,cmds,copyBufferToBuffer:*
 webgpu:api,validation,render_pipeline,vertex_state:*
 webgpu:api,validation,encoding,createRenderBundleEncoder:*
+
+# Phase B-5 growth (2026-07-12). The B-4c engine crash that forced the earlier
+# curation is gone with QuickJS (block 14); these families were previously
+# unrunnable or crashing, and the failures they exposed have now been fixed
+# (indirect draws, maxDrawCount, clearBuffer, resolveQuerySet, setBlendConstant,
+# setStencilReference, setBindGroup dynamic offsets, the debug-marker mixin, and
+# encoder-state violations becoming validation errors).
+webgpu:api,validation,encoding,cmds,render,draw:*
+webgpu:api,validation,encoding,cmds,render,setVertexBuffer:*
+webgpu:api,validation,encoding,cmds,render,setIndexBuffer:*
+webgpu:api,validation,encoding,cmds,render,setPipeline:*
+webgpu:api,validation,encoding,cmds,render,state_tracking:*
+webgpu:api,validation,encoding,cmds,setBindGroup:*
+webgpu:api,validation,encoding,cmds,clearBuffer:*
+webgpu:api,validation,encoding,cmds,debug:*
+webgpu:api,validation,encoding,cmds,index_access:*
+webgpu:api,validation,encoding,queries,resolveQuerySet:*
+webgpu:api,validation,encoding,encoder_state:*
+webgpu:api,validation,encoding,render_bundle:*
+webgpu:api,validation,createView:*

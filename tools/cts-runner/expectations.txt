@@ -3,3 +3,14 @@
 webgpu:api,validation,createPipelineLayout:bind_group_layouts,null_bind_group_layouts:* fail # specs/tracking/codegen-deltas.md: sequence<GPUBindGroupLayout?> element nullability is dropped
 webgpu:api,validation,createPipelineLayout:bind_group_layouts,create_pipeline_with_null_bind_group_layouts:* fail # specs/tracking/codegen-deltas.md: sequence<GPUBindGroupLayout?> element nullability is dropped
 webgpu:api,validation,createPipelineLayout:bind_group_layouts,set_pipeline_with_null_bind_group_layouts:* fail # specs/tracking/codegen-deltas.md: sequence<GPUBindGroupLayout?> element nullability is dropped
+
+# Boa engine gap (block 14 → B7): Boa does not expose Error.prototype.stack
+# (verified in Boa's own CLI: typeof e.stack === "undefined"). The CTS asserts a
+# stack on the thrown error. Not a binding defect; catalogued, not worked around.
+webgpu:api,validation,encoding,cmds,setBindGroup:u32array_start_and_length: fail # specs/blocks/14-boa-engine.md B7: Boa has no Error.prototype.stack
+
+# yawgpu backend validation gap: the binding delivers the requested view usage to
+# the C descriptor (pinned by a mock regression test), but the backend does not
+# validate a usage subset. Parked for Dawn arbitration; never worked around in
+# the binding.
+webgpu:api,validation,createView:texture_view_usage_of_multiple_usages:usage1=16;usage2=32 fail # backend validation gap, not a binding gap

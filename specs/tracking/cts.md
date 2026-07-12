@@ -239,3 +239,38 @@ encoder to command buffer / render bundle and survives wrapper release.
 **Still open in the same family:** `draw:*` as a whole is now **82 pass / 16
 fail / 1 skip**. The 16 are unrelated to the indirect gap and are not yet
 triaged.
+
+## Phase B-5 (2026-07-12): the crash blocker is gone, and the suite more than doubles
+
+Dropping QuickJS for Boa (block 14) removed the B-4c engine crash that had
+forced the earlier curation. The families that used to abort the process now
+*report* — and what they reported was a run of genuine, previously invisible
+binding gaps. All are now fixed:
+
+| Gap | Was | Now |
+|---|---|---|
+| indirect draw/dispatch (5 methods) | `TypeError: not a callable function` | implemented |
+| `GPURenderPassDescriptor.maxDrawCount` | reject-if-present (expired reason) | emitted via `WGPURenderPassMaxDrawCount` chain |
+| `GPUCommandEncoder.clearBuffer` | absent | implemented |
+| `GPUCommandEncoder.resolveQuerySet` | absent | implemented |
+| `setBlendConstant`, `setStencilReference` | absent | implemented |
+| `setBindGroup` dynamic offsets (both overloads) | ignored | implemented (+ `JsEngine::is_uint32array`) |
+| `GPUDebugCommandsMixin` (12 C fns) | absent | implemented |
+| encoder-state violations | threw `OperationError` | **validation error to the device sink** (spec + principle 8) |
+
+**The suite grew 1,312 → 2,822 cases**, 3/3 stable, exit 0, **0 fail**, 178
+skip, 2 expected-fail. Parity grew 127 → 154 lines, byte-identical under Boa and
+JSC throughout.
+
+The two expected-fails are honest and reasoned, not swept under the rug:
+- `setBindGroup:u32array_start_and_length` — **Boa engine gap**: no
+  `Error.prototype.stack` (block 14 → B7, verified in Boa's own CLI). Not a
+  binding defect.
+- `createView:texture_view_usage_of_multiple_usages` — **yawgpu backend
+  validation gap**: the binding delivers the requested view usage to the C
+  descriptor (pinned by a mock regression test); the backend does not validate a
+  usage subset. Parked for Dawn arbitration, never worked around in the binding.
+
+**The earlier engine-crash exclusion list is retired.** `buffer_binding_overlap`,
+`vertex_buffer_OOB`, and `createView` — the three families excluded as crashers —
+are all in the suite now and all green.
