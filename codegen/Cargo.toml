@@ -2,6 +2,8 @@
 name = "webgpu-native-js-codegen"
 version = "0.1.0"
 edition = "2021"
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 weedle2 = "5.0.0"

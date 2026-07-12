@@ -2,3 +2,9 @@
 members = ["adapters/boa", "adapters/javascriptcore", "codegen", "core", "examples/compute", "examples/triangle", "ffi", "spikes/release-queue", "tools/cts-runner"]
 exclude = ["spikes/jsc-detach", "third_party/*"]
 resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/infosia/webgpu-native-js"

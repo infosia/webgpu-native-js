@@ -269,9 +269,22 @@ Next: mobile bring-up.
 
 ## License
 
-Not yet decided — this repository currently ships no license, so all rights
-are reserved in the interim. Third-party components keep their own licenses:
-Boa is MIT/Unlicense, `webgpu-headers` is BSD-3-Clause, and JavaScriptCore
-(LGPL-2.1) is only ever **dynamically linked** as an Apple system framework
-(the `jsc` feature, default-on, compiles to an empty crate off Apple
-platforms).
+Dual-licensed under **MIT** ([LICENSE-MIT](LICENSE-MIT)) or **Apache-2.0**
+([LICENSE-APACHE](LICENSE-APACHE)), at your option — the same terms as
+[yawgpu](https://github.com/infosia/yawgpu) and the Rust ecosystem norm.
+
+Third-party components keep their own licenses, and all of them are compatible
+with that choice:
+
+- **Boa** (the Tier 1 engine) — MIT or Unlicense; vendored only as a
+  crates.io dependency.
+- **`webgpu-headers`** — BSD-3-Clause; the pinned canonical `webgpu.h`.
+- **gpuweb** — the W3C document licenses; used as the pinned `webgpu.idl`
+  codegen input.
+- **JavaScriptCore** (LGPL-2.1) — never vendored. It is only ever
+  **dynamically linked** as an Apple system framework (the default-on `jsc`
+  feature compiles to an empty crate off Apple platforms), so no LGPL
+  obligations attach to a binary that links it this way.
+
+Contributions are accepted under the same dual license, without any additional
+terms.
