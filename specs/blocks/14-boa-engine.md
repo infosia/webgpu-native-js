@@ -91,10 +91,9 @@ Standard gates additionally apply: workspace `cargo test` green, clippy
 
 Nothing here is a code deliverable; it is the evidence the tier decision needs.
 
-- **B6 — Performance.** Boa states performance is a secondary goal. Measure, on
-  one machine, against QuickJS: parity-suite wall time, CTS-runner throughput
-  (QuickJS baseline: ~102 cases/s), process startup time, and release binary
-  size. Record absolute numbers and the ratio.
+- **B6 — Performance. DEFERRED (owner, 2026-07-12).** Boa publishes its own
+  benchmarks; re-measuring them here buys nothing the decision needs. Revisit
+  only if a concrete workload turns out to be too slow in practice.
 - **B7 — Language gaps.** Phase A found *zero* ES gaps under QuickJS for the
   CTS harness (Babel output runs untransformed). Re-run that check under Boa;
   catalogue any gap rather than working around it.
@@ -102,13 +101,17 @@ Nothing here is a code deliverable; it is the evidence the tier decision needs.
   `encoding,cmds,render,draw:buffer_binding_overlap:*` (~8/10 crash),
   `createView:*` (~1/3), `draw:vertex_buffer_OOB:*` (~1/4) — under Boa. If they
   are clean, B-4c stops blocking Phase B and the fork fix becomes unnecessary.
-- **B9 — Mobile.** `cargo check` for iOS and Android targets. Note whether the
-  `jsvalue-enum` feature is needed (Boa's NaN-boxing assumes pointer alignment
-  that some platforms break).
+- **B9 — Mobile. DEFERRED (owner, 2026-07-12)** to mobile bring-up, as with the
+  other engines. One data point already exists and cost nothing:
+  `cargo check -p boa-adapter --target aarch64-apple-ios` passes. (Android's
+  `cargo check` fails in the *FFI* crate's bindgen, which needs the NDK
+  headers — a pre-existing backend/toolchain matter, not a Boa one.) Whether
+  the `jsvalue-enum` feature is needed (Boa's NaN-boxing assumes a pointer
+  alignment some platforms break) is a bring-up question.
 
 ## Phase 3 — the owner's decision (not this block's)
 
-With B6–B9 in hand: Boa's tier, and whether QuickJS is kept, demoted, or
+With B7 and B8 in hand: Boa's tier, and whether QuickJS is kept, demoted, or
 dropped. Dropping it would remove the C toolchain, `bindgen`-for-the-engine, and
 the B-4c fork workstream — but only the numbers can say whether the performance
 cost is acceptable. **This block does not pre-judge that.**
