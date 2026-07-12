@@ -57,7 +57,7 @@ binding an already-created `WGPUDevice` and pumps one `tick()` per frame.
 │                descriptor conversion (WebIDL),    │
 │                Promise bridge + settlement queue, │
 │                tick() skeleton, release queue,    │
-│                buffer mapping (both strategies)   │
+│                buffer mapping (copy-in/copy-out)  │
 ├─────────────────────────────────────────────────┤
 │ ffi/           webgpu.h C ABI                     │
 │                bindgen from pinned webgpu-headers,│

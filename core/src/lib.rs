@@ -347,9 +347,6 @@ pub trait JsEngine: Sized {
     type Error;
     /// Engine-owned registration for a deferred slot held by an async request.
     type DeferredRegistration: Send + 'static;
-    /// Mapped range behavior supported by this engine.
-    const MAPPED_RANGE_STRATEGY: MappedRangeStrategy;
-
     /// Returns the binding environment associated with a context.
     fn environment<'a>(cx: Self::Context<'a>) -> &'a Environment;
     /// Gets an object property.
@@ -448,21 +445,6 @@ pub trait JsEngine: Sized {
     ) -> Result<(), Self::Error>;
     /// Drains engine microtasks scheduled by promise settlement.
     fn drain_microtasks(cx: Self::Context<'_>) -> Result<(), Self::Error>;
-    /// Creates a script-visible ArrayBuffer over external memory.
-    ///
-    /// # Safety
-    ///
-    /// `ptr..ptr + len` must name the live mapped range returned by
-    /// `wgpuBufferGetMappedRange(owner, ..)`. The caller must keep the
-    /// `owner` reference passed here alive until the ArrayBuffer's engine
-    /// finalizer releases it, and must track the returned value so it is
-    /// detached before calling `wgpuBufferUnmap` or `wgpuBufferDestroy`.
-    unsafe fn new_external_arraybuffer(
-        cx: Self::Context<'_>,
-        ptr: *mut u8,
-        len: usize,
-        owner: WGPUBuffer,
-    ) -> Result<Self::Value, Self::Error>;
     /// Creates a script-visible ArrayBuffer by copying bytes.
     fn new_arraybuffer_copy(
         cx: Self::Context<'_>,
@@ -495,15 +477,6 @@ pub trait JsEngine: Sized {
     ) -> Self::DeferredRegistration;
     /// Releases a deferred without settling it during engine teardown.
     fn release_deferred(cx: Self::Context<'_>, deferred: Deferred<Self>);
-}
-
-/// Engine strategy for script-visible mapped ranges.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum MappedRangeStrategy {
-    /// Expose backend memory directly and detach it before unmap.
-    ZeroCopyDetach,
-    /// Copy into a script buffer and copy back before unmap.
-    CopyInCopyOut,
 }
 
 /// Owned promise resolving functions.
@@ -2515,7 +2488,6 @@ struct MappedRange<E: JsEngine> {
     /// guarantees that it remains valid until unmap; every detach/copy-back path
     /// runs strictly before `wgpuBufferUnmap` or `wgpuBufferDestroy`.
     native_ptr: *mut c_void,
-    strategy: MappedRangeStrategy,
     map_mode: WGPUMapMode,
 }
 
@@ -3567,27 +3539,16 @@ pub fn buffer_get_mapped_range<E: JsEngine + 'static>(
                 "wgpuBufferGetMappedRange returned null for current map mode",
             ));
         }
-        let value = match E::MAPPED_RANGE_STRATEGY {
-            MappedRangeStrategy::ZeroCopyDetach => {
-                unsafe {
-                    (E::environment(cx).gpu().buffer_add_ref)(state.buffer);
-                }
-                // SAFETY: `wgpuBufferGetMappedRange` returned a non-null mapped
-                // range for `size` bytes, and the range is tracked until unmap.
-                unsafe { E::new_external_arraybuffer(cx, ptr.cast::<u8>(), size, state.buffer)? }
-            }
-            MappedRangeStrategy::CopyInCopyOut => {
-                let bytes = unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), size) };
-                E::new_arraybuffer_copy(cx, bytes)?
-            }
-        };
+        // SAFETY: `mapped_range_ptr` returned a non-null mapped range for
+        // `size` bytes, and the native range remains valid until unmap.
+        let bytes = unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), size) };
+        let value = E::new_arraybuffer_copy(cx, bytes)?;
         let tracked = E::duplicate_value(cx, value);
         state.ranges.push(MappedRange {
             value: tracked,
             _offset: offset,
             size,
             native_ptr: ptr,
-            strategy: E::MAPPED_RANGE_STRATEGY,
             map_mode: state.map_mode,
         });
         Ok(value)
@@ -7114,9 +7075,7 @@ fn detach_all_ranges<E: JsEngine>(
     let mut first_error = None;
     for range in ranges {
         let mut copy_back = Vec::new();
-        let should_copy_back = flush
-            && range.strategy == MappedRangeStrategy::CopyInCopyOut
-            && range.map_mode == WGPUMapMode_Write;
+        let should_copy_back = flush && range.map_mode == WGPUMapMode_Write;
         let out = if should_copy_back {
             copy_back.resize(range.size, 0);
             Some(copy_back.as_mut_slice())

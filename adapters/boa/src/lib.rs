@@ -1029,9 +1029,6 @@ impl core::JsEngine for Engine {
     type Error = BoaValue;
     type DeferredRegistration = DeferredRegistration;
 
-    const MAPPED_RANGE_STRATEGY: core::MappedRangeStrategy =
-        core::MappedRangeStrategy::CopyInCopyOut;
-
     fn environment<'a>(cx: Self::Context<'a>) -> &'a core::Environment {
         &cx.arena.env
     }
@@ -1426,18 +1423,6 @@ impl core::JsEngine for Engine {
         cx.boa().run_jobs().map_err(|error| insert_error(cx, error))
     }
 
-    unsafe fn new_external_arraybuffer(
-        cx: Self::Context<'_>,
-        _ptr: *mut u8,
-        _len: usize,
-        _owner: core::WGPUBuffer,
-    ) -> core::Result<Self::Value, Self::Error> {
-        Err(Self::operation_error(
-            cx,
-            "external ArrayBuffers are unavailable under CopyInCopyOut",
-        ))
-    }
-
     fn new_arraybuffer_copy(
         cx: Self::Context<'_>,
         bytes: &[u8],
@@ -1808,10 +1793,6 @@ mod tests {
     fn public_runtime_and_copy_handles_work() {
         let runtime = Runtime::new().expect("Boa runtime");
         assert_eq!(eval_number(&runtime, "1 + 2", "smoke.js"), Some(3.0));
-        assert_eq!(
-            Engine::MAPPED_RANGE_STRATEGY,
-            webgpu_native_js_core::MappedRangeStrategy::CopyInCopyOut
-        );
     }
 
     #[test]

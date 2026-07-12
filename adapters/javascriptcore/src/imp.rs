@@ -1184,9 +1184,6 @@ impl core::JsEngine for Engine {
     type Error = JSValueRef;
     type DeferredRegistration = DeferredRegistration;
 
-    const MAPPED_RANGE_STRATEGY: core::MappedRangeStrategy =
-        core::MappedRangeStrategy::CopyInCopyOut;
-
     fn environment<'a>(cx: Self::Context<'a>) -> &'a core::Environment {
         &state_from_context(cx.ctx).finalizer.env
     }
@@ -1865,20 +1862,6 @@ impl core::JsEngine for Engine {
         // JSC exposes no public microtask pump (F1); microtasks drain when the
         // settlement trampoline's JavaScript frame returns (F2).
         Ok(())
-    }
-
-    unsafe fn new_external_arraybuffer(
-        cx: Self::Context<'_>,
-        _ptr: *mut u8,
-        _len: usize,
-        _owner: core::WGPUBuffer,
-    ) -> core::Result<Self::Value, Self::Error> {
-        // Honest strategy-gated stub: core calls this primitive only for
-        // ZeroCopyDetach, while JSC advertises CopyInCopyOut (J8/A10).
-        Err(Self::operation_error(
-            cx,
-            "external ArrayBuffers are unavailable under CopyInCopyOut",
-        ))
     }
 
     fn new_arraybuffer_copy(
@@ -3022,10 +3005,6 @@ mod tests {
     fn mapping_primitives_stage_copy_detach_and_read_without_pinning_input() {
         let runtime = Runtime::new().expect("JSC runtime");
         super::with_scope(runtime.raw_context(), |cx| {
-            assert_eq!(
-                Engine::MAPPED_RANGE_STRATEGY,
-                core::MappedRangeStrategy::CopyInCopyOut
-            );
             let value = Engine::new_arraybuffer_copy(cx, &[1, 2, 3]).expect("staged copy");
             assert_eq!(Engine::arraybuffer_len(cx, value), Some(3));
             assert_eq!(Engine::arraybuffer_copy(cx, value), Some(vec![1, 2, 3]));
@@ -3033,15 +3012,6 @@ mod tests {
             Engine::detach_arraybuffer(cx, value, Some(&mut out)).expect("detach and copy");
             assert_eq!(out, [1, 2, 3]);
             assert_eq!(Engine::arraybuffer_len(cx, value), Some(0));
-
-            let external_error = unsafe {
-                Engine::new_external_arraybuffer(cx, ptr::null_mut(), 0, ptr::null_mut())
-            }
-            .expect_err("external creation must remain unavailable");
-            assert!(
-                super::value_to_string(runtime.raw_context(), external_error)
-                    .contains("CopyInCopyOut")
-            );
             let non_buffer = Engine::undefined(cx);
             assert_eq!(Engine::arraybuffer_len(cx, non_buffer), None);
             assert_eq!(Engine::arraybuffer_copy(cx, non_buffer), None);

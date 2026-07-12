@@ -8,11 +8,11 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::{
-    Arena, ClassId, ClassSpec, Deferred, Environment, GpuDispatch, JsEngine, MappedRangeStrategy,
-    ReleaseQueue, Result, WGPUAdapter, WGPUAdapterInfo, WGPUBuffer, WGPUBufferDescriptor,
-    WGPUBufferMapCallbackInfo, WGPUDevice, WGPULimits, WGPUMapAsyncStatus, WGPUMapMode,
-    WGPURequestAdapterCallbackInfo, WGPURequestDeviceCallbackInfo, WGPUStatus, WGPUStringView,
-    WGPUStringViewExt, WGPUSupportedFeatures,
+    Arena, ClassId, ClassSpec, Deferred, Environment, GpuDispatch, JsEngine, ReleaseQueue, Result,
+    WGPUAdapter, WGPUAdapterInfo, WGPUBuffer, WGPUBufferDescriptor, WGPUBufferMapCallbackInfo,
+    WGPUDevice, WGPULimits, WGPUMapAsyncStatus, WGPUMapMode, WGPURequestAdapterCallbackInfo,
+    WGPURequestDeviceCallbackInfo, WGPUStatus, WGPUStringView, WGPUStringViewExt,
+    WGPUSupportedFeatures,
 };
 use crate::{
     WGPUBindGroup, WGPUBindGroupDescriptor, WGPUBindGroupLayout, WGPUBindGroupLayoutDescriptor,
@@ -300,20 +300,6 @@ impl Runtime {
                 stored.copy_from_slice(bytes);
                 true
             }
-            MockValue::ExternalArrayBuffer {
-                ptr,
-                len,
-                detached: false,
-                ..
-            } => {
-                if ptr.is_null() || *len != bytes.len() {
-                    return false;
-                }
-                unsafe {
-                    std::slice::from_raw_parts_mut(*ptr, *len).copy_from_slice(bytes);
-                }
-                true
-            }
             _ => false,
         })
         .unwrap_or(false)
@@ -337,12 +323,6 @@ impl Runtime {
                 bytes,
                 detached: false,
             } => Some(bytes.clone()),
-            MockValue::ExternalArrayBuffer {
-                ptr,
-                len,
-                detached: false,
-                ..
-            } if !ptr.is_null() => Some(unsafe { std::slice::from_raw_parts(*ptr, *len).to_vec() }),
             _ => None,
         })
         .flatten()
@@ -493,12 +473,6 @@ enum MockValue {
         bytes: Vec<u8>,
         detached: bool,
     },
-    ExternalArrayBuffer {
-        ptr: *mut u8,
-        len: usize,
-        owner: WGPUBuffer,
-        detached: bool,
-    },
     Instance {
         class: ClassId,
         payload: &'static (dyn Any + Send),
@@ -519,23 +493,17 @@ enum MockConstructor {
     Set,
 }
 
-/// Mock engine marker type parameterized by mapped-range behavior.
-pub struct MockEngine<const COPY_IN_COPY_OUT: bool>;
+/// Mock JavaScript engine marker type.
+pub struct MockEngine;
 
-/// Default mock engine using zero-copy mapped ranges.
-pub type Engine = MockEngine<false>;
+/// Mock engine used by core tests.
+pub type Engine = MockEngine;
 
-impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
+impl JsEngine for MockEngine {
     type Value = Value;
     type Context<'a> = Context<'a>;
     type Error = String;
     type DeferredRegistration = ();
-
-    const MAPPED_RANGE_STRATEGY: MappedRangeStrategy = if COPY_IN_COPY_OUT {
-        MappedRangeStrategy::CopyInCopyOut
-    } else {
-        MappedRangeStrategy::ZeroCopyDetach
-    };
 
     fn environment<'a>(cx: Self::Context<'a>) -> &'a Environment {
         &cx.runtime.env
@@ -740,7 +708,6 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
                 | MockValue::Promise { .. }
                 | MockValue::Resolver { .. }
                 | MockValue::ArrayBuffer { .. }
-                | MockValue::ExternalArrayBuffer { .. }
                 | MockValue::Instance { .. }
         )
     }
@@ -780,7 +747,6 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
             | MockValue::Promise { .. }
             | MockValue::Resolver { .. }
             | MockValue::ArrayBuffer { .. }
-            | MockValue::ExternalArrayBuffer { .. }
             | MockValue::Instance { .. } => Err("number".to_owned()),
         }
     }
@@ -802,7 +768,6 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
             | MockValue::Promise { .. }
             | MockValue::Resolver { .. }
             | MockValue::ArrayBuffer { .. }
-            | MockValue::ExternalArrayBuffer { .. }
             | MockValue::Instance { .. } => true,
         }
     }
@@ -828,7 +793,6 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
             | MockValue::Promise { .. }
             | MockValue::Resolver { .. }
             | MockValue::ArrayBuffer { .. }
-            | MockValue::ExternalArrayBuffer { .. }
             | MockValue::Instance { .. } => Ok(arena.alloc_str("[object Object]")),
         }
     }
@@ -975,20 +939,6 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
         Ok(())
     }
 
-    unsafe fn new_external_arraybuffer(
-        cx: Self::Context<'_>,
-        ptr: *mut u8,
-        len: usize,
-        owner: WGPUBuffer,
-    ) -> Result<Self::Value, Self::Error> {
-        Ok(cx.runtime.insert(MockValue::ExternalArrayBuffer {
-            ptr,
-            len,
-            owner,
-            detached: false,
-        }))
-    }
-
     fn new_arraybuffer_copy(
         cx: Self::Context<'_>,
         bytes: &[u8],
@@ -1029,22 +979,6 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
                     }
                     Ok(())
                 }
-                MockValue::ExternalArrayBuffer {
-                    owner, detached, ..
-                } => {
-                    if !*detached {
-                        let _ = cx
-                            .runtime
-                            .env
-                            .queue()
-                            .enqueue(crate::ReleaseRequest::Buffer {
-                                buffer: *owner,
-                                gpu: cx.runtime.env.gpu(),
-                            });
-                    }
-                    *detached = true;
-                    Ok(())
-                }
                 _ => Err("arraybuffer".to_owned()),
             })
             .unwrap_or_else(|| Err("arraybuffer".to_owned()))
@@ -1055,9 +989,6 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
             MockValue::ArrayBuffer {
                 bytes, detached, ..
             } => Some(if detached { 0 } else { bytes.len() }),
-            MockValue::ExternalArrayBuffer { len, detached, .. } => {
-                Some(if detached { 0 } else { len })
-            }
             _ => None,
         }
     }
@@ -3145,6 +3076,14 @@ mod tests {
     // webgpu.h; it passes it solely to the enqueue-only event forwarder.
     unsafe impl<T> Send for SendPtr<T> {}
 
+    struct SendPendingNative {
+        _native: PendingNative,
+    }
+
+    // SAFETY: tests move the wrapper only into the thread-safe settlement queue,
+    // then drop it on the same test thread to exercise native-handle cleanup.
+    unsafe impl Send for SendPendingNative {}
+
     impl<T> SendPtr<T> {
         fn new(ptr: *mut T) -> Self {
             Self(ptr)
@@ -3391,11 +3330,12 @@ mod tests {
         reset_gpu();
         let rt = runtime();
         let cx = rt.context();
-        let (_, deferred) = MockEngine::<true>::new_promise(cx).expect("promise");
         rt.env
             .settlements()
-            .enqueue::<MockEngine<true>>(crate::SettlementRequest::Success { deferred })
-            .expect("enqueue settlement");
+            .requests
+            .lock()
+            .expect("settlement queue")
+            .push_back(Box::new(()));
 
         let error = unsafe { crate::tick::<Engine>(cx, fake_handle(99)) }.expect_err("tick error");
         assert!(matches!(
@@ -6740,19 +6680,18 @@ mod tests {
         rt.env.settlements().release_pending::<Engine>(cx);
         assert_eq!(rt.queue().drain(), Ok(1));
 
-        let (_, deferred) = MockEngine::<true>::new_promise(cx).expect("promise");
         rt.env
             .settlements()
-            .enqueue::<MockEngine<true>>(SettlementRequest::Device {
-                deferred,
-                native: PendingNative {
+            .requests
+            .lock()
+            .expect("settlement queue")
+            .push_back(Box::new(SendPendingNative {
+                _native: PendingNative {
                     handle: PendingNativeHandle::Device(fake_device()),
                     queue: Arc::clone(rt.queue()),
                     gpu: dispatch(),
                 },
-                events: DeviceEventState::new(Arc::clone(rt.env.settlements())),
-            })
-            .expect("enqueue device");
+            }));
         assert_eq!(
             rt.env.settlements().drain::<Engine>(cx),
             Err(crate::TickError::Queue(
@@ -7099,11 +7038,11 @@ mod tests {
         );
     }
 
-    fn assert_unmap_detaches_all_mapped_ranges<const COPY: bool>() {
+    fn assert_unmap_detaches_all_mapped_ranges() {
         reset_gpu();
         let rt = runtime();
         let cx = rt.context();
-        let device = unsafe { wrap_device::<MockEngine<COPY>>(cx, fake_device()) }.expect("device");
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
         let desc = descriptor(
             &rt,
             &[
@@ -7112,76 +7051,44 @@ mod tests {
                 ("mappedAtCreation", rt.bool(true)),
             ],
         );
-        let buffer = device_create_buffer::<MockEngine<COPY>>(cx, device, &[desc]).expect("buffer");
-        let native = MockEngine::<COPY>::payload(cx, buffer, crate::GPU_BUFFER_CLASS)
-            .and_then(|payload| payload.downcast_ref::<BufferPayload<MockEngine<COPY>>>())
+        let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("buffer");
+        let native = Engine::payload(cx, buffer, crate::GPU_BUFFER_CLASS)
+            .and_then(|payload| payload.downcast_ref::<BufferPayload<Engine>>())
             .and_then(|payload| payload.state().lock().ok().map(|state| state.buffer))
             .expect("native buffer");
-        let first = buffer_get_mapped_range::<MockEngine<COPY>>(
-            cx,
-            buffer,
-            &[rt.number(0.0), rt.number(4.0)],
-        )
-        .expect("range");
-        let second = buffer_get_mapped_range::<MockEngine<COPY>>(
-            cx,
-            buffer,
-            &[rt.number(4.0), rt.number(4.0)],
-        )
-        .expect("range");
-        GPU_STATE.with(|state| {
-            assert_eq!(
-                state.borrow().buffer_add_refs,
-                if COPY { 0 } else { 2 },
-                "zero-copy ranges must retain their owner once per range"
-            );
-        });
-        assert_eq!(MockEngine::<COPY>::arraybuffer_len(cx, first), Some(4));
-        assert_eq!(MockEngine::<COPY>::arraybuffer_len(cx, second), Some(4));
+        let first =
+            buffer_get_mapped_range::<Engine>(cx, buffer, &[rt.number(0.0), rt.number(4.0)])
+                .expect("range");
+        let second =
+            buffer_get_mapped_range::<Engine>(cx, buffer, &[rt.number(4.0), rt.number(4.0)])
+                .expect("range");
+        assert_eq!(Engine::arraybuffer_len(cx, first), Some(4));
+        assert_eq!(Engine::arraybuffer_len(cx, second), Some(4));
         assert!(rt.write_arraybuffer(first, &[1, 2, 3, 4]));
         assert!(rt.write_arraybuffer(second, &[5, 6, 7, 8]));
-        if MockEngine::<COPY>::MAPPED_RANGE_STRATEGY == MappedRangeStrategy::ZeroCopyDetach {
-            assert_eq!(
-                buffer_bytes(native).expect("bytes")[..8],
-                [1, 2, 3, 4, 5, 6, 7, 8],
-                "zero-copy mapped ranges must alias backend memory"
-            );
-        }
+        assert_eq!(
+            buffer_bytes(native).expect("bytes")[..8],
+            [0; 8],
+            "script writes must remain staged until unmap"
+        );
 
-        let _ = buffer_unmap::<MockEngine<COPY>>(cx, buffer, &[]).expect("unmap");
+        let _ = buffer_unmap::<Engine>(cx, buffer, &[]).expect("unmap");
 
-        if !COPY {
-            assert_eq!(rt.queue().len(), Ok(2));
-            assert_eq!(rt.queue().drain(), Ok(2));
-            GPU_STATE.with(|state| assert_eq!(state.borrow().buffer_releases, 2));
-        }
-
-        assert_eq!(MockEngine::<COPY>::arraybuffer_len(cx, first), Some(0));
-        assert_eq!(MockEngine::<COPY>::arraybuffer_len(cx, second), Some(0));
+        assert_eq!(Engine::arraybuffer_len(cx, first), Some(0));
+        assert_eq!(Engine::arraybuffer_len(cx, second), Some(0));
         assert_eq!(rt.read_arraybuffer(first), None);
         assert_eq!(rt.read_arraybuffer(second), None);
-        if MockEngine::<COPY>::MAPPED_RANGE_STRATEGY == MappedRangeStrategy::CopyInCopyOut {
-            assert_eq!(
-                buffer_bytes(native).expect("bytes")[..8],
-                [1, 2, 3, 4, 5, 6, 7, 8]
-            );
-        }
         assert_eq!(
             buffer_bytes(native).expect("bytes")[..8],
             [1, 2, 3, 4, 5, 6, 7, 8],
             "script writes through mapped ranges must reach native memory"
         );
-        rt.env.release_device_event_values::<MockEngine<COPY>>(cx);
-    }
-
-    #[test]
-    fn a15_unmap_detaches_all_mapped_ranges_zero_copy() {
-        assert_unmap_detaches_all_mapped_ranges::<false>();
+        rt.env.release_device_event_values::<Engine>(cx);
     }
 
     #[test]
     fn a10_a20_copy_in_copy_out_detaches_and_copies_back() {
-        assert_unmap_detaches_all_mapped_ranges::<true>();
+        assert_unmap_detaches_all_mapped_ranges();
     }
 
     #[test]
@@ -7520,7 +7427,7 @@ mod tests {
         reset_gpu();
         let rt = runtime();
         let cx = rt.context();
-        let device = unsafe { wrap_device::<MockEngine<true>>(cx, fake_device()) }.expect("device");
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
         let desc = descriptor(
             &rt,
             &[
@@ -7529,35 +7436,25 @@ mod tests {
                 ("mappedAtCreation", rt.bool(true)),
             ],
         );
-        let buffer = device_create_buffer::<MockEngine<true>>(cx, device, &[desc]).expect("buffer");
-        let first = buffer_get_mapped_range::<MockEngine<true>>(
-            cx,
-            buffer,
-            &[rt.number(0.0), rt.number(4.0)],
-        )
-        .expect("first range");
-        let middle = buffer_get_mapped_range::<MockEngine<true>>(
-            cx,
-            buffer,
-            &[rt.number(4.0), rt.number(4.0)],
-        )
-        .expect("middle range");
-        let last = buffer_get_mapped_range::<MockEngine<true>>(
-            cx,
-            buffer,
-            &[rt.number(8.0), rt.number(4.0)],
-        )
-        .expect("last range");
+        let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("buffer");
+        let first =
+            buffer_get_mapped_range::<Engine>(cx, buffer, &[rt.number(0.0), rt.number(4.0)])
+                .expect("first range");
+        let middle =
+            buffer_get_mapped_range::<Engine>(cx, buffer, &[rt.number(4.0), rt.number(4.0)])
+                .expect("middle range");
+        let last = buffer_get_mapped_range::<Engine>(cx, buffer, &[rt.number(8.0), rt.number(4.0)])
+            .expect("last range");
         rt.set_detach_noop_for(middle);
 
-        let error = buffer_unmap::<MockEngine<true>>(cx, buffer, &[])
+        let error = buffer_unmap::<Engine>(cx, buffer, &[])
             .expect_err("middle detach verification must fail");
 
         assert_eq!(error, "OperationError: mapped range detach failed");
-        assert_eq!(MockEngine::<true>::arraybuffer_len(cx, first), Some(0));
-        assert_eq!(MockEngine::<true>::arraybuffer_len(cx, middle), Some(4));
-        assert_eq!(MockEngine::<true>::arraybuffer_len(cx, last), Some(0));
-        rt.env.release_device_event_values::<MockEngine<true>>(cx);
+        assert_eq!(Engine::arraybuffer_len(cx, first), Some(0));
+        assert_eq!(Engine::arraybuffer_len(cx, middle), Some(4));
+        assert_eq!(Engine::arraybuffer_len(cx, last), Some(0));
+        rt.env.release_device_event_values::<Engine>(cx);
         assert!(
             rt.duplicated_values.borrow().is_empty(),
             "every mapped-range value must be released even after an earlier failure"
@@ -7594,7 +7491,7 @@ mod tests {
         reset_gpu();
         let rt = runtime();
         let cx = rt.context();
-        let device = unsafe { wrap_device::<MockEngine<true>>(cx, fake_device()) }.expect("device");
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
         let desc = descriptor(
             &rt,
             &[
@@ -7603,28 +7500,25 @@ mod tests {
                 ("mappedAtCreation", rt.bool(true)),
             ],
         );
-        let buffer = device_create_buffer::<MockEngine<true>>(cx, device, &[desc]).expect("buffer");
-        let native = MockEngine::<true>::payload(cx, buffer, crate::GPU_BUFFER_CLASS)
-            .and_then(|payload| payload.downcast_ref::<BufferPayload<MockEngine<true>>>())
+        let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("buffer");
+        let native = Engine::payload(cx, buffer, crate::GPU_BUFFER_CLASS)
+            .and_then(|payload| payload.downcast_ref::<BufferPayload<Engine>>())
             .and_then(|payload| payload.state().lock().ok().map(|state| state.buffer))
             .expect("native buffer");
-        let range = buffer_get_mapped_range::<MockEngine<true>>(
-            cx,
-            buffer,
-            &[rt.number(0.0), rt.number(4.0)],
-        )
-        .expect("range");
+        let range =
+            buffer_get_mapped_range::<Engine>(cx, buffer, &[rt.number(0.0), rt.number(4.0)])
+                .expect("range");
         assert!(rt.write_arraybuffer(range, &[9, 8, 7, 6]));
 
-        let _ = buffer_destroy::<MockEngine<true>>(cx, buffer, &[]).expect("destroy");
+        let _ = buffer_destroy::<Engine>(cx, buffer, &[]).expect("destroy");
 
-        assert_eq!(MockEngine::<true>::arraybuffer_len(cx, range), Some(0));
+        assert_eq!(Engine::arraybuffer_len(cx, range), Some(0));
         assert_eq!(
             buffer_bytes(native).expect("bytes")[..4],
             [0, 0, 0, 0],
             "destroy detaches ranges but discards script-side mapped bytes"
         );
-        rt.env.release_device_event_values::<MockEngine<true>>(cx);
+        rt.env.release_device_event_values::<Engine>(cx);
     }
 
     #[test]
