@@ -1,22 +1,25 @@
 # webgpu-native-js
 
-A **JavaScript scripting layer for native game engines**, exposing the standard
+A **JavaScript scripting layer for native applications**, exposing the standard
 **WebGPU JavaScript API** (`GPUDevice`, `GPUBuffer`, `GPUQueue`, …) inside a
-native application — no browser, no Node.js — over any GPU backend that speaks
+native host — no browser, no Node.js — over any GPU backend that speaks
 the standard **WebGPU C ABI** ([`webgpu.h`](https://github.com/webgpu-native/webgpu-headers)).
 
-The host engine owns the GPU. Scripts author resources, pipelines, and game
-logic in the same WebGPU API they would use on the web; the engine hands the
+Any native host that owns a GPU can embed it: game engines, renderers and
+DCC/creative tools, simulation and visualization apps, GPU-compute pipelines.
+
+The host owns the GPU. Scripts author resources, pipelines, and application
+logic in the same WebGPU API they would use on the web; the host hands the
 binding an already-created `WGPUDevice` and pumps one `tick()` per frame.
 
 ## What makes it different
 
 - **JS is the scripting layer, not the render hot path.** Initialization,
-  resource and pipeline definition, and game logic run in JS. Per-frame draw
-  submission stays in the native host. This scoping is permanent and is what
-  keeps a JIT-less embedded engine viable.
+  resource and pipeline definition, and application logic run in JS. Per-frame
+  draw submission stays in the native host. This scoping is permanent and is
+  what keeps a JIT-less embedded engine viable.
 - **The host owns the GPU.** The primary entry point is *handle adoption* —
-  `wrap_device(WGPUDevice)` — not `navigator.gpu.requestAdapter()`. The engine
+  `wrap_device(WGPUDevice)` — not `navigator.gpu.requestAdapter()`. The host
   has already chosen its instance, adapter, and device before any script runs.
   (`requestAdapter`/`requestDevice` exist too, so the async path is real.)
 - **One conversion layer, N engines.** All descriptor conversion, validation,
@@ -39,7 +42,7 @@ binding an already-created `WGPUDevice` and pumps one `tick()` per frame.
 ## Architecture
 
 ```
-        game scripts (JavaScript, WebGPU API)
+        host scripts (JavaScript, WebGPU API)
                 │
                 ▼
 ┌─────────────────────────────────────────────────┐
@@ -147,7 +150,7 @@ Three rules for script authors:
 - **Do not call `transfer()` on a mapped-range `ArrayBuffer`.** It moves the
   live mapping into a new buffer the binding cannot see or revoke, leaving a
   dangling view after `unmap()`. Recorded limitation; no guard is practical.
-- **Scripts are trusted.** This is first-party game logic, not a browser
+- **Scripts are trusted.** This is first-party application logic, not a browser
   sandbox. The binding spends its effort on catching honest mistakes with
   clear, early errors, not on hardening against adversarial JS.
 
