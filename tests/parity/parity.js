@@ -838,6 +838,88 @@
         });
     }
 
+    function runIndirectCommands() {
+        return validationScope("indirect-commands", function () {
+            var indirectBuffer = device.createBuffer({ size: 32, usage: 256 });
+            var indexBuffer = device.createBuffer({ size: 8, usage: 16 });
+
+            var computeModule = device.createShaderModule({
+                code: "@compute @workgroup_size(1) fn main() {}"
+            });
+            var computePipeline = device.createComputePipeline({
+                layout: "auto",
+                compute: { module: computeModule, entryPoint: "main" }
+            });
+            var computeEncoder = device.createCommandEncoder();
+            var computePass = computeEncoder.beginComputePass();
+            computePass.setPipeline(computePipeline);
+            computePass.dispatchWorkgroupsIndirect(indirectBuffer, 0);
+            var computeTypeError = caught(function () {
+                computePass.dispatchWorkgroupsIndirect({}, 0);
+            });
+            log("indirect:dispatchWorkgroupsIndirect:" + computeTypeError.name);
+            computePass.end();
+
+            var renderModule = device.createShaderModule({
+                code: "@vertex fn main() -> @builtin(position) vec4f { " +
+                    "return vec4f(0); } @fragment fn fs() -> @location(0) vec4f { " +
+                    "return vec4f(1); }"
+            });
+            var renderPipeline = device.createRenderPipeline({
+                layout: "auto",
+                vertex: { module: renderModule, entryPoint: "main" },
+                fragment: {
+                    module: renderModule,
+                    entryPoint: "fs",
+                    targets: [{ format: "rgba8unorm" }]
+                }
+            });
+            var texture = device.createTexture({
+                size: [1], format: "rgba8unorm", usage: 16
+            });
+            var renderEncoder = device.createCommandEncoder();
+            var renderPass = renderEncoder.beginRenderPass({
+                colorAttachments: [{
+                    view: texture.createView(),
+                    loadOp: "clear",
+                    storeOp: "store"
+                }]
+            });
+            renderPass.setPipeline(renderPipeline);
+            renderPass.setIndexBuffer(indexBuffer, "uint16");
+            renderPass.drawIndirect(indirectBuffer, 0);
+            var drawOffsetError = caught(function () {
+                renderPass.drawIndirect(indirectBuffer, -1);
+            });
+            log("indirect:drawIndirect:" + drawOffsetError.name);
+            renderPass.drawIndexedIndirect(indirectBuffer, 0);
+            var indexedTypeError = caught(function () {
+                renderPass.drawIndexedIndirect(null, 0);
+            });
+            log("indirect:drawIndexedIndirect:" + indexedTypeError.name);
+
+            var bundleEncoder = device.createRenderBundleEncoder({
+                colorFormats: ["rgba8unorm"]
+            });
+            bundleEncoder.setPipeline(renderPipeline);
+            bundleEncoder.setIndexBuffer(indexBuffer, "uint16");
+            bundleEncoder.drawIndirect(indirectBuffer, 0);
+            var bundleTypeError = caught(function () {
+                bundleEncoder.drawIndirect("buffer", 0);
+            });
+            log("indirect:bundle.drawIndirect:" + bundleTypeError.name);
+            bundleEncoder.drawIndexedIndirect(indirectBuffer, 0);
+            var bundleOffsetError = caught(function () {
+                bundleEncoder.drawIndexedIndirect(indirectBuffer, NaN);
+            });
+            log("indirect:bundle.drawIndexedIndirect:" + bundleOffsetError.name);
+            renderPass.executeBundles([bundleEncoder.finish()]);
+            renderPass.end();
+
+            device.queue.submit([computeEncoder.finish(), renderEncoder.finish()]);
+        });
+    }
+
     function runRequiredMembers() {
         var entriesError = caught(function () {
             device.createBindGroupLayout({});
@@ -976,6 +1058,7 @@
             .then(runRenderPipelineValidation)
             .then(runRenderPassAndCopyValidation)
             .then(runRenderBundles)
+            .then(runIndirectCommands)
             .then(runErrorScopes)
             .then(runOrdering)
             .then(runRequestedFeatureOrdering)

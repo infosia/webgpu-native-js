@@ -2294,6 +2294,46 @@ impl LiveRenderCommands {
             },
         }
     }
+
+    unsafe fn draw_indirect(
+        self,
+        gpu: GpuDispatch,
+        indirect_buffer: WGPUBuffer,
+        indirect_offset: u64,
+    ) {
+        match self {
+            Self::Pass(pass) => unsafe {
+                (gpu.render_pass_encoder_draw_indirect)(pass, indirect_buffer, indirect_offset)
+            },
+            Self::Bundle(bundle) => unsafe {
+                (gpu.render_bundle_encoder_draw_indirect)(bundle, indirect_buffer, indirect_offset)
+            },
+        }
+    }
+
+    unsafe fn draw_indexed_indirect(
+        self,
+        gpu: GpuDispatch,
+        indirect_buffer: WGPUBuffer,
+        indirect_offset: u64,
+    ) {
+        match self {
+            Self::Pass(pass) => unsafe {
+                (gpu.render_pass_encoder_draw_indexed_indirect)(
+                    pass,
+                    indirect_buffer,
+                    indirect_offset,
+                )
+            },
+            Self::Bundle(bundle) => unsafe {
+                (gpu.render_bundle_encoder_draw_indexed_indirect)(
+                    bundle,
+                    indirect_buffer,
+                    indirect_offset,
+                )
+            },
+        }
+    }
 }
 
 struct ComputePassState {
@@ -4977,6 +5017,34 @@ pub fn compute_pass_dispatch_workgroups<E: JsEngine + 'static>(
     Ok(E::undefined(cx))
 }
 
+/// Implements `GPUComputePassEncoder.dispatchWorkgroupsIndirect`.
+pub fn compute_pass_dispatch_workgroups_indirect<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let pass = live_compute_pass::<E>(cx, this)?;
+    let indirect_buffer =
+        buffer_handle::<E>(cx, required_argument::<E>(cx, args, 0, "indirectBuffer")?)?;
+    let indirect_offset = enforce_u64::<E>(
+        cx,
+        required_argument::<E>(cx, args, 1, "indirectOffset")?,
+        "indirectOffset",
+    )?;
+    // As with setVertexBuffer/setIndexBuffer, native command recording owns
+    // resource liveness after this call; the wrapper does not retain a JS value.
+    unsafe {
+        (E::environment(cx)
+            .gpu()
+            .compute_pass_encoder_dispatch_workgroups_indirect)(
+            pass,
+            indirect_buffer,
+            indirect_offset,
+        )
+    };
+    Ok(E::undefined(cx))
+}
+
 /// Implements `GPUComputePassEncoder.end`.
 pub fn compute_pass_end<E: JsEngine + 'static>(
     cx: E::Context<'_>,
@@ -5130,6 +5198,46 @@ pub fn render_pass_draw_indexed<E: JsEngine + 'static>(
                 first_instance,
             ),
         )
+    };
+    Ok(E::undefined(cx))
+}
+
+/// Implements the shared `GPURenderCommandsMixin.drawIndirect` body.
+pub fn render_pass_draw_indirect<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let encoder = live_render_commands::<E>(cx, this)?;
+    let indirect_buffer =
+        buffer_handle::<E>(cx, required_argument::<E>(cx, args, 0, "indirectBuffer")?)?;
+    let indirect_offset = enforce_u64::<E>(
+        cx,
+        required_argument::<E>(cx, args, 1, "indirectOffset")?,
+        "indirectOffset",
+    )?;
+    // Shared render-command ownership matches setVertexBuffer/setIndexBuffer:
+    // the native encoder retains command resources, not the JS wrapper.
+    unsafe { encoder.draw_indirect(E::environment(cx).gpu(), indirect_buffer, indirect_offset) };
+    Ok(E::undefined(cx))
+}
+
+/// Implements the shared `GPURenderCommandsMixin.drawIndexedIndirect` body.
+pub fn render_pass_draw_indexed_indirect<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let encoder = live_render_commands::<E>(cx, this)?;
+    let indirect_buffer =
+        buffer_handle::<E>(cx, required_argument::<E>(cx, args, 0, "indirectBuffer")?)?;
+    let indirect_offset = enforce_u64::<E>(
+        cx,
+        required_argument::<E>(cx, args, 1, "indirectOffset")?,
+        "indirectOffset",
+    )?;
+    unsafe {
+        encoder.draw_indexed_indirect(E::environment(cx).gpu(), indirect_buffer, indirect_offset)
     };
     Ok(E::undefined(cx))
 }

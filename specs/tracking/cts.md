@@ -211,3 +211,31 @@ the same case often passes on a re-run), so a crash aborts only one unit
 instead of the gate. That driver is deferred until the fork fix is attempted;
 if the fix lands first it is moot. Recorded so the next agent does not mistake
 the curated suite's exclusions for missing coverage.
+
+**Indirect draw/dispatch implemented (2026-07-12) — the first bug the QuickJS
+crash had been hiding.** Under QuickJS these cases aborted the process, so their
+failures were never observable. Boa runs them and reported
+`TypeError: not a callable function` on every `drawIndirect` /
+`drawIndexedIndirect` subcase. Cause: the indirect methods were simply absent
+from the surface. Added, from the pins:
+
+| Interface | Members | IDL | C ABI |
+|---|---|---|---|
+| `GPURenderPassEncoder` | `drawIndirect`, `drawIndexedIndirect` | `webgpu.idl:1159-1160` (`GPURenderCommandsMixin`) | `wgpuRenderPassEncoderDraw{,Indexed}Indirect` |
+| `GPURenderBundleEncoder` | `drawIndirect`, `drawIndexedIndirect` | same mixin | `wgpuRenderBundleEncoderDraw{,Indexed}Indirect` |
+| `GPUComputePassEncoder` | `dispatchWorkgroupsIndirect` | `webgpu.idl:1046` | `wgpuComputePassEncoderDispatchWorkgroupsIndirect` |
+
+Result: `buffer_binding_overlap:*` **2 pass/2 fail → 4/0**;
+`vertex_buffer_OOB:*` **30/30 → 60/0**. Parity 127 → 133 lines, byte-identical
+under Boa and JSC.
+
+**A premise of the handoff was wrong, and the agent said so** rather than
+building on it: `setVertexBuffer`/`setIndexBuffer` do *not* capture buffers in
+Rust-side encoder state — native command recording retains them. The indirect
+methods follow that same established behaviour; no new wrapper-side retention
+scheme was invented, and the mock tests verify native ownership transfers from
+encoder to command buffer / render bundle and survives wrapper release.
+
+**Still open in the same family:** `draw:*` as a whole is now **82 pass / 16
+fail / 1 skip**. The 16 are unrelated to the indirect gap and are not yet
+triaged.

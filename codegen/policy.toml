@@ -186,7 +186,13 @@ members = [
 
 [[subset]]
 interface = "GPUComputePassEncoder"
-members = ["setPipeline", "setBindGroup", "dispatchWorkgroups", "end"]
+members = [
+  "setPipeline",
+  "setBindGroup",
+  "dispatchWorkgroups",
+  "dispatchWorkgroupsIndirect",
+  "end",
+]
 
 [[subset]]
 interface = "GPURenderPassEncoder"
@@ -197,6 +203,8 @@ members = [
   "setBindGroup",
   "draw",
   "drawIndexed",
+  "drawIndirect",
+  "drawIndexedIndirect",
   "setViewport",
   "setScissorRect",
   "beginOcclusionQuery",
@@ -214,6 +222,8 @@ members = [
   "setBindGroup",
   "draw",
   "drawIndexed",
+  "drawIndirect",
+  "drawIndexedIndirect",
   "finish",
 ]
 
@@ -406,6 +416,11 @@ path = "compute_pass_dispatch_workgroups"
 
 [[lifecycle.methods]]
 interface = "GPUComputePassEncoder"
+member = "dispatchWorkgroupsIndirect"
+path = "compute_pass_dispatch_workgroups_indirect"
+
+[[lifecycle.methods]]
+interface = "GPUComputePassEncoder"
 member = "end"
 path = "compute_pass_end"
 
@@ -438,6 +453,16 @@ path = "render_pass_draw"
 interface = "GPURenderPassEncoder"
 member = "drawIndexed"
 path = "render_pass_draw_indexed"
+
+[[lifecycle.methods]]
+interface = "GPURenderPassEncoder"
+member = "drawIndirect"
+path = "render_pass_draw_indirect"
+
+[[lifecycle.methods]]
+interface = "GPURenderPassEncoder"
+member = "drawIndexedIndirect"
+path = "render_pass_draw_indexed_indirect"
 
 [[lifecycle.methods]]
 interface = "GPURenderPassEncoder"
@@ -503,6 +528,18 @@ reason = "GPURenderCommandsMixin reuses the render-command body with bundle-spec
 interface = "GPURenderBundleEncoder"
 member = "drawIndexed"
 path = "render_pass_draw_indexed"
+reason = "GPURenderCommandsMixin reuses the render-command body with bundle-specific dispatch"
+
+[[lifecycle.methods]]
+interface = "GPURenderBundleEncoder"
+member = "drawIndirect"
+path = "render_pass_draw_indirect"
+reason = "GPURenderCommandsMixin reuses the render-command body with bundle-specific dispatch"
+
+[[lifecycle.methods]]
+interface = "GPURenderBundleEncoder"
+member = "drawIndexedIndirect"
+path = "render_pass_draw_indexed_indirect"
 reason = "GPURenderCommandsMixin reuses the render-command body with bundle-specific dispatch"
 
 [[lifecycle.methods]]

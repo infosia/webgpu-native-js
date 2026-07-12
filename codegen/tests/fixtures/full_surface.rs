@@ -191,6 +191,8 @@ pub struct GpuDispatch {
     pub compute_pass_encoder_set_bind_group: unsafe fn(WGPUComputePassEncoder, u32, WGPUBindGroup, usize, *const u32),
     /// `wgpuComputePassEncoderDispatchWorkgroups`.
     pub compute_pass_encoder_dispatch_workgroups: unsafe fn(WGPUComputePassEncoder, u32, u32, u32),
+    /// `wgpuComputePassEncoderDispatchWorkgroupsIndirect`.
+    pub compute_pass_encoder_dispatch_workgroups_indirect: unsafe fn(WGPUComputePassEncoder, WGPUBuffer, u64),
     /// `wgpuComputePassEncoderEnd`.
     pub compute_pass_encoder_end: unsafe fn(WGPUComputePassEncoder),
     /// `wgpuRenderPassEncoderRelease`.
@@ -207,6 +209,10 @@ pub struct GpuDispatch {
     pub render_pass_encoder_draw: unsafe fn(WGPURenderPassEncoder, u32, u32, u32, u32),
     /// `wgpuRenderPassEncoderDrawIndexed`.
     pub render_pass_encoder_draw_indexed: unsafe fn(WGPURenderPassEncoder, u32, u32, u32, i32, u32),
+    /// `wgpuRenderPassEncoderDrawIndirect`.
+    pub render_pass_encoder_draw_indirect: unsafe fn(WGPURenderPassEncoder, WGPUBuffer, u64),
+    /// `wgpuRenderPassEncoderDrawIndexedIndirect`.
+    pub render_pass_encoder_draw_indexed_indirect: unsafe fn(WGPURenderPassEncoder, WGPUBuffer, u64),
     /// `wgpuRenderPassEncoderSetViewport`.
     pub render_pass_encoder_set_viewport: unsafe fn(WGPURenderPassEncoder, f32, f32, f32, f32, f32, f32),
     /// `wgpuRenderPassEncoderSetScissorRect`.
@@ -233,6 +239,10 @@ pub struct GpuDispatch {
     pub render_bundle_encoder_draw: unsafe fn(WGPURenderBundleEncoder, u32, u32, u32, u32),
     /// `wgpuRenderBundleEncoderDrawIndexed`.
     pub render_bundle_encoder_draw_indexed: unsafe fn(WGPURenderBundleEncoder, u32, u32, u32, i32, u32),
+    /// `wgpuRenderBundleEncoderDrawIndirect`.
+    pub render_bundle_encoder_draw_indirect: unsafe fn(WGPURenderBundleEncoder, WGPUBuffer, u64),
+    /// `wgpuRenderBundleEncoderDrawIndexedIndirect`.
+    pub render_bundle_encoder_draw_indexed_indirect: unsafe fn(WGPURenderBundleEncoder, WGPUBuffer, u64),
     /// `wgpuRenderBundleEncoderFinish`.
     pub render_bundle_encoder_finish: unsafe fn(WGPURenderBundleEncoder, *const WGPURenderBundleDescriptor) -> WGPURenderBundle,
     /// `wgpuRenderBundleRelease`.
@@ -342,6 +352,7 @@ macro_rules! for_each_gpu_dispatch_entry {
             (compute_pass_encoder_set_pipeline, wgpuComputePassEncoderSetPipeline, unsafe fn(compute_pass_encoder: $crate::WGPUComputePassEncoder, pipeline: $crate::WGPUComputePipeline)),
             (compute_pass_encoder_set_bind_group, wgpuComputePassEncoderSetBindGroup, unsafe fn(compute_pass_encoder: $crate::WGPUComputePassEncoder, group_index: u32, group: $crate::WGPUBindGroup, dynamic_offsets_count: usize, dynamic_offsets: *const u32)),
             (compute_pass_encoder_dispatch_workgroups, wgpuComputePassEncoderDispatchWorkgroups, unsafe fn(compute_pass_encoder: $crate::WGPUComputePassEncoder, workgroup_count_x: u32, workgroup_count_y: u32, workgroup_count_z: u32)),
+            (compute_pass_encoder_dispatch_workgroups_indirect, wgpuComputePassEncoderDispatchWorkgroupsIndirect, unsafe fn(compute_pass_encoder: $crate::WGPUComputePassEncoder, indirect_buffer: $crate::WGPUBuffer, indirect_offset: u64)),
             (compute_pass_encoder_end, wgpuComputePassEncoderEnd, unsafe fn(compute_pass_encoder: $crate::WGPUComputePassEncoder)),
             (render_pass_encoder_release, wgpuRenderPassEncoderRelease, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder)),
             (render_pass_encoder_set_pipeline, wgpuRenderPassEncoderSetPipeline, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder, pipeline: $crate::WGPURenderPipeline)),
@@ -350,6 +361,8 @@ macro_rules! for_each_gpu_dispatch_entry {
             (render_pass_encoder_set_bind_group, wgpuRenderPassEncoderSetBindGroup, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder, group_index: u32, group: $crate::WGPUBindGroup, dynamic_offsets_count: usize, dynamic_offsets: *const u32)),
             (render_pass_encoder_draw, wgpuRenderPassEncoderDraw, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder, vertex_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32)),
             (render_pass_encoder_draw_indexed, wgpuRenderPassEncoderDrawIndexed, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder, index_count: u32, instance_count: u32, first_index: u32, base_vertex: i32, first_instance: u32)),
+            (render_pass_encoder_draw_indirect, wgpuRenderPassEncoderDrawIndirect, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder, indirect_buffer: $crate::WGPUBuffer, indirect_offset: u64)),
+            (render_pass_encoder_draw_indexed_indirect, wgpuRenderPassEncoderDrawIndexedIndirect, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder, indirect_buffer: $crate::WGPUBuffer, indirect_offset: u64)),
             (render_pass_encoder_set_viewport, wgpuRenderPassEncoderSetViewport, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder, x: f32, y: f32, width: f32, height: f32, min_depth: f32, max_depth: f32)),
             (render_pass_encoder_set_scissor_rect, wgpuRenderPassEncoderSetScissorRect, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder, x: u32, y: u32, width: u32, height: u32)),
             (render_pass_encoder_begin_occlusion_query, wgpuRenderPassEncoderBeginOcclusionQuery, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder, query_index: u32)),
@@ -363,6 +376,8 @@ macro_rules! for_each_gpu_dispatch_entry {
             (render_bundle_encoder_set_bind_group, wgpuRenderBundleEncoderSetBindGroup, unsafe fn(render_bundle_encoder: $crate::WGPURenderBundleEncoder, group_index: u32, group: $crate::WGPUBindGroup, dynamic_offsets_count: usize, dynamic_offsets: *const u32)),
             (render_bundle_encoder_draw, wgpuRenderBundleEncoderDraw, unsafe fn(render_bundle_encoder: $crate::WGPURenderBundleEncoder, vertex_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32)),
             (render_bundle_encoder_draw_indexed, wgpuRenderBundleEncoderDrawIndexed, unsafe fn(render_bundle_encoder: $crate::WGPURenderBundleEncoder, index_count: u32, instance_count: u32, first_index: u32, base_vertex: i32, first_instance: u32)),
+            (render_bundle_encoder_draw_indirect, wgpuRenderBundleEncoderDrawIndirect, unsafe fn(render_bundle_encoder: $crate::WGPURenderBundleEncoder, indirect_buffer: $crate::WGPUBuffer, indirect_offset: u64)),
+            (render_bundle_encoder_draw_indexed_indirect, wgpuRenderBundleEncoderDrawIndexedIndirect, unsafe fn(render_bundle_encoder: $crate::WGPURenderBundleEncoder, indirect_buffer: $crate::WGPUBuffer, indirect_offset: u64)),
             (render_bundle_encoder_finish, wgpuRenderBundleEncoderFinish, unsafe fn(render_bundle_encoder: $crate::WGPURenderBundleEncoder, descriptor: *const $crate::WGPURenderBundleDescriptor) -> $crate::WGPURenderBundle),
             (render_bundle_release, wgpuRenderBundleRelease, unsafe fn(render_bundle: $crate::WGPURenderBundle)),
             (command_buffer_release, wgpuCommandBufferRelease, unsafe fn(command_buffer: $crate::WGPUCommandBuffer)),
@@ -5046,6 +5061,7 @@ pub(super) fn compute_pass_encoder_class<E: JsEngine + 'static>() -> &'static Cl
             MethodSpec { name: "setPipeline", length: 1, call: compute_pass_set_pipeline::<E> },
             MethodSpec { name: "setBindGroup", length: 2, call: compute_pass_set_bind_group::<E> },
             MethodSpec { name: "dispatchWorkgroups", length: 1, call: compute_pass_dispatch_workgroups::<E> },
+            MethodSpec { name: "dispatchWorkgroupsIndirect", length: 2, call: compute_pass_dispatch_workgroups_indirect::<E> },
             MethodSpec { name: "end", length: 0, call: compute_pass_end::<E> },
         ])),
         finalizer: finalize_compute_pass_encoder,
@@ -5065,6 +5081,8 @@ pub(super) fn render_pass_encoder_class<E: JsEngine + 'static>() -> &'static Cla
             MethodSpec { name: "setBindGroup", length: 2, call: render_pass_set_bind_group::<E> },
             MethodSpec { name: "draw", length: 1, call: render_pass_draw::<E> },
             MethodSpec { name: "drawIndexed", length: 1, call: render_pass_draw_indexed::<E> },
+            MethodSpec { name: "drawIndirect", length: 2, call: render_pass_draw_indirect::<E> },
+            MethodSpec { name: "drawIndexedIndirect", length: 2, call: render_pass_draw_indexed_indirect::<E> },
             MethodSpec { name: "setViewport", length: 6, call: render_pass_set_viewport::<E> },
             MethodSpec { name: "setScissorRect", length: 4, call: render_pass_set_scissor_rect::<E> },
             MethodSpec { name: "beginOcclusionQuery", length: 1, call: render_pass_begin_occlusion_query::<E> },
@@ -5089,6 +5107,8 @@ pub(super) fn render_bundle_encoder_class<E: JsEngine + 'static>() -> &'static C
             MethodSpec { name: "setBindGroup", length: 2, call: render_pass_set_bind_group::<E> },
             MethodSpec { name: "draw", length: 1, call: render_pass_draw::<E> },
             MethodSpec { name: "drawIndexed", length: 1, call: render_pass_draw_indexed::<E> },
+            MethodSpec { name: "drawIndirect", length: 2, call: render_pass_draw_indirect::<E> },
+            MethodSpec { name: "drawIndexedIndirect", length: 2, call: render_pass_draw_indexed_indirect::<E> },
             MethodSpec { name: "finish", length: 0, call: render_bundle_encoder_finish::<E> },
         ])),
         finalizer: finalize_render_bundle_encoder,

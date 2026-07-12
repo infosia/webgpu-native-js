@@ -117,6 +117,12 @@ renderBundle:use-after-finish:OperationError:GPURenderBundleEncoder is finished
 renderBundle:type-confusion:TypeError:GPURenderBundle is required
 renderBundle:sparse-colorFormats:null
 renderBundle:chain:null
+indirect:dispatchWorkgroupsIndirect:TypeError
+indirect:drawIndirect:TypeError
+indirect:drawIndexedIndirect:TypeError
+indirect:bundle.drawIndirect:TypeError
+indirect:bundle.drawIndexedIndirect:TypeError
+scope:indirect-commands:null
 scope:nested:null,GPUValidationError
 reject:popErrorScope:OperationError:popErrorScope failed:[backend-detail]
 order:same-tick:mapAsync,workDone

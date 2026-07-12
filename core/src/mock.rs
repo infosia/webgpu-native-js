@@ -1166,6 +1166,13 @@ struct MockGpuState {
     recording_calls: BTreeMap<&'static str, usize>,
     vertex_buffer_ranges: Vec<(u64, u64)>,
     index_buffer_ranges: Vec<(u64, u64)>,
+    indirect_calls: Vec<(&'static str, WGPUBuffer, u64)>,
+    encoder_retained_indirect_buffers: Vec<WGPUBuffer>,
+    command_buffer_retained_indirect_buffers: Vec<WGPUBuffer>,
+    released_indirect_buffers: Vec<WGPUBuffer>,
+    bundle_encoder_retained_indirect_buffers: Vec<WGPUBuffer>,
+    render_bundle_retained_indirect_buffers: Vec<WGPUBuffer>,
+    released_bundle_indirect_buffers: Vec<WGPUBuffer>,
 }
 
 struct MockPopError {
@@ -2334,7 +2341,12 @@ unsafe fn render_pipeline_get_bind_group_layout(
     }
 }
 unsafe fn command_encoder_release(_encoder: WGPUCommandEncoder) {
-    GPU_STATE.with(|state| state.borrow_mut().command_encoder_releases += 1);
+    GPU_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        state.command_encoder_releases += 1;
+        let retained = std::mem::take(&mut state.encoder_retained_indirect_buffers);
+        state.released_indirect_buffers.extend(retained);
+    });
 }
 
 unsafe fn command_encoder_copy_buffer_to_buffer(
@@ -2435,11 +2447,23 @@ unsafe fn command_encoder_finish(
     _encoder: WGPUCommandEncoder,
     _descriptor: *const WGPUCommandBufferDescriptor,
 ) -> WGPUCommandBuffer {
+    GPU_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let retained = std::mem::take(&mut state.encoder_retained_indirect_buffers);
+        state
+            .command_buffer_retained_indirect_buffers
+            .extend(retained);
+    });
     fake_handle(9001)
 }
 
 unsafe fn command_buffer_release(_command_buffer: WGPUCommandBuffer) {
-    GPU_STATE.with(|state| state.borrow_mut().command_buffer_releases += 1);
+    GPU_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        state.command_buffer_releases += 1;
+        let retained = std::mem::take(&mut state.command_buffer_retained_indirect_buffers);
+        state.released_indirect_buffers.extend(retained);
+    });
 }
 unsafe fn compute_pass_encoder_release(_pass: WGPUComputePassEncoder) {
     GPU_STATE.with(|state| state.borrow_mut().compute_pass_encoder_releases += 1);
@@ -2483,6 +2507,27 @@ unsafe fn compute_pass_encoder_dispatch_workgroups(
             .recording_calls
             .entry("dispatch_workgroups")
             .or_default() += 1;
+    });
+}
+unsafe fn compute_pass_encoder_dispatch_workgroups_indirect(
+    _pass: WGPUComputePassEncoder,
+    indirect_buffer: WGPUBuffer,
+    indirect_offset: u64,
+) {
+    GPU_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        *state
+            .recording_calls
+            .entry("dispatch_workgroups_indirect")
+            .or_default() += 1;
+        state.indirect_calls.push((
+            "dispatch_workgroups_indirect",
+            indirect_buffer,
+            indirect_offset,
+        ));
+        state
+            .encoder_retained_indirect_buffers
+            .push(indirect_buffer);
     });
 }
 unsafe fn compute_pass_encoder_end(_pass: WGPUComputePassEncoder) {
@@ -2587,6 +2632,41 @@ unsafe fn render_pass_encoder_draw_indexed(
             .or_default() += 1;
     });
 }
+unsafe fn render_pass_encoder_draw_indirect(
+    _pass: WGPURenderPassEncoder,
+    indirect_buffer: WGPUBuffer,
+    indirect_offset: u64,
+) {
+    GPU_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        *state.recording_calls.entry("draw_indirect").or_default() += 1;
+        state
+            .indirect_calls
+            .push(("draw_indirect", indirect_buffer, indirect_offset));
+        state
+            .encoder_retained_indirect_buffers
+            .push(indirect_buffer);
+    });
+}
+unsafe fn render_pass_encoder_draw_indexed_indirect(
+    _pass: WGPURenderPassEncoder,
+    indirect_buffer: WGPUBuffer,
+    indirect_offset: u64,
+) {
+    GPU_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        *state
+            .recording_calls
+            .entry("draw_indexed_indirect")
+            .or_default() += 1;
+        state
+            .indirect_calls
+            .push(("draw_indexed_indirect", indirect_buffer, indirect_offset));
+        state
+            .encoder_retained_indirect_buffers
+            .push(indirect_buffer);
+    });
+}
 unsafe fn render_pass_encoder_set_viewport(
     _pass: WGPURenderPassEncoder,
     _x: f32,
@@ -2665,7 +2745,12 @@ unsafe fn render_pass_encoder_end(_pass: WGPURenderPassEncoder) {
 }
 
 unsafe fn render_bundle_encoder_release(_encoder: WGPURenderBundleEncoder) {
-    GPU_STATE.with(|state| state.borrow_mut().render_bundle_encoder_releases += 1);
+    GPU_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        state.render_bundle_encoder_releases += 1;
+        let retained = std::mem::take(&mut state.bundle_encoder_retained_indirect_buffers);
+        state.released_bundle_indirect_buffers.extend(retained);
+    });
 }
 unsafe fn render_bundle_encoder_set_pipeline(
     _encoder: WGPURenderBundleEncoder,
@@ -2755,14 +2840,66 @@ unsafe fn render_bundle_encoder_draw_indexed(
             .or_default() += 1;
     });
 }
+unsafe fn render_bundle_encoder_draw_indirect(
+    _encoder: WGPURenderBundleEncoder,
+    indirect_buffer: WGPUBuffer,
+    indirect_offset: u64,
+) {
+    GPU_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        *state
+            .recording_calls
+            .entry("bundle_draw_indirect")
+            .or_default() += 1;
+        state
+            .indirect_calls
+            .push(("bundle_draw_indirect", indirect_buffer, indirect_offset));
+        state
+            .bundle_encoder_retained_indirect_buffers
+            .push(indirect_buffer);
+    });
+}
+unsafe fn render_bundle_encoder_draw_indexed_indirect(
+    _encoder: WGPURenderBundleEncoder,
+    indirect_buffer: WGPUBuffer,
+    indirect_offset: u64,
+) {
+    GPU_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        *state
+            .recording_calls
+            .entry("bundle_draw_indexed_indirect")
+            .or_default() += 1;
+        state.indirect_calls.push((
+            "bundle_draw_indexed_indirect",
+            indirect_buffer,
+            indirect_offset,
+        ));
+        state
+            .bundle_encoder_retained_indirect_buffers
+            .push(indirect_buffer);
+    });
+}
 unsafe fn render_bundle_encoder_finish(
     _encoder: WGPURenderBundleEncoder,
     _descriptor: *const WGPURenderBundleDescriptor,
 ) -> WGPURenderBundle {
+    GPU_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let retained = std::mem::take(&mut state.bundle_encoder_retained_indirect_buffers);
+        state
+            .render_bundle_retained_indirect_buffers
+            .extend(retained);
+    });
     fake_handle(13_001)
 }
 unsafe fn render_bundle_release(_bundle: WGPURenderBundle) {
-    GPU_STATE.with(|state| state.borrow_mut().render_bundle_releases += 1);
+    GPU_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        state.render_bundle_releases += 1;
+        let retained = std::mem::take(&mut state.render_bundle_retained_indirect_buffers);
+        state.released_bundle_indirect_buffers.extend(retained);
+    });
 }
 
 fn read_view(view: WGPUStringView) -> Vec<u8> {
@@ -8408,6 +8545,146 @@ mod tests {
     }
 
     #[test]
+    fn indirect_dispatch_and_draw_forward_handles_offsets_and_reject_bad_arguments() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let buffer = device_create_buffer::<Engine>(
+            cx,
+            device,
+            &[descriptor(
+                &rt,
+                &[("size", rt.number(64.0)), ("usage", rt.number(256.0))],
+            )],
+        )
+        .expect("indirect buffer");
+        let native = crate::buffer_handle::<Engine>(cx, buffer).expect("native buffer");
+        let encoder = device_create_command_encoder::<Engine>(cx, device, &[]).expect("encoder");
+        let compute_pass = crate::command_encoder_begin_compute_pass::<Engine>(cx, encoder, &[])
+            .expect("compute pass");
+
+        crate::compute_pass_dispatch_workgroups_indirect::<Engine>(
+            cx,
+            compute_pass,
+            &[buffer, rt.number(4_294_967_296.0)],
+        )
+        .expect("indirect dispatch");
+        assert_eq!(
+            crate::compute_pass_dispatch_workgroups_indirect::<Engine>(
+                cx,
+                compute_pass,
+                &[rt.null(), rt.number(0.0)],
+            )
+            .expect_err("non-buffer argument"),
+            "TypeError: GPUBuffer is required"
+        );
+        assert_eq!(
+            crate::compute_pass_dispatch_workgroups_indirect::<Engine>(
+                cx,
+                compute_pass,
+                &[buffer, rt.number(-1.0)],
+            )
+            .expect_err("negative offset"),
+            "TypeError: indirectOffset"
+        );
+        crate::compute_pass_end::<Engine>(cx, compute_pass, &[]).expect("end compute pass");
+
+        let render_descriptor = descriptor(&rt, &[("colorAttachments", rt.set_like(&[]))]);
+        let render_pass =
+            crate::command_encoder_begin_render_pass::<Engine>(cx, encoder, &[render_descriptor])
+                .expect("render pass");
+        crate::render_pass_draw_indirect::<Engine>(
+            cx,
+            render_pass,
+            &[buffer, rt.number(1_099_511_627_776.0)],
+        )
+        .expect("indirect draw");
+        crate::render_pass_draw_indexed_indirect::<Engine>(
+            cx,
+            render_pass,
+            &[buffer, rt.number(8.0)],
+        )
+        .expect("indexed indirect draw");
+        assert_eq!(
+            crate::render_pass_draw_indirect::<Engine>(
+                cx,
+                render_pass,
+                &[rt.string("buffer"), rt.number(0.0)],
+            )
+            .expect_err("non-buffer draw argument"),
+            "TypeError: GPUBuffer is required"
+        );
+        assert_eq!(
+            crate::render_pass_draw_indexed_indirect::<Engine>(
+                cx,
+                render_pass,
+                &[buffer, rt.number(f64::NAN)],
+            )
+            .expect_err("NaN draw offset"),
+            "TypeError: indirectOffset"
+        );
+        crate::render_pass_end::<Engine>(cx, render_pass, &[]).expect("end render pass");
+
+        let command_buffer =
+            command_encoder_finish::<Engine>(cx, encoder, &[]).expect("command buffer");
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(
+                state.indirect_calls,
+                [
+                    ("dispatch_workgroups_indirect", native, 4_294_967_296),
+                    ("draw_indirect", native, 1_099_511_627_776),
+                    ("draw_indexed_indirect", native, 8),
+                ]
+            );
+            assert!(state.encoder_retained_indirect_buffers.is_empty());
+            assert_eq!(
+                state.command_buffer_retained_indirect_buffers,
+                [native, native, native]
+            );
+        });
+
+        let buffer_state = Engine::payload(cx, buffer, crate::GPU_BUFFER_CLASS)
+            .and_then(|payload| payload.downcast_ref::<BufferPayload<Engine>>())
+            .map(|payload| Arc::clone(&payload.state))
+            .expect("buffer state");
+        crate::finalize_buffer::<Engine>(
+            Box::new(BufferPayload {
+                state: buffer_state,
+            }),
+            &rt.env,
+        );
+        assert_eq!(rt.queue().drain().expect("release buffer wrapper"), 1);
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.buffer_releases, 1);
+            assert_eq!(
+                state.command_buffer_retained_indirect_buffers,
+                [native, native, native]
+            );
+        });
+
+        let queue = device_queue_get::<Engine>(cx, device).expect("queue");
+        queue_submit::<Engine>(cx, queue, &[rt.set_like(&[command_buffer])]).expect("submit");
+        let command_buffer_state =
+            crate::command_buffer_state::<Engine>(cx, command_buffer).expect("command state");
+        crate::finalize_command_buffer(
+            Box::new(crate::CommandBufferPayload {
+                state: command_buffer_state,
+            }),
+            &rt.env,
+        );
+        assert_eq!(rt.queue().drain().expect("release command buffer"), 1);
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            assert!(state.command_buffer_retained_indirect_buffers.is_empty());
+            assert_eq!(state.released_indirect_buffers, [native, native, native]);
+        });
+        release_device_held_values(&rt, cx, device);
+    }
+
+    #[test]
     fn t6_render_pass_state_machine_and_t7_copy_calls_are_validation_only() {
         reset_gpu();
         let rt = runtime();
@@ -8726,6 +9003,8 @@ mod tests {
                 "setBindGroup",
                 "draw",
                 "drawIndexed",
+                "drawIndirect",
+                "drawIndexedIndirect",
                 "finish",
             ]
         );
@@ -8753,6 +9032,7 @@ mod tests {
             )],
         )
         .expect("buffer");
+        let native_buffer = crate::buffer_handle::<Engine>(cx, buffer).expect("native buffer");
         let bind_group = Engine::new_instance(
             cx,
             crate::GPU_BIND_GROUP_CLASS,
@@ -8790,6 +9070,18 @@ mod tests {
             .expect("shared draw body");
         crate::render_pass_draw_indexed::<Engine>(cx, bundle_encoder, &[rt.number(3.0)])
             .expect("shared indexed-draw body");
+        crate::render_pass_draw_indirect::<Engine>(
+            cx,
+            bundle_encoder,
+            &[buffer, rt.number(4_294_967_296.0)],
+        )
+        .expect("shared indirect-draw body");
+        crate::render_pass_draw_indexed_indirect::<Engine>(
+            cx,
+            bundle_encoder,
+            &[buffer, rt.number(1_099_511_627_776.0)],
+        )
+        .expect("shared indexed-indirect-draw body");
 
         let bundle = crate::render_bundle_encoder_finish::<Engine>(
             cx,
@@ -8807,6 +9099,25 @@ mod tests {
                 .expect_err("double finish"),
             "OperationError: GPURenderBundleEncoder is finished"
         );
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            assert!(state.bundle_encoder_retained_indirect_buffers.is_empty());
+            assert_eq!(
+                state.render_bundle_retained_indirect_buffers,
+                [native_buffer, native_buffer]
+            );
+            assert_eq!(
+                state.indirect_calls,
+                [
+                    ("bundle_draw_indirect", native_buffer, 4_294_967_296),
+                    (
+                        "bundle_draw_indexed_indirect",
+                        native_buffer,
+                        1_099_511_627_776,
+                    ),
+                ]
+            );
+        });
 
         let command_encoder =
             device_create_command_encoder::<Engine>(cx, device, &[]).expect("command encoder");
@@ -8829,18 +9140,42 @@ mod tests {
             "TypeError: GPURenderBundle is required"
         );
 
-        crate::finalize_render_bundle_encoder(
-            Box::new(crate::RenderBundleEncoderPayload {
-                state: Arc::new(Mutex::new(crate::RenderBundleEncoderState {
-                    render_bundle_encoder: fake_handle(15_001),
-                    ended: true,
-                })),
+        let buffer_state = Engine::payload(cx, buffer, crate::GPU_BUFFER_CLASS)
+            .and_then(|payload| payload.downcast_ref::<BufferPayload<Engine>>())
+            .map(|payload| Arc::clone(&payload.state))
+            .expect("buffer state");
+        crate::finalize_buffer::<Engine>(
+            Box::new(BufferPayload {
+                state: buffer_state,
             }),
             &rt.env,
         );
+        assert_eq!(rt.queue().drain(), Ok(1));
+        GPU_STATE.with(|state| {
+            assert_eq!(
+                state.borrow().render_bundle_retained_indirect_buffers,
+                [native_buffer, native_buffer]
+            );
+        });
+
+        let bundle_encoder_state =
+            Engine::payload(cx, bundle_encoder, crate::GPU_RENDER_BUNDLE_ENCODER_CLASS)
+                .and_then(|payload| payload.downcast_ref::<crate::RenderBundleEncoderPayload>())
+                .map(|payload| Arc::clone(&payload.state))
+                .expect("bundle encoder state");
+        crate::finalize_render_bundle_encoder(
+            Box::new(crate::RenderBundleEncoderPayload {
+                state: bundle_encoder_state,
+            }),
+            &rt.env,
+        );
+        let native_bundle = Engine::payload(cx, bundle, crate::GPU_RENDER_BUNDLE_CLASS)
+            .and_then(|payload| payload.downcast_ref::<crate::RenderBundlePayload>())
+            .map(|payload| payload.render_bundle)
+            .expect("native render bundle");
         crate::finalize_render_bundle(
             Box::new(crate::RenderBundlePayload {
-                render_bundle: fake_handle(15_002),
+                render_bundle: native_bundle,
             }),
             &rt.env,
         );
@@ -8854,12 +9189,19 @@ mod tests {
                 "bundle_set_bind_group",
                 "bundle_draw",
                 "bundle_draw_indexed",
+                "bundle_draw_indirect",
+                "bundle_draw_indexed_indirect",
             ] {
                 assert_eq!(state.recording_calls.get(name), Some(&1), "{name}");
             }
             assert_eq!(state.recording_calls.get("execute_bundles"), Some(&2));
             assert_eq!(state.render_bundle_encoder_releases, 1);
             assert_eq!(state.render_bundle_releases, 1);
+            assert!(state.render_bundle_retained_indirect_buffers.is_empty());
+            assert_eq!(
+                state.released_bundle_indirect_buffers,
+                [native_buffer, native_buffer]
+            );
         });
         release_device_held_values(&rt, cx, device);
     }
