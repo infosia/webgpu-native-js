@@ -8328,6 +8328,57 @@ mod tests {
         let native_depth = unsafe { native.depthStencilAttachment.as_ref() }.expect("depth");
         assert_eq!(native_depth.view, fake_handle(501));
 
+        let max_draw_count_pass = descriptor(
+            &rt,
+            &[
+                ("colorAttachments", rt.set_like(&[])),
+                ("maxDrawCount", rt.number(12_345.0)),
+            ],
+        );
+        let max_draw_count_arena = Arena::new();
+        let max_draw_count_native = convert_render_pass_descriptor::<Engine>(
+            cx,
+            max_draw_count_pass,
+            &max_draw_count_arena,
+            &mut created_texture_views,
+        )
+        .expect("render pass descriptor with maxDrawCount");
+        assert!(!max_draw_count_native.nextInChain.is_null());
+        let max_draw_count = unsafe {
+            max_draw_count_native
+                .nextInChain
+                .cast::<crate::WGPURenderPassMaxDrawCount>()
+                .as_ref()
+        }
+        .expect("maxDrawCount chain");
+        assert!(max_draw_count.chain.next.is_null());
+        assert_eq!(
+            max_draw_count.chain.sType,
+            crate::WGPUSType_WGPUSType_RenderPassMaxDrawCount
+        );
+        assert_eq!(max_draw_count.maxDrawCount, 12_345);
+
+        for bad_value in [-1.0, 18_446_744_073_709_551_616.0, 1.5] {
+            let bad = descriptor(
+                &rt,
+                &[
+                    ("colorAttachments", rt.set_like(&[])),
+                    ("maxDrawCount", rt.number(bad_value)),
+                ],
+            );
+            let bad_arena = Arena::new();
+            assert_eq!(
+                convert_render_pass_descriptor::<Engine>(
+                    cx,
+                    bad,
+                    &bad_arena,
+                    &mut created_texture_views,
+                )
+                .expect_err("invalid maxDrawCount must fail"),
+                "TypeError: maxDrawCount"
+            );
+        }
+
         let texture = Engine::new_instance(
             cx,
             crate::GPU_TEXTURE_CLASS,

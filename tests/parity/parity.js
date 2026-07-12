@@ -675,6 +675,27 @@
         });
         log("renderPass:clearValue-wrong-length:" + wrongColor.name);
 
+        var maxDrawCountPass = device.createCommandEncoder().beginRenderPass({
+            colorAttachments: [],
+            maxDrawCount: 4
+        });
+        maxDrawCountPass.end();
+        log("renderPass:maxDrawCount:ok");
+
+        [
+            ["negative", -1],
+            ["2^64", 18446744073709551616],
+            ["fractional", 1.5]
+        ].forEach(function (entry) {
+            var error = caught(function () {
+                device.createCommandEncoder().beginRenderPass({
+                    colorAttachments: [],
+                    maxDrawCount: entry[1]
+                });
+            });
+            log("renderPass:maxDrawCount-" + entry[0] + ":" + error.name);
+        });
+
         var textureEncoder = device.createCommandEncoder();
         var textureAsView = textureEncoder.beginRenderPass({
                 colorAttachments: [{

@@ -1031,10 +1031,6 @@ pub(super) fn convert_render_pass_descriptor<E: JsEngine + 'static>(
         return Err(E::type_error(cx, "timestampWrites are not supported yet"));
     }
     let max_draw_count_value = dictionary_member::<E>(cx, value, "maxDrawCount")?;
-    // Policy skip: reject present unsupported API instead of ignoring it.
-    if !E::is_undefined(cx, max_draw_count_value) {
-        return Err(E::type_error(cx, "maxDrawCount are not supported yet"));
-    }
     // B4: non-nullable strings default only for undefined; null is stringified.
     let label = if E::is_undefined(cx, label_value) {
         ""
@@ -1075,8 +1071,23 @@ pub(super) fn convert_render_pass_descriptor<E: JsEngine + 'static>(
     } else {
         query_set_handle::<E>(cx, occlusion_query_set_value)?
     };
+    let max_draw_count_chain = if E::is_undefined(cx, max_draw_count_value) {
+        ptr::null_mut()
+    } else {
+        let max_draw_count = enforce_u64::<E>(cx, max_draw_count_value, "maxDrawCount")?;
+        // An explicitly provided optional value is represented by an arena-owned chained struct.
+        let max_draw_count_source = arena.alloc_slice(vec![WGPURenderPassMaxDrawCount {
+            chain: WGPUChainedStruct {
+                next: ptr::null_mut(),
+                sType: WGPUSType_WGPUSType_RenderPassMaxDrawCount,
+            },
+            maxDrawCount: max_draw_count,
+        }]).as_ptr();
+        // SAFETY: the arena allocation contains one initialized chained source.
+        unsafe { ptr::addr_of!((*max_draw_count_source).chain) }.cast_mut()
+    };
     Ok(WGPURenderPassDescriptor {
-        nextInChain: ptr::null_mut(),
+        nextInChain: max_draw_count_chain,
         label: WGPUStringView::from_bytes(label.as_bytes()),
         colorAttachmentCount: color_attachments.len(),
         colorAttachments: if color_attachments.is_empty() {

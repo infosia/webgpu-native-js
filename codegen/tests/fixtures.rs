@@ -416,6 +416,7 @@ fn new_descriptor_policy_reasons_are_surfaced_in_the_report() {
     for reason in [
         "recorded deferral: block 03 section 7",
         "timestamp-query feature not yet requested in tests",
+        "the pinned C ABI represents maxDrawCount with an optional typed chained struct",
         "WebIDL names the reusable programmable stage",
     ] {
         assert!(report.contains(reason), "missing policy reason: {reason}");
@@ -439,6 +440,13 @@ fn new_descriptor_policy_kinds_reject_missing_and_dead_entries() {
                 "",
             ),
             "code",
+        ),
+        (
+            policy.replace(
+                "[[descriptor.chains]]\nmember = \"maxDrawCount\"\ntarget = \"WGPURenderPassMaxDrawCount\"\nfield = \"max_draw_count\"\ns_type = \"WGPUSType_WGPUSType_RenderPassMaxDrawCount\"\nreason = \"the pinned C ABI represents maxDrawCount with an optional typed chained struct\"\n",
+                "",
+            ),
+            "maxDrawCount",
         ),
         (
             policy.replace("helper = \"bind_group_layout_handle\"", "helper = \"not a helper\""),

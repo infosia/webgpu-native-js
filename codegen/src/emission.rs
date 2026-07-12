@@ -1050,12 +1050,6 @@ fn validate_chain_policy(
                 descriptor.dictionary, chain.member
             ))
         })?;
-    if !is_idl_string(idl) || !idl.required {
-        return Err(CodegenError::Policy(format!(
-            "dead chain policy {}.{}: source is not a required string",
-            descriptor.dictionary, chain.member
-        )));
-    }
     let target = report
         .dictionaries
         .iter()
@@ -1083,10 +1077,17 @@ fn validate_chain_policy(
                 descriptor.dictionary, chain.member, chain.target, chain.field
             ))
         })?;
-    if !field.string_view {
+    let required_string = is_idl_string(idl) && idl.required && field.string_view;
+    let optional_u64 = !idl.required
+        && idl.enforce_range
+        && idl.integer_width == Some(64)
+        && field.integer_width == Some(64)
+        && idl.default_value.is_some()
+        && idl.default_value == field.default_value;
+    if !required_string && !optional_u64 {
         return Err(CodegenError::Policy(format!(
-            "dead chain policy {}.{}: target field is not a string view",
-            descriptor.dictionary, chain.member
+            "dead chain policy {}.{}: source and target field are not a supported required string or optional EnforceRange u64 pair",
+            descriptor.dictionary, chain.member,
         )));
     }
     Ok(())
@@ -1734,7 +1735,11 @@ fn emit_descriptor(
         if let Some(policy) = flatten.get(name.as_str()) {
             emit_union_flatten_locals(&mut output, report, dictionary, &value, policy)?;
         } else if let Some(policy) = chains.get(name.as_str()) {
-            emit_chain_local(&mut output, name, &value, policy);
+            let idl = member
+                .values
+                .first()
+                .ok_or_else(|| unsupported_shape(dictionary, name, "missing chained IDL value"))?;
+            emit_chain_local(&mut output, name, &value, idl, policy);
         }
     }
 
@@ -2169,32 +2174,73 @@ fn emit_union_flatten_locals(
     Ok(())
 }
 
-fn emit_chain_local(output: &mut String, name: &str, value: &str, policy: &ChainPolicy) {
+fn emit_chain_local(
+    output: &mut String,
+    name: &str,
+    value: &str,
+    idl: &ValueModel,
+    policy: &ChainPolicy,
+) {
     let local = snake_case(name);
     let target_field = rust_field_name(&policy.field, true);
-    let _ = writeln!(output, "    let {local} = E::to_str(cx, {value}, arena)?;");
-    output.push_str(
-        "    // B3: WGSL is represented by an arena-owned chained struct with sType set.\n",
-    );
+    if is_idl_string(idl) {
+        let _ = writeln!(output, "    let {local} = E::to_str(cx, {value}, arena)?;");
+        output.push_str(
+            "    // B3: WGSL is represented by an arena-owned chained struct with sType set.\n",
+        );
+    } else {
+        let _ = writeln!(
+            output,
+            "    let {local}_chain = if E::is_undefined(cx, {value}) {{"
+        );
+        output.push_str("        ptr::null_mut()\n    } else {\n");
+        let _ = writeln!(
+            output,
+            "        let {local} = enforce_u64::<E>(cx, {value}, \"{name}\")?;"
+        );
+        output.push_str(
+            "        // An explicitly provided optional value is represented by an arena-owned chained struct.\n",
+        );
+    }
+    let indent = if is_idl_string(idl) {
+        "    "
+    } else {
+        "        "
+    };
     let _ = writeln!(
         output,
-        "    let {local}_source = arena.alloc_slice(vec![{} {{",
-        policy.target
+        "{indent}let {local}_source = arena.alloc_slice(vec![{} {{",
+        policy.target,
     );
-    output.push_str("        chain: WGPUChainedStruct {\n            next: ptr::null_mut(),\n");
-    let _ = writeln!(output, "            sType: {},", policy.s_type);
-    output.push_str("        },\n");
+    let _ = writeln!(output, "{indent}    chain: WGPUChainedStruct {{");
+    let _ = writeln!(output, "{indent}        next: ptr::null_mut(),");
+    let _ = writeln!(output, "{indent}        sType: {},", policy.s_type);
+    let _ = writeln!(output, "{indent}    }},");
+    if is_idl_string(idl) {
+        let _ = writeln!(
+            output,
+            "{indent}    {target_field}: WGPUStringView::from_bytes({local}.as_bytes()),"
+        );
+    } else {
+        let _ = writeln!(output, "{indent}    {target_field}: {local},");
+    }
+    let _ = writeln!(output, "{indent}}}]).as_ptr();");
     let _ = writeln!(
         output,
-        "        {target_field}: WGPUStringView::from_bytes({local}.as_bytes()),"
+        "{indent}// SAFETY: the arena allocation contains one initialized chained source."
     );
-    output.push_str("    }]).as_ptr();\n");
-    output
-        .push_str("    // SAFETY: the arena allocation contains one initialized chained source.\n");
-    let _ = writeln!(
-        output,
-        "    let {local}_chain = unsafe {{ ptr::addr_of!((*{local}_source).chain) }}.cast_mut();"
-    );
+    if is_idl_string(idl) {
+        let _ = writeln!(
+            output,
+            "{indent}let {local}_chain = unsafe {{ ptr::addr_of!((*{local}_source).chain) }}.cast_mut();"
+        );
+    } else {
+        let _ = writeln!(
+            output,
+            "        unsafe {{ ptr::addr_of!((*{local}_source).chain) }}.cast_mut()"
+        );
+        output.push_str("    };\n");
+    }
 }
 
 fn emit_dict_or_sequence_union(

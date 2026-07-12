@@ -105,6 +105,10 @@ bindGroup:resources-alive:true
 scope:render-pipeline:null,GPUValidationError
 renderPass:loadOp-missing:TypeError
 renderPass:clearValue-wrong-length:TypeError
+renderPass:maxDrawCount:ok
+renderPass:maxDrawCount-negative:TypeError
+renderPass:maxDrawCount-2^64:TypeError
+renderPass:maxDrawCount-fractional:TypeError
 renderPass:texture-as-view:ok
 renderPass:double-end:OperationError
 renderPass:method-after-end:OperationError:GPURenderPassEncoder is ended

@@ -14,6 +14,7 @@ generator's report; this file is the committed, reviewable index.
 | `GPUShaderModuleDescriptor.compilationHints` | reject-if-present | recorded deferral (block 03 §7) |
 | `GPUProgrammableStage.constants` | reject-if-present | pipeline constants deferred (block 03 §7); silent drop retired by the Phase 4 review |
 | `GPUComputePassDescriptor.timestampWrites` | reject-if-present | query sets out of scope |
+| ~~`GPURenderPassDescriptor.maxDrawCount`~~ | **RETIRED 2026-07-12 — emitted through `WGPURenderPassMaxDrawCount` only when present** | historical: rejected while optional extension-chain emission was unavailable |
 | `GPUDevice.importExternalTexture`; `GPUQueue.copyExternalImageToTexture` | not in subset | external-texture surface out of scope; join-report mismatch entries |
 | `GPUDevice.lost`, `.onuncapturederror` | ~~not in subset~~ **shipped in Phase 6 (P6b)** | see the Phase 6 additions below |
 | `GPUAutoLayoutMode.auto` (as an enum value) | enum_value_skip | the C ABI represents auto layout as a null pipeline-layout handle |

@@ -748,10 +748,12 @@ member = "timestampWrites"
 reason = "timestamp-query feature not yet requested in tests"
 reject_if_present = true
 
-[[descriptor.skips]]
+[[descriptor.chains]]
 member = "maxDrawCount"
-reason = "the pinned C ABI exposes maxDrawCount only through an optional extension chain"
-reject_if_present = true
+target = "WGPURenderPassMaxDrawCount"
+field = "max_draw_count"
+s_type = "WGPUSType_WGPUSType_RenderPassMaxDrawCount"
+reason = "the pinned C ABI represents maxDrawCount with an optional typed chained struct"
 
 [[descriptor]]
 dictionary = "GPUTexelCopyBufferLayout"
