@@ -173,6 +173,8 @@ pub struct GpuDispatch {
     pub command_encoder_begin_compute_pass: unsafe fn(WGPUCommandEncoder, *const WGPUComputePassDescriptor) -> WGPUComputePassEncoder,
     /// `wgpuCommandEncoderBeginRenderPass`.
     pub command_encoder_begin_render_pass: unsafe fn(WGPUCommandEncoder, *const WGPURenderPassDescriptor) -> WGPURenderPassEncoder,
+    /// `wgpuCommandEncoderClearBuffer`.
+    pub command_encoder_clear_buffer: unsafe fn(WGPUCommandEncoder, WGPUBuffer, u64, u64),
     /// `wgpuCommandEncoderCopyBufferToBuffer`.
     pub command_encoder_copy_buffer_to_buffer: unsafe fn(WGPUCommandEncoder, WGPUBuffer, u64, WGPUBuffer, u64, u64),
     /// `wgpuCommandEncoderCopyBufferToTexture`.
@@ -181,6 +183,8 @@ pub struct GpuDispatch {
     pub command_encoder_copy_texture_to_buffer: unsafe fn(WGPUCommandEncoder, *const WGPUTexelCopyTextureInfo, *const WGPUTexelCopyBufferInfo, *const WGPUExtent3D),
     /// `wgpuCommandEncoderCopyTextureToTexture`.
     pub command_encoder_copy_texture_to_texture: unsafe fn(WGPUCommandEncoder, *const WGPUTexelCopyTextureInfo, *const WGPUTexelCopyTextureInfo, *const WGPUExtent3D),
+    /// `wgpuCommandEncoderResolveQuerySet`.
+    pub command_encoder_resolve_query_set: unsafe fn(WGPUCommandEncoder, WGPUQuerySet, u32, u32, WGPUBuffer, u64),
     /// `wgpuCommandEncoderFinish`.
     pub command_encoder_finish: unsafe fn(WGPUCommandEncoder, *const WGPUCommandBufferDescriptor) -> WGPUCommandBuffer,
     /// `wgpuComputePassEncoderRelease`.
@@ -343,10 +347,12 @@ macro_rules! for_each_gpu_dispatch_entry {
             (command_encoder_release, wgpuCommandEncoderRelease, unsafe fn(command_encoder: $crate::WGPUCommandEncoder)),
             (command_encoder_begin_compute_pass, wgpuCommandEncoderBeginComputePass, unsafe fn(command_encoder: $crate::WGPUCommandEncoder, descriptor: *const $crate::WGPUComputePassDescriptor) -> $crate::WGPUComputePassEncoder),
             (command_encoder_begin_render_pass, wgpuCommandEncoderBeginRenderPass, unsafe fn(command_encoder: $crate::WGPUCommandEncoder, descriptor: *const $crate::WGPURenderPassDescriptor) -> $crate::WGPURenderPassEncoder),
+            (command_encoder_clear_buffer, wgpuCommandEncoderClearBuffer, unsafe fn(command_encoder: $crate::WGPUCommandEncoder, buffer: $crate::WGPUBuffer, offset: u64, size: u64)),
             (command_encoder_copy_buffer_to_buffer, wgpuCommandEncoderCopyBufferToBuffer, unsafe fn(command_encoder: $crate::WGPUCommandEncoder, source: $crate::WGPUBuffer, source_offset: u64, destination: $crate::WGPUBuffer, destination_offset: u64, size: u64)),
             (command_encoder_copy_buffer_to_texture, wgpuCommandEncoderCopyBufferToTexture, unsafe fn(command_encoder: $crate::WGPUCommandEncoder, source: *const $crate::WGPUTexelCopyBufferInfo, destination: *const $crate::WGPUTexelCopyTextureInfo, copy_size: *const $crate::WGPUExtent3D)),
             (command_encoder_copy_texture_to_buffer, wgpuCommandEncoderCopyTextureToBuffer, unsafe fn(command_encoder: $crate::WGPUCommandEncoder, source: *const $crate::WGPUTexelCopyTextureInfo, destination: *const $crate::WGPUTexelCopyBufferInfo, copy_size: *const $crate::WGPUExtent3D)),
             (command_encoder_copy_texture_to_texture, wgpuCommandEncoderCopyTextureToTexture, unsafe fn(command_encoder: $crate::WGPUCommandEncoder, source: *const $crate::WGPUTexelCopyTextureInfo, destination: *const $crate::WGPUTexelCopyTextureInfo, copy_size: *const $crate::WGPUExtent3D)),
+            (command_encoder_resolve_query_set, wgpuCommandEncoderResolveQuerySet, unsafe fn(command_encoder: $crate::WGPUCommandEncoder, query_set: $crate::WGPUQuerySet, first_query: u32, query_count: u32, destination: $crate::WGPUBuffer, destination_offset: u64)),
             (command_encoder_finish, wgpuCommandEncoderFinish, unsafe fn(command_encoder: $crate::WGPUCommandEncoder, descriptor: *const $crate::WGPUCommandBufferDescriptor) -> $crate::WGPUCommandBuffer),
             (compute_pass_encoder_release, wgpuComputePassEncoderRelease, unsafe fn(compute_pass_encoder: $crate::WGPUComputePassEncoder)),
             (compute_pass_encoder_set_pipeline, wgpuComputePassEncoderSetPipeline, unsafe fn(compute_pass_encoder: $crate::WGPUComputePassEncoder, pipeline: $crate::WGPUComputePipeline)),
@@ -5051,6 +5057,8 @@ pub(super) fn command_encoder_class<E: JsEngine + 'static>() -> &'static ClassSp
         properties: &[],
         methods: Box::leak(Box::new([
             MethodSpec { name: "copyBufferToBuffer", length: 5, call: command_encoder_copy_buffer_to_buffer::<E> },
+            MethodSpec { name: "clearBuffer", length: 1, call: command_encoder_clear_buffer::<E> },
+            MethodSpec { name: "resolveQuerySet", length: 5, call: command_encoder_resolve_query_set::<E> },
             MethodSpec { name: "beginComputePass", length: 0, call: command_encoder_begin_compute_pass::<E> },
             MethodSpec { name: "beginRenderPass", length: 1, call: command_encoder_begin_render_pass::<E> },
             MethodSpec { name: "copyBufferToTexture", length: 3, call: command_encoder_copy_buffer_to_texture::<E> },

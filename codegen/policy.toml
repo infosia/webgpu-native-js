@@ -177,10 +177,12 @@ interface = "GPUCommandEncoder"
 members = [
   "beginComputePass",
   "beginRenderPass",
+  "clearBuffer",
   "copyBufferToBuffer",
   "copyBufferToTexture",
   "copyTextureToBuffer",
   "copyTextureToTexture",
+  "resolveQuerySet",
   "finish",
 ]
 
@@ -368,6 +370,16 @@ member = "copyBufferToBuffer"
 path = "command_encoder_copy_buffer_to_buffer"
 length = 5
 reason = "preserved quirk: the shipped class table reports the legacy five-argument overload length"
+
+[[lifecycle.methods]]
+interface = "GPUCommandEncoder"
+member = "clearBuffer"
+path = "command_encoder_clear_buffer"
+
+[[lifecycle.methods]]
+interface = "GPUCommandEncoder"
+member = "resolveQuerySet"
+path = "command_encoder_resolve_query_set"
 
 [[lifecycle.methods]]
 interface = "GPUCommandEncoder"
@@ -801,6 +813,8 @@ reject_if_present = true
 [[descriptor]]
 dictionary = "GPUTextureViewDescriptor"
 sentinel_defaults = ["aspect"]
+# `usage` is a joined ordinary flags member. Descriptor generation forwards its
+# WebIDL default 0 as WGPUTextureUsage_None and nonzero values as WGPUTextureUsage.
 
 [[descriptor.strings]]
 member = "label"

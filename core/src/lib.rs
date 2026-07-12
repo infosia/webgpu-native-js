@@ -4629,6 +4629,59 @@ pub fn command_encoder_copy_buffer_to_buffer<E: JsEngine + 'static>(
     Ok(E::undefined(cx))
 }
 
+/// Implements `GPUCommandEncoder.clearBuffer`.
+pub fn command_encoder_clear_buffer<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let encoder = live_command_encoder::<E>(cx, this)?;
+    let buffer = buffer_handle::<E>(cx, required_argument::<E>(cx, args, 0, "buffer")?)?;
+    let offset = optional_gpu_size64_to_u64::<E>(cx, args.get(1).copied(), "offset", 0)?;
+    let size = optional_gpu_size64_to_u64::<E>(cx, args.get(2).copied(), "size", u64::MAX)?;
+    unsafe {
+        (E::environment(cx).gpu().command_encoder_clear_buffer)(encoder, buffer, offset, size);
+    }
+    Ok(E::undefined(cx))
+}
+
+/// Implements `GPUCommandEncoder.resolveQuerySet`.
+pub fn command_encoder_resolve_query_set<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let encoder = live_command_encoder::<E>(cx, this)?;
+    let query_set = query_set_handle::<E>(cx, required_argument::<E>(cx, args, 0, "querySet")?)?;
+    let first_query = enforce_u32::<E>(
+        cx,
+        required_argument::<E>(cx, args, 1, "firstQuery")?,
+        "firstQuery",
+    )?;
+    let query_count = enforce_u32::<E>(
+        cx,
+        required_argument::<E>(cx, args, 2, "queryCount")?,
+        "queryCount",
+    )?;
+    let destination = buffer_handle::<E>(cx, required_argument::<E>(cx, args, 3, "destination")?)?;
+    let destination_offset = enforce_u64::<E>(
+        cx,
+        required_argument::<E>(cx, args, 4, "destinationOffset")?,
+        "destinationOffset",
+    )?;
+    unsafe {
+        (E::environment(cx).gpu().command_encoder_resolve_query_set)(
+            encoder,
+            query_set,
+            first_query,
+            query_count,
+            destination,
+            destination_offset,
+        );
+    }
+    Ok(E::undefined(cx))
+}
+
 /// Implements `GPUCommandEncoder.copyBufferToTexture`.
 pub fn command_encoder_copy_buffer_to_texture<E: JsEngine + 'static>(
     cx: E::Context<'_>,

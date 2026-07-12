@@ -350,6 +350,8 @@
         log("texture:dimension:" + texture.dimension);
         log("texture:format:" + texture.format);
         log("texture:usage:" + texture.usage);
+        texture.createView({ usage: 4 });
+        log("texture:view-usage:ok");
 
         var dictTexture = device.createTexture({
             size: { width: 4, height: 2 },
@@ -586,6 +588,26 @@
                 pass.beginOcclusionQuery(2);
                 pass.endOcclusionQuery();
                 pass.end();
+                var destination = device.createBuffer({ size: 1024, usage: 520 });
+                var clearTypeError = caught(function () {
+                    encoder.clearBuffer(null);
+                });
+                log("commandEncoder:clearBuffer-type:" + clearTypeError.name);
+                var clearOffsetError = caught(function () {
+                    encoder.clearBuffer(destination, -1);
+                });
+                log("commandEncoder:clearBuffer-offset:" + clearOffsetError.name);
+                var resolveTypeError = caught(function () {
+                    encoder.resolveQuerySet(null, 0, 1, destination, 0);
+                });
+                log("commandEncoder:resolveQuerySet-type:" + resolveTypeError.name);
+                var resolveOffsetError = caught(function () {
+                    encoder.resolveQuerySet(parityQuerySet, 0, 1, destination, -1);
+                });
+                log("commandEncoder:resolveQuerySet-offset:" + resolveOffsetError.name);
+                encoder.clearBuffer(destination);
+                encoder.clearBuffer(destination, 256, 256);
+                encoder.resolveQuerySet(parityQuerySet, 0, 4, destination, 0);
                 device.queue.submit([encoder.finish()]);
                 log("querySet:occlusion-pass:ok");
             });

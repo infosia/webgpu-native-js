@@ -21,6 +21,7 @@ texture:sampleCount:1
 texture:dimension:2d
 texture:format:r8unorm
 texture:usage:4
+texture:view-usage:ok
 texture:extent-dict:4,2,1,1,1,2d,r8unorm,4
 texture:extent-sequence:4,2,1,1,1,2d,r8unorm,4
 texture:extent-equal:true
@@ -46,6 +47,10 @@ querySet:count:4
 querySet:label:query-set-round-trip
 querySet:type-rejection:TypeError:GPUQueryType
 scope:querySet:null
+commandEncoder:clearBuffer-type:TypeError
+commandEncoder:clearBuffer-offset:TypeError
+commandEncoder:resolveQuerySet-type:TypeError
+commandEncoder:resolveQuerySet-offset:TypeError
 querySet:occlusion-pass:ok
 scope:occlusion-query:null
 querySet:destroy:ok

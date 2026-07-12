@@ -1164,6 +1164,8 @@ struct MockGpuState {
     requested_features: Vec<Vec<crate::WGPUFeatureName>>,
     requested_limits: Vec<Option<(WGPULimits, crate::WGPUCompatibilityModeLimits)>>,
     recording_calls: BTreeMap<&'static str, usize>,
+    clear_buffer_calls: Vec<(WGPUCommandEncoder, WGPUBuffer, u64, u64)>,
+    resolve_query_set_calls: Vec<(WGPUCommandEncoder, WGPUQuerySet, u32, u32, WGPUBuffer, u64)>,
     vertex_buffer_ranges: Vec<(u64, u64)>,
     index_buffer_ranges: Vec<(u64, u64)>,
     indirect_calls: Vec<(&'static str, WGPUBuffer, u64)>,
@@ -2384,6 +2386,40 @@ unsafe fn command_encoder_copy_buffer_to_buffer(
     });
 }
 
+unsafe fn command_encoder_clear_buffer(
+    encoder: WGPUCommandEncoder,
+    buffer: WGPUBuffer,
+    offset: u64,
+    size: u64,
+) {
+    GPU_STATE.with(|state| {
+        state
+            .borrow_mut()
+            .clear_buffer_calls
+            .push((encoder, buffer, offset, size));
+    });
+}
+
+unsafe fn command_encoder_resolve_query_set(
+    encoder: WGPUCommandEncoder,
+    query_set: WGPUQuerySet,
+    first_query: u32,
+    query_count: u32,
+    destination: WGPUBuffer,
+    destination_offset: u64,
+) {
+    GPU_STATE.with(|state| {
+        state.borrow_mut().resolve_query_set_calls.push((
+            encoder,
+            query_set,
+            first_query,
+            query_count,
+            destination,
+            destination_offset,
+        ));
+    });
+}
+
 unsafe fn command_encoder_begin_compute_pass(
     _encoder: WGPUCommandEncoder,
     _descriptor: *const WGPUComputePassDescriptor,
@@ -2915,7 +2951,8 @@ mod tests {
     use crate::{
         adapter_request_device, buffer_destroy, buffer_get_mapped_range, buffer_label_get,
         buffer_label_set, buffer_map_async, buffer_size_get, buffer_unmap, buffer_usage_get,
-        command_encoder_finish, convert_bind_group_descriptor, convert_bind_group_entry,
+        command_encoder_clear_buffer, command_encoder_finish, command_encoder_resolve_query_set,
+        convert_bind_group_descriptor, convert_bind_group_entry,
         convert_bind_group_layout_descriptor, convert_blend_component,
         convert_buffer_binding_layout, convert_buffer_descriptor, convert_color_dict,
         convert_color_target_state, convert_command_buffer_descriptor,
@@ -3565,6 +3602,23 @@ mod tests {
             (native.baseMipLevel, native.baseArrayLayer, native.usage),
             (0, 0, 0)
         );
+
+        let explicit = convert_texture_view_descriptor::<Engine>(
+            cx,
+            descriptor(&rt, &[("usage", rt.number(20.0))]),
+            &arena,
+        )
+        .expect("explicit view usage");
+        assert_eq!(explicit.usage, 20);
+        assert_eq!(
+            convert_texture_view_descriptor::<Engine>(
+                cx,
+                descriptor(&rt, &[("usage", rt.number(4_294_967_296.0))]),
+                &arena,
+            )
+            .expect_err("view usage above GPUFlagsConstant range"),
+            "TypeError: usage"
+        );
     }
 
     #[test]
@@ -3767,7 +3821,9 @@ mod tests {
 
         crate::texture_destroy::<Engine>(cx, texture, &[]).expect("destroy");
         crate::texture_destroy::<Engine>(cx, texture, &[]).expect("idempotent destroy");
-        let view = crate::texture_create_view::<Engine>(cx, texture, &[]).expect("default view");
+        let view_descriptor = descriptor(&rt, &[("usage", rt.number(4.0))]);
+        let view = crate::texture_create_view::<Engine>(cx, texture, &[view_descriptor])
+            .expect("usage-restricted view");
         let texture_payload = Engine::payload(cx, texture, crate::GPU_TEXTURE_CLASS)
             .and_then(|payload| payload.downcast_ref::<TexturePayload>())
             .expect("texture payload");
@@ -3803,6 +3859,7 @@ mod tests {
                 view.aspect,
                 crate::WGPUTextureAspect_WGPUTextureAspect_Undefined
             );
+            assert_eq!(view.usage, 4);
         });
 
         finalize_texture_view(
@@ -8731,6 +8788,153 @@ mod tests {
             let state = state.borrow();
             assert!(state.command_buffer_retained_indirect_buffers.is_empty());
             assert_eq!(state.released_indirect_buffers, [native, native, native]);
+        });
+        release_device_held_values(&rt, cx, device);
+    }
+
+    #[test]
+    fn command_encoder_clear_and_resolve_forward_values_sentinels_and_reject_bad_arguments() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let destination = device_create_buffer::<Engine>(
+            cx,
+            device,
+            &[descriptor(
+                &rt,
+                &[("size", rt.number(1024.0)), ("usage", rt.number(520.0))],
+            )],
+        )
+        .expect("destination buffer");
+        let query_set = device_create_query_set::<Engine>(
+            cx,
+            device,
+            &[descriptor(
+                &rt,
+                &[("type", rt.string("occlusion")), ("count", rt.number(8.0))],
+            )],
+        )
+        .expect("query set");
+        let native_destination =
+            crate::buffer_handle::<Engine>(cx, destination).expect("destination handle");
+        let native_query_set =
+            crate::query_set_handle::<Engine>(cx, query_set).expect("query-set handle");
+        let encoder = device_create_command_encoder::<Engine>(cx, device, &[]).expect("encoder");
+        let native_encoder = crate::live_command_encoder::<Engine>(cx, encoder).expect("handle");
+
+        command_encoder_clear_buffer::<Engine>(cx, encoder, &[destination])
+            .expect("clear with both optionals absent");
+        command_encoder_clear_buffer::<Engine>(
+            cx,
+            encoder,
+            &[destination, rt.number(16.0), rt.number(32.0)],
+        )
+        .expect("clear explicit range");
+        assert_eq!(
+            command_encoder_clear_buffer::<Engine>(cx, encoder, &[rt.null()])
+                .expect_err("non-buffer clear argument"),
+            "TypeError: GPUBuffer is required"
+        );
+        assert_eq!(
+            command_encoder_clear_buffer::<Engine>(cx, encoder, &[destination, rt.number(-1.0)],)
+                .expect_err("negative clear offset"),
+            "TypeError: offset"
+        );
+
+        command_encoder_resolve_query_set::<Engine>(
+            cx,
+            encoder,
+            &[
+                query_set,
+                rt.number(2.0),
+                rt.number(3.0),
+                destination,
+                rt.number(256.0),
+            ],
+        )
+        .expect("resolve query set");
+        assert_eq!(
+            command_encoder_resolve_query_set::<Engine>(
+                cx,
+                encoder,
+                &[
+                    rt.null(),
+                    rt.number(0.0),
+                    rt.number(1.0),
+                    destination,
+                    rt.number(0.0),
+                ],
+            )
+            .expect_err("non-query-set argument"),
+            "TypeError: GPUQuerySet is required"
+        );
+        assert_eq!(
+            command_encoder_resolve_query_set::<Engine>(
+                cx,
+                encoder,
+                &[
+                    query_set,
+                    rt.number(0.0),
+                    rt.number(1.0),
+                    rt.null(),
+                    rt.number(0.0),
+                ],
+            )
+            .expect_err("non-buffer destination"),
+            "TypeError: GPUBuffer is required"
+        );
+        assert_eq!(
+            command_encoder_resolve_query_set::<Engine>(
+                cx,
+                encoder,
+                &[
+                    query_set,
+                    rt.number(4_294_967_296.0),
+                    rt.number(1.0),
+                    destination,
+                    rt.number(0.0),
+                ],
+            )
+            .expect_err("first query above GPUSize32 range"),
+            "TypeError: firstQuery"
+        );
+        assert_eq!(
+            command_encoder_resolve_query_set::<Engine>(
+                cx,
+                encoder,
+                &[
+                    query_set,
+                    rt.number(0.0),
+                    rt.number(1.0),
+                    destination,
+                    rt.number(-1.0),
+                ],
+            )
+            .expect_err("negative destination offset"),
+            "TypeError: destinationOffset"
+        );
+
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(
+                state.clear_buffer_calls,
+                [
+                    (native_encoder, native_destination, 0, u64::MAX),
+                    (native_encoder, native_destination, 16, 32),
+                ]
+            );
+            assert_eq!(
+                state.resolve_query_set_calls,
+                [(
+                    native_encoder,
+                    native_query_set,
+                    2,
+                    3,
+                    native_destination,
+                    256,
+                )]
+            );
         });
         release_device_held_values(&rt, cx, device);
     }
