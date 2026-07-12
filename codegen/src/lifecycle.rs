@@ -63,10 +63,29 @@ pub(super) fn emit_lifecycle(report: &JoinReport, source: &str) -> Result<String
         emit_finalizer(&mut output, standard);
     }
     emit_class_specs(&mut output, report, &policy, lifecycle, &standards)?;
+    emit_class_inventory(&mut output, &policy, lifecycle);
     if output.ends_with("\n\n") {
         output.pop();
     }
     Ok(output)
+}
+
+fn emit_class_inventory(output: &mut String, policy: &Policy, lifecycle: &LifecyclePolicy) {
+    output.push_str(
+        "pub(super) fn register_generated_classes<E: JsEngine + 'static>(\n    cx: E::Context<'_>,\n) -> Result<(), E::Error> {\n",
+    );
+    for interface in lifecycle
+        .extra_class_interfaces
+        .iter()
+        .chain(policy.subset.iter().map(|entry| &entry.interface))
+    {
+        let class_fn = format!("{}_class", snake_case(object_name(interface)));
+        let _ = writeln!(
+            output,
+            "    let _ = E::register_class(cx, {class_fn}::<E>())?;"
+        );
+    }
+    output.push_str("    Ok(())\n}\n\n");
 }
 
 fn validate_lifecycle(
@@ -1406,7 +1425,10 @@ fn emit_one_class(
             constructor
                 .parent
                 .as_ref()
-                .map_or_else(|| "None".to_owned(), |parent| format!("Some({parent})")),
+                .map_or_else(
+                    || "None".to_owned(),
+                    |parent| format!("Some(ClassParent::Class({parent}))")
+                ),
             constructor.path
         );
     } else {

@@ -48,3 +48,38 @@ webgpu:api,validation,encoding,beginRenderPass:*
 webgpu:api,validation,encoding,queries,*
 webgpu:api,validation,query_set,*
 webgpu:api,validation,error_scope:*
+
+# Phase B-6 growth (2026-07-13). Families that were already green once screened —
+# they had simply never been run. No binding change was needed for these.
+webgpu:api,validation,image_copy,*
+webgpu:api,validation,encoding,cmds,copyTextureToTexture:*
+webgpu:api,validation,encoding,cmds,compute_pass:*
+webgpu:api,validation,encoding,beginComputePass:*
+webgpu:api,validation,layout_shader_compat:*
+webgpu:api,validation,getBindGroupLayout:*
+webgpu:api,validation,debugMarker:*
+webgpu:api,validation,dispatch:*
+webgpu:api,validation,buffer,destroy:*
+webgpu:api,validation,texture,destroy:*
+webgpu:api,validation,texture,bgra8unorm_storage:*
+webgpu:api,validation,texture,float32_filterable:*
+webgpu:api,validation,texture,rg11b10ufloat_renderable:*
+
+# Phase B-6 growth, unlocked by the WebIDL interface-object work (2026-07-13).
+# Every registered class now installs its interface object on the global (and all
+# classes register eagerly), so the CTS can feature-detect via
+# `'x' in GPURenderPassEncoder.prototype` and assert `instanceof`. These families
+# failed only on `ReferenceError: GPUxxx is not defined` before.
+webgpu:api,validation,resource_usages,*
+webgpu:api,validation,encoding,encoder_open_state:*
+webgpu:api,validation,createPipelineLayout:*
+
+# Phase B-6 growth, unlocked by GPUPipelineError (2026-07-13). Async pipeline
+# creation now rejects with a real GPUPipelineError (name + reason) instead of a
+# named OperationError, retiring the B-4b deviation. `THREW OperationError,
+# instead of GPUPipelineError` was the SOLE remaining failure in all four.
+webgpu:api,validation,render_pipeline,*
+webgpu:api,validation,compute_pipeline:*
+webgpu:api,validation,shader_module,*
+webgpu:api,validation,non_filterable_texture:*
+webgpu:idl,constructable:*

@@ -268,17 +268,32 @@ fn generated_lifecycle_covers_every_selected_class_and_retention_set() {
         "render_bundle_class",
         "command_buffer_class",
         "uncaptured_error_event_class",
+        "pipeline_error_class",
     ];
     assert_eq!(
         emitted.matches("_class<E: JsEngine + 'static>").count(),
         classes.len()
     );
-    for class in classes {
+    for class in &classes {
         assert!(
             emitted.contains(&format!("pub(super) fn {class}<")),
             "missing generated {class}"
         );
     }
+    let inventory = emitted
+        .split("pub(super) fn register_generated_classes")
+        .nth(1)
+        .expect("generated class registration inventory");
+    for class in &classes {
+        assert!(
+            inventory.contains(&format!("{class}::<E>()")),
+            "generated inventory omitted {class}"
+        );
+    }
+    assert_eq!(
+        inventory.matches("E::register_class").count(),
+        classes.len()
+    );
     assert!(emitted.contains(
         "MethodSpec { name: \"createRenderPipeline\", length: 1, call: device_create_render_pipeline::<E> }"
     ));

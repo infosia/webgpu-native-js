@@ -271,13 +271,19 @@ standard_interfaces = [
   "GPUCommandEncoder",
   "GPURenderBundleEncoder",
 ]
-extra_class_interfaces = ["GPU", "GPUAdapter", "GPUUncapturedErrorEvent"]
+extra_class_interfaces = ["GPU", "GPUAdapter", "GPUUncapturedErrorEvent", "GPUPipelineError"]
 
 [[lifecycle.constructors]]
 interface = "GPUUncapturedErrorEvent"
 length = 2
 parent = "EVENT_CLASS"
 path = "gpu_uncaptured_error_event_constructor"
+
+[[lifecycle.constructors]]
+interface = "GPUPipelineError"
+length = 1
+parent = "DOM_EXCEPTION_CLASS"
+path = "gpu_pipeline_error_constructor"
 
 [[lifecycle.constructors]]
 interface = "GPUDevice"
@@ -366,6 +372,21 @@ get = "event_cancelable_get"
 interface = "GPUUncapturedErrorEvent"
 member = "defaultPrevented"
 get = "event_default_prevented_get"
+
+[[lifecycle.properties]]
+interface = "GPUPipelineError"
+member = "name"
+get = "gpu_pipeline_error_name_get"
+
+[[lifecycle.properties]]
+interface = "GPUPipelineError"
+member = "message"
+get = "gpu_pipeline_error_message_get"
+
+[[lifecycle.properties]]
+interface = "GPUPipelineError"
+member = "reason"
+get = "gpu_pipeline_error_reason_get"
 
 [[lifecycle.methods]]
 interface = "GPUBuffer"

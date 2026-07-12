@@ -38,7 +38,8 @@ The five aliases in `src/main.rs` are validated against the pinned revision
 and its standalone built-output layout.
 
 The runner installs only headless shims: `navigator.gpu`, monotonic
-`performance.now()`, console output, host-drained timers, UTF-8
+`performance.now()`, `queueMicrotask`, a guarded synthetic
+`Error.prototype.stack`, console output, host-drained timers, UTF-8
 `TextEncoder`/`TextDecoder`, `DOMException`, `EventTarget`/`MessageEvent`, and
 the `self` alias. Each used shim is emitted as a `shim:` diagnostic. Timers are
 kept in a JavaScript min-heap; while module evaluation is pending, the host

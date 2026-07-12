@@ -331,3 +331,145 @@ the parity suite (`error:GPUOutOfMemoryError`). Verify on a real backend (Dawn)
 
 Suite grows **2,852 → 2,889 cases**, 3/3 stable, exit 0, 0 fail, 14
 expected-fail (all the Noop OOM cases).
+
+## Phase B-6 (2026-07-13) — the unscreened families, and what running them found
+
+Every remaining `api,validation` family was screened. Suite grows **2,889 →
+23,178 cases**, 3/3 stable, exit 0, 0 fail, 16 expected-fail. Three findings,
+in ascending order of how much they had been hiding.
+
+**Finding 1 — most families were already green; they had simply never been
+run.** `image_copy,*` (6,557), `encoding,cmds,copyTextureToTexture:*` (3,194),
+`layout_shader_compat:*` (110), the four `texture,*` families, `buffer,destroy`,
+`getBindGroupLayout`, `debugMarker`, `dispatch`, `encoding,cmds,compute_pass`,
+`beginComputePass` — all passed on first contact, no binding change. Coverage was
+bounded by what we had thought to run, not by what worked.
+
+**Finding 2 — the binding installed no WebIDL interface objects.** The adapters'
+`register_class` put a global on the object graph **only when the class had a
+constructor**, and most classes registered lazily on first instance creation. So
+`GPURenderPassEncoder`, `GPUComputePassEncoder`, `GPUComputePipeline` and the
+rest simply did not exist as globals. Per WebIDL every exposed interface gets an
+interface object whose `prototype` is the interface prototype object; a
+non-constructible one throws `TypeError: Illegal constructor` when called.
+
+The CTS leans on this hard — it feature-detects with
+`'setImmediates' in GPURenderPassEncoder.prototype` (`supportsImmediateData`, in
+the CTS's `common/util/util.js`) and asserts `instanceof`. Failures read
+`ReferenceError: GPURenderPassEncoder is not defined`.
+
+Fixed in both adapters plus the mock, with eager registration of every class
+(the generator now emits a `register_generated_classes` inventory; `wrap_gpu` and
+`wrap_device` both call it, so host adoption — invariant 6 — reaches the same
+complete surface). Results: `resource_usages,*` 3,286 pass/280 fail → **3,566/0**;
+`encoding,encoder_open_state:*` → **47/0**; `createPipelineLayout:*` 3/11 →
+**11/3** (the 3 are the recorded null-BGL nullability deviation).
+
+*A cross-engine parity bug surfaced inside this fix, and it is the reason the
+parity suite exists.* JSC's `JSObjectMakeConstructor` defines
+`prototype.constructor` as **enumerable**; Boa defines it non-enumerable (ES
+semantics: writable, non-enumerable, configurable). So `Object.keys(X.prototype)`
+would have differed by engine. JSC's public C API has no `JSObjectDefineProperty`
+and `JSObjectSetProperty` follows *assignment* semantics — it honours the
+inherited `constructor` and recreates the own property with default attributes.
+The adapter therefore detaches the prototype chain, defines the property with
+`DontEnum`, and restores the chain. Ugly, documented, and correct.
+
+**Finding 3 — `GPUPipelineError` was the single thing standing between us and
+2,000 cases.** After findings 1–2, **the sole remaining failure message** in four
+whole families was `THREW OperationError, instead of GPUPipelineError`. The B-4b
+deviation had said to revisit "when a second DOMException-subclass consumer
+appears **or a CTS family blocks on it**" — four did.
+
+Implemented from the pins (`webgpu.idl` `GPUPipelineError : DOMException` with
+`constructor(optional DOMString message = "", GPUPipelineErrorInit options)` and
+readonly `reason`): a minimal `DOMException` base — the same
+build-only-what-the-pins-need approach the `Event` base took — and
+`GPUPipelineError` emitted through the existing policy-driven constructor
+machinery (`codegen/policy.toml`, not hand-written). Async pipeline creation now
+rejects with a real `GPUPipelineError` carrying `name` and `reason`; the
+synchronous paths still raise device validation errors.
+
+The engine boundary held: the only core change was an additive
+`ClassParent::IntrinsicError` and a `new_error_instance` trait method, so a class
+prototype can inherit the engine's intrinsic `Error.prototype` (the CTS's
+`shouldReject` requires `ex instanceof Error`). No engine types in `core/`.
+
+Results — all four families go **fully green**: `render_pipeline,*` 4,467
+pass/1,772 fail → **6,239/0**; `compute_pipeline:*` 128/146 → **274/0**;
+`shader_module,*` 26/12 → **38/0**; `non_filterable_texture:*` 96/64 →
+**160/0**. `webgpu:idl,constructable:*` (which constructs a `GPUPipelineError`
+directly) is now **8/0** and joins the suite.
+
+### Two runner shims, and one honest limit
+
+Boa has no `queueMicrotask` and no `Error.prototype.stack` (the latter is block
+14 → B7). The CTS asserts `typeof ex.stack === "string"` on every expected
+throw/rejection, which was costing thousands of otherwise-passing subcases. Both
+are **runner** shims (`tools/cts-runner/shims.js`), not binding behaviour: the
+stack shim is guarded (installed only if the engine has no stack) and returns a
+synthetic string that says so.
+
+Two CTS self-tests assert real stack *contents* (`.spec.js` frame locations),
+which no synthetic string can satisfy. They stay expected-fail, with that reason,
+until the engine gap closes — as do the two `determinantInterval` numeric
+failures B7 recorded but never characterized.
+
+### Families still red, and why (all catalogued, none worked around)
+
+- `capability_checks,*` (10,954 cases) — blocked by a **Boa engine bug**, now
+  isolated (below). Not a binding gap.
+- `encoding,programmable,*` — `pipeline_immediate` (immediate data / push
+  constants, unimplemented) and `TypeError: GPUBindGroupLayout is required` (the
+  null-BGL nullability deviation).
+- `createBindGroup:external_texture,*` (82) — external textures are out of scope.
+- `createTexture:texture_usage` (42), `render_pass_descriptor:loadOp_storeOp`,
+  `queue,submit` command-buffer reuse, `buffer,mapping` — a mix of yawgpu Noop
+  backend gaps and suspected binding bugs; **untriaged**, and the honest state is
+  that they are not yet separated. Next slice.
+
+### The Boa bug blocking `capability_checks` — characterized, not guessed
+
+The CTS builds its limit fixtures with (`capability_checks/limits/limit_utils.js`,
+`makeLimitTestFixture`):
+
+```js
+function makeLimitTestFixture(limit, params) {
+  class LimitTests extends LimitTestsImpl {
+    limit = limit;                      // class field initializer
+    limitTestParams = params ?? {};
+  }
+  return LimitTests;
+}
+```
+
+Under Boa 0.21.1 this throws `ReferenceError: access of uninitialized binding`.
+A minimal repro run directly against the adapter isolates it, and the shape is
+**not** what the CTS source suggests:
+
+| Case | Result |
+|---|---|
+| field initializer reads an enclosing **function parameter** | **throws** |
+| field initializer reads an enclosing **function-local `let`** | **throws** |
+| field initializer reads an enclosing **function-local `var`** | **throws** |
+| **static** field initializer reads an enclosing function param | **throws** |
+| field initializer reads a **global** binding | OK |
+| field initializer that is a **constant** | OK |
+| field initializer reads the param **through an arrow function** — `x = (() => v)()` | **OK** |
+| an ordinary **method** reads the same enclosing binding | OK |
+
+So it is *not* about the field name shadowing the outer name (`limit = limit`) —
+a differently-named binding fails identically. **A class field initializer cannot
+read any binding from an enclosing function scope**, while a method in the same
+class can, and an arrow *inside* the initializer can. The closure machinery
+works; the field-initializer's own synthetic function is being given the wrong
+outer environment.
+
+This is an engine defect, catalogued here per the operational rule. It gates
+`capability_checks,*` entirely (10,954 cases — the single largest remaining
+family) and cannot be fixed in the binding: the offending code is the CTS's, the
+JS is valid, and no shim can reach into a class body. Boa is pure Rust and
+MIT/Unlicense, so unlike the QuickJS defect this one is *fixable by us* — but
+doing so means pinning a patched Boa, which contradicts the standing "crates.io,
+exact version pin, never a filesystem path" dependency rule (block 14). **Owner
+decision.**

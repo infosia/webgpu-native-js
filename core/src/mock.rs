@@ -8,11 +8,11 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::{
-    Arena, ClassId, ClassSpec, Deferred, Environment, GpuDispatch, JsEngine, ReleaseQueue, Result,
-    WGPUAdapter, WGPUAdapterInfo, WGPUBuffer, WGPUBufferDescriptor, WGPUBufferMapCallbackInfo,
-    WGPUDevice, WGPULimits, WGPUMapAsyncStatus, WGPUMapMode, WGPURequestAdapterCallbackInfo,
-    WGPURequestDeviceCallbackInfo, WGPUStatus, WGPUStringView, WGPUStringViewExt,
-    WGPUSupportedFeatures,
+    Arena, ClassId, ClassParent, ClassSpec, Deferred, Environment, GpuDispatch, JsEngine,
+    ReleaseQueue, Result, WGPUAdapter, WGPUAdapterInfo, WGPUBuffer, WGPUBufferDescriptor,
+    WGPUBufferMapCallbackInfo, WGPUDevice, WGPULimits, WGPUMapAsyncStatus, WGPUMapMode,
+    WGPURequestAdapterCallbackInfo, WGPURequestDeviceCallbackInfo, WGPUStatus, WGPUStringView,
+    WGPUStringViewExt, WGPUSupportedFeatures,
 };
 use crate::{
     WGPUBindGroup, WGPUBindGroupDescriptor, WGPUBindGroupLayout, WGPUBindGroupLayoutDescriptor,
@@ -55,7 +55,7 @@ pub struct Runtime {
     values: RefCell<Vec<MockValue>>,
     global: Value,
     symbol_iterator: Value,
-    classes: RefCell<BTreeMap<ClassId, &'static str>>,
+    classes: RefCell<BTreeMap<ClassId, MockClassEntry>>,
     reclaimed_values: Cell<usize>,
     reclaimed_handles: RefCell<Vec<Value>>,
     detach_noop: Cell<bool>,
@@ -91,6 +91,7 @@ impl Runtime {
         let set_constructor = Value(4);
         let boolean = Value(5);
         let global = Value(6);
+        let error = Value(7);
         let mut symbol_properties = BTreeMap::new();
         symbol_properties.insert("iterator".to_owned(), symbol_iterator);
         let mut global_properties = BTreeMap::new();
@@ -98,6 +99,7 @@ impl Runtime {
         global_properties.insert("Array".to_owned(), array_constructor);
         global_properties.insert("Set".to_owned(), set_constructor);
         global_properties.insert("Boolean".to_owned(), boolean);
+        global_properties.insert("Error".to_owned(), error);
         Self {
             env: Environment::new(gpu, Arc::new(ReleaseQueue::new())),
             values: RefCell::new(vec![
@@ -108,6 +110,7 @@ impl Runtime {
                 MockValue::Constructor(MockConstructor::Set),
                 MockValue::Callable(MockCallable::Boolean),
                 MockValue::Object(global_properties),
+                MockValue::Callable(MockCallable::IntrinsicError),
             ]),
             global,
             symbol_iterator,
@@ -214,6 +217,38 @@ impl Runtime {
             .iter()
             .filter(|value| matches!(value, MockValue::Scoped(_)))
             .count()
+    }
+
+    fn instance_of(&self, value: Value, interface: Value) -> bool {
+        let MockValue::Instance {
+            class: mut actual, ..
+        } = self.get(value)
+        else {
+            return false;
+        };
+        let target = match self.get(interface) {
+            MockValue::Callable(MockCallable::Interface(target)) => Some(target),
+            MockValue::Callable(MockCallable::IntrinsicError) => None,
+            _ => return false,
+        };
+        loop {
+            if target == Some(actual) {
+                return true;
+            }
+            let Some(parent) = self
+                .classes
+                .borrow()
+                .get(&actual)
+                .and_then(|entry| entry.spec.constructor.as_ref())
+                .and_then(|constructor| constructor.parent)
+            else {
+                return false;
+            };
+            match parent {
+                ClassParent::Class(parent) => actual = parent,
+                ClassParent::IntrinsicError => return target.is_none(),
+            }
+        }
     }
 
     /// Returns the release queue.
@@ -501,6 +536,15 @@ enum MockCallable {
     Next,
     Handler,
     Boolean,
+    Interface(ClassId),
+    IntrinsicError,
+}
+
+#[derive(Clone, Copy)]
+struct MockClassEntry {
+    spec: &'static ClassSpec<MockEngine>,
+    prototype: Value,
+    interface: Value,
 }
 
 #[derive(Clone, Copy)]
@@ -545,6 +589,22 @@ impl JsEngine for MockEngine {
                 .copied()
                 .unwrap_or_else(|| cx.runtime.undefined()),
             MockValue::Iterator { next_method, .. } if key == "next" => next_method,
+            MockValue::Callable(MockCallable::Interface(class)) if key == "prototype" => cx
+                .runtime
+                .classes
+                .borrow()
+                .get(&class)
+                .map_or_else(|| cx.runtime.undefined(), |entry| entry.prototype),
+            MockValue::Instance { class, .. } => cx
+                .runtime
+                .classes
+                .borrow()
+                .get(&class)
+                .and_then(|entry| match cx.runtime.get(entry.prototype) {
+                    MockValue::Object(map) => map.get(key).copied(),
+                    _ => None,
+                })
+                .unwrap_or_else(|| cx.runtime.undefined()),
             _ => cx.runtime.undefined(),
         };
         Ok(cx.runtime.tracked_alias(cx.scope, value))
@@ -664,6 +724,20 @@ impl JsEngine for MockEngine {
                         _ => true,
                     }),
             ),
+            MockValue::Callable(MockCallable::IntrinsicError) => {
+                return Err("TypeError: mock Error is not callable".to_owned());
+            }
+            MockValue::Callable(MockCallable::Interface(class)) => {
+                let call = cx
+                    .runtime
+                    .classes
+                    .borrow()
+                    .get(&class)
+                    .and_then(|entry| entry.spec.constructor.as_ref())
+                    .map(|constructor| constructor.call)
+                    .ok_or_else(|| "TypeError: Illegal constructor".to_owned())?;
+                call(cx, &args)?
+            }
             _ => return Err("TypeError: value is not callable".to_owned()),
         };
         Ok(cx.runtime.tracked_alias(cx.scope, result))
@@ -699,6 +773,17 @@ impl JsEngine for MockEngine {
                     }
                 }
                 cx.runtime.iterable(&unique, None)
+            }
+            MockValue::Callable(MockCallable::Interface(class)) => {
+                let call = cx
+                    .runtime
+                    .classes
+                    .borrow()
+                    .get(&class)
+                    .and_then(|entry| entry.spec.constructor.as_ref())
+                    .map(|constructor| constructor.call)
+                    .ok_or_else(|| "TypeError: Illegal constructor".to_owned())?;
+                call(cx, &args)?
             }
             _ => return Err("TypeError: value is not a constructor".to_owned()),
         };
@@ -821,7 +906,44 @@ impl JsEngine for MockEngine {
         cx: Self::Context<'_>,
         spec: &'static ClassSpec<Self>,
     ) -> Result<ClassId, Self::Error> {
-        cx.runtime.classes.borrow_mut().insert(spec.id, spec.name);
+        if cx.runtime.classes.borrow().contains_key(&spec.id) {
+            return Ok(spec.id);
+        }
+        let mut prototype_properties = BTreeMap::new();
+        for method in spec.methods {
+            prototype_properties.insert(
+                method.name.to_owned(),
+                cx.runtime
+                    .insert(MockValue::Callable(MockCallable::Handler)),
+            );
+        }
+        for property in spec.properties {
+            prototype_properties.insert(property.name.to_owned(), cx.runtime.undefined());
+        }
+        let prototype = cx.runtime.insert(MockValue::Object(prototype_properties));
+        let interface = cx
+            .runtime
+            .insert(MockValue::Callable(MockCallable::Interface(spec.id)));
+        let _ = cx.runtime.with_value(prototype, |value| {
+            let MockValue::Object(properties) = value else {
+                return;
+            };
+            properties.insert("constructor".to_owned(), interface);
+        });
+        let _ = cx.runtime.with_value(cx.runtime.global, |value| {
+            let MockValue::Object(properties) = value else {
+                return;
+            };
+            properties.insert(spec.name.to_owned(), interface);
+        });
+        cx.runtime.classes.borrow_mut().insert(
+            spec.id,
+            MockClassEntry {
+                spec,
+                prototype,
+                interface,
+            },
+        );
         Ok(spec.id)
     }
 
@@ -835,6 +957,16 @@ impl JsEngine for MockEngine {
         }
         let payload = Box::leak(payload);
         Ok(cx.runtime.insert(MockValue::Instance { class, payload }))
+    }
+
+    fn new_error_instance(
+        cx: Self::Context<'_>,
+        class: ClassId,
+        payload: Box<dyn Any + Send>,
+        _name: &str,
+        _message: &str,
+    ) -> Result<Self::Value, Self::Error> {
+        Self::new_instance(cx, class, payload)
     }
 
     fn payload<'a>(
@@ -3139,6 +3271,125 @@ mod tests {
             properties.get("message").copied().map(|value| rt.get(value)),
             Some(MockValue::String(actual)) if actual == message
         ));
+    }
+
+    #[test]
+    fn install_eagerly_exposes_non_constructible_interface_objects_and_prototypes() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let _gpu = crate::wrap_gpu::<Engine>(cx, fake_handle(40_001)).expect("wrap GPU");
+
+        assert_eq!(rt.classes.borrow().len(), 33);
+        let global = Engine::global(cx);
+        let render_pass = Engine::get_property(cx, global, "GPURenderPassEncoder")
+            .expect("render-pass interface object");
+        assert!(Engine::is_callable(cx, render_pass));
+        assert_eq!(
+            rt.classes
+                .borrow()
+                .get(&crate::GPU_RENDER_PASS_ENCODER_CLASS)
+                .map(|entry| entry.interface),
+            Some(rt.canonical(render_pass))
+        );
+
+        let prototype = Engine::get_property(cx, render_pass, "prototype").expect("prototype");
+        let method = Engine::get_property(cx, prototype, "setBindGroup").expect("method");
+        assert!(Engine::is_callable(cx, method));
+        let constructor =
+            Engine::get_property(cx, prototype, "constructor").expect("prototype constructor");
+        assert!(Engine::same_value(cx, constructor, render_pass));
+
+        let supported_limits = Engine::get_property(cx, global, "GPUSupportedLimits")
+            .expect("supported-limits interface object");
+        for error in [
+            Engine::call(cx, supported_limits, Engine::undefined(cx), &[])
+                .expect_err("calling must fail"),
+            Engine::construct(cx, supported_limits, &[]).expect_err("constructing must fail"),
+        ] {
+            assert!(error.contains("TypeError"), "{error}");
+            assert!(error.contains("Illegal constructor"), "{error}");
+        }
+
+        let pass = Engine::new_instance(cx, crate::GPU_RENDER_PASS_ENCODER_CLASS, Box::new(()))
+            .expect("render-pass instance");
+        assert!(rt.instance_of(pass, render_pass));
+        assert!(Engine::is_callable(
+            cx,
+            Engine::get_property(cx, pass, "setBindGroup").expect("inherited method")
+        ));
+    }
+
+    #[test]
+    fn gpu_pipeline_error_constructor_enforces_init_and_inherits_error() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let _device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let global = Engine::global(cx);
+        let constructor =
+            Engine::get_property(cx, global, "GPUPipelineError").expect("constructor");
+        let error_constructor = Engine::get_property(cx, global, "Error").expect("Error");
+
+        let validation_init = descriptor(&rt, &[("reason", rt.string("validation"))]);
+        let validation = Engine::construct(
+            cx,
+            constructor,
+            &[rt.string("pipeline failed"), validation_init],
+        )
+        .expect("validation error");
+        let internal_init = descriptor(&rt, &[("reason", rt.string("internal"))]);
+        let internal = Engine::construct(cx, constructor, &[rt.undefined(), internal_init])
+            .expect("default-message error");
+
+        let name = crate::gpu_pipeline_error_name_get::<Engine>(cx, validation).expect("name");
+        let message =
+            crate::gpu_pipeline_error_message_get::<Engine>(cx, validation).expect("message");
+        let validation_reason =
+            crate::gpu_pipeline_error_reason_get::<Engine>(cx, validation).expect("reason");
+        let default_message =
+            crate::gpu_pipeline_error_message_get::<Engine>(cx, internal).expect("message");
+        let internal_reason =
+            crate::gpu_pipeline_error_reason_get::<Engine>(cx, internal).expect("reason");
+        assert!(matches!(rt.get(name), MockValue::String(value) if value == "GPUPipelineError"));
+        assert!(matches!(rt.get(message), MockValue::String(value) if value == "pipeline failed"));
+        assert!(
+            matches!(rt.get(validation_reason), MockValue::String(value) if value == "validation")
+        );
+        assert!(matches!(rt.get(default_message), MockValue::String(value) if value.is_empty()));
+        assert!(matches!(rt.get(internal_reason), MockValue::String(value) if value == "internal"));
+        assert!(rt.instance_of(validation, error_constructor));
+
+        let missing_reason = descriptor(&rt, &[]);
+        let error = Engine::construct(cx, constructor, &[rt.string("bad"), missing_reason])
+            .expect_err("missing reason must throw");
+        assert!(error.starts_with("TypeError:"));
+        let invalid_reason = descriptor(&rt, &[("reason", rt.string("device-lost"))]);
+        let error = Engine::construct(cx, constructor, &[rt.string("bad"), invalid_reason])
+            .expect_err("invalid reason must throw");
+        assert!(error.starts_with("TypeError:"));
+    }
+
+    #[test]
+    fn adopted_device_installs_the_complete_class_inventory() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let _device =
+            unsafe { wrap_device::<Engine>(cx, fake_handle(40_002)) }.expect("adopt native device");
+        assert_eq!(rt.classes.borrow().len(), 33);
+        let global = Engine::global(cx);
+        assert!(Engine::is_callable(
+            cx,
+            Engine::get_property(cx, global, "DOMException").expect("DOMException interface")
+        ));
+        assert!(Engine::is_callable(
+            cx,
+            Engine::get_property(cx, global, "GPUPipelineError").expect("pipeline-error interface")
+        ));
+        let command_buffer = Engine::get_property(cx, global, "GPUCommandBuffer")
+            .expect("command-buffer interface object");
+        assert!(Engine::is_callable(cx, command_buffer));
     }
 
     fn assert_validation_scope_error(
@@ -6524,17 +6775,19 @@ mod tests {
             .promise_result(promise)
             .expect("settled")
             .expect_err("rejected");
-        let MockValue::Object(properties) = rt.get(reason) else {
-            panic!("rejection reason is not an error object");
-        };
+        assert!(Engine::payload(cx, reason, crate::GPU_PIPELINE_ERROR_CLASS).is_some());
+        let name = crate::gpu_pipeline_error_name_get::<Engine>(cx, reason).expect("name");
+        let message = crate::gpu_pipeline_error_message_get::<Engine>(cx, reason).expect("message");
+        let pipeline_reason =
+            crate::gpu_pipeline_error_reason_get::<Engine>(cx, reason).expect("reason");
+        assert!(matches!(rt.get(name), MockValue::String(name) if name == "GPUPipelineError"));
         assert!(matches!(
-            properties.get("name").copied().map(|value| rt.get(value)),
-            Some(MockValue::String(name)) if name == "OperationError"
+            rt.get(message),
+            MockValue::String(message) if message.contains("bad pipeline descriptor")
         ));
         assert!(matches!(
-            properties.get("message").copied().map(|value| rt.get(value)),
-            Some(MockValue::String(message))
-                if message.contains("validation") && message.contains("bad pipeline descriptor")
+            rt.get(pipeline_reason),
+            MockValue::String(reason) if reason == "validation"
         ));
         assert_eq!(rt.queue().drain().expect("release failed retention"), 1);
         GPU_STATE.with(|state| assert_eq!(state.borrow().shader_module_releases, 1));

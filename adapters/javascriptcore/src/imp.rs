@@ -128,6 +128,7 @@ impl JSClassDefinition {
 }
 
 const PROPERTY_NONE: JSPropertyAttributes = 0;
+const PROPERTY_DONT_ENUM: JSPropertyAttributes = 1 << 2;
 
 #[link(name = "JavaScriptCore", kind = "framework")]
 unsafe extern "C" {
@@ -233,12 +234,6 @@ unsafe extern "C" {
     fn JSClassRelease(class: JSClassRef);
     /// Creates an object with a class and private data.
     fn JSObjectMake(ctx: JSContextRef, class: JSClassRef, data: *mut c_void) -> JSObjectRef;
-    /// Creates a constructor function associated with a class prototype.
-    fn JSObjectMakeConstructor(
-        ctx: JSContextRef,
-        class: JSClassRef,
-        call_as_constructor: Option<CallAsConstructorCallback>,
-    ) -> JSObjectRef;
     /// Creates a JavaScript function from trusted parameter and body strings.
     fn JSObjectMakeFunction(
         ctx: JSContextRef,
@@ -304,8 +299,23 @@ unsafe extern "C" {
         attributes: JSPropertyAttributes,
         exception: *mut JSValueRef,
     );
+    /// Deletes a named object property.
+    fn JSObjectDeleteProperty(
+        ctx: JSContextRef,
+        object: JSObjectRef,
+        property_name: JSStringRef,
+        exception: *mut JSValueRef,
+    ) -> bool;
+    /// Gets an object's JavaScript prototype.
+    fn JSObjectGetPrototype(ctx: JSContextRef, object: JSObjectRef) -> JSValueRef;
     /// Sets an object's JavaScript prototype.
     fn JSObjectSetPrototype(ctx: JSContextRef, object: JSObjectRef, value: JSValueRef);
+    /// Creates a constructor function associated with a class prototype.
+    fn JSObjectMakeConstructor(
+        ctx: JSContextRef,
+        class: JSClassRef,
+        call_as_constructor: Option<CallAsConstructorCallback>,
+    ) -> JSObjectRef;
     /// Calls a JavaScript object as a function.
     fn JSObjectCallAsFunction(
         ctx: JSContextRef,
@@ -577,6 +587,7 @@ struct ClassEntry {
     class: JSClassRef,
     spec: &'static core::ClassSpec<Engine>,
     methods: Vec<ClassMethod>,
+    prototype: JSValueRef,
     _name: CString,
 }
 
@@ -1489,6 +1500,216 @@ impl core::JsEngine for Engine {
                 value: ProtectedValue(value),
             });
         }
+        // SAFETY: class is live and wrapper_construct has the verified
+        // JSObjectCallAsConstructorCallback ABI from the pinned SDK.
+        let native_constructor =
+            unsafe { JSObjectMakeConstructor(cx.ctx, class, Some(wrapper_construct)) };
+        if native_constructor.is_null() {
+            return Err(Self::operation_error(cx, "JSObjectMakeConstructor failed"));
+        }
+        state
+            .constructors
+            .lock()
+            .map_err(|_| Self::operation_error(cx, "constructor registry is poisoned"))?
+            .insert(native_constructor as usize, spec.id);
+        let prototype = JsString::new("prototype")
+            .map_err(|_| Self::operation_error(cx, "prototype string failed"))?;
+        let mut exception = ptr::null();
+        // SAFETY: native_constructor belongs to cx and exposes the class
+        // prototype associated with instances created by JSObjectMake.
+        let child_prototype = unsafe {
+            JSObjectGetProperty(
+                cx.ctx,
+                native_constructor,
+                prototype.as_raw(),
+                &mut exception,
+            )
+        };
+        if !exception.is_null() {
+            return Err(exception);
+        }
+        let child_prototype = unsafe { JSValueToObject(cx.ctx, child_prototype, &mut exception) };
+        if !exception.is_null() || child_prototype.is_null() {
+            return Err(if exception.is_null() {
+                Self::operation_error(cx, "constructor prototype is not an object")
+            } else {
+                exception
+            });
+        }
+        let constructor = make_interface_function(cx, spec, native_constructor)?;
+        // SAFETY: interface function and prototype belong to the live cx.
+        unsafe {
+            JSObjectSetProperty(
+                cx.ctx,
+                constructor,
+                prototype.as_raw(),
+                child_prototype.cast_const(),
+                PROPERTY_NONE,
+                &mut exception,
+            )
+        };
+        if !exception.is_null() {
+            return Err(exception);
+        }
+        for method in &methods {
+            let name = JsString::new(method.name)
+                .map_err(|_| Self::type_error(cx, "method name contains a nul byte"))?;
+            unsafe {
+                JSObjectSetProperty(
+                    cx.ctx,
+                    child_prototype,
+                    name.as_raw(),
+                    method.value.0,
+                    PROPERTY_DONT_ENUM,
+                    &mut exception,
+                )
+            };
+            if !exception.is_null() {
+                return Err(exception);
+            }
+        }
+        let constructor_name = JsString::new("constructor")
+            .map_err(|_| Self::operation_error(cx, "constructor string failed"))?;
+        // JSObjectMakeConstructor pre-populates an enumerable `constructor`
+        // property. Delete it so the WebIDL attributes below can take effect.
+        // The native class prototype also inherits a `constructor`, and JSC's
+        // C API otherwise follows assignment semantics and creates the new own
+        // property with default attributes. Temporarily detach that inherited
+        // property while defining the replacement.
+        // SAFETY: child_prototype belongs to the live cx.
+        let inherited_prototype = unsafe { JSObjectGetPrototype(cx.ctx, child_prototype) };
+        let deleted = unsafe {
+            JSObjectDeleteProperty(
+                cx.ctx,
+                child_prototype,
+                constructor_name.as_raw(),
+                &mut exception,
+            )
+        };
+        if !exception.is_null() {
+            return Err(exception);
+        }
+        if !deleted {
+            return Err(Self::operation_error(
+                cx,
+                "failed to replace prototype constructor",
+            ));
+        }
+        // SAFETY: prototype, constructor, and inherited_prototype belong to the
+        // live cx. Restore the prototype chain before inspecting any exception.
+        unsafe {
+            JSObjectSetPrototype(cx.ctx, child_prototype, JSValueMakeNull(cx.ctx));
+            JSObjectSetProperty(
+                cx.ctx,
+                child_prototype,
+                constructor_name.as_raw(),
+                constructor.cast_const(),
+                PROPERTY_DONT_ENUM,
+                &mut exception,
+            );
+            JSObjectSetPrototype(cx.ctx, child_prototype, inherited_prototype);
+        };
+        if !exception.is_null() {
+            return Err(exception);
+        }
+        if let Some(parent) = spec
+            .constructor
+            .as_ref()
+            .and_then(|constructor| constructor.parent)
+        {
+            let parent_prototype = match parent {
+                core::ClassParent::Class(parent) => {
+                    let parent_prototype = state
+                        .classes
+                        .lock()
+                        .map_err(|_| Self::operation_error(cx, "class registry is poisoned"))?
+                        .get(&parent)
+                        .map(|entry| entry.prototype)
+                        .ok_or_else(|| {
+                            Self::operation_error(cx, "parent class is not registered")
+                        })?;
+                    parent_prototype
+                }
+                core::ClassParent::IntrinsicError => {
+                    let error_name = JsString::new("Error")
+                        .map_err(|_| Self::operation_error(cx, "Error string failed"))?;
+                    let global = unsafe { JSContextGetGlobalObject(cx.ctx) };
+                    let error_constructor = unsafe {
+                        JSObjectGetProperty(cx.ctx, global, error_name.as_raw(), &mut exception)
+                    };
+                    if !exception.is_null() {
+                        return Err(exception);
+                    }
+                    let error_constructor =
+                        unsafe { JSValueToObject(cx.ctx, error_constructor, &mut exception) };
+                    if !exception.is_null() || error_constructor.is_null() {
+                        return Err(if exception.is_null() {
+                            Self::operation_error(cx, "intrinsic Error is not an object")
+                        } else {
+                            exception
+                        });
+                    }
+                    let parent_prototype = unsafe {
+                        JSObjectGetProperty(
+                            cx.ctx,
+                            error_constructor,
+                            prototype.as_raw(),
+                            &mut exception,
+                        )
+                    };
+                    if !exception.is_null() {
+                        return Err(exception);
+                    }
+                    parent_prototype
+                }
+            };
+            // SAFETY: prototype values belong to the live cx. This creates
+            // JS inheritance without a native JSClass finalizer chain.
+            unsafe { JSObjectSetPrototype(cx.ctx, child_prototype, parent_prototype) };
+        }
+        let name_property =
+            JsString::new("name").map_err(|_| Self::operation_error(cx, "name string failed"))?;
+        let function_name = JsString::new(spec.name)
+            .map_err(|_| Self::type_error(cx, "class name contains a nul byte"))?;
+        // SAFETY: constructor and strings belong to the live cx.
+        let function_name = unsafe { JSValueMakeString(cx.ctx, function_name.as_raw()) };
+        unsafe {
+            JSObjectSetProperty(
+                cx.ctx,
+                constructor,
+                name_property.as_raw(),
+                function_name,
+                PROPERTY_NONE,
+                &mut exception,
+            )
+        };
+        if !exception.is_null() {
+            return Err(exception);
+        }
+        let length_property = JsString::new("length")
+            .map_err(|_| Self::operation_error(cx, "length string failed"))?;
+        // SAFETY: constructor and property belong to the live cx.
+        let length = unsafe {
+            JSValueMakeNumber(
+                cx.ctx,
+                spec.constructor
+                    .as_ref()
+                    .map_or(0.0, |constructor| f64::from(constructor.length)),
+            )
+        };
+        unsafe {
+            JSObjectSetProperty(
+                cx.ctx,
+                constructor,
+                length_property.as_raw(),
+                length,
+                PROPERTY_NONE,
+                &mut exception,
+            )
+        };
+        if !exception.is_null() {
+            return Err(exception);
+        }
         state
             .classes
             .lock()
@@ -1499,166 +1720,27 @@ impl core::JsEngine for Engine {
                     class,
                     spec,
                     methods,
+                    prototype: child_prototype.cast_const(),
                     _name: name,
                 },
             );
-        if let Some(constructor_spec) = &spec.constructor {
-            // SAFETY: class is live and wrapper_construct has the verified
-            // JSObjectCallAsConstructorCallback ABI from the pinned SDK.
-            let constructor =
-                unsafe { JSObjectMakeConstructor(cx.ctx, class, Some(wrapper_construct)) };
-            if constructor.is_null() {
-                return Err(Self::operation_error(cx, "JSObjectMakeConstructor failed"));
-            }
-            state
-                .constructors
-                .lock()
-                .map_err(|_| Self::operation_error(cx, "constructor registry is poisoned"))?
-                .insert(constructor as usize, spec.id);
-            let prototype = JsString::new("prototype")
-                .map_err(|_| Self::operation_error(cx, "prototype string failed"))?;
-            let mut exception = ptr::null();
-            // SAFETY: constructor belongs to cx and exposes the prototype
-            // created by JSObjectMakeConstructor.
-            let child_prototype = unsafe {
-                JSObjectGetProperty(cx.ctx, constructor, prototype.as_raw(), &mut exception)
-            };
-            if !exception.is_null() {
-                return Err(exception);
-            }
-            let child_prototype =
-                unsafe { JSValueToObject(cx.ctx, child_prototype, &mut exception) };
-            if !exception.is_null() || child_prototype.is_null() {
-                return Err(if exception.is_null() {
-                    Self::operation_error(cx, "constructor prototype is not an object")
-                } else {
-                    exception
-                });
-            }
-            let prototype_methods = state
-                .classes
-                .lock()
-                .map_err(|_| Self::operation_error(cx, "class registry is poisoned"))?
-                .get(&spec.id)
-                .map(|entry| entry.methods.clone())
-                .unwrap_or_default();
-            for method in prototype_methods {
-                let name = JsString::new(method.name)
-                    .map_err(|_| Self::type_error(cx, "method name contains a nul byte"))?;
-                unsafe {
-                    JSObjectSetProperty(
-                        cx.ctx,
-                        child_prototype,
-                        name.as_raw(),
-                        method.value.0,
-                        PROPERTY_NONE,
-                        &mut exception,
-                    )
-                };
-                if !exception.is_null() {
-                    return Err(exception);
-                }
-            }
-            let constructor_name = JsString::new("constructor")
-                .map_err(|_| Self::operation_error(cx, "constructor string failed"))?;
-            // SAFETY: prototype and constructor belong to the live cx.
-            unsafe {
-                JSObjectSetProperty(
-                    cx.ctx,
-                    child_prototype,
-                    constructor_name.as_raw(),
-                    constructor.cast_const(),
-                    PROPERTY_NONE,
-                    &mut exception,
-                )
-            };
-            if !exception.is_null() {
-                return Err(exception);
-            }
-            if let Some(parent) = spec
-                .constructor
-                .as_ref()
-                .and_then(|constructor| constructor.parent)
-            {
-                let parent_constructor = state
-                    .constructors
-                    .lock()
-                    .map_err(|_| Self::operation_error(cx, "constructor registry is poisoned"))?
-                    .iter()
-                    .find_map(|(constructor, class)| {
-                        (*class == parent).then_some(*constructor as JSObjectRef)
-                    })
-                    .ok_or_else(|| Self::operation_error(cx, "parent class is not registered"))?;
-                // SAFETY: the parent constructor belongs to cx.
-                let parent_prototype = unsafe {
-                    JSObjectGetProperty(
-                        cx.ctx,
-                        parent_constructor,
-                        prototype.as_raw(),
-                        &mut exception,
-                    )
-                };
-                if !exception.is_null() {
-                    return Err(exception);
-                }
-                // SAFETY: prototype values belong to the live cx. This creates
-                // JS inheritance without a native JSClass finalizer chain.
-                unsafe { JSObjectSetPrototype(cx.ctx, child_prototype, parent_prototype) };
-            }
-            let name_property = JsString::new("name")
-                .map_err(|_| Self::operation_error(cx, "name string failed"))?;
-            let function_name = JsString::new(spec.name)
-                .map_err(|_| Self::type_error(cx, "class name contains a nul byte"))?;
-            // SAFETY: constructor and strings belong to the live cx.
-            let function_name = unsafe { JSValueMakeString(cx.ctx, function_name.as_raw()) };
-            unsafe {
-                JSObjectSetProperty(
-                    cx.ctx,
-                    constructor,
-                    name_property.as_raw(),
-                    function_name,
-                    PROPERTY_NONE,
-                    &mut exception,
-                )
-            };
-            if !exception.is_null() {
-                return Err(exception);
-            }
-            let length_property = JsString::new("length")
-                .map_err(|_| Self::operation_error(cx, "length string failed"))?;
-            // SAFETY: constructor and property belong to the live cx.
-            let length = unsafe { JSValueMakeNumber(cx.ctx, f64::from(constructor_spec.length)) };
-            unsafe {
-                JSObjectSetProperty(
-                    cx.ctx,
-                    constructor,
-                    length_property.as_raw(),
-                    length,
-                    PROPERTY_NONE,
-                    &mut exception,
-                )
-            };
-            if !exception.is_null() {
-                return Err(exception);
-            }
-            let property = JsString::new(spec.name)
-                .map_err(|_| Self::type_error(cx, "class name contains a nul byte"))?;
-            let global = unsafe { JSContextGetGlobalObject(cx.ctx) };
-            let mut exception = ptr::null();
-            // SAFETY: global, constructor, and property belong to the live cx.
-            unsafe {
-                JSObjectSetProperty(
-                    cx.ctx,
-                    global,
-                    property.as_raw(),
-                    constructor.cast_const(),
-                    PROPERTY_NONE,
-                    &mut exception,
-                )
-            };
-            if !exception.is_null() {
-                return Err(exception);
-            }
+        let property = JsString::new(spec.name)
+            .map_err(|_| Self::type_error(cx, "class name contains a nul byte"))?;
+        let global = unsafe { JSContextGetGlobalObject(cx.ctx) };
+        let mut exception = ptr::null();
+        // SAFETY: global, constructor, and property belong to the live cx.
+        unsafe {
+            JSObjectSetProperty(
+                cx.ctx,
+                global,
+                property.as_raw(),
+                constructor.cast_const(),
+                PROPERTY_NONE,
+                &mut exception,
+            )
+        };
+        if !exception.is_null() {
+            return Err(exception);
         }
         Ok(spec.id)
     }
@@ -1669,7 +1751,7 @@ impl core::JsEngine for Engine {
         payload: Box<dyn Any + Send>,
     ) -> core::Result<Self::Value, Self::Error> {
         let state = state_from_context(cx.ctx);
-        let (js_class, spec) = {
+        let (js_class, spec, prototype) = {
             let classes = state
                 .classes
                 .lock()
@@ -1677,7 +1759,7 @@ impl core::JsEngine for Engine {
             let Some(entry) = classes.get(&class) else {
                 return Err(Self::operation_error(cx, "class is not registered"));
             };
-            (entry.class, entry.spec)
+            (entry.class, entry.spec, entry.prototype)
         };
         let holder = Box::new(ObjectPayload {
             spec,
@@ -1692,10 +1774,62 @@ impl core::JsEngine for Engine {
             unsafe { drop(Box::from_raw(raw.cast::<ObjectPayload>())) };
             Err(Self::operation_error(cx, "JSObjectMake failed"))
         } else {
+            // SAFETY: object and the globally rooted interface prototype belong
+            // to the live cx.
+            unsafe { JSObjectSetPrototype(cx.ctx, object, prototype) };
             let value = object.cast_const();
             cx.scope.track(value);
             Ok(value)
         }
+    }
+
+    fn new_error_instance(
+        cx: Self::Context<'_>,
+        class: core::ClassId,
+        payload: Box<dyn Any + Send>,
+        name: &str,
+        message: &str,
+    ) -> core::Result<Self::Value, Self::Error> {
+        let value = Self::new_instance(cx, class, payload)?;
+        let error = set_error_name(cx, make_error(cx, message, false), name);
+        let stack_name =
+            JsString::new("stack").map_err(|_| Self::operation_error(cx, "stack string failed"))?;
+        let mut exception = ptr::null();
+        let error = unsafe { JSValueToObject(cx.ctx, error, &mut exception) };
+        if !exception.is_null() || error.is_null() {
+            return Err(if exception.is_null() {
+                Self::operation_error(cx, "native Error is not an object")
+            } else {
+                exception
+            });
+        }
+        let stack =
+            unsafe { JSObjectGetProperty(cx.ctx, error, stack_name.as_raw(), &mut exception) };
+        if !exception.is_null() {
+            return Err(exception);
+        }
+        let object = unsafe { JSValueToObject(cx.ctx, value, &mut exception) };
+        if !exception.is_null() || object.is_null() {
+            return Err(if exception.is_null() {
+                Self::operation_error(cx, "Error instance is not an object")
+            } else {
+                exception
+            });
+        }
+        unsafe {
+            JSObjectSetProperty(
+                cx.ctx,
+                object,
+                stack_name.as_raw(),
+                stack,
+                PROPERTY_DONT_ENUM,
+                &mut exception,
+            )
+        };
+        if !exception.is_null() {
+            return Err(exception);
+        }
+        Ok(value)
     }
 
     fn payload<'a>(
@@ -2460,9 +2594,12 @@ unsafe extern "C" fn wrapper_construct(
             .lock()
             .map_err(|_| Engine::operation_error(cx, "class registry is poisoned"))?
             .get(&class)
-            .and_then(|entry| entry.spec.constructor.as_ref())
+            .ok_or_else(|| Engine::operation_error(cx, "constructor class is not registered"))?
+            .spec
+            .constructor
+            .as_ref()
             .map(|constructor| constructor.call)
-            .ok_or_else(|| Engine::operation_error(cx, "constructor is not registered"))?;
+            .ok_or_else(|| Engine::type_error(cx, "Illegal constructor"))?;
         let args = if argument_count == 0 || arguments.is_null() {
             &[]
         } else {
@@ -2572,6 +2709,98 @@ fn make_method(
         cx.scope.track(value);
         Ok(value)
     }
+}
+
+fn make_interface_function(
+    cx: Context<'_>,
+    spec: &'static core::ClassSpec<Engine>,
+    native_constructor: JSObjectRef,
+) -> core::Result<JSObjectRef, JSValueRef> {
+    let length = spec
+        .constructor
+        .as_ref()
+        .map_or(0, |constructor| constructor.length);
+    let parameters = (0..length)
+        .map(|index| format!("arg{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let body = if spec.constructor.is_some() {
+        format!(
+            "return function {}({parameters}) {{ \
+             if (!new.target) {{ throw new TypeError('Illegal constructor'); }} \
+             return Reflect.construct(nativeConstructor, \
+             Array.prototype.slice.call(arguments), new.target); \
+             }};",
+            spec.name
+        )
+    } else {
+        format!(
+            "return function {}() {{ \
+             void nativeConstructor; \
+             throw new TypeError('Illegal constructor'); \
+             }};",
+            spec.name
+        )
+    };
+    let factory_name = JsString::new("createWebGpuInterface")
+        .map_err(|_| Engine::operation_error(cx, "interface factory name failed"))?;
+    let native_parameter = JsString::new("nativeConstructor")
+        .map_err(|_| Engine::operation_error(cx, "interface factory parameter failed"))?;
+    let body = JsString::new(&body)
+        .map_err(|_| Engine::operation_error(cx, "interface function body failed"))?;
+    let source = JsString::new("webgpu-native-js-interface.js")
+        .map_err(|_| Engine::operation_error(cx, "interface source URL failed"))?;
+    let parameter_names = [native_parameter.as_raw()];
+    // SAFETY: all strings and the parameter pointer remain live for the call,
+    // and JSObjectMakeFunction copies the source into a function owned by cx.
+    let mut exception = ptr::null();
+    let factory = unsafe {
+        JSObjectMakeFunction(
+            cx.ctx,
+            factory_name.as_raw(),
+            1,
+            parameter_names.as_ptr(),
+            body.as_raw(),
+            source.as_raw(),
+            1,
+            &mut exception,
+        )
+    };
+    if !exception.is_null() {
+        return Err(exception);
+    }
+    if factory.is_null() {
+        return Err(Engine::operation_error(
+            cx,
+            "JSObjectMakeFunction(interface factory) failed",
+        ));
+    }
+    let arguments = [native_constructor.cast_const()];
+    let mut exception = ptr::null();
+    // SAFETY: factory and native_constructor belong to cx.
+    let function = unsafe {
+        JSObjectCallAsFunction(
+            cx.ctx,
+            factory,
+            ptr::null_mut(),
+            arguments.len(),
+            arguments.as_ptr(),
+            &mut exception,
+        )
+    };
+    if !exception.is_null() {
+        return Err(exception);
+    }
+    // SAFETY: the factory returns the JavaScript function expression above.
+    let function = unsafe { JSValueToObject(cx.ctx, function, &mut exception) };
+    if !exception.is_null() || function.is_null() {
+        return Err(if exception.is_null() {
+            Engine::operation_error(cx, "interface factory returned no function")
+        } else {
+            exception
+        });
+    }
+    Ok(function)
 }
 
 fn write_exception(out: *mut JSValueRef, error: JSValueRef) {
@@ -2903,6 +3132,68 @@ mod tests {
             Some(13_001usize as wgpu::WGPURenderBundle)
         );
         assert_eq!(runtime.native_render_bundle(wrong), None);
+    }
+
+    #[test]
+    fn install_exposes_eager_non_constructible_interface_objects() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("JSC runtime");
+        let device = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("interfaceDevice", device)
+            .expect("set device");
+        eval(
+            &runtime,
+            r#"
+                const passTypeReady = typeof GPURenderPassEncoder === "function";
+                const passMethodReady = "setBindGroup" in GPURenderPassEncoder.prototype;
+                const constructibleDescriptor = Object.getOwnPropertyDescriptor(
+                    GPURenderPassEncoder.prototype,
+                    "constructor"
+                );
+                const nonConstructibleDescriptor = Object.getOwnPropertyDescriptor(
+                    GPUSupportedLimits.prototype,
+                    "constructor"
+                );
+                const descriptorIsWebIdl = (descriptor, interfaceObject) =>
+                    descriptor.value === interfaceObject && descriptor.writable === true &&
+                    descriptor.enumerable === false && descriptor.configurable === true;
+                const constructibleConstructorDescriptor = descriptorIsWebIdl(
+                    constructibleDescriptor,
+                    GPURenderPassEncoder
+                );
+                const nonConstructibleConstructorDescriptor = descriptorIsWebIdl(
+                    nonConstructibleDescriptor,
+                    GPUSupportedLimits
+                );
+                let callError;
+                let constructError;
+                try { GPUSupportedLimits(); } catch (error) { callError = error; }
+                try { new GPUSupportedLimits(); } catch (error) { constructError = error; }
+                const encoder = interfaceDevice.createCommandEncoder();
+                const pass = encoder.beginComputePass();
+                const instanceReady = pass instanceof GPUComputePassEncoder;
+                pass.end();
+                encoder.finish();
+                if (!(passTypeReady && passMethodReady && constructibleConstructorDescriptor &&
+                    nonConstructibleConstructorDescriptor && instanceReady &&
+                    callError instanceof TypeError && callError.message.includes("Illegal constructor") &&
+                    constructError instanceof TypeError && constructError.message.includes("Illegal constructor"))) {
+                    throw new Error("eager interface-object invariants failed: " + [
+                        passTypeReady,
+                        passMethodReady,
+                        JSON.stringify(constructibleDescriptor),
+                        JSON.stringify(nonConstructibleDescriptor),
+                        instanceReady,
+                        callError && callError.name,
+                        callError && callError.message,
+                        constructError && constructError.name,
+                        constructError && constructError.message
+                    ].join("|"));
+                }
+            "#,
+            "eager-interface-objects.js",
+        );
     }
 
     fn tick_until<F>(
@@ -3603,6 +3894,39 @@ mod tests {
                 device.queue.submit(new Set([c2]));
             "#,
             "sequence-conformance.js",
+        );
+    }
+
+    #[test]
+    fn gpu_pipeline_error_is_a_constructible_error_subclass() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("JSC runtime");
+        let _device = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        eval(
+            &runtime,
+            r#"
+                const validation = new GPUPipelineError("pipeline failed", {
+                    reason: "validation"
+                });
+                const internal = new GPUPipelineError(undefined, { reason: "internal" });
+                let missingIsTypeError = false;
+                let invalidIsTypeError = false;
+                try { new GPUPipelineError("bad", {}); }
+                catch (error) { missingIsTypeError = error instanceof TypeError; }
+                try { new GPUPipelineError("bad", { reason: "device-lost" }); }
+                catch (error) { invalidIsTypeError = error instanceof TypeError; }
+                if (validation.name !== "GPUPipelineError" ||
+                    validation.message !== "pipeline failed" ||
+                    validation.reason !== "validation" ||
+                    internal.message !== "" || internal.reason !== "internal" ||
+                    !(validation instanceof GPUPipelineError) ||
+                    !(validation instanceof DOMException) || !(validation instanceof Error) ||
+                    typeof validation.stack !== typeof new Error("pipeline failed").stack ||
+                    !missingIsTypeError || !invalidIsTypeError) {
+                    throw new Error("GPUPipelineError contract mismatch");
+                }
+            "#,
+            "gpu-pipeline-error.js",
         );
     }
 

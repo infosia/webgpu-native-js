@@ -53,7 +53,12 @@ enum sentinels `Undefined` / `BindingNotUsed` (emitted only for absent optionals
 - **No DOMException hierarchy (block 07 → S8).** WebGPU rejections are spec'd
   as DOMExceptions (`OperationError`, `AbortError`); this binding rejects with
   plain error objects carrying `name`/`message`. Cited at each rejection
-  construction site.
+  construction site. **Narrowed 2026-07-13 (B-6):** a minimal `DOMException`
+  base now exists — built only to what the pins and CTS need, as the `Event`
+  base was — because `GPUPipelineError : DOMException` required it. It is a real
+  `Error` subclass (the CTS's `shouldReject` demands `ex instanceof Error`).
+  `GPUPipelineError` is its one subclass; the other rejection sites still use
+  plain named error objects, so the general deviation stands.
 - **RETIRED 2026-07-12 — `GPUDevice` now inherits the binding's minimal
   `EventTarget`, and uncaptured errors dispatch a `GPUUncapturedErrorEvent`.**
   The event carries its `[SameObject]` `.error`, supports the pinned Event
@@ -95,16 +100,18 @@ enum sentinels `Undefined` / `BindingNotUsed` (emitted only for absent optionals
 
 ## Block 13 / B-4b additions (2026-07-11)
 
-- **Async pipeline rejections use named `OperationError`, not
-  `GPUPipelineError`.** The pinned IDL defines `GPUPipelineError` (a
-  `DOMException` subclass with a `reason` attribute: `"validation"` |
-  `"internal"`) as the rejection type for
-  `createComputePipelineAsync`/`createRenderPipelineAsync`. Implementing the
-  DOMException-subclass machinery was out of B-4b's slice; the rejection is a
-  named `OperationError` whose message carries the `validation`/`internal`
-  distinction. Deviation is visible to CTS cases that assert the class;
-  revisit when a second DOMException-subclass consumer appears or a CTS
-  family blocks on it.
+- ~~**Async pipeline rejections use named `OperationError`, not
+  `GPUPipelineError`.**~~ **RETIRED 2026-07-13 (B-6).** The exit condition this
+  entry named — "revisit when a second DOMException-subclass consumer appears
+  **or a CTS family blocks on it**" — was met by four families at once
+  (`render_pipeline`, `compute_pipeline`, `shader_module`,
+  `non_filterable_texture`), where `THREW OperationError, instead of
+  GPUPipelineError` was the *sole* remaining failure. `GPUPipelineError` is now
+  implemented from the pins and emitted through the policy-driven constructor
+  machinery; async pipeline creation rejects with it, carrying `name` and
+  `reason`. All four families are green. *Historical:* the rejection was a named
+  `OperationError` whose message carried the validation/internal distinction,
+  because the DOMException-subclass machinery was out of B-4b's slice.
 
 ## Block 10 additions (2026-07-11)
 
@@ -126,3 +133,23 @@ enum sentinels `Undefined` / `BindingNotUsed` (emitted only for absent optionals
   until query sets" after query sets shipped; both twins cited the
   requiredFeatures gap.~~ **RETIRED 2026-07-12:** the gap and both skips are
   gone; the two IDL dictionaries map to the shared C timestamp-write struct.
+
+## Block 13 / B-6 additions (2026-07-13)
+
+- **WebIDL interface objects are now installed for every registered class**, not
+  only constructible ones, and every class registers eagerly at install
+  (`wrap_gpu` / `wrap_device`); the generator emits the inventory. A
+  non-constructible interface object throws `TypeError: Illegal constructor` on
+  call and construct, and its `prototype` is the interface prototype object.
+  Previously the adapters installed a global only for constructible classes and
+  registered most classes lazily, so `GPURenderPassEncoder` and friends did not
+  exist as globals at all. Recorded here because it is an IDL-conformance
+  property the join report cannot see: interface *objects* are not descriptor
+  conversion.
+- **`prototype.constructor` attribute parity is engine-specific work.** ES says
+  `{ writable: true, enumerable: false, configurable: true }`. Boa complies;
+  JSC's `JSObjectMakeConstructor` makes it **enumerable**, its public C API has
+  no `JSObjectDefineProperty`, and `JSObjectSetProperty` follows assignment
+  semantics (so an inherited `constructor` defeats the attribute). The JSC
+  adapter detaches the prototype chain, defines with `DontEnum`, and restores.
+  Contained in the adapter; `core/` is untouched by it.

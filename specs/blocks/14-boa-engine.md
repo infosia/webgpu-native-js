@@ -190,6 +190,25 @@ Catalogued, not worked around. Boa is pure Rust and MIT/Unlicense, so this is a
 gap we *could* close upstream — unlike the QuickJS defect, which took eight
 sessions of C forensics and is still unfixed.
 
+**Update (2026-07-13, B-6): the CTS runner now shims it, and the shim's limits
+are the honest measure of the gap.** The stack assertion was costing thousands of
+otherwise-passing validation subcases, so `tools/cts-runner/shims.js` installs a
+*guarded* `Error.prototype.stack` — present only when the engine has none, and
+returning a synthetic string that says exactly that. This is **runner** scaffolding,
+not binding behaviour; the binding never fabricates a stack.
+
+Two CTS self-tests (`unittests:test_group:stack`,
+`unittests:loaders_and_trees:end2end`) assert real stack *contents* — `.spec.js`
+frame locations — which no synthetic string can satisfy. They remain expected-fail
+with that reason, and they are the standing evidence that the engine gap is real.
+The two `determinantInterval` failures this section left "not yet characterized"
+are likewise now expected-fail rather than silently red. Boa also has no
+`queueMicrotask`; that one is a plain HTML-global gap and is shimmed outright.
+
+The machinery to close the stack gap exists inside Boa (`ShadowStack`,
+`Backtrace`, `JsError::backtrace`) but is `pub(crate)`; only the JS-visible
+`Error.prototype.stack` is missing. Priority: **low** (owner, 2026-07-12).
+
 ### Engine wiring
 
 At the time of this measurement, `tools/cts-runner` was engine-selectable by

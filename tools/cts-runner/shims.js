@@ -27,6 +27,29 @@
     },
   };
 
+  globalThis.queueMicrotask = callback => {
+    if (typeof callback !== "function") throw new TypeError("callback must be a function");
+    __shimLog("queueMicrotask");
+    Promise.resolve().then(() => callback());
+  };
+
+  if (!("stack" in new Error("probe"))) {
+    Object.defineProperty(Error.prototype, "stack", {
+      configurable: true,
+      get() {
+        __shimLog("Error.prototype.stack");
+        return "<stack unavailable: cts-runner shim (engine does not expose Error.prototype.stack)>";
+      },
+      set(value) {
+        Object.defineProperty(this, "stack", {
+          configurable: true,
+          writable: true,
+          value,
+        });
+      },
+    });
+  }
+
   let nextTimerId = 1;
   const timers = [];
   const cancelledTimerIds = new Set();
@@ -192,13 +215,14 @@
   globalThis.TextEncoder = TextEncoder;
   globalThis.TextDecoder = TextDecoder;
 
-  globalThis.DOMException = class DOMException extends Error {
+  const DOMExceptionBase = globalThis.DOMException || class DOMException extends Error {
     constructor(message = "", name = "Error") {
       super(String(message));
       this.name = String(name);
       __shimLog("DOMException");
     }
   };
+  globalThis.DOMException = DOMExceptionBase;
   const EventBase = globalThis.Event || class Event {
     constructor(type) {
       this.type = String(type);

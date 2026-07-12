@@ -107,3 +107,11 @@ pub(super) fn sampler_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
         finalizer: finalize_sampler,
     })
 }
+
+pub(super) fn register_generated_classes<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+) -> Result<(), E::Error> {
+    let _ = E::register_class(cx, device_class::<E>())?;
+    let _ = E::register_class(cx, sampler_class::<E>())?;
+    Ok(())
+}

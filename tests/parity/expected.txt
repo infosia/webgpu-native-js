@@ -1,3 +1,7 @@
+interface:GPURenderPassEncoder:function:true
+interface:GPURenderPassEncoder:setBindGroup:true
+interface:GPUSupportedLimits:illegal-constructor:true:Illegal constructor
+interface:GPUComputePassEncoder:instanceof:true
 buffer:null,round-trip;method:true
 identity:queue:true
 identity:lost:true
@@ -40,6 +44,7 @@ getBindGroupLayout:create/release:ok
 renderPipeline:topology-rejection:TypeError:GPUPrimitiveTopology
 renderPipeline:nullable-holes:ok
 pipelineAsync:compute,render:ok
+pipelineAsync:rejection:GPUPipelineError:validation:true
 scope:pipelines:GPUValidationError
 querySet:create:ok
 querySet:type:occlusion
@@ -90,6 +95,9 @@ error:GPUInternalError:true,true
 error:GPUError:true,true,true
 error:subclass:true,true,true
 error:length:0,1,1,1
+pipelineError:constructor:true:1
+pipelineError:validation:GPUPipelineError:pipeline failed:validation:true
+pipelineError:default:0:internal:true
 event:construct:manual:true,true,true
 event:inheritance:true,true
 event:target-once:1

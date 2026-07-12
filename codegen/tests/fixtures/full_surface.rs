@@ -4955,7 +4955,7 @@ pub(super) fn uncaptured_error_event_class<E: JsEngine + 'static>() -> &'static 
     class_spec_once::<E, _>(GPU_UNCAPTURED_ERROR_EVENT_CLASS, || ClassSpec {
         name: "GPUUncapturedErrorEvent",
         id: GPU_UNCAPTURED_ERROR_EVENT_CLASS,
-        constructor: Some(ConstructorSpec { length: 2, parent: Some(EVENT_CLASS), call: gpu_uncaptured_error_event_constructor::<E> }),
+        constructor: Some(ConstructorSpec { length: 2, parent: Some(ClassParent::Class(EVENT_CLASS)), call: gpu_uncaptured_error_event_constructor::<E> }),
         properties: Box::leak(Box::new([
             PropertySpec { name: "error", get: Some(gpu_uncaptured_error_event_error_get::<E>), set: None },
             PropertySpec { name: "type", get: Some(event_type_get::<E>), set: None },
@@ -4969,11 +4969,26 @@ pub(super) fn uncaptured_error_event_class<E: JsEngine + 'static>() -> &'static 
     })
 }
 
+pub(super) fn pipeline_error_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
+    class_spec_once::<E, _>(GPU_PIPELINE_ERROR_CLASS, || ClassSpec {
+        name: "GPUPipelineError",
+        id: GPU_PIPELINE_ERROR_CLASS,
+        constructor: Some(ConstructorSpec { length: 1, parent: Some(ClassParent::Class(DOM_EXCEPTION_CLASS)), call: gpu_pipeline_error_constructor::<E> }),
+        properties: Box::leak(Box::new([
+            PropertySpec { name: "name", get: Some(gpu_pipeline_error_name_get::<E>), set: None },
+            PropertySpec { name: "message", get: Some(gpu_pipeline_error_message_get::<E>), set: None },
+            PropertySpec { name: "reason", get: Some(gpu_pipeline_error_reason_get::<E>), set: None },
+        ])),
+        methods: &[],
+        finalizer: finalize_pipeline_error,
+    })
+}
+
 pub(super) fn device_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
     class_spec_once::<E, _>(GPU_DEVICE_CLASS, || ClassSpec {
         name: "GPUDevice",
         id: GPU_DEVICE_CLASS,
-        constructor: Some(ConstructorSpec { length: 0, parent: Some(EVENT_TARGET_CLASS), call: device_illegal_constructor::<E> }),
+        constructor: Some(ConstructorSpec { length: 0, parent: Some(ClassParent::Class(EVENT_TARGET_CLASS)), call: device_illegal_constructor::<E> }),
         properties: Box::leak(Box::new([
             PropertySpec { name: "features", get: Some(device_features_get::<E>), set: None },
             PropertySpec { name: "limits", get: Some(device_limits_get::<E>), set: None },
@@ -5294,4 +5309,33 @@ pub(super) fn command_buffer_class<E: JsEngine + 'static>() -> &'static ClassSpe
         methods: &[],
         finalizer: finalize_command_buffer,
     })
+}
+
+pub(super) fn register_generated_classes<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+) -> Result<(), E::Error> {
+    let _ = E::register_class(cx, gpu_class::<E>())?;
+    let _ = E::register_class(cx, adapter_class::<E>())?;
+    let _ = E::register_class(cx, uncaptured_error_event_class::<E>())?;
+    let _ = E::register_class(cx, pipeline_error_class::<E>())?;
+    let _ = E::register_class(cx, device_class::<E>())?;
+    let _ = E::register_class(cx, buffer_class::<E>())?;
+    let _ = E::register_class(cx, texture_class::<E>())?;
+    let _ = E::register_class(cx, texture_view_class::<E>())?;
+    let _ = E::register_class(cx, queue_class::<E>())?;
+    let _ = E::register_class(cx, shader_module_class::<E>())?;
+    let _ = E::register_class(cx, sampler_class::<E>())?;
+    let _ = E::register_class(cx, bind_group_layout_class::<E>())?;
+    let _ = E::register_class(cx, pipeline_layout_class::<E>())?;
+    let _ = E::register_class(cx, bind_group_class::<E>())?;
+    let _ = E::register_class(cx, compute_pipeline_class::<E>())?;
+    let _ = E::register_class(cx, render_pipeline_class::<E>())?;
+    let _ = E::register_class(cx, query_set_class::<E>())?;
+    let _ = E::register_class(cx, command_encoder_class::<E>())?;
+    let _ = E::register_class(cx, compute_pass_encoder_class::<E>())?;
+    let _ = E::register_class(cx, render_pass_encoder_class::<E>())?;
+    let _ = E::register_class(cx, render_bundle_encoder_class::<E>())?;
+    let _ = E::register_class(cx, render_bundle_class::<E>())?;
+    let _ = E::register_class(cx, command_buffer_class::<E>())?;
+    Ok(())
 }

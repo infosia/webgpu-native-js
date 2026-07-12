@@ -21,7 +21,7 @@ use boa_engine::builtins::promise::PromiseState;
 use boa_engine::module::{ModuleLoader, Referrer};
 use boa_engine::object::builtins::{AlignedVec, JsArray, JsArrayBuffer, JsPromise, JsUint32Array};
 use boa_engine::object::{FunctionObjectBuilder, JsObject, ObjectInitializer};
-use boa_engine::property::Attribute;
+use boa_engine::property::{Attribute, PropertyDescriptor};
 use boa_engine::{
     Context as BoaContext, JsData, JsError, JsNativeError, JsResult, JsString, JsValue, Module,
     NativeFunction, Source,
@@ -1016,6 +1016,16 @@ fn constructor_callback(
     Ok(value)
 }
 
+fn illegal_constructor_callback(
+    _this: &JsValue,
+    _args: &[JsValue],
+    _context: &mut BoaContext,
+) -> JsResult<JsValue> {
+    Err(JsNativeError::typ()
+        .with_message("Illegal constructor")
+        .into())
+}
+
 fn object(cx: Context<'_>, value: BoaValue) -> core::Result<JsObject, BoaValue> {
     cx.arena
         .get(value)
@@ -1243,8 +1253,8 @@ impl core::JsEngine for Engine {
         let prototype_handle = cx.arena.insert(prototype.clone().into());
         cx.arena.duplicate(prototype_handle);
 
-        if let Some(constructor_spec) = &spec.constructor {
-            let constructor = FunctionObjectBuilder::new(
+        let constructor = if let Some(constructor_spec) = &spec.constructor {
+            FunctionObjectBuilder::new(
                 cx.boa().realm(),
                 NativeFunction::from_copy_closure_with_captures(
                     constructor_callback,
@@ -1254,41 +1264,67 @@ impl core::JsEngine for Engine {
             .name(spec.name)
             .length(usize::from(constructor_spec.length))
             .constructor(true)
-            .build();
-            constructor
-                .set(
-                    JsString::from("prototype"),
-                    prototype.clone(),
-                    true,
-                    cx.boa(),
-                )
-                .map_err(|error| insert_error(cx, error))?;
-            prototype
-                .set(
-                    JsString::from("constructor"),
-                    constructor.clone(),
-                    true,
-                    cx.boa(),
-                )
-                .map_err(|error| insert_error(cx, error))?;
-            if let Some(parent) = constructor_spec.parent {
-                let parent_prototype = cx
+            .build()
+        } else {
+            FunctionObjectBuilder::new(
+                cx.boa().realm(),
+                NativeFunction::from_fn_ptr(illegal_constructor_callback),
+            )
+            .name(spec.name)
+            .length(0)
+            .constructor(true)
+            .build()
+        };
+        constructor
+            .set(
+                JsString::from("prototype"),
+                prototype.clone(),
+                true,
+                cx.boa(),
+            )
+            .map_err(|error| insert_error(cx, error))?;
+        prototype
+            .define_property_or_throw(
+                JsString::from("constructor"),
+                PropertyDescriptor::builder()
+                    .value(constructor.clone())
+                    .writable(true)
+                    .enumerable(false)
+                    .configurable(true)
+                    .build(),
+                cx.boa(),
+            )
+            .map_err(|error| insert_error(cx, error))?;
+        if let Some(parent) = spec
+            .constructor
+            .as_ref()
+            .and_then(|constructor| constructor.parent)
+        {
+            let parent_prototype = match parent {
+                core::ClassParent::Class(parent) => cx
                     .arena
                     .classes
                     .borrow()
                     .get(&parent)
                     .map(|entry| cx.arena.get(entry.prototype))
                     .and_then(|value| value.as_object())
-                    .ok_or_else(|| Self::operation_error(cx, "parent class is not registered"))?;
-                if !prototype.set_prototype(Some(parent_prototype)) {
-                    return Err(Self::operation_error(cx, "failed to set parent prototype"));
-                }
+                    .ok_or_else(|| Self::operation_error(cx, "parent class is not registered"))?,
+                core::ClassParent::IntrinsicError => cx
+                    .boa()
+                    .realm()
+                    .intrinsics()
+                    .constructors()
+                    .error()
+                    .prototype(),
+            };
+            if !prototype.set_prototype(Some(parent_prototype)) {
+                return Err(Self::operation_error(cx, "failed to set parent prototype"));
             }
-            cx.boa()
-                .global_object()
-                .set(JsString::from(spec.name), constructor, true, cx.boa())
-                .map_err(|error| insert_error(cx, error))?;
         }
+        cx.boa()
+            .global_object()
+            .set(JsString::from(spec.name), constructor, true, cx.boa())
+            .map_err(|error| insert_error(cx, error))?;
 
         cx.arena.classes.borrow_mut().insert(
             spec.id,
@@ -1326,6 +1362,43 @@ impl core::JsEngine for Engine {
         )
         .build();
         Ok(cx.arena.insert(object.into()))
+    }
+
+    fn new_error_instance(
+        cx: Self::Context<'_>,
+        class: core::ClassId,
+        payload: Box<dyn Any + Send>,
+        name: &str,
+        message: &str,
+    ) -> core::Result<Self::Value, Self::Error> {
+        let value = Self::new_instance(cx, class, payload)?;
+        let object = cx
+            .arena
+            .get(value)
+            .as_object()
+            .ok_or_else(|| Self::operation_error(cx, "Error instance is not an object"))?;
+        let native = named_error(cx, ErrorKind::Error, name, message);
+        let native = cx
+            .arena
+            .get(native)
+            .as_object()
+            .ok_or_else(|| Self::operation_error(cx, "native Error is not an object"))?;
+        let stack = native
+            .get(JsString::from("stack"), cx.boa())
+            .map_err(|error| insert_error(cx, error))?;
+        object
+            .define_property_or_throw(
+                JsString::from("stack"),
+                PropertyDescriptor::builder()
+                    .value(stack)
+                    .writable(true)
+                    .enumerable(false)
+                    .configurable(true)
+                    .build(),
+                cx.boa(),
+            )
+            .map_err(|error| insert_error(cx, error))?;
+        Ok(value)
     }
 
     fn payload<'a>(
@@ -2074,6 +2147,85 @@ mod tests {
             &runtime,
                 "typeof wrappedDevice.createBuffer === 'function' && wrappedDevice.queue === wrappedDevice.queue",
                 "wrapped-device.js",
+        ));
+    }
+
+    #[test]
+    fn install_exposes_eager_non_constructible_interface_objects() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("Boa runtime");
+        // SAFETY: setup owns the live device until after runtime teardown.
+        let device = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("interfaceDevice", device)
+            .expect("set device");
+        assert!(eval_bool(
+            &runtime,
+            r#"
+                const passTypeReady = typeof GPURenderPassEncoder === "function";
+                const passMethodReady = "setBindGroup" in GPURenderPassEncoder.prototype;
+                const descriptorIsWebIdl = (prototype, interfaceObject) => {
+                    const descriptor = Object.getOwnPropertyDescriptor(prototype, "constructor");
+                    return descriptor.value === interfaceObject && descriptor.writable === true &&
+                        descriptor.enumerable === false && descriptor.configurable === true;
+                };
+                const constructibleConstructorDescriptor = descriptorIsWebIdl(
+                    GPURenderPassEncoder.prototype,
+                    GPURenderPassEncoder
+                );
+                const nonConstructibleConstructorDescriptor = descriptorIsWebIdl(
+                    GPUSupportedLimits.prototype,
+                    GPUSupportedLimits
+                );
+                let callError;
+                let constructError;
+                try { GPUSupportedLimits(); } catch (error) { callError = error; }
+                try { new GPUSupportedLimits(); } catch (error) { constructError = error; }
+                const encoder = interfaceDevice.createCommandEncoder();
+                const pass = encoder.beginComputePass();
+                const instanceReady = pass instanceof GPUComputePassEncoder;
+                pass.end();
+                encoder.finish();
+                passTypeReady && passMethodReady && constructibleConstructorDescriptor &&
+                    nonConstructibleConstructorDescriptor && instanceReady &&
+                    callError instanceof TypeError && callError.message.includes("Illegal constructor") &&
+                    constructError instanceof TypeError && constructError.message.includes("Illegal constructor")
+            "#,
+            "eager-interface-objects.js",
+        ));
+    }
+
+    #[test]
+    fn gpu_pipeline_error_is_a_constructible_error_subclass() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("Boa runtime");
+        // SAFETY: setup owns the live device until after runtime teardown.
+        let _device = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        assert!(eval_bool(
+            &runtime,
+            r#"
+                (() => {
+                    const validation = new GPUPipelineError("pipeline failed", {
+                        reason: "validation"
+                    });
+                    const internal = new GPUPipelineError(undefined, { reason: "internal" });
+                    let missingIsTypeError = false;
+                    let invalidIsTypeError = false;
+                    try { new GPUPipelineError("bad", {}); }
+                    catch (error) { missingIsTypeError = error instanceof TypeError; }
+                    try { new GPUPipelineError("bad", { reason: "device-lost" }); }
+                    catch (error) { invalidIsTypeError = error instanceof TypeError; }
+                    return validation.name === "GPUPipelineError" &&
+                        validation.message === "pipeline failed" &&
+                        validation.reason === "validation" &&
+                        internal.message === "" && internal.reason === "internal" &&
+                        validation instanceof GPUPipelineError &&
+                        validation instanceof DOMException && validation instanceof Error &&
+                        typeof validation.stack === typeof new Error("pipeline failed").stack &&
+                        missingIsTypeError && invalidIsTypeError;
+                })()
+            "#,
+            "gpu-pipeline-error.js",
         ));
     }
 

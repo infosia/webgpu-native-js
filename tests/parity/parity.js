@@ -57,6 +57,23 @@
         }
     }
 
+    log("interface:GPURenderPassEncoder:function:" +
+        (typeof GPURenderPassEncoder === "function"));
+    log("interface:GPURenderPassEncoder:setBindGroup:" +
+        ("setBindGroup" in GPURenderPassEncoder.prototype));
+    var supportedLimitsConstructorError = caught(function () {
+        new GPUSupportedLimits();
+    });
+    log("interface:GPUSupportedLimits:illegal-constructor:" +
+        (supportedLimitsConstructorError instanceof TypeError) + ":" +
+        supportedLimitsConstructorError.message);
+    var interfaceEncoder = device.createCommandEncoder();
+    var interfaceComputePass = interfaceEncoder.beginComputePass();
+    log("interface:GPUComputePassEncoder:instanceof:" +
+        (interfaceComputePass instanceof GPUComputePassEncoder));
+    interfaceComputePass.end();
+    device.queue.submit([interfaceEncoder.finish()]);
+
     function errorLine(section, error) {
         return section + ":" + error.name + ":" + error.message;
     }
@@ -375,6 +392,17 @@
             GPUOutOfMemoryError.length,
             GPUInternalError.length
         ].join(","));
+        var pipelineValidation = new GPUPipelineError("pipeline failed", {
+            reason: "validation"
+        });
+        var pipelineInternal = new GPUPipelineError(undefined, { reason: "internal" });
+        log("pipelineError:constructor:" +
+            (typeof GPUPipelineError === "function") + ":" + GPUPipelineError.length);
+        log("pipelineError:validation:" + pipelineValidation.name + ":" +
+            pipelineValidation.message + ":" + pipelineValidation.reason + ":" +
+            (pipelineValidation instanceof Error));
+        log("pipelineError:default:" + pipelineInternal.message.length + ":" +
+            pipelineInternal.reason + ":" + (pipelineInternal instanceof Error));
 
         var constructedEvent = new GPUUncapturedErrorEvent("manual", {
             error: validation,
@@ -603,6 +631,18 @@
             });
         }).then(function () {
             log("pipelineAsync:compute,render:ok");
+            var invalidModule = device.createShaderModule({
+                code: "this is not valid WGSL"
+            });
+            return device.createComputePipelineAsync({
+                layout: "auto",
+                compute: { module: invalidModule, entryPoint: "main" }
+            }).then(function () {
+                throw new Error("invalid async compute pipeline unexpectedly resolved");
+            }, function (error) {
+                log("pipelineAsync:rejection:" + error.name + ":" + error.reason + ":" +
+                    (error instanceof Error));
+            });
         });
     }
 

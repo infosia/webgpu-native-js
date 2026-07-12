@@ -86,6 +86,8 @@ const GPU_RENDER_BUNDLE_CLASS: ClassId = ClassId(28);
 const EVENT_TARGET_CLASS: ClassId = ClassId(29);
 const EVENT_CLASS: ClassId = ClassId(30);
 const GPU_UNCAPTURED_ERROR_EVENT_CLASS: ClassId = ClassId(31);
+const DOM_EXCEPTION_CLASS: ClassId = ClassId(32);
+const GPU_PIPELINE_ERROR_CLASS: ClassId = ClassId(33);
 const WEBIDL_U32_MAX: u64 = u32::MAX as u64;
 const WGPU_DEPTH_CLEAR_VALUE_UNDEFINED: f32 = f32::NAN;
 
@@ -417,6 +419,14 @@ pub trait JsEngine: Sized {
         class: ClassId,
         payload: Box<dyn Any + Send>,
     ) -> Result<Self::Value, Self::Error>;
+    /// Creates a payload-carrying instance with engine-native Error stack behavior.
+    fn new_error_instance(
+        cx: Self::Context<'_>,
+        class: ClassId,
+        payload: Box<dyn Any + Send>,
+        name: &str,
+        message: &str,
+    ) -> Result<Self::Value, Self::Error>;
     /// Returns an object's payload when it belongs to the requested class.
     fn payload<'a>(
         cx: Self::Context<'a>,
@@ -714,25 +724,23 @@ impl<E: JsEngine + 'static> SettlementRequest<E> {
                     || pipeline.is_null()
                 {
                     enqueue_compute_pipeline_release(&queue, pipeline, module, layout, gpu);
-                    // B-4b deviation: the pinned IDL specifies GPUPipelineError,
-                    // but that DOMException subclass is outside this slice's class machinery.
-                    // Preserve the reason in a named OperationError until it lands.
                     let reason = if status
                         == WGPUCreatePipelineAsyncStatus_WGPUCreatePipelineAsyncStatus_ValidationError
                     {
-                        "validation"
+                        PipelineErrorReason::Validation
                     } else {
-                        "internal"
+                        PipelineErrorReason::Internal
                     };
                     let message = if message.is_empty() {
-                        format!("{reason}: createComputePipelineAsync failed")
+                        "createComputePipelineAsync failed".to_owned()
                     } else {
-                        format!("{reason}: {message}")
+                        message
                     };
-                    return SettlementOutcome::Deferred((
-                        deferred,
-                        Err(E::async_error_value(cx, "OperationError", &message)),
-                    ));
+                    let rejection = match new_gpu_pipeline_error::<E>(cx, message, reason) {
+                        Ok(error) => error,
+                        Err(error) => E::error_value_from_error(cx, error),
+                    };
+                    return SettlementOutcome::Deferred((deferred, Err(rejection)));
                 }
                 let value = E::new_instance(
                     cx,
@@ -773,25 +781,23 @@ impl<E: JsEngine + 'static> SettlementRequest<E> {
                         layout,
                         gpu,
                     );
-                    // B-4b deviation: the pinned IDL specifies GPUPipelineError,
-                    // but that DOMException subclass is outside this slice's class machinery.
-                    // Preserve the reason in a named OperationError until it lands.
                     let reason = if status
                         == WGPUCreatePipelineAsyncStatus_WGPUCreatePipelineAsyncStatus_ValidationError
                     {
-                        "validation"
+                        PipelineErrorReason::Validation
                     } else {
-                        "internal"
+                        PipelineErrorReason::Internal
                     };
                     let message = if message.is_empty() {
-                        format!("{reason}: createRenderPipelineAsync failed")
+                        "createRenderPipelineAsync failed".to_owned()
                     } else {
-                        format!("{reason}: {message}")
+                        message
                     };
-                    return SettlementOutcome::Deferred((
-                        deferred,
-                        Err(E::async_error_value(cx, "OperationError", &message)),
-                    ));
+                    let rejection = match new_gpu_pipeline_error::<E>(cx, message, reason) {
+                        Ok(error) => error,
+                        Err(error) => E::error_value_from_error(cx, error),
+                    };
+                    return SettlementOutcome::Deferred((deferred, Err(rejection)));
                 }
                 let value = E::new_instance(
                     cx,
@@ -1095,10 +1101,19 @@ pub struct MethodSpec<E: JsEngine + 'static> {
 pub struct ConstructorSpec<E: JsEngine + 'static> {
     /// Constructor arity.
     pub length: u8,
-    /// Parent class for constructor-prototype inheritance.
-    pub parent: Option<ClassId>,
+    /// Parent for instance-prototype inheritance.
+    pub parent: Option<ClassParent>,
     /// Constructor callback.
     pub call: ConstructorFn<E>,
+}
+
+/// Parent of a registered class's instance prototype.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClassParent {
+    /// Another class registered by the binding.
+    Class(ClassId),
+    /// The JavaScript engine's intrinsic `Error.prototype`.
+    IntrinsicError,
 }
 
 /// A JavaScript class specification.
@@ -2591,6 +2606,13 @@ pub fn register_error_classes<E: JsEngine + 'static>(cx: E::Context<'_>) -> Resu
     Ok(())
 }
 
+/// Registers the minimal `DOMException` base used by WebGPU exceptions.
+pub fn register_dom_exception_class<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+) -> Result<ClassId, E::Error> {
+    E::register_class(cx, dom_exception_class::<E>())
+}
+
 /// Registers the minimal DOM event classes required by WebGPU.
 pub fn register_event_classes<E: JsEngine + 'static>(cx: E::Context<'_>) -> Result<(), E::Error> {
     for spec in [
@@ -2610,6 +2632,16 @@ pub fn register_device_lost_info_class<E: JsEngine + 'static>(
     E::register_class(cx, gpu_device_lost_info_class::<E>())
 }
 
+fn register_all_classes<E: JsEngine + 'static>(cx: E::Context<'_>) -> Result<(), E::Error> {
+    register_event_classes::<E>(cx)?;
+    let _ = register_dom_exception_class::<E>(cx)?;
+    register_error_classes::<E>(cx)?;
+    let _ = register_device_lost_info_class::<E>(cx)?;
+    let _ = E::register_class(cx, supported_limits_class::<E>())?;
+    let _ = E::register_class(cx, adapter_info_class::<E>())?;
+    register_generated_classes::<E>(cx)
+}
+
 /// Wraps a native instance as a JavaScript `GPU`.
 pub fn wrap_gpu<E: JsEngine + 'static>(
     cx: E::Context<'_>,
@@ -2621,13 +2653,7 @@ pub fn wrap_gpu<E: JsEngine + 'static>(
             "wrap_gpu received a null WGPUInstance",
         ));
     }
-    register_event_classes::<E>(cx)?;
-    let _ = register_gpu_class::<E>(cx)?;
-    let _ = register_adapter_class::<E>(cx)?;
-    let _ = register_device_class::<E>(cx)?;
-    let _ = register_buffer_class::<E>(cx)?;
-    register_error_classes::<E>(cx)?;
-    let _ = register_device_lost_info_class::<E>(cx)?;
+    register_all_classes::<E>(cx)?;
     E::new_instance(cx, GPU_CLASS, Box::new(GpuPayload { instance }))
 }
 
@@ -2649,15 +2675,11 @@ pub unsafe fn wrap_device<E: JsEngine + 'static>(
             "wrap_device received a null WGPUDevice",
         ));
     }
+    register_all_classes::<E>(cx)?;
     let env = E::environment(cx);
     unsafe {
         (env.gpu().device_add_ref)(device);
     }
-    register_event_classes::<E>(cx)?;
-    let _ = register_device_class::<E>(cx)?;
-    let _ = register_buffer_class::<E>(cx)?;
-    register_error_classes::<E>(cx)?;
-    let _ = register_device_lost_info_class::<E>(cx)?;
     let events = DeviceEventState::new(Arc::clone(env.settlements()));
     if let Err(error) = events.initialize(cx) {
         events.release_after_failed_wrap(cx);
@@ -2690,6 +2712,27 @@ pub unsafe fn wrap_device<E: JsEngine + 'static>(
 
 struct ErrorPayload {
     message: String,
+}
+
+struct DomExceptionPayload {
+    name: String,
+    message: String,
+    reason: Option<PipelineErrorReason>,
+}
+
+#[derive(Clone, Copy)]
+enum PipelineErrorReason {
+    Validation,
+    Internal,
+}
+
+impl PipelineErrorReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Validation => "validation",
+            Self::Internal => "internal",
+        }
+    }
 }
 
 struct EventPayload<E: JsEngine> {
@@ -2847,6 +2890,168 @@ fn new_gpu_uncaptured_error_event<E: JsEngine + 'static>(
         cancelable,
         Some(error),
     )
+}
+
+fn dom_exception_payload<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+) -> Option<&DomExceptionPayload> {
+    [DOM_EXCEPTION_CLASS, GPU_PIPELINE_ERROR_CLASS]
+        .into_iter()
+        .find_map(|class| E::payload(cx, this, class))
+        .and_then(|payload| payload.downcast_ref::<DomExceptionPayload>())
+}
+
+fn optional_dom_string<E: JsEngine>(
+    cx: E::Context<'_>,
+    value: Option<E::Value>,
+    arena: &Arena,
+    default: &str,
+) -> Result<String, E::Error> {
+    let Some(value) = value else {
+        return Ok(default.to_owned());
+    };
+    if E::is_undefined(cx, value) {
+        Ok(default.to_owned())
+    } else {
+        Ok(E::to_str(cx, value, arena)?.to_owned())
+    }
+}
+
+fn dom_exception_constructor<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let arena = Arena::new();
+    let message = optional_dom_string::<E>(cx, args.first().copied(), &arena, "")?;
+    let name = optional_dom_string::<E>(cx, args.get(1).copied(), &arena, "Error")?;
+    E::new_error_instance(
+        cx,
+        DOM_EXCEPTION_CLASS,
+        Box::new(DomExceptionPayload {
+            name: name.clone(),
+            message: message.clone(),
+            reason: None,
+        }),
+        &name,
+        &message,
+    )
+}
+
+/// Implements the `GPUPipelineError` constructor emitted by codegen.
+pub fn gpu_pipeline_error_constructor<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let arena = Arena::new();
+    let message = optional_dom_string::<E>(cx, args.first().copied(), &arena, "")?;
+    let init = required_argument::<E>(cx, args, 1, "GPUPipelineErrorInit is required")?;
+    if !E::is_object(cx, init) {
+        return Err(E::type_error(cx, "GPUPipelineErrorInit must be an object"));
+    }
+    let reason = E::get_property(cx, init, "reason")?;
+    if E::is_undefined(cx, reason) {
+        return Err(E::type_error(cx, "GPUPipelineErrorInit.reason is required"));
+    }
+    let reason = match E::to_str(cx, reason, &arena)? {
+        "validation" => PipelineErrorReason::Validation,
+        "internal" => PipelineErrorReason::Internal,
+        _ => {
+            return Err(E::type_error(
+                cx,
+                "GPUPipelineErrorInit.reason must be 'validation' or 'internal'",
+            ));
+        }
+    };
+    new_gpu_pipeline_error::<E>(cx, message, reason)
+}
+
+fn new_gpu_pipeline_error<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    message: String,
+    reason: PipelineErrorReason,
+) -> Result<E::Value, E::Error> {
+    E::new_error_instance(
+        cx,
+        GPU_PIPELINE_ERROR_CLASS,
+        Box::new(DomExceptionPayload {
+            name: "GPUPipelineError".to_owned(),
+            message: message.clone(),
+            reason: Some(reason),
+        }),
+        "GPUPipelineError",
+        &message,
+    )
+}
+
+/// Gets the inherited `DOMException.name` attribute for a `GPUPipelineError`.
+pub fn gpu_pipeline_error_name_get<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+) -> Result<E::Value, E::Error> {
+    let payload = dom_exception_payload::<E>(cx, this).ok_or_else(|| {
+        E::type_error(cx, "GPUPipelineError.name called on an incompatible object")
+    })?;
+    E::string(cx, &payload.name)
+}
+
+/// Gets the inherited `DOMException.message` attribute for a `GPUPipelineError`.
+pub fn gpu_pipeline_error_message_get<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+) -> Result<E::Value, E::Error> {
+    let payload = dom_exception_payload::<E>(cx, this).ok_or_else(|| {
+        E::type_error(
+            cx,
+            "GPUPipelineError.message called on an incompatible object",
+        )
+    })?;
+    E::string(cx, &payload.message)
+}
+
+/// Gets the `GPUPipelineError.reason` attribute.
+pub fn gpu_pipeline_error_reason_get<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+) -> Result<E::Value, E::Error> {
+    let reason = dom_exception_payload::<E>(cx, this)
+        .and_then(|payload| payload.reason)
+        .ok_or_else(|| {
+            E::type_error(
+                cx,
+                "GPUPipelineError.reason called on an incompatible object",
+            )
+        })?;
+    E::string(cx, reason.as_str())
+}
+
+/// Finalizes a `GPUPipelineError`; its payload contains only Rust-owned strings.
+pub fn finalize_pipeline_error(_payload: Box<dyn Any + Send>, _env: &Environment) {}
+
+fn dom_exception_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
+    class_spec_once::<E, _>(DOM_EXCEPTION_CLASS, || ClassSpec {
+        name: "DOMException",
+        id: DOM_EXCEPTION_CLASS,
+        constructor: Some(ConstructorSpec {
+            length: 0,
+            parent: Some(ClassParent::IntrinsicError),
+            call: dom_exception_constructor::<E>,
+        }),
+        properties: Box::leak(Box::new([
+            PropertySpec {
+                name: "name",
+                get: Some(gpu_pipeline_error_name_get::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "message",
+                get: Some(gpu_pipeline_error_message_get::<E>),
+                set: None,
+            },
+        ])),
+        methods: &[],
+        finalizer: |_payload, _env| {},
+    })
 }
 
 fn event_constructor<E: JsEngine + 'static>(
@@ -3163,7 +3368,7 @@ fn error_subclass<E: JsEngine + 'static>(
         id,
         constructor: Some(ConstructorSpec {
             length: 1,
-            parent: Some(GPU_ERROR_CLASS),
+            parent: Some(ClassParent::Class(GPU_ERROR_CLASS)),
             call: constructor,
         }),
         properties: Box::leak(Box::new([PropertySpec {
