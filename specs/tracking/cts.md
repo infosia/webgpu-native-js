@@ -471,5 +471,10 @@ family) and cannot be fixed in the binding: the offending code is the CTS's, the
 JS is valid, and no shim can reach into a class body. Boa is pure Rust and
 MIT/Unlicense, so unlike the QuickJS defect this one is *fixable by us* — but
 doing so means pinning a patched Boa, which contradicts the standing "crates.io,
-exact version pin, never a filesystem path" dependency rule (block 14). **Owner
-decision.**
+exact version pin, never a filesystem path" dependency rule (block 14).
+
+**Owner decision (2026-07-13): catalogue and move on — do not fork Boa.** The
+dependency rule stands; `capability_checks,*` stays out of the suite with this
+entry as its reason. Revisit if the family becomes load-bearing, or if a Boa
+release fixes it (re-test the repro above against each pin bump — the repro is
+the acceptance test).
