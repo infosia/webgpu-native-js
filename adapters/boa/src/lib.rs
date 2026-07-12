@@ -701,6 +701,17 @@ impl Runtime {
             .forward_device_lost(device, reason, message)
     }
 
+    /// Enqueues an adopted-device uncaptured error without touching Boa.
+    pub fn forward_uncaptured_error(
+        &self,
+        device: ffi_wgpu::WGPUDevice,
+        type_: ffi_wgpu::WGPUErrorType,
+        message: impl Into<String>,
+    ) -> std::result::Result<(), core::QueueError> {
+        self.device_event_forwarder()
+            .forward_uncaptured_error(device, type_, message)
+    }
+
     /// Runs one engine-neutral WebGPU tick and Boa's job executor.
     ///
     /// # Safety
@@ -759,6 +770,17 @@ pub struct DeviceEventForwarder {
 }
 
 impl DeviceEventForwarder {
+    /// Enqueues an adopted-device uncaptured error without touching Boa.
+    pub fn forward_uncaptured_error(
+        &self,
+        device: ffi_wgpu::WGPUDevice,
+        type_: ffi_wgpu::WGPUErrorType,
+        message: impl Into<String>,
+    ) -> std::result::Result<(), core::QueueError> {
+        self.inner
+            .forward_uncaptured_error::<Engine>(device, type_, message)
+    }
+
     /// Enqueues adopted-device loss without touching Boa.
     pub fn forward_device_lost(
         &self,
@@ -1142,6 +1164,10 @@ impl core::JsEngine for Engine {
         cx.arena.get(value).is_callable()
     }
 
+    fn same_value(cx: Self::Context<'_>, left: Self::Value, right: Self::Value) -> bool {
+        JsValue::same_value(&cx.arena.get(left), &cx.arena.get(right))
+    }
+
     fn is_uint32array(cx: Self::Context<'_>, value: Self::Value) -> bool {
         cx.arena
             .get(value)
@@ -1331,6 +1357,10 @@ impl core::JsEngine for Engine {
 
     fn number(cx: Self::Context<'_>, value: f64) -> core::Result<Self::Value, Self::Error> {
         Ok(cx.arena.insert(value.into()))
+    }
+
+    fn boolean(cx: Self::Context<'_>, value: bool) -> Self::Value {
+        cx.arena.insert(value.into())
     }
 
     fn string(cx: Self::Context<'_>, value: &str) -> core::Result<Self::Value, Self::Error> {
@@ -2091,6 +2121,51 @@ mod tests {
     }
 
     #[test]
+    fn shared_device_event_script_survives_gc_and_tick() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("Boa runtime");
+        // SAFETY: setup owns the live device until after runtime teardown.
+        let device = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("device", device)
+            .expect("set device");
+        runtime
+            .eval(
+                include_str!("../../../tests/device-events.js"),
+                "device-events.js",
+            )
+            .expect("install listeners");
+        runtime.run_gc();
+        runtime
+            .forward_uncaptured_error(
+                setup.device,
+                wgpu::WGPUErrorType_WGPUErrorType_Validation,
+                "script uncaptured",
+            )
+            .expect("forward uncaptured");
+        runtime
+            .forward_device_lost(
+                setup.device,
+                wgpu::WGPUDeviceLostReason_WGPUDeviceLostReason_Destroyed,
+                "script lost",
+            )
+            .expect("forward lost");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            // SAFETY: setup keeps the instance live on the runtime thread.
+            unsafe { runtime.tick(setup.instance) }.expect("device-event tick");
+            if eval_bool(
+                &runtime,
+                "uncapturedEventPassed && uncapturedListenerPassed && deviceLostPassed",
+                "device-events-check.js",
+            ) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "device event script timed out");
+        }
+    }
+
+    #[test]
     fn runtime_forward_device_lost_enqueues_for_a_registered_wrapper() {
         let setup = native_setup();
         let runtime = Runtime::new().expect("Boa runtime");
@@ -2365,6 +2440,14 @@ mod tests {
         runtime
             .eval(SCRIPT, "tests/parity/parity.js")
             .expect("evaluate parity script");
+        runtime
+            .device_event_forwarder()
+            .forward_uncaptured_error(
+                setup.device,
+                wgpu::WGPUErrorType_WGPUErrorType_Validation,
+                "parity uncaptured",
+            )
+            .expect("forward parity uncaptured");
         runtime
             .forward_device_lost(
                 setup.device,

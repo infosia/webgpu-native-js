@@ -4951,11 +4951,29 @@ pub(super) fn adapter_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
     })
 }
 
+pub(super) fn uncaptured_error_event_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
+    class_spec_once::<E, _>(GPU_UNCAPTURED_ERROR_EVENT_CLASS, || ClassSpec {
+        name: "GPUUncapturedErrorEvent",
+        id: GPU_UNCAPTURED_ERROR_EVENT_CLASS,
+        constructor: Some(ConstructorSpec { length: 2, parent: Some(EVENT_CLASS), call: gpu_uncaptured_error_event_constructor::<E> }),
+        properties: Box::leak(Box::new([
+            PropertySpec { name: "error", get: Some(gpu_uncaptured_error_event_error_get::<E>), set: None },
+            PropertySpec { name: "type", get: Some(event_type_get::<E>), set: None },
+            PropertySpec { name: "cancelable", get: Some(event_cancelable_get::<E>), set: None },
+            PropertySpec { name: "defaultPrevented", get: Some(event_default_prevented_get::<E>), set: None },
+        ])),
+        methods: Box::leak(Box::new([
+            MethodSpec { name: "preventDefault", length: 0, call: event_prevent_default::<E> },
+        ])),
+        finalizer: finalize_uncaptured_error_event,
+    })
+}
+
 pub(super) fn device_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
     class_spec_once::<E, _>(GPU_DEVICE_CLASS, || ClassSpec {
         name: "GPUDevice",
         id: GPU_DEVICE_CLASS,
-        constructor: None,
+        constructor: Some(ConstructorSpec { length: 0, parent: Some(EVENT_TARGET_CLASS), call: device_illegal_constructor::<E> }),
         properties: Box::leak(Box::new([
             PropertySpec { name: "features", get: Some(device_features_get::<E>), set: None },
             PropertySpec { name: "limits", get: Some(device_limits_get::<E>), set: None },

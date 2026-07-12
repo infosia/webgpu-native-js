@@ -47,3 +47,4 @@ webgpu:api,validation,createView:*
 webgpu:api,validation,encoding,beginRenderPass:*
 webgpu:api,validation,encoding,queries,*
 webgpu:api,validation,query_set,*
+webgpu:api,validation,error_scope:*

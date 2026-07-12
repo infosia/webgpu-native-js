@@ -9,6 +9,23 @@
     var retainedTextureView;
     var retainedBindGroup;
     var parityQuerySet;
+    var uncapturedEventLines = [];
+
+    function removedUncapturedListener() {
+        log("event:removed-listener:called");
+    }
+    device.addEventListener("uncapturederror", function (event) {
+        uncapturedEventLines.push("event:listener:" + event.type + ":" + event.error.constructor.name + ":" +
+            (event instanceof GPUUncapturedErrorEvent) + "," +
+            (event instanceof Event) + "," + event.defaultPrevented);
+        event.preventDefault();
+        uncapturedEventLines.push("event:prevented:" + event.defaultPrevented);
+    });
+    device.addEventListener("uncapturederror", removedUncapturedListener);
+    device.removeEventListener("uncapturederror", removedUncapturedListener);
+    device.onuncapturederror = function (event) {
+        uncapturedEventLines.push("event:handler:" + event.error.message + ":" + event.defaultPrevented);
+    };
 
     function log(line) {
         globalThis.parityLog.push(String(line));
@@ -358,6 +375,25 @@
             GPUOutOfMemoryError.length,
             GPUInternalError.length
         ].join(","));
+
+        var constructedEvent = new GPUUncapturedErrorEvent("manual", {
+            error: validation,
+            cancelable: true
+        });
+        constructedEvent.preventDefault();
+        log("event:construct:" + constructedEvent.type + ":" +
+            (constructedEvent.error === validation) + "," +
+            constructedEvent.cancelable + "," + constructedEvent.defaultPrevented);
+        log("event:inheritance:" +
+            (GPUDevice.prototype instanceof EventTarget) + "," +
+            (GPUUncapturedErrorEvent.prototype instanceof Event));
+        var target = new EventTarget();
+        var onceCalls = 0;
+        target.addEventListener("manual", function () { onceCalls += 1; }, { once: true });
+        var genericEvent = new Event("manual");
+        target.dispatchEvent(genericEvent);
+        target.dispatchEvent(genericEvent);
+        log("event:target-once:" + onceCalls);
     }
 
     function textureAttributes(texture) {
@@ -1222,6 +1258,7 @@
     }
 
     function finishConformance() {
+        uncapturedEventLines.forEach(log);
         return runTextureRetention()
             .then(runBindGroupRetention)
             .then(runRenderPipelineValidation)

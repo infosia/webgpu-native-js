@@ -199,21 +199,21 @@
       __shimLog("DOMException");
     }
   };
-  class Event {
+  const EventBase = globalThis.Event || class Event {
     constructor(type) {
       this.type = String(type);
       this.target = null;
       this.currentTarget = null;
     }
   }
-  class MessageEvent extends Event {
+  class MessageEvent extends EventBase {
     constructor(type, init = {}) {
       super(type);
       this.data = init.data ?? null;
       __shimLog("MessageEvent");
     }
   }
-  class EventTarget {
+  const EventTargetBase = globalThis.EventTarget || class EventTarget {
     constructor() { this.__listeners = new Map(); }
     addEventListener(type, callback, options = {}) {
       __shimLog("EventTarget");
@@ -231,7 +231,7 @@
       this.__listeners.set(String(type), listeners.filter(entry => entry.callback !== callback));
     }
     dispatchEvent(event) {
-      if (!(event instanceof Event)) throw new TypeError("argument must be an Event");
+      if (!(event instanceof EventBase)) throw new TypeError("argument must be an Event");
       event.target = this;
       event.currentTarget = this;
       for (const entry of [...(this.__listeners.get(event.type) ?? [])]) {
@@ -242,14 +242,14 @@
       return true;
     }
   }
-  globalThis.Event = Event;
+  globalThis.Event = EventBase;
   globalThis.MessageEvent = MessageEvent;
-  globalThis.EventTarget = EventTarget;
+  globalThis.EventTarget = EventTargetBase;
 
   // Native interface wrappers have their WebGPU prototypes, but the binding does not
   // install non-constructible WebGPU interface objects on the global object. The CTS
   // fixture uses this one solely to distinguish devices during cleanup.
-  globalThis.GPUDevice = class GPUDevice {
+  globalThis.GPUDevice = globalThis.GPUDevice || class GPUDevice {
     constructor() { throw new TypeError("Illegal constructor"); }
     static [Symbol.hasInstance](value) {
       __shimLog("GPUDevice[Symbol.hasInstance]");

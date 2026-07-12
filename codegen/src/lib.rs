@@ -421,6 +421,8 @@ pub(crate) struct LifecyclePolicy {
     #[serde(default)]
     pub(crate) extra_class_interfaces: Vec<String>,
     #[serde(default)]
+    pub(crate) constructors: Vec<ConstructorMappingPolicy>,
+    #[serde(default)]
     pub(crate) methods: Vec<MethodMappingPolicy>,
     #[serde(default)]
     pub(crate) properties: Vec<PropertyMappingPolicy>,
@@ -430,6 +432,15 @@ pub(crate) struct LifecyclePolicy {
     pub(crate) retention_extensions: Vec<RetentionExtensionPolicy>,
     #[serde(default)]
     pub(crate) quirks: Vec<LifecycleQuirkPolicy>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ConstructorMappingPolicy {
+    pub(crate) interface: String,
+    pub(crate) length: u8,
+    pub(crate) parent: Option<String>,
+    pub(crate) path: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1213,7 +1224,7 @@ fn validate_policy(
             let mapped: BTreeSet<_> = lifecycle
                 .methods
                 .iter()
-                .filter(|mapping| mapping.interface == *interface)
+                .filter(|mapping| mapping.interface == *interface && mapping.reason.is_none())
                 .map(|mapping| mapping.member.as_str())
                 .collect();
             for member in mapped {

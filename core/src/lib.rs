@@ -83,6 +83,9 @@ const GPU_ADAPTER_INFO_CLASS: ClassId = ClassId(25);
 const GPU_QUERY_SET_CLASS: ClassId = ClassId(26);
 const GPU_RENDER_BUNDLE_ENCODER_CLASS: ClassId = ClassId(27);
 const GPU_RENDER_BUNDLE_CLASS: ClassId = ClassId(28);
+const EVENT_TARGET_CLASS: ClassId = ClassId(29);
+const EVENT_CLASS: ClassId = ClassId(30);
+const GPU_UNCAPTURED_ERROR_EVENT_CLASS: ClassId = ClassId(31);
 const WEBIDL_U32_MAX: u64 = u32::MAX as u64;
 const WGPU_DEPTH_CLEAR_VALUE_UNDEFINED: f32 = f32::NAN;
 
@@ -389,6 +392,8 @@ pub trait JsEngine: Sized {
     fn is_object(cx: Self::Context<'_>, value: Self::Value) -> bool;
     /// Returns true when a JavaScript value is callable.
     fn is_callable(cx: Self::Context<'_>, value: Self::Value) -> bool;
+    /// Returns true when two JavaScript values have the same identity/value.
+    fn same_value(cx: Self::Context<'_>, left: Self::Value, right: Self::Value) -> bool;
     /// Returns true only for a `Uint32Array` view.
     fn is_uint32array(cx: Self::Context<'_>, value: Self::Value) -> bool;
     /// Converts with JavaScript `ToNumber`.
@@ -424,6 +429,8 @@ pub trait JsEngine: Sized {
     fn null(cx: Self::Context<'_>) -> Self::Value;
     /// Creates a JavaScript number value.
     fn number(cx: Self::Context<'_>, value: f64) -> Result<Self::Value, Self::Error>;
+    /// Creates a JavaScript boolean value.
+    fn boolean(cx: Self::Context<'_>, value: bool) -> Self::Value;
     /// Creates a JavaScript string value.
     fn string(cx: Self::Context<'_>, value: &str) -> Result<Self::Value, Self::Error>;
     /// Creates a synchronous JavaScript type error.
@@ -821,9 +828,6 @@ impl<E: JsEngine + 'static> SettlementRequest<E> {
             } => {
                 // S8: OperationError/AbortError are specified as DOMExceptions;
                 // this binding records the deviation and creates a named Error.
-                // S8 companion deviation: GPUDevice exposes only the writable
-                // onuncapturederror callback attribute; full EventTarget and
-                // GPUUncapturedErrorEvent are intentionally outside this slice.
                 SettlementOutcome::Deferred((
                     deferred,
                     Err(E::async_error_value(cx, name, &message)),
@@ -1286,9 +1290,38 @@ impl<E: JsEngine + 'static> DevicePayload<E> {
 
 struct DeviceEventJs<E: JsEngine + 'static> {
     handler: HeldValue<E>,
+    listeners: Vec<RegisteredEventListener<E>>,
+    next_listener_id: u64,
     lost_promise: HeldValue<E>,
     lost_deferred: Option<Deferred<E>>,
     lost_registration: Option<E::DeferredRegistration>,
+}
+
+struct RegisteredEventListener<E: JsEngine> {
+    id: u64,
+    type_: String,
+    callback: Option<E::Value>,
+    once: bool,
+}
+
+struct EventTargetPayload<E: JsEngine> {
+    listeners: Mutex<EventTargetListeners<E>>,
+}
+
+struct EventTargetListeners<E: JsEngine> {
+    entries: Vec<RegisteredEventListener<E>>,
+    next_listener_id: u64,
+}
+
+impl<E: JsEngine> EventTargetPayload<E> {
+    fn new() -> Self {
+        Self {
+            listeners: Mutex::new(EventTargetListeners {
+                entries: Vec::new(),
+                next_listener_id: 0,
+            }),
+        }
+    }
 }
 
 struct DeviceEventRegistration {
@@ -1385,23 +1418,32 @@ impl<E: JsEngine + 'static> DeviceEventState<E> {
     }
 
     fn take_engine_values(&self) -> Vec<E::Value> {
-        let state = self
+        let mut state = self
             .js
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(state) = state.as_ref() else {
+        let Some(state) = state.as_mut() else {
             return Vec::new();
         };
-        [state.handler.take(), state.lost_promise.take()]
+        let mut values = [state.handler.take(), state.lost_promise.take()]
             .into_iter()
             .flatten()
-            .collect()
+            .collect::<Vec<_>>();
+        values.extend(
+            state
+                .listeners
+                .drain(..)
+                .filter_map(|listener| listener.callback),
+        );
+        values
     }
 
     fn initialize(&self, cx: E::Context<'_>) -> Result<(), E::Error> {
         let (promise, deferred) = E::new_promise(cx)?;
         let mut js = Box::new(DeviceEventJs {
             handler: HeldValue::empty(),
+            listeners: Vec::new(),
+            next_listener_id: 0,
             lost_promise: HeldValue::empty(),
             lost_deferred: Some(deferred),
             lost_registration: None,
@@ -1583,6 +1625,10 @@ impl<E: JsEngine> HeldValue<E> {
 // release closure; it never dereferences it or calls a context-taking engine API.
 unsafe impl<E: JsEngine> Send for HeldValue<E> {}
 
+// SAFETY: listener tokens are duplicated/released only on the engine thread.
+// Arbitrary-thread native callbacks never inspect this payload.
+unsafe impl<E: JsEngine> Send for EventTargetPayload<E> {}
+
 /// Payload stored by a `GPUBuffer` wrapper.
 pub struct BufferPayload<E: JsEngine> {
     state: Arc<Mutex<BufferState<E>>>,
@@ -1636,6 +1682,21 @@ pub fn release_payload_values<E: JsEngine + 'static>(
         ];
         for value in held.into_iter().flatten() {
             release(value);
+        }
+    }
+    if let Some(event) = payload.downcast_ref::<EventPayload<E>>() {
+        if let Some(error) = event.error.take() {
+            release(error);
+        }
+    }
+    if let Some(target) = payload.downcast_ref::<EventTargetPayload<E>>() {
+        let entries = target
+            .listeners
+            .lock()
+            .map(|mut listeners| std::mem::take(&mut listeners.entries))
+            .unwrap_or_default();
+        for callback in entries.into_iter().filter_map(|entry| entry.callback) {
+            release(callback);
         }
     }
 }
@@ -2530,6 +2591,18 @@ pub fn register_error_classes<E: JsEngine + 'static>(cx: E::Context<'_>) -> Resu
     Ok(())
 }
 
+/// Registers the minimal DOM event classes required by WebGPU.
+pub fn register_event_classes<E: JsEngine + 'static>(cx: E::Context<'_>) -> Result<(), E::Error> {
+    for spec in [
+        event_class::<E>(),
+        event_target_class::<E>(),
+        uncaptured_error_event_class::<E>(),
+    ] {
+        let _ = E::register_class(cx, spec)?;
+    }
+    Ok(())
+}
+
 /// Registers the script-visible `GPUDeviceLostInfo` class.
 pub fn register_device_lost_info_class<E: JsEngine + 'static>(
     cx: E::Context<'_>,
@@ -2548,6 +2621,7 @@ pub fn wrap_gpu<E: JsEngine + 'static>(
             "wrap_gpu received a null WGPUInstance",
         ));
     }
+    register_event_classes::<E>(cx)?;
     let _ = register_gpu_class::<E>(cx)?;
     let _ = register_adapter_class::<E>(cx)?;
     let _ = register_device_class::<E>(cx)?;
@@ -2579,6 +2653,7 @@ pub unsafe fn wrap_device<E: JsEngine + 'static>(
     unsafe {
         (env.gpu().device_add_ref)(device);
     }
+    register_event_classes::<E>(cx)?;
     let _ = register_device_class::<E>(cx)?;
     let _ = register_buffer_class::<E>(cx)?;
     register_error_classes::<E>(cx)?;
@@ -2615,6 +2690,13 @@ pub unsafe fn wrap_device<E: JsEngine + 'static>(
 
 struct ErrorPayload {
     message: String,
+}
+
+struct EventPayload<E: JsEngine> {
+    type_: String,
+    cancelable: bool,
+    default_prevented: AtomicBool,
+    error: HeldValue<E>,
 }
 
 struct DeviceLostInfoPayload {
@@ -2709,6 +2791,259 @@ fn new_gpu_error<E: JsEngine + 'static>(
     };
     E::new_instance(cx, class, Box::new(ErrorPayload { message }))
 }
+
+fn event_init_cancelable<E: JsEngine>(
+    cx: E::Context<'_>,
+    init: Option<E::Value>,
+) -> Result<bool, E::Error> {
+    let Some(init) = init else {
+        return Ok(false);
+    };
+    if E::is_undefined(cx, init) {
+        return Ok(false);
+    }
+    if !E::is_object(cx, init) {
+        return Err(E::type_error(cx, "EventInit must be an object"));
+    }
+    Ok(E::to_bool(cx, E::get_property(cx, init, "cancelable")?))
+}
+
+fn new_event<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    class: ClassId,
+    type_: String,
+    cancelable: bool,
+    error: Option<E::Value>,
+) -> Result<E::Value, E::Error> {
+    let value = E::new_instance(
+        cx,
+        class,
+        Box::new(EventPayload::<E> {
+            type_,
+            cancelable,
+            default_prevented: AtomicBool::new(false),
+            error: HeldValue::empty(),
+        }),
+    )?;
+    if let Some(error) = error {
+        let payload = E::payload(cx, value, class)
+            .and_then(|payload| payload.downcast_ref::<EventPayload<E>>())
+            .ok_or_else(|| E::operation_error(cx, "new Event payload is unavailable"))?;
+        payload.error.set(E::duplicate_value(cx, error));
+    }
+    Ok(value)
+}
+
+fn new_gpu_uncaptured_error_event<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    type_: String,
+    cancelable: bool,
+    error: E::Value,
+) -> Result<E::Value, E::Error> {
+    new_event::<E>(
+        cx,
+        GPU_UNCAPTURED_ERROR_EVENT_CLASS,
+        type_,
+        cancelable,
+        Some(error),
+    )
+}
+
+fn event_constructor<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let arena = Arena::new();
+    let type_ = E::to_str(
+        cx,
+        args.first().copied().unwrap_or_else(|| E::undefined(cx)),
+        &arena,
+    )?
+    .to_owned();
+    let cancelable = event_init_cancelable::<E>(cx, args.get(1).copied())?;
+    new_event::<E>(cx, EVENT_CLASS, type_, cancelable, None)
+}
+
+fn event_target_constructor<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    _args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    E::new_instance(
+        cx,
+        EVENT_TARGET_CLASS,
+        Box::new(EventTargetPayload::<E>::new()),
+    )
+}
+
+/// Implements the `GPUUncapturedErrorEvent` constructor emitted by codegen.
+pub fn gpu_uncaptured_error_event_constructor<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let arena = Arena::new();
+    let type_ = E::to_str(
+        cx,
+        args.first().copied().unwrap_or_else(|| E::undefined(cx)),
+        &arena,
+    )?
+    .to_owned();
+    let init = required_argument::<E>(cx, args, 1, "GPUUncapturedErrorEventInit")?;
+    if !E::is_object(cx, init) {
+        return Err(E::type_error(
+            cx,
+            "GPUUncapturedErrorEventInit must be an object",
+        ));
+    }
+    let error = E::get_property(cx, init, "error")?;
+    if [
+        GPU_ERROR_CLASS,
+        GPU_VALIDATION_ERROR_CLASS,
+        GPU_OUT_OF_MEMORY_ERROR_CLASS,
+        GPU_INTERNAL_ERROR_CLASS,
+    ]
+    .into_iter()
+    .all(|class| E::payload(cx, error, class).is_none())
+    {
+        return Err(E::type_error(cx, "GPUError is required"));
+    }
+    let cancelable = event_init_cancelable::<E>(cx, Some(init))?;
+    new_gpu_uncaptured_error_event::<E>(cx, type_, cancelable, error)
+}
+
+fn event_type_get<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+) -> Result<E::Value, E::Error> {
+    E::string(cx, &event_type_value::<E>(cx, this)?)
+}
+
+fn event_cancelable_get<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+) -> Result<E::Value, E::Error> {
+    let cancelable = event_payload::<E>(cx, this)
+        .and_then(|payload| payload.downcast_ref::<EventPayload<E>>())
+        .map(|payload| payload.cancelable)
+        .ok_or_else(|| E::type_error(cx, "Event.cancelable called on an incompatible object"))?;
+    Ok(E::boolean(cx, cancelable))
+}
+
+fn event_default_prevented_get<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+) -> Result<E::Value, E::Error> {
+    Ok(E::boolean(cx, event_default_prevented::<E>(cx, this)?))
+}
+
+fn event_prevent_default<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    _args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let payload = event_payload::<E>(cx, this)
+        .and_then(|payload| payload.downcast_ref::<EventPayload<E>>())
+        .ok_or_else(|| {
+            E::type_error(cx, "Event.preventDefault called on an incompatible object")
+        })?;
+    if payload.cancelable {
+        payload.default_prevented.store(true, Ordering::Release);
+    }
+    Ok(E::undefined(cx))
+}
+
+/// Gets the `[SameObject]` `GPUUncapturedErrorEvent.error` attribute.
+pub fn gpu_uncaptured_error_event_error_get<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+) -> Result<E::Value, E::Error> {
+    let error = E::payload(cx, this, GPU_UNCAPTURED_ERROR_EVENT_CLASS)
+        .and_then(|payload| payload.downcast_ref::<EventPayload<E>>())
+        .and_then(|payload| payload.error.get())
+        .ok_or_else(|| {
+            E::type_error(
+                cx,
+                "GPUUncapturedErrorEvent.error called on an incompatible object",
+            )
+        })?;
+    Ok(E::return_held_value(cx, error))
+}
+
+fn event_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
+    class_spec_once::<E, _>(EVENT_CLASS, || ClassSpec {
+        name: "Event",
+        id: EVENT_CLASS,
+        constructor: Some(ConstructorSpec {
+            length: 1,
+            parent: None,
+            call: event_constructor::<E>,
+        }),
+        properties: Box::leak(Box::new([
+            PropertySpec {
+                name: "type",
+                get: Some(event_type_get::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "cancelable",
+                get: Some(event_cancelable_get::<E>),
+                set: None,
+            },
+            PropertySpec {
+                name: "defaultPrevented",
+                get: Some(event_default_prevented_get::<E>),
+                set: None,
+            },
+        ])),
+        methods: Box::leak(Box::new([MethodSpec {
+            name: "preventDefault",
+            length: 0,
+            call: event_prevent_default::<E>,
+        }])),
+        finalizer: |_payload, _env| {},
+    })
+}
+
+fn event_target_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
+    class_spec_once::<E, _>(EVENT_TARGET_CLASS, || ClassSpec {
+        name: "EventTarget",
+        id: EVENT_TARGET_CLASS,
+        constructor: Some(ConstructorSpec {
+            length: 0,
+            parent: None,
+            call: event_target_constructor::<E>,
+        }),
+        properties: &[],
+        methods: Box::leak(Box::new([
+            MethodSpec {
+                name: "addEventListener",
+                length: 2,
+                call: event_target_add_event_listener::<E>,
+            },
+            MethodSpec {
+                name: "removeEventListener",
+                length: 2,
+                call: event_target_remove_event_listener::<E>,
+            },
+            MethodSpec {
+                name: "dispatchEvent",
+                length: 1,
+                call: event_target_dispatch_event::<E>,
+            },
+        ])),
+        finalizer: |_payload, _env| {},
+    })
+}
+
+/// Implements the illegal `GPUDevice` constructor installed for interface identity.
+pub fn device_illegal_constructor<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    _args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    Err(E::type_error(cx, "GPUDevice is not constructible"))
+}
+
+/// Finalizes a `GPUUncapturedErrorEvent`; held values are released by the adapter.
+pub fn finalize_uncaptured_error_event(_payload: Box<dyn Any + Send>, _env: &Environment) {}
 
 fn gpu_error_message_get<E: JsEngine + 'static>(
     cx: E::Context<'_>,
@@ -2906,12 +3241,12 @@ pub fn device_on_uncaptured_error_set<E: JsEngine + 'static>(
             Some(E::duplicate_value(cx, value))
         };
     let old = {
-        let state = payload
+        let mut state = payload
             .events
             .js
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(state) = state.as_ref() else {
+        let Some(state) = state.as_mut() else {
             if let Some(replacement) = replacement {
                 E::release_value(cx, replacement);
             }
@@ -2922,7 +3257,21 @@ pub fn device_on_uncaptured_error_set<E: JsEngine + 'static>(
         };
         let old = state.handler.take();
         if let Some(replacement) = replacement {
+            if old.is_none() {
+                let id = state.next_listener_id;
+                state.next_listener_id += 1;
+                state.listeners.push(RegisteredEventListener {
+                    id,
+                    type_: "uncapturederror".to_owned(),
+                    callback: None,
+                    once: false,
+                });
+            }
             state.handler.set(replacement);
+        } else if old.is_some() {
+            state
+                .listeners
+                .retain(|listener| listener.callback.is_some());
         }
         old
     };
@@ -2932,32 +3281,314 @@ pub fn device_on_uncaptured_error_set<E: JsEngine + 'static>(
     Ok(())
 }
 
+fn listener_type<E: JsEngine>(cx: E::Context<'_>, args: &[E::Value]) -> Result<String, E::Error> {
+    let arena = Arena::new();
+    Ok(E::to_str(
+        cx,
+        args.first().copied().unwrap_or_else(|| E::undefined(cx)),
+        &arena,
+    )?
+    .to_owned())
+}
+
+fn listener_once<E: JsEngine>(cx: E::Context<'_>, args: &[E::Value]) -> Result<bool, E::Error> {
+    let Some(options) = args.get(2).copied() else {
+        return Ok(false);
+    };
+    if !E::is_object(cx, options) {
+        return Ok(false);
+    }
+    Ok(E::to_bool(cx, E::get_property(cx, options, "once")?))
+}
+
+fn add_listener<E: JsEngine>(
+    cx: E::Context<'_>,
+    entries: &mut Vec<RegisteredEventListener<E>>,
+    next_listener_id: &mut u64,
+    type_: String,
+    callback: E::Value,
+    once: bool,
+) {
+    if entries.iter().any(|listener| {
+        listener.type_ == type_
+            && listener
+                .callback
+                .is_some_and(|existing| E::same_value(cx, existing, callback))
+    }) {
+        return;
+    }
+    let id = *next_listener_id;
+    *next_listener_id += 1;
+    entries.push(RegisteredEventListener {
+        id,
+        type_,
+        callback: Some(E::duplicate_value(cx, callback)),
+        once,
+    });
+}
+
+/// Implements `EventTarget.addEventListener` for `GPUDevice` and `EventTarget`.
+pub fn event_target_add_event_listener<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let type_ = listener_type::<E>(cx, args)?;
+    let callback = args.get(1).copied().unwrap_or_else(|| E::undefined(cx));
+    if E::is_null(cx, callback) || E::is_undefined(cx, callback) || !E::is_callable(cx, callback) {
+        return Ok(E::undefined(cx));
+    }
+    let once = listener_once::<E>(cx, args)?;
+    if let Some(payload) = E::payload(cx, this, GPU_DEVICE_CLASS)
+        .and_then(|payload| payload.downcast_ref::<DevicePayload<E>>())
+    {
+        let mut state = payload
+            .events
+            .js
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = state
+            .as_mut()
+            .ok_or_else(|| E::operation_error(cx, "GPUDevice event state is unavailable"))?;
+        add_listener::<E>(
+            cx,
+            &mut state.listeners,
+            &mut state.next_listener_id,
+            type_,
+            callback,
+            once,
+        );
+        return Ok(E::undefined(cx));
+    }
+    let payload = E::payload(cx, this, EVENT_TARGET_CLASS)
+        .and_then(|payload| payload.downcast_ref::<EventTargetPayload<E>>())
+        .ok_or_else(|| E::type_error(cx, "addEventListener called on an incompatible object"))?;
+    let mut listeners = payload
+        .listeners
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let EventTargetListeners {
+        entries,
+        next_listener_id,
+    } = &mut *listeners;
+    add_listener::<E>(cx, entries, next_listener_id, type_, callback, once);
+    Ok(E::undefined(cx))
+}
+
+fn remove_listener<E: JsEngine>(
+    cx: E::Context<'_>,
+    entries: &mut Vec<RegisteredEventListener<E>>,
+    type_: &str,
+    callback: E::Value,
+) -> Option<E::Value> {
+    let index = entries.iter().position(|listener| {
+        listener.type_ == type_
+            && listener
+                .callback
+                .is_some_and(|existing| E::same_value(cx, existing, callback))
+    })?;
+    entries.remove(index).callback
+}
+
+/// Implements `EventTarget.removeEventListener` for `GPUDevice` and `EventTarget`.
+pub fn event_target_remove_event_listener<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let type_ = listener_type::<E>(cx, args)?;
+    let callback = args.get(1).copied().unwrap_or_else(|| E::undefined(cx));
+    let removed = if let Some(payload) = E::payload(cx, this, GPU_DEVICE_CLASS)
+        .and_then(|payload| payload.downcast_ref::<DevicePayload<E>>())
+    {
+        let mut state = payload
+            .events
+            .js
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state
+            .as_mut()
+            .and_then(|state| remove_listener::<E>(cx, &mut state.listeners, &type_, callback))
+    } else {
+        let payload = E::payload(cx, this, EVENT_TARGET_CLASS)
+            .and_then(|payload| payload.downcast_ref::<EventTargetPayload<E>>())
+            .ok_or_else(|| {
+                E::type_error(cx, "removeEventListener called on an incompatible object")
+            })?;
+        let mut listeners = payload
+            .listeners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        remove_listener::<E>(cx, &mut listeners.entries, &type_, callback)
+    };
+    if let Some(removed) = removed {
+        E::release_value(cx, removed);
+    }
+    Ok(E::undefined(cx))
+}
+
+fn event_payload<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    value: E::Value,
+) -> Option<&(dyn Any + Send)> {
+    E::payload(cx, value, EVENT_CLASS)
+        .or_else(|| E::payload(cx, value, GPU_UNCAPTURED_ERROR_EVENT_CLASS))
+}
+
+fn event_type_value<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    event: E::Value,
+) -> Result<String, E::Error> {
+    event_payload::<E>(cx, event)
+        .and_then(|payload| payload.downcast_ref::<EventPayload<E>>())
+        .map(|payload| payload.type_.clone())
+        .ok_or_else(|| E::type_error(cx, "dispatchEvent requires an Event"))
+}
+
+fn dispatch_callbacks<E: JsEngine>(
+    cx: E::Context<'_>,
+    receiver: E::Value,
+    event: E::Value,
+    callbacks: Vec<E::Value>,
+) -> Result<(), E::Error> {
+    let mut first_error = None;
+    for callback in callbacks {
+        if let Err(error) = E::call(cx, callback, receiver, &[event]) {
+            if first_error.is_none() {
+                first_error = Some(error);
+            }
+        }
+        E::release_value(cx, callback);
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
+fn snapshot_device_listeners<E: JsEngine>(
+    cx: E::Context<'_>,
+    state: &DeviceEventState<E>,
+    type_: &str,
+) -> (Vec<E::Value>, Vec<E::Value>) {
+    let mut state = state
+        .js
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(state) = state.as_mut() else {
+        return (Vec::new(), Vec::new());
+    };
+    let callbacks = state
+        .listeners
+        .iter()
+        .filter(|listener| listener.type_ == type_)
+        .filter_map(|listener| {
+            listener
+                .callback
+                .or_else(|| state.handler.get())
+                .map(|callback| E::duplicate_value(cx, callback))
+        })
+        .collect();
+    let once_ids = state
+        .listeners
+        .iter()
+        .filter(|listener| listener.type_ == type_ && listener.once)
+        .map(|listener| listener.id)
+        .collect::<Vec<_>>();
+    let mut released = Vec::new();
+    state.listeners.retain(|listener| {
+        let remove = once_ids.contains(&listener.id);
+        if remove {
+            released.extend(listener.callback);
+        }
+        !remove
+    });
+    (callbacks, released)
+}
+
+fn snapshot_target_listeners<E: JsEngine>(
+    cx: E::Context<'_>,
+    payload: &EventTargetPayload<E>,
+    type_: &str,
+) -> (Vec<E::Value>, Vec<E::Value>) {
+    let mut listeners = payload
+        .listeners
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let callbacks = listeners
+        .entries
+        .iter()
+        .filter(|listener| listener.type_ == type_)
+        .filter_map(|listener| listener.callback)
+        .map(|callback| E::duplicate_value(cx, callback))
+        .collect();
+    let once_ids = listeners
+        .entries
+        .iter()
+        .filter(|listener| listener.type_ == type_ && listener.once)
+        .map(|listener| listener.id)
+        .collect::<Vec<_>>();
+    let mut released = Vec::new();
+    listeners.entries.retain(|listener| {
+        let remove = once_ids.contains(&listener.id);
+        if remove {
+            released.extend(listener.callback);
+        }
+        !remove
+    });
+    (callbacks, released)
+}
+
+fn event_default_prevented<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    event: E::Value,
+) -> Result<bool, E::Error> {
+    event_payload::<E>(cx, event)
+        .and_then(|payload| payload.downcast_ref::<EventPayload<E>>())
+        .map(|payload| payload.default_prevented.load(Ordering::Acquire))
+        .ok_or_else(|| {
+            E::type_error(
+                cx,
+                "Event.defaultPrevented called on an incompatible object",
+            )
+        })
+}
+
+/// Implements `EventTarget.dispatchEvent` for `GPUDevice` and `EventTarget`.
+pub fn event_target_dispatch_event<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let event = args.first().copied().unwrap_or_else(|| E::undefined(cx));
+    let type_ = event_type_value::<E>(cx, event)?;
+    let (callbacks, released) = if let Some(payload) = E::payload(cx, this, GPU_DEVICE_CLASS)
+        .and_then(|payload| payload.downcast_ref::<DevicePayload<E>>())
+    {
+        snapshot_device_listeners::<E>(cx, &payload.events, &type_)
+    } else {
+        let payload = E::payload(cx, this, EVENT_TARGET_CLASS)
+            .and_then(|payload| payload.downcast_ref::<EventTargetPayload<E>>())
+            .ok_or_else(|| E::type_error(cx, "dispatchEvent called on an incompatible object"))?;
+        snapshot_target_listeners::<E>(cx, payload, &type_)
+    };
+    for callback in released {
+        E::release_value(cx, callback);
+    }
+    dispatch_callbacks::<E>(cx, this, event, callbacks)?;
+    Ok(E::boolean(cx, !event_default_prevented::<E>(cx, event)?))
+}
+
 fn dispatch_uncaptured_error<E: JsEngine + 'static>(
     cx: E::Context<'_>,
     state: &DeviceEventState<E>,
     type_: WGPUErrorType,
     message: String,
 ) -> Result<(), E::Error> {
-    let handler = {
-        let state = state
-            .js
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state
-            .as_ref()
-            .and_then(|state| state.handler.get())
-            .map(|handler| E::duplicate_value(cx, handler))
-    };
-    let Some(handler) = handler else {
-        return Ok(());
-    };
-    let result = (|| {
-        let error = new_gpu_error::<E>(cx, type_, message)?;
-        let _ = E::call(cx, handler, E::global(cx), &[error])?;
-        Ok(())
-    })();
-    E::release_value(cx, handler);
-    result
+    let error = new_gpu_error::<E>(cx, type_, message)?;
+    let event = new_gpu_uncaptured_error_event::<E>(cx, "uncapturederror".to_owned(), true, error)?;
+    let (callbacks, released) = snapshot_device_listeners::<E>(cx, state, "uncapturederror");
+    for callback in released {
+        E::release_value(cx, callback);
+    }
+    dispatch_callbacks::<E>(cx, E::global(cx), event, callbacks)
 }
 
 /// Implements `GPUDevice.pushErrorScope`.

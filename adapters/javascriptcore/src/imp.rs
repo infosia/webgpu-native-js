@@ -221,6 +221,8 @@ unsafe extern "C" {
     fn JSValueMakeUndefined(ctx: JSContextRef) -> JSValueRef;
     /// Creates JavaScript `null`.
     fn JSValueMakeNull(ctx: JSContextRef) -> JSValueRef;
+    /// Creates a JavaScript boolean.
+    fn JSValueMakeBoolean(ctx: JSContextRef, boolean: bool) -> JSValueRef;
     /// Creates a JavaScript number.
     fn JSValueMakeNumber(ctx: JSContextRef, number: f64) -> JSValueRef;
     /// Creates a JavaScript string value.
@@ -1386,6 +1388,10 @@ impl core::JsEngine for Engine {
         unsafe { JSValueIsObject(cx.ctx, value) && JSObjectIsFunction(cx.ctx, value.cast_mut()) }
     }
 
+    fn same_value(_cx: Self::Context<'_>, left: Self::Value, right: Self::Value) -> bool {
+        left == right
+    }
+
     fn is_uint32array(cx: Self::Context<'_>, value: Self::Value) -> bool {
         let mut exception = ptr::null();
         // SAFETY: value belongs to cx. This predicate reads only the view kind
@@ -1528,6 +1534,30 @@ impl core::JsEngine for Engine {
                 } else {
                     exception
                 });
+            }
+            let prototype_methods = state
+                .classes
+                .lock()
+                .map_err(|_| Self::operation_error(cx, "class registry is poisoned"))?
+                .get(&spec.id)
+                .map(|entry| entry.methods.clone())
+                .unwrap_or_default();
+            for method in prototype_methods {
+                let name = JsString::new(method.name)
+                    .map_err(|_| Self::type_error(cx, "method name contains a nul byte"))?;
+                unsafe {
+                    JSObjectSetProperty(
+                        cx.ctx,
+                        child_prototype,
+                        name.as_raw(),
+                        method.value.0,
+                        PROPERTY_NONE,
+                        &mut exception,
+                    )
+                };
+                if !exception.is_null() {
+                    return Err(exception);
+                }
             }
             let constructor_name = JsString::new("constructor")
                 .map_err(|_| Self::operation_error(cx, "constructor string failed"))?;
@@ -1705,6 +1735,10 @@ impl core::JsEngine for Engine {
         let value = unsafe { JSValueMakeNumber(cx.ctx, value) };
         cx.scope.track(value);
         Ok(value)
+    }
+
+    fn boolean(cx: Self::Context<'_>, value: bool) -> Self::Value {
+        unsafe { JSValueMakeBoolean(cx.ctx, value) }
     }
 
     fn string(cx: Self::Context<'_>, value: &str) -> core::Result<Self::Value, Self::Error> {
@@ -2916,6 +2950,13 @@ mod tests {
         runtime.set_global_value("gpu", gpu).expect("set gpu");
         eval(&runtime, SCRIPT, "tests/parity/parity.js");
         runtime
+            .forward_uncaptured_error(
+                setup.device,
+                wgpu::WGPUErrorType_WGPUErrorType_Validation,
+                "parity uncaptured",
+            )
+            .expect("forward parity uncaptured");
+        runtime
             .forward_device_lost(
                 setup.device,
                 wgpu::WGPUDeviceLostReason_WGPUDeviceLostReason_Destroyed,
@@ -3676,11 +3717,12 @@ mod tests {
         .expect("forward thread");
         tick_until(&runtime, setup.instance, 5000, || {
             global_bool(&runtime, "uncapturedEventPassed")
+                && global_bool(&runtime, "uncapturedListenerPassed")
                 && global_bool(&runtime, "deviceLostPassed")
         });
         eval(
             &runtime,
-            "if (!uncapturedEventPassed || !deviceLostPassed) throw new Error('device event callback did not run');",
+            "if (!uncapturedEventPassed || !uncapturedListenerPassed || !deviceLostPassed) throw new Error('device event callback did not run');",
             "device-events-check.js",
         );
     }

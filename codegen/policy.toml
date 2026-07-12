@@ -271,7 +271,19 @@ standard_interfaces = [
   "GPUCommandEncoder",
   "GPURenderBundleEncoder",
 ]
-extra_class_interfaces = ["GPU", "GPUAdapter"]
+extra_class_interfaces = ["GPU", "GPUAdapter", "GPUUncapturedErrorEvent"]
+
+[[lifecycle.constructors]]
+interface = "GPUUncapturedErrorEvent"
+length = 2
+parent = "EVENT_CLASS"
+path = "gpu_uncaptured_error_event_constructor"
+
+[[lifecycle.constructors]]
+interface = "GPUDevice"
+length = 0
+parent = "EVENT_TARGET_CLASS"
+path = "device_illegal_constructor"
 
 [[lifecycle.methods]]
 interface = "GPUComputePipeline"
@@ -327,6 +339,33 @@ path = "device_push_error_scope"
 interface = "GPUDevice"
 member = "popErrorScope"
 path = "device_pop_error_scope"
+
+[[lifecycle.methods]]
+interface = "GPUUncapturedErrorEvent"
+member = "preventDefault"
+path = "event_prevent_default"
+length = 0
+reason = "inherited Event member; the external DOM base is not part of the pinned WebGPU IDL join"
+
+[[lifecycle.properties]]
+interface = "GPUUncapturedErrorEvent"
+member = "error"
+get = "gpu_uncaptured_error_event_error_get"
+
+[[lifecycle.properties]]
+interface = "GPUUncapturedErrorEvent"
+member = "type"
+get = "event_type_get"
+
+[[lifecycle.properties]]
+interface = "GPUUncapturedErrorEvent"
+member = "cancelable"
+get = "event_cancelable_get"
+
+[[lifecycle.properties]]
+interface = "GPUUncapturedErrorEvent"
+member = "defaultPrevented"
+get = "event_default_prevented_get"
 
 [[lifecycle.methods]]
 interface = "GPUBuffer"

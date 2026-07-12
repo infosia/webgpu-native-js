@@ -54,19 +54,24 @@ enum sentinels `Undefined` / `BindingNotUsed` (emitted only for absent optionals
   as DOMExceptions (`OperationError`, `AbortError`); this binding rejects with
   plain error objects carrying `name`/`message`. Cited at each rejection
   construction site.
-- **`onuncapturederror` receives the bare `GPUError`, not a
-  `GPUUncapturedErrorEvent`.** The IDL defines an `Event` subclass with an
-  `.error` attribute and full EventTarget semantics; this binding has no
-  EventTarget and calls the handler with the error object directly. Revisit if
-  event plumbing ever lands.
+- **RETIRED 2026-07-12 — `GPUDevice` now inherits the binding's minimal
+  `EventTarget`, and uncaptured errors dispatch a `GPUUncapturedErrorEvent`.**
+  The event carries its `[SameObject]` `.error`, supports the pinned Event
+  surface (`type`, `cancelable`, `preventDefault()`, `defaultPrevented`), and is
+  delivered through the ordered listener list shared by `addEventListener` and
+  `onuncapturederror`. Historical deviation: the handler received the bare
+  `GPUError` because no event plumbing existed.
 - **`WGPUErrorType_Unknown` folds into `GPUInternalError`.** The IDL has no
   fourth error class, so a fold is forced; Internal is the closest semantic.
   Direct test pins it.
 - **Non-callable `onuncapturederror` assignments coerce to `null`** (Web
   EventHandler semantics), tested.
-- **Constructor emission is not in the generator** (block 07 → S3): the
-  `ConstructorSpec` slot is hand-wired for the four error classes; the
-  generator learns constructors when a second constructible family appears.
+- **RETIRED 2026-07-12 — constructor emission is now policy-driven.** The
+  anticipated second WebGPU constructible family arrived with
+  `GPUUncapturedErrorEvent`; lifecycle policy now emits its `ConstructorSpec`
+  (and the illegal `GPUDevice` interface constructor used to establish
+  EventTarget prototype inheritance). The original four GPU error-class
+  constructor specs remain hand-written historical first-family plumbing.
 
 ## Block 09 addition (2026-07-11)
 

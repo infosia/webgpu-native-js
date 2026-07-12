@@ -270,10 +270,39 @@ fn validate_lifecycle(
                 .iter()
                 .map(|mapping| (mapping.interface.as_str(), mapping.member.as_str())),
         )
+        .chain(
+            lifecycle
+                .methods
+                .iter()
+                .filter(|mapping| mapping.reason.is_some())
+                .map(|mapping| (mapping.interface.as_str(), mapping.member.as_str())),
+        )
         // A reasoned omission may deliberately keep a currently unselected
         // WebIDL member out of the emitted class table.
         .chain(omitted.iter().copied())
         .collect();
+
+    let class_interfaces: BTreeSet<_> = policy
+        .subset
+        .iter()
+        .map(|entry| entry.interface.as_str())
+        .chain(lifecycle.extra_class_interfaces.iter().map(String::as_str))
+        .collect();
+    let mut constructors = BTreeSet::new();
+    for constructor in &lifecycle.constructors {
+        if !class_interfaces.contains(constructor.interface.as_str()) {
+            return Err(CodegenError::Policy(format!(
+                "dead lifecycle constructor {}: interface is neither subset nor extra class",
+                constructor.interface
+            )));
+        }
+        if !constructors.insert(constructor.interface.as_str()) {
+            return Err(CodegenError::Policy(format!(
+                "duplicate lifecycle constructor {}",
+                constructor.interface
+            )));
+        }
+    }
     for key in methods
         .iter()
         .chain(properties.iter())
@@ -1365,7 +1394,24 @@ fn emit_one_class(
     );
     let _ = writeln!(output, "        name: \"{interface}\",");
     let _ = writeln!(output, "        id: {class_id},");
-    output.push_str("        constructor: None,\n");
+    if let Some(constructor) = lifecycle
+        .constructors
+        .iter()
+        .find(|constructor| constructor.interface == interface)
+    {
+        let _ = writeln!(
+            output,
+            "        constructor: Some(ConstructorSpec {{ length: {}, parent: {}, call: {}::<E> }}),",
+            constructor.length,
+            constructor
+                .parent
+                .as_ref()
+                .map_or_else(|| "None".to_owned(), |parent| format!("Some({parent})")),
+            constructor.path
+        );
+    } else {
+        output.push_str("        constructor: None,\n");
+    }
 
     let selected = subset.map_or(&[][..], |entry| entry.members.as_slice());
     let mut properties: Vec<_> = selected
@@ -1498,6 +1544,23 @@ fn emit_one_class(
                 },
             );
             methods.push((order, member.member.as_str(), path, length));
+        }
+        for mapping in lifecycle.methods.iter().filter(|mapping| {
+            mapping.interface == interface
+                && mapping.reason.is_some()
+                && !selected.contains(&mapping.member)
+        }) {
+            let order = lifecycle
+                .methods
+                .iter()
+                .position(|candidate| std::ptr::eq(candidate, mapping))
+                .expect("mapping belongs to lifecycle policy");
+            methods.push((
+                order,
+                mapping.member.as_str(),
+                mapping.path.clone(),
+                mapping.length.unwrap_or(0),
+            ));
         }
     } else {
         for mapping in lifecycle

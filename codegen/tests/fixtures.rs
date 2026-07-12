@@ -267,6 +267,7 @@ fn generated_lifecycle_covers_every_selected_class_and_retention_set() {
         "render_bundle_encoder_class",
         "render_bundle_class",
         "command_buffer_class",
+        "uncaptured_error_event_class",
     ];
     assert_eq!(
         emitted.matches("_class<E: JsEngine + 'static>").count(),

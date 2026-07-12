@@ -391,7 +391,23 @@ impl Runtime {
 impl Drop for Runtime {
     fn drop(&mut self) {
         if !std::thread::panicking() {
-            self.with_scope(|cx| self.env.release_device_event_values::<Engine>(cx));
+            self.with_scope(|cx| {
+                let payloads = self
+                    .values
+                    .borrow()
+                    .iter()
+                    .filter_map(|value| match value {
+                        MockValue::Instance { payload, .. } => Some(*payload),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                for payload in payloads {
+                    crate::release_payload_values::<Engine>(payload, &mut |value| {
+                        Engine::release_value(cx, value);
+                    });
+                }
+                self.env.release_device_event_values::<Engine>(cx);
+            });
             let duplicated = self.duplicated_values.borrow();
             assert!(
                 duplicated.is_empty(),
@@ -719,6 +735,10 @@ impl JsEngine for MockEngine {
         )
     }
 
+    fn same_value(cx: Self::Context<'_>, left: Self::Value, right: Self::Value) -> bool {
+        cx.runtime.canonical(left) == cx.runtime.canonical(right)
+    }
+
     fn is_uint32array(cx: Self::Context<'_>, value: Self::Value) -> bool {
         cx.runtime
             .uint32arrays
@@ -841,6 +861,10 @@ impl JsEngine for MockEngine {
 
     fn number(cx: Self::Context<'_>, value: f64) -> Result<Self::Value, Self::Error> {
         Ok(cx.runtime.number(value))
+    }
+
+    fn boolean(cx: Self::Context<'_>, value: bool) -> Self::Value {
+        cx.runtime.bool(value)
     }
 
     fn string(cx: Self::Context<'_>, value: &str) -> Result<Self::Value, Self::Error> {
@@ -7382,7 +7406,9 @@ mod tests {
         );
         assert_eq!(rt.env.settlements().drain::<Engine>(cx), Ok(0));
         assert_eq!(rt.calls.get() - handler_calls, 1, "exactly one event");
-        let error = rt.call_args.borrow()[0];
+        let event = rt.call_args.borrow()[0];
+        let error =
+            crate::gpu_uncaptured_error_event_error_get::<Engine>(cx, event).expect("event error");
         let payload = Engine::payload(cx, error, crate::GPU_VALIDATION_ERROR_CLASS)
             .and_then(|payload| payload.downcast_ref::<ErrorPayload>())
             .expect("GPUValidationError");
@@ -7997,7 +8023,10 @@ mod tests {
             );
             crate::tick::<Engine>(cx, fake_handle(702)).expect("uncaptured tick");
         }
-        let error = rt.call_args.borrow()[0];
+        let event = rt.call_args.borrow()[0];
+        assert!(Engine::payload(cx, event, crate::GPU_UNCAPTURED_ERROR_EVENT_CLASS).is_some());
+        let error =
+            crate::gpu_uncaptured_error_event_error_get::<Engine>(cx, event).expect("event error");
         assert!(Engine::payload(cx, error, crate::GPU_VALIDATION_ERROR_CLASS).is_some());
         let message = crate::gpu_error_message_get::<Engine>(cx, error).expect("message");
         assert!(
@@ -8022,6 +8051,84 @@ mod tests {
             unsafe { crate::tick::<Engine>(cx, fake_handle(703)) },
             Err(crate::TickError::Engine("handler exploded".to_owned()))
         );
+    }
+
+    #[test]
+    fn uncaptured_event_target_listeners_remove_retain_and_observe_prevent_default() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let native = fake_handle(704);
+        let device = unsafe { wrap_device::<Engine>(cx, native) }.expect("device");
+        let listener = rt.insert(MockValue::Callable(MockCallable::Handler));
+        let removed = rt.insert(MockValue::Callable(MockCallable::Handler));
+        let handler = rt.insert(MockValue::Callable(MockCallable::Handler));
+        let type_ = rt.string("uncapturederror");
+
+        crate::event_target_add_event_listener::<Engine>(cx, device, &[type_, listener])
+            .expect("add listener");
+        crate::event_target_add_event_listener::<Engine>(cx, device, &[type_, removed])
+            .expect("add removed listener");
+        crate::event_target_remove_event_listener::<Engine>(cx, device, &[type_, removed])
+            .expect("remove listener");
+        device_on_uncaptured_error_set::<Engine>(cx, device, handler).expect("set handler");
+        assert_eq!(rt.duplicated_values.borrow().get(&listener), Some(&1));
+        assert!(!rt.duplicated_values.borrow().contains_key(&removed));
+
+        let calls_before = rt.calls.get();
+        rt.env
+            .device_event_forwarder()
+            .forward_uncaptured_error::<Engine>(
+                native,
+                crate::WGPUErrorType_WGPUErrorType_Validation,
+                "listener validation",
+            )
+            .expect("forward");
+        unsafe { crate::tick::<Engine>(cx, fake_handle(705)) }.expect("tick");
+        assert_eq!(
+            rt.calls.get() - calls_before,
+            2,
+            "listener and handler fire"
+        );
+        assert_eq!(rt.duplicated_values.borrow().get(&listener), Some(&1));
+
+        let event = rt.call_args.borrow()[0];
+        let type_value = crate::event_type_get::<Engine>(cx, event).expect("type");
+        assert!(
+            matches!(rt.get(type_value), MockValue::String(value) if value == "uncapturederror")
+        );
+        let error = crate::gpu_uncaptured_error_event_error_get::<Engine>(cx, event)
+            .expect("same-object error");
+        assert_eq!(
+            error,
+            crate::gpu_uncaptured_error_event_error_get::<Engine>(cx, event)
+                .expect("same-object error again")
+        );
+        assert!(Engine::payload(cx, error, crate::GPU_VALIDATION_ERROR_CLASS).is_some());
+        crate::event_prevent_default::<Engine>(cx, event, &[]).expect("prevent default");
+        assert!(crate::event_default_prevented::<Engine>(cx, event).expect("default prevented"));
+
+        crate::event_target_remove_event_listener::<Engine>(cx, device, &[type_, listener])
+            .expect("remove retained listener");
+        assert!(!rt.duplicated_values.borrow().contains_key(&listener));
+        device_on_uncaptured_error_set::<Engine>(cx, device, rt.null()).expect("clear handler");
+        assert!(!rt.duplicated_values.borrow().contains_key(&handler));
+
+        let retained_until_device_release = rt.insert(MockValue::Callable(MockCallable::Handler));
+        crate::event_target_add_event_listener::<Engine>(
+            cx,
+            device,
+            &[type_, retained_until_device_release],
+        )
+        .expect("add final retained listener");
+        let payload = Engine::payload(cx, device, crate::GPU_DEVICE_CLASS).expect("device payload");
+        crate::release_payload_values::<Engine>(payload, &mut |value| {
+            Engine::release_value(cx, value);
+        });
+        assert!(!rt
+            .duplicated_values
+            .borrow()
+            .contains_key(&retained_until_device_release));
     }
 
     #[test]
@@ -8437,7 +8544,9 @@ mod tests {
             .borrow()
             .iter()
             .filter_map(|args| args.first().copied())
-            .filter_map(|error| {
+            .filter_map(|event| {
+                let error =
+                    crate::gpu_uncaptured_error_event_error_get::<Engine>(cx, event).ok()?;
                 Engine::payload(cx, error, crate::GPU_VALIDATION_ERROR_CLASS)
                     .and_then(|payload| payload.downcast_ref::<ErrorPayload>())
                     .map(|payload| payload.message.clone())

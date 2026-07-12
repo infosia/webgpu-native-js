@@ -300,3 +300,34 @@ Lesson worth keeping: a policy skip's *reason* is a claim with an expiry date.
 Two of them (`maxDrawCount`, `timestampWrites`) turned out to be stale within a
 day of each other, and one tracking record was simply wrong. Re-read skip
 reasons against the code before trusting them.
+
+**GPUDevice becomes an EventTarget; GPUUncapturedErrorEvent lands (2026-07-12) —
+retiring a Phase-6 deviation.** The recorded deviation read: "`onuncapturederror`
+receives the bare `GPUError`, not a `GPUUncapturedErrorEvent` … this binding has
+no EventTarget … Revisit if event plumbing ever lands." The CTS forced the issue:
+`expectUncapturedError` (webgpu/error_test.js) uses
+`device.addEventListener('uncapturederror', …)`, calls `event.preventDefault()`,
+and reads `event.error`. Every `errorType !== errorFilter` case failed on it.
+
+Implemented from the pins (`webgpu.idl:150` `GPUDevice : EventTarget`; `:1323`
+`GPUUncapturedErrorEvent : Event` with `[SameObject] readonly error`; `:1331`
+`GPUUncapturedErrorEventInit`): a minimal `Event` base (type, preventDefault,
+defaultPrevented — no browser DOM invented beyond the pins), the event class, and
+`addEventListener`/`removeEventListener`/`dispatchEvent` on the device. An
+uncaptured error now constructs the event and dispatches it to registered
+listeners *and* to `onuncapturederror` (the handler is one of the listeners, per
+Web EventHandler semantics). Invariant 2 is untouched — the uncaptured-error C
+callback is still the one with no mode and still marshals to the JS thread.
+
+`error_scope:*` 35 pass / 14 fail → **37 / 12**, and **zero of the remaining 12
+are binding failures**.
+
+**All 12 are a backend limitation, recorded as expectations with the reason.**
+The CTS provokes out-of-memory by creating a **256 GiB texture** (rgba32float at
+max dimensions). yawgpu's Noop backend allocates it without failing, so no
+`GPUOutOfMemoryError` is ever raised. The binding's OOM path itself is pinned by
+the parity suite (`error:GPUOutOfMemoryError`). Verify on a real backend (Dawn)
+— never worked around in the binding.
+
+Suite grows **2,852 → 2,889 cases**, 3/3 stable, exit 0, 0 fail, 14
+expected-fail (all the Noop OOM cases).
