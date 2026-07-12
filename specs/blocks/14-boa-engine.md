@@ -133,3 +133,68 @@ deliberately.
   straightforward, but the spike's verdict does not depend on it.
 - The CTS runner under Boa beyond B7/B8's checks.
 - Any tier or `CLAUDE.md` change. Those follow Phase 3.
+
+## Phase 2 results (2026-07-12) — measured, and independently re-run by the planner
+
+### B8 — the decisive check: **Boa does not crash. 0/15.**
+
+The three families that crash QuickJS were run five times each under Boa. Every
+exit was **1** (an ordinary test failure); **no exit was ever >= 132**, and
+nothing hung.
+
+| Family | QuickJS (measured earlier) | Boa (5 runs) |
+|---|---|---|
+| `encoding,cmds,render,draw:buffer_binding_overlap:*` | crashes ~8/10 | `1 1 1 1 1` — no crash |
+| `createView:*` | crashes ~1/3 | `1 1 1 1 1` — no crash |
+| `encoding,cmds,render,draw:vertex_buffer_OOB:*` | crashes ~1/4 | `1 1 1 1 1` — no crash |
+
+**The B-4c crash class does not occur under Boa.** Two consequences, both real:
+
+1. **The crash was hiding results.** Under QuickJS these families aborted the
+   process, so we never saw their pass/fail at all. Under Boa they *report*:
+   `createView` 1,191 pass / 1 fail / 175 skip; `buffer_binding_overlap` 2/2;
+   `vertex_buffer_OOB` 30/30. Those failures are ordinary and actionable —
+   several indirect-draw cases raise `TypeError: not a callable function`
+   (a binding gap the crash had been masking), and one `createView` case is an
+   `Expected validation error` mismatch. **These are new findings, not
+   regressions**, and they are triage material, not blockers.
+2. The Phase-B suite-growth blocker and the quickjs fork fix both become
+   unnecessary *if* Boa is adopted — that call is Phase 3's, not this block's.
+
+### B7 — language gaps: **one real gap — Boa has no `Error.prototype.stack`.**
+
+CTS self-tests under Boa: **1,002 pass / 29 fail** (QuickJS: 1,031/1,031).
+Twenty-three of the 29 say verbatim `EXPECTATION FAILED: threw as expected, but
+missing stack` / `rejected as expected, but missing stack`.
+
+Confirmed **at the source, not inferred from our binding** — Boa's own CLI:
+
+```
+typeof e.stack = undefined
+own props: ["message"]
+```
+
+`Error.prototype.stack` is a de-facto standard (every other engine has it; it is
+a proposal, not ES-spec text), and the CTS self-tests assert on it. Note the
+scope: this hits the CTS's *own* unittests, **not** the WebGPU validation suites
+— B8's `createView` run passed 1,191 cases with the gap present. The remaining
+handful of failures include two `determinantInterval` cases raising
+`TypeError: cannot convert 'null' or 'undefined' to object`, not yet
+characterized.
+
+Catalogued, not worked around. Boa is pure Rust and MIT/Unlicense, so this is a
+gap we *could* close upstream — unlike the QuickJS defect, which took eight
+sessions of C forensics and is still unfixed.
+
+### Engine wiring
+
+`tools/cts-runner` is now engine-selectable by cargo feature: `engine-quickjs`
+(default, unchanged) and `engine-boa`. `cfg`-on-engine is forbidden in `core/`;
+this is a tool, so a thin wiring module is fine. The Boa adapter gained host
+functions, module loading (with block 12's lexical-normalization rule and its
+diamond-import regression test), `clear_global`, and `run_gc`; 23 tests, up
+from 15.
+
+**Gates:** workspace 354 pass, clippy `-D warnings`, fmt, `git diff core/`
+**still empty**, and the QuickJS curated suite still exits 0 at **1,312 pass /
+0 fail** — the incumbent path is bit-for-bit intact.

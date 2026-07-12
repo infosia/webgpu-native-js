@@ -9,15 +9,21 @@ use std::any::Any;
 use std::cell::{Cell, RefCell, UnsafeCell};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::io::Cursor;
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::path::{Component, Path, PathBuf};
 use std::ptr::NonNull;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use boa_engine::builtins::object::OrdinaryObject as BoaObjectBuiltin;
+use boa_engine::builtins::promise::PromiseState;
+use boa_engine::module::{ModuleLoader, Referrer};
 use boa_engine::object::builtins::{AlignedVec, JsArray, JsArrayBuffer, JsPromise};
 use boa_engine::object::{FunctionObjectBuilder, JsObject, ObjectInitializer};
 use boa_engine::property::Attribute;
 use boa_engine::{
-    Context as BoaContext, JsData, JsError, JsNativeError, JsResult, JsString, JsValue,
+    Context as BoaContext, JsData, JsError, JsNativeError, JsResult, JsString, JsValue, Module,
     NativeFunction, Source,
 };
 use boa_gc::{Finalize, Trace};
@@ -37,6 +43,13 @@ pub enum Error {
     Exception(String),
     /// An engine-neutral queue operation failed.
     Queue(core::QueueError),
+    /// A module source file could not be read.
+    Io {
+        /// The module path that failed.
+        path: PathBuf,
+        /// The underlying filesystem error.
+        source: std::io::Error,
+    },
 }
 
 impl fmt::Display for Error {
@@ -44,6 +57,13 @@ impl fmt::Display for Error {
         match self {
             Self::Exception(message) => formatter.write_str(message),
             Self::Queue(error) => write!(formatter, "{error:?}"),
+            Self::Io { path, source } => {
+                write!(
+                    formatter,
+                    "could not read module '{}': {source}",
+                    path.display()
+                )
+            }
         }
     }
 }
@@ -74,6 +94,7 @@ struct Arena {
     outstanding_deferreds: RefCell<BTreeMap<u32, NonNull<Option<core::Deferred<Engine>>>>>,
     registration_removals: Arc<Mutex<Vec<u32>>>,
     settle_trampoline: RefCell<Option<BoaValue>>,
+    host_functions: RefCell<Vec<Rc<HostFunction>>>,
 }
 
 impl Arena {
@@ -88,6 +109,7 @@ impl Arena {
             outstanding_deferreds: RefCell::new(BTreeMap::new()),
             registration_removals: Arc::new(Mutex::new(Vec::new())),
             settle_trampoline: RefCell::new(None),
+            host_functions: RefCell::new(Vec::new()),
         }
     }
 
@@ -186,6 +208,95 @@ impl Arena {
                 self.release(deferred.reject());
             }
         }
+    }
+}
+
+type HostFunction = dyn Fn(&[HostValue]) -> std::result::Result<HostValue, String>;
+type ModuleTransform = dyn Fn(&str, &Path) -> std::result::Result<String, String>;
+
+#[derive(Default)]
+struct FileModuleLoader {
+    aliases: RefCell<BTreeMap<String, PathBuf>>,
+    transform: RefCell<Option<Rc<ModuleTransform>>>,
+    modules: RefCell<BTreeMap<PathBuf, Module>>,
+}
+
+impl FileModuleLoader {
+    fn resolve(&self, specifier: &str, importer: &Path) -> std::result::Result<PathBuf, String> {
+        let base = self
+            .aliases
+            .borrow()
+            .get(specifier)
+            .cloned()
+            .unwrap_or_else(|| {
+                importer
+                    .parent()
+                    .unwrap_or_else(|| Path::new(""))
+                    .join(specifier)
+            });
+        let probes = module_resolution_probes(&base);
+        probes
+            .iter()
+            .find(|path| path.is_file())
+            .map(|path| lexical_normalize_path(path))
+            .ok_or_else(|| {
+                let probed = probes
+                    .iter()
+                    .map(|path| format!("'{}'", path.display()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "could not resolve module '{specifier}' imported from '{}': probed paths: {probed}",
+                    importer.display()
+                )
+            })
+    }
+
+    fn parse(&self, path: &Path, context: &mut BoaContext) -> JsResult<Module> {
+        if let Some(module) = self.modules.borrow().get(path) {
+            return Ok(module.clone());
+        }
+        let source = std::fs::read_to_string(path).map_err(|error| {
+            JsNativeError::error().with_message(format!(
+                "could not load module '{}': {error}",
+                path.display()
+            ))
+        })?;
+        let transform = self.transform.borrow().clone();
+        let source = match transform {
+            Some(transform) => transform(&source, path).map_err(|message| {
+                JsNativeError::error().with_message(format!(
+                    "could not load module '{}': transform failed: {message}",
+                    path.display()
+                ))
+            })?,
+            None => source,
+        };
+        let module = Module::parse(
+            Source::from_reader(Cursor::new(source), Some(path)),
+            None,
+            context,
+        )?;
+        self.modules
+            .borrow_mut()
+            .insert(path.to_path_buf(), module.clone());
+        Ok(module)
+    }
+}
+
+impl ModuleLoader for FileModuleLoader {
+    async fn load_imported_module(
+        self: Rc<Self>,
+        referrer: Referrer,
+        specifier: JsString,
+        context: &RefCell<&mut BoaContext>,
+    ) -> JsResult<Module> {
+        let importer = referrer.path().unwrap_or_else(|| Path::new(""));
+        let specifier = specifier.to_std_string_lossy();
+        let path = self
+            .resolve(&specifier, importer)
+            .map_err(|message| JsNativeError::error().with_message(message))?;
+        self.parse(&path, &mut context.borrow_mut())
     }
 }
 
@@ -324,6 +435,50 @@ impl Drop for DeferredRegistration {
 pub struct Runtime {
     context: UnsafeCell<Option<BoaContext>>,
     arena: Box<Arena>,
+    module_loader: Rc<FileModuleLoader>,
+}
+
+/// Observable completion state of an ES module evaluation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ModuleEvaluationStatus {
+    /// Evaluation is suspended, normally at top-level `await`.
+    Pending,
+    /// Evaluation completed successfully.
+    Fulfilled,
+}
+
+/// An owned Boa module-evaluation promise.
+pub struct ModuleEvaluation<'runtime> {
+    runtime: &'runtime Runtime,
+    promise: JsPromise,
+}
+
+impl fmt::Debug for ModuleEvaluation<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ModuleEvaluation")
+            .finish_non_exhaustive()
+    }
+}
+
+impl ModuleEvaluation<'_> {
+    /// Returns the current evaluation state, surfacing rejection as an adapter exception.
+    pub fn status(&self) -> Result<ModuleEvaluationStatus> {
+        match self.promise.state() {
+            PromiseState::Pending => Ok(ModuleEvaluationStatus::Pending),
+            PromiseState::Fulfilled(_) => Ok(ModuleEvaluationStatus::Fulfilled),
+            PromiseState::Rejected(reason) => {
+                // SAFETY: the evaluation borrows the live runtime and status calls
+                // do not overlap any other Boa operation.
+                let context = unsafe { &mut *self.runtime.raw_context() };
+                let message = reason.to_string(context).map_or_else(
+                    |_| "Boa module evaluation rejected".to_owned(),
+                    |value| value.to_std_string_lossy(),
+                );
+                Err(Error::Exception(message))
+            }
+        }
+    }
 }
 
 impl Runtime {
@@ -334,18 +489,21 @@ impl Runtime {
 
     fn new_with_dispatch(gpu: core::GpuDispatch) -> Result<Self> {
         let arena = Box::new(Arena::new(gpu));
-        let mut context = BoaContext::default();
+        let module_loader = Rc::new(FileModuleLoader::default());
+        let mut context = BoaContext::builder()
+            .module_loader(module_loader.clone())
+            .build()
+            .map_err(|error| Error::Exception(error.to_string()))?;
         context.insert_data(ArenaPointer((&*arena) as *const Arena));
         let runtime = Self {
             context: UnsafeCell::new(Some(context)),
             arena,
+            module_loader,
         };
-        let trampoline = runtime
-            .eval(
-                "(function(fns, values) { for (let i = 0; i < fns.length; i++) fns[i](values[i]); })",
-                "webgpu-native-js-settle-trampoline.js",
-            )
-            .map(|value| runtime.arena.insert(value))?;
+        let trampoline = runtime.eval(
+            "(function(fns, values) { for (let i = 0; i < fns.length; i++) fns[i](values[i]); })",
+            "webgpu-native-js-settle-trampoline.js",
+        )?;
         *runtime.arena.settle_trampoline.borrow_mut() = Some(trampoline);
         Ok(runtime)
     }
@@ -364,13 +522,14 @@ impl Runtime {
         })
     }
 
-    /// Evaluates a script and returns its completion value as text-capable Boa value.
-    pub fn eval(&self, source: &str, _name: &str) -> Result<JsValue> {
+    /// Evaluates a script and returns its rooted completion value.
+    pub fn eval(&self, source: &str, _name: &str) -> Result<BoaValue> {
         // SAFETY: runtime methods are single-threaded and do not overlap Boa
         // calls; native callbacks finish before this borrow is used again.
         let context = unsafe { &mut *self.raw_context() };
         context
             .eval(Source::from_bytes(source))
+            .map(|value| self.arena.insert(value))
             .map_err(|error| Error::Exception(js_error_string(error, context)))
     }
 
@@ -386,6 +545,99 @@ impl Runtime {
             .map_err(|error| Error::Exception(js_error_string(error, context)));
         self.arena.release(value);
         result.map(|_| ())
+    }
+
+    /// Registers a global JavaScript function backed by a side-effect-only Rust callback.
+    pub fn register_host_function<F>(&self, name: &str, f: F) -> Result<()>
+    where
+        F: Fn(&[HostValue]) -> std::result::Result<(), String> + 'static,
+    {
+        self.register_host_function_with_result(name, move |args| {
+            f(args)?;
+            Ok(HostValue::Undefined)
+        })
+    }
+
+    /// Registers a global JavaScript function backed by a primitive-valued Rust callback.
+    pub fn register_host_function_with_result<F>(&self, name: &str, f: F) -> Result<()>
+    where
+        F: Fn(&[HostValue]) -> std::result::Result<HostValue, String> + 'static,
+    {
+        let index = {
+            let mut functions = self.arena.host_functions.borrow_mut();
+            functions.push(Rc::new(f));
+            functions.len() - 1
+        };
+        let capture = HostFunctionCapture {
+            arena: (&*self.arena) as *const Arena,
+            index,
+        };
+        // SAFETY: no other Boa operation overlaps this host-facing call.
+        let context = unsafe { &mut *self.raw_context() };
+        context
+            .register_global_builtin_callable(
+                JsString::from(name),
+                0,
+                NativeFunction::from_copy_closure_with_captures(host_function_callback, capture),
+            )
+            .map_err(|error| Error::Exception(js_error_string(error, context)))
+    }
+
+    /// Clears a global property by assigning `undefined`.
+    pub fn clear_global(&self, name: &str) -> Result<()> {
+        let value = self.arena.insert(JsValue::undefined());
+        self.set_global_value(name, value)
+    }
+
+    /// Maps an exact ES module specifier to a host-owned source file.
+    pub fn set_module_alias(&self, specifier: &str, path: &Path) -> Result<()> {
+        let path = lexical_normalize_path(&absolute_path(path).map_err(|source| Error::Io {
+            path: path.to_path_buf(),
+            source,
+        })?);
+        self.module_loader
+            .aliases
+            .borrow_mut()
+            .insert(specifier.to_owned(), path);
+        Ok(())
+    }
+
+    /// Sets the source transform applied before every module is parsed.
+    pub fn set_module_transform<F>(&self, transform: F)
+    where
+        F: Fn(&str, &Path) -> std::result::Result<String, String> + 'static,
+    {
+        self.module_loader
+            .transform
+            .replace(Some(Rc::new(transform)));
+    }
+
+    /// Reads and evaluates a file as an ES module.
+    pub fn eval_module(&self, path: &Path) -> Result<ModuleEvaluation<'_>> {
+        let path = lexical_normalize_path(&absolute_path(path).map_err(|source| Error::Io {
+            path: path.to_path_buf(),
+            source,
+        })?);
+        std::fs::read_to_string(&path).map_err(|source| Error::Io {
+            path: path.clone(),
+            source,
+        })?;
+        // SAFETY: no other Boa operation overlaps this host-facing call.
+        let context = unsafe { &mut *self.raw_context() };
+        let module = self
+            .module_loader
+            .parse(&path, context)
+            .map_err(|error| Error::Exception(js_error_string(error, context)))?;
+        let promise = module.load_link_evaluate(context);
+        context
+            .run_jobs()
+            .map_err(|error| Error::Exception(js_error_string(error, context)))?;
+        let evaluation = ModuleEvaluation {
+            runtime: self,
+            promise,
+        };
+        evaluation.status()?;
+        Ok(evaluation)
     }
 
     /// Wraps an adopted WebGPU device.
@@ -449,6 +701,11 @@ impl Runtime {
                 _ => Error::Exception("unknown tick failure".to_owned()),
             })
         })
+    }
+
+    /// Runs the engine garbage collector.
+    pub fn run_gc(&self) {
+        boa_gc::force_collect();
     }
 }
 
@@ -523,6 +780,123 @@ fn callback_args(arena: &Arena, args: &[JsValue]) -> Vec<BoaValue> {
         .cloned()
         .map(|value| arena.insert(value))
         .collect()
+}
+
+#[derive(Clone, Copy)]
+struct HostFunctionCapture {
+    arena: *const Arena,
+    index: usize,
+}
+
+impl Finalize for HostFunctionCapture {}
+
+// SAFETY: the capture contains no Boa GC pointer and Runtime keeps the arena live.
+unsafe impl Trace for HostFunctionCapture {
+    boa_gc::empty_trace!();
+}
+
+fn host_value(value: &JsValue, context: &mut BoaContext) -> JsResult<HostValue> {
+    if value.is_undefined() {
+        return Ok(HostValue::Undefined);
+    }
+    if value.is_null() {
+        return Ok(HostValue::Null);
+    }
+    if let Some(value) = value.as_boolean() {
+        return Ok(HostValue::Bool(value));
+    }
+    if let Some(value) = value.as_number() {
+        return Ok(HostValue::Number(value));
+    }
+    value
+        .to_string(context)
+        .map(|value| HostValue::String(value.to_std_string_lossy()))
+}
+
+fn host_function_callback(
+    _this: &JsValue,
+    args: &[JsValue],
+    capture: &HostFunctionCapture,
+    context: &mut BoaContext,
+) -> JsResult<JsValue> {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: Runtime keeps the address-stable arena alive for every callback.
+        let arena = unsafe { &*capture.arena };
+        let function = arena
+            .host_functions
+            .borrow()
+            .get(capture.index)
+            .cloned()
+            .ok_or_else(|| {
+                JsNativeError::error().with_message("host function is not registered")
+            })?;
+        let args = args
+            .iter()
+            .map(|value| host_value(value, context))
+            .collect::<JsResult<Vec<_>>>()?;
+        let result =
+            function(&args).map_err(|message| JsNativeError::typ().with_message(message))?;
+        Ok(match result {
+            HostValue::String(value) => JsString::from(value).into(),
+            HostValue::Number(value) => JsValue::from(value),
+            HostValue::Bool(value) => JsValue::from(value),
+            HostValue::Null => JsValue::null(),
+            HostValue::Undefined => JsValue::undefined(),
+        })
+    }));
+    match result {
+        Ok(result) => result,
+        Err(_) => Err(JsNativeError::error()
+            .with_message("Rust callback panicked")
+            .into()),
+    }
+}
+
+fn module_resolution_probes(base: &Path) -> [PathBuf; 4] {
+    [
+        base.to_path_buf(),
+        path_with_suffix(base, ".js"),
+        path_with_suffix(base, ".mjs"),
+        base.join("index.js"),
+    ]
+}
+
+fn path_with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(suffix);
+    PathBuf::from(value)
+}
+
+fn lexical_normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                let can_pop = matches!(
+                    normalized.components().next_back(),
+                    Some(Component::Normal(_))
+                );
+                if can_pop {
+                    normalized.pop();
+                } else if !normalized.has_root() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+        }
+    }
+    normalized
+}
+
+fn absolute_path(path: &Path) -> std::io::Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()?.join(path))
+    }
 }
 
 fn callback_result(cx: Context<'_>, result: core::Result<BoaValue, BoaValue>) -> JsResult<JsValue> {
@@ -1147,7 +1521,9 @@ fn gpu_dispatch() -> core::GpuDispatch {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::fs;
     use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::path::{Path, PathBuf};
     use std::ptr;
     use std::rc::Rc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1158,7 +1534,9 @@ mod tests {
     use boa_engine::{JsData, JsValue};
     use boa_gc::{Finalize, Trace};
 
-    use super::{core, ffi_wgpu as wgpu, BoaValue, Engine, Runtime};
+    use super::{
+        core, ffi_wgpu as wgpu, BoaValue, Engine, HostValue, ModuleEvaluationStatus, Runtime,
+    };
     use webgpu_native_js_core::JsEngine;
 
     struct FinalizeProbe {
@@ -1330,17 +1708,71 @@ mod tests {
         })
     }
 
+    fn eval_js(runtime: &Runtime, source: &str, name: &str) -> JsValue {
+        let value = runtime.eval(source, name).expect(name);
+        let js_value = runtime.arena.get(value);
+        runtime.arena.release(value);
+        js_value
+    }
+
+    fn eval_bool(runtime: &Runtime, source: &str, name: &str) -> bool {
+        eval_js(runtime, source, name).to_boolean()
+    }
+
+    fn eval_number(runtime: &Runtime, source: &str, name: &str) -> Option<f64> {
+        eval_js(runtime, source, name).as_number()
+    }
+
+    fn eval_string(runtime: &Runtime, source: &str, name: &str) -> String {
+        // SAFETY: the test is single-threaded and no other Boa call overlaps conversion.
+        let context = unsafe { &mut *runtime.raw_context() };
+        eval_js(runtime, source, name)
+            .to_string(context)
+            .expect("stringify evaluation")
+            .to_std_string_lossy()
+    }
+
+    struct TempModules(PathBuf);
+
+    impl TempModules {
+        fn new() -> Self {
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "webgpu-native-js-boa-modules-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir(&path).expect("create module temp directory");
+            Self(path)
+        }
+
+        fn write(&self, name: &str, source: &str) -> PathBuf {
+            let path = self.0.join(name);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("create module fixture parent");
+            }
+            fs::write(&path, source).expect("write module fixture");
+            path
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempModules {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
     fn tick_until(runtime: &Runtime, instance: wgpu::WGPUInstance, expression: &str) {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             // SAFETY: the caller's NativeSetup keeps instance live, and tests
             // invoke this helper only on the runtime's owning thread.
             unsafe { runtime.tick(instance) }.expect("tick while waiting");
-            if runtime
-                .eval(expression, "wait-condition.js")
-                .expect("read wait condition")
-                .to_boolean()
-            {
+            if eval_bool(runtime, expression, "wait-condition.js") {
                 return;
             }
             assert!(
@@ -1354,8 +1786,7 @@ mod tests {
     #[test]
     fn public_runtime_and_copy_handles_work() {
         let runtime = Runtime::new().expect("Boa runtime");
-        let value = runtime.eval("1 + 2", "smoke.js").expect("evaluate");
-        assert_eq!(value.as_number(), Some(3.0));
+        assert_eq!(eval_number(&runtime, "1 + 2", "smoke.js"), Some(3.0));
         assert_eq!(
             Engine::MAPPED_RANGE_STRATEGY,
             webgpu_native_js_core::MappedRangeStrategy::CopyInCopyOut
@@ -1369,26 +1800,202 @@ mod tests {
         first
             .eval("globalThis.onlyFirst = 7", "first.js")
             .expect("set first global");
-        assert!(second
-            .eval("typeof globalThis.onlyFirst === 'undefined'", "second.js")
-            .expect("inspect second global")
-            .to_boolean());
+        assert!(eval_bool(
+            &second,
+            "typeof globalThis.onlyFirst === 'undefined'",
+            "second.js"
+        ));
     }
 
     #[test]
     fn runtime_eval_returns_values_and_surfaces_exceptions() {
         let runtime = Runtime::new().expect("Boa runtime");
-        assert_eq!(
-            runtime
-                .eval("6 * 7", "value.js")
-                .expect("value")
-                .as_number(),
-            Some(42.0)
-        );
+        assert_eq!(eval_number(&runtime, "6 * 7", "value.js"), Some(42.0));
         let error = runtime
             .eval("throw new TypeError('eval boom')", "throw.js")
             .expect_err("evaluation must fail");
         assert!(error.to_string().contains("eval boom"));
+    }
+
+    #[test]
+    fn register_host_function_converts_arguments_and_surfaces_errors() {
+        let runtime = Runtime::new().expect("Boa runtime");
+        let recorded = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let captured = Rc::clone(&recorded);
+        runtime
+            .register_host_function("record", move |args| {
+                captured.borrow_mut().extend_from_slice(args);
+                Ok(())
+            })
+            .expect("register record");
+        runtime
+            .register_host_function("reject", |_| Err("host rejected call".to_owned()))
+            .expect("register reject");
+        eval_js(
+            &runtime,
+            "record('text', 3.5, true, null, undefined, { toString() { return 'object'; } });",
+            "host-arguments.js",
+        );
+        assert_eq!(
+            *recorded.borrow(),
+            [
+                HostValue::String("text".to_owned()),
+                HostValue::Number(3.5),
+                HostValue::Bool(true),
+                HostValue::Null,
+                HostValue::Undefined,
+                HostValue::String("object".to_owned()),
+            ]
+        );
+        let error = runtime
+            .eval("reject()", "host-error.js")
+            .expect_err("host error must throw");
+        assert!(error.to_string().contains("host rejected call"), "{error}");
+    }
+
+    #[test]
+    fn register_host_function_with_result_returns_all_primitives() {
+        let runtime = Runtime::new().expect("Boa runtime");
+        for (name, value) in [
+            ("hostString", HostValue::String("text".to_owned())),
+            ("hostNumber", HostValue::Number(3.5)),
+            ("hostTrue", HostValue::Bool(true)),
+            ("hostNull", HostValue::Null),
+            ("hostUndefined", HostValue::Undefined),
+        ] {
+            runtime
+                .register_host_function_with_result(name, move |_| Ok(value.clone()))
+                .expect("register primitive result");
+        }
+        assert!(eval_bool(
+            &runtime,
+            "hostString() === 'text' && hostNumber() === 3.5 && hostTrue() === true && hostNull() === null && hostUndefined() === undefined",
+            "host-results.js",
+        ));
+    }
+
+    #[test]
+    fn clear_global_assigns_undefined_and_releases_its_handle() {
+        let runtime = Runtime::new().expect("Boa runtime");
+        let value = runtime.eval("41", "clear-value.js").expect("value");
+        runtime
+            .set_global_value("clearTarget", value)
+            .expect("set clear target");
+        runtime.clear_global("clearTarget").expect("clear target");
+        assert!(eval_bool(
+            &runtime,
+            "globalThis.clearTarget === undefined",
+            "clear-result.js",
+        ));
+    }
+
+    #[test]
+    fn eval_module_loads_a_relative_import_chain() {
+        let files = TempModules::new();
+        files.write("value.mjs", "export const answer = 42;");
+        let entry = files.write(
+            "entry.mjs",
+            "import { answer } from './value.mjs'; globalThis.moduleAnswer = answer;",
+        );
+        let runtime = Runtime::new().expect("Boa runtime");
+        let evaluation = runtime.eval_module(&entry).expect("evaluate module");
+        assert_eq!(
+            evaluation.status().expect("module status"),
+            ModuleEvaluationStatus::Fulfilled
+        );
+        assert_eq!(
+            eval_number(&runtime, "globalThis.moduleAnswer", "module-result.js"),
+            Some(42.0)
+        );
+    }
+
+    #[test]
+    fn set_module_alias_resolves_an_exact_specifier() {
+        let files = TempModules::new();
+        let aliased = files.write("owner.mjs", "export const revision = 'owner';");
+        let entry = files.write(
+            "alias-entry.mjs",
+            "import { revision } from 'three'; globalThis.aliasRevision = revision;",
+        );
+        let runtime = Runtime::new().expect("Boa runtime");
+        runtime
+            .set_module_alias("three", &aliased)
+            .expect("set alias");
+        runtime.eval_module(&entry).expect("evaluate alias module");
+        assert!(eval_bool(
+            &runtime,
+            "globalThis.aliasRevision === 'owner'",
+            "alias-result.js",
+        ));
+    }
+
+    #[test]
+    fn set_module_transform_applies_to_root_and_imported_modules() {
+        let files = TempModules::new();
+        files.write("value.mjs", "export const value = __IMPORTED_MARKER__;");
+        let entry = files.write(
+            "transform-entry.mjs",
+            "import { value } from './value.mjs'; globalThis.transformValue = value + __ROOT_MARKER__;",
+        );
+        let runtime = Runtime::new().expect("Boa runtime");
+        runtime.set_module_transform(|source, _| {
+            Ok(source
+                .replace("__IMPORTED_MARKER__", "29")
+                .replace("__ROOT_MARKER__", "31"))
+        });
+        runtime
+            .eval_module(&entry)
+            .expect("evaluate transformed module");
+        assert_eq!(
+            eval_number(&runtime, "globalThis.transformValue", "transform-result.js"),
+            Some(60.0)
+        );
+    }
+
+    #[test]
+    fn module_identity_lexically_normalizes_dot_and_parent_diamonds() {
+        let files = TempModules::new();
+        files.write(
+            "sub/x.mjs",
+            "globalThis.diamondEvaluations = (globalThis.diamondEvaluations ?? 0) + 1; export const shared = {};",
+        );
+        files.write(
+            "sub/nested/y.mjs",
+            "import { shared } from '.././x.mjs'; export { shared };",
+        );
+        let entry = files.write(
+            "diamond-entry.mjs",
+            "import { shared as direct } from './sub/./x.mjs'; import { shared as indirect } from './sub/nested/../nested/y.mjs'; globalThis.diamondSame = direct === indirect;",
+        );
+        let runtime = Runtime::new().expect("Boa runtime");
+        runtime.eval_module(&entry).expect("evaluate diamond");
+        assert!(eval_bool(
+            &runtime,
+            "globalThis.diamondEvaluations === 1 && globalThis.diamondSame",
+            "diamond-result.js",
+        ));
+        assert!(runtime
+            .module_loader
+            .modules
+            .borrow()
+            .contains_key(&files.path().join("sub/x.mjs")));
+    }
+
+    #[test]
+    fn run_gc_collects_an_unrooted_native_object() {
+        let runtime = Runtime::new().expect("Boa runtime");
+        let finalized = Arc::new(AtomicUsize::new(0));
+        runtime.with_scope(|cx| {
+            ObjectInitializer::with_native_data(
+                FinalizeProbe {
+                    finalized: Arc::clone(&finalized),
+                },
+                cx.boa(),
+            )
+            .build();
+        });
+        runtime.run_gc();
+        assert_eq!(finalized.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -1398,10 +2005,11 @@ mod tests {
         runtime
             .set_global_value("hostValue", value)
             .expect("set global value");
-        assert!(runtime
-            .eval("globalThis.hostValue === 37", "global-value.js")
-            .expect("inspect global value")
-            .to_boolean());
+        assert!(eval_bool(
+            &runtime,
+            "globalThis.hostValue === 37",
+            "global-value.js"
+        ));
         assert!(runtime.arena.slots.borrow()[value.0 as usize].is_none());
 
         runtime
@@ -1430,13 +2038,11 @@ mod tests {
         runtime
             .set_global_value("wrappedDevice", device)
             .expect("set wrapped device");
-        assert!(runtime
-            .eval(
+        assert!(eval_bool(
+            &runtime,
                 "typeof wrappedDevice.createBuffer === 'function' && wrappedDevice.queue === wrappedDevice.queue",
                 "wrapped-device.js",
-            )
-            .expect("inspect wrapped device")
-            .to_boolean());
+        ));
     }
 
     #[test]
@@ -1448,13 +2054,11 @@ mod tests {
         runtime
             .set_global_value("wrappedGpu", gpu)
             .expect("set wrapped GPU");
-        assert!(runtime
-            .eval(
-                "typeof wrappedGpu.requestAdapter === 'function'",
-                "wrapped-gpu.js",
-            )
-            .expect("inspect wrapped GPU")
-            .to_boolean());
+        assert!(eval_bool(
+            &runtime,
+            "typeof wrappedGpu.requestAdapter === 'function'",
+            "wrapped-gpu.js",
+        ));
     }
 
     #[test]
@@ -1518,13 +2122,11 @@ mod tests {
             .expect("observe lost promise");
         // SAFETY: setup keeps the instance live and this runs on the runtime thread.
         unsafe { runtime.tick(setup.instance) }.expect("drain lost observer");
-        assert!(runtime
-            .eval(
-                "globalThis.forwardedReason === 'destroyed'",
-                "lost-result.js",
-            )
-            .expect("inspect lost reason")
-            .to_boolean());
+        assert!(eval_bool(
+            &runtime,
+            "globalThis.forwardedReason === 'destroyed'",
+            "lost-result.js",
+        ));
     }
 
     #[test]
@@ -1651,13 +2253,11 @@ mod tests {
             )
             .expect("run copy-back script");
         tick_until(&runtime, setup.instance, "globalThis.copyBackDone");
-        assert!(runtime
-            .eval(
-                "globalThis.copyBackBytes.join(',') === '11,22,33,44'",
-                "copy-back-result.js",
-            )
-            .expect("inspect copy-back bytes")
-            .to_boolean());
+        assert!(eval_bool(
+            &runtime,
+            "globalThis.copyBackBytes.join(',') === '11,22,33,44'",
+            "copy-back-result.js",
+        ));
     }
 
     #[test]
@@ -1696,21 +2296,17 @@ mod tests {
             )
             .expect("batched settlement");
         });
-        assert!(runtime
-            .eval(
-                "globalThis.settlementOrder.length === 0",
-                "before-microtasks.js",
-            )
-            .expect("inspect pre-drain order")
-            .to_boolean());
+        assert!(eval_bool(
+            &runtime,
+            "globalThis.settlementOrder.length === 0",
+            "before-microtasks.js",
+        ));
         runtime.with_scope(|cx| Engine::drain_microtasks(cx).expect("drain microtasks"));
-        assert!(runtime
-            .eval(
-                "globalThis.settlementOrder.join(',') === 'first:one,second-error:two'",
-                "after-microtasks.js",
-            )
-            .expect("inspect settlement order")
-            .to_boolean());
+        assert!(eval_bool(
+            &runtime,
+            "globalThis.settlementOrder.join(',') === 'first:one,second-error:two'",
+            "after-microtasks.js",
+        ));
     }
 
     #[test]
@@ -1745,10 +2341,11 @@ mod tests {
             // SAFETY: setup keeps the instance live and this loop runs on the
             // runtime's owning thread.
             unsafe { runtime.tick(setup.instance) }.expect("parity tick");
-            let done = runtime
-                .eval("Boolean(globalThis.parityDone)", "tests/parity/done.js")
-                .expect("read parity completion")
-                .to_boolean();
+            let done = eval_bool(
+                &runtime,
+                "Boolean(globalThis.parityDone)",
+                "tests/parity/done.js",
+            );
             if done {
                 break;
             }
@@ -1756,18 +2353,13 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
 
-        let joined = runtime
-            .eval("globalThis.parityLog.join('\\n')", "tests/parity/join.js")
-            .expect("join parity log");
-        // SAFETY: the parity test is single-threaded and no other Boa call is
-        // active while this completion value is converted.
-        let context = unsafe { &mut *runtime.raw_context() };
         let actual = format!(
             "{}\n",
-            joined
-                .to_string(context)
-                .expect("stringify parity output")
-                .to_std_string_lossy()
+            eval_string(
+                &runtime,
+                "globalThis.parityLog.join('\\n')",
+                "tests/parity/join.js",
+            )
         );
         assert_eq!(actual, EXPECTED);
     }

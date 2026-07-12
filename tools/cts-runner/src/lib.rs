@@ -185,7 +185,7 @@ pub fn format_summary(summary: Summary) -> String {
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "engine-quickjs"))]
 mod tests {
     use std::cell::Cell;
     use std::rc::Rc;

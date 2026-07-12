@@ -6,8 +6,26 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use cts_runner::{format_summary, load_expectations, load_suite, summarize, Status, TestResult};
-use quickjs_adapter::{HostValue, ModuleEvaluationStatus, Runtime};
 use webgpu_native_js_ffi::native as wgpu;
+
+#[cfg(all(feature = "engine-quickjs", feature = "engine-boa"))]
+compile_error!("engine-quickjs and engine-boa are mutually exclusive");
+#[cfg(not(any(feature = "engine-quickjs", feature = "engine-boa")))]
+compile_error!("one of engine-quickjs or engine-boa must be enabled");
+
+#[cfg(feature = "engine-boa")]
+mod engine {
+    pub use boa_adapter::{HostValue, ModuleEvaluationStatus, Runtime};
+    pub type Result<T> = boa_adapter::Result<T>;
+}
+
+#[cfg(feature = "engine-quickjs")]
+mod engine {
+    pub use quickjs_adapter::{HostValue, ModuleEvaluationStatus, Runtime};
+    pub type Result<T> = quickjs_adapter::Result<T>;
+}
+
+use engine::{HostValue, ModuleEvaluationStatus, Runtime};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 300;
 const GLUE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/glue.mjs");
@@ -233,7 +251,7 @@ fn js_string(value: &str) -> String {
     encoded
 }
 
-fn install_config(runtime: &Runtime, config: &Config) -> quickjs_adapter::Result<()> {
+fn install_config(runtime: &Runtime, config: &Config) -> engine::Result<()> {
     let queries = config
         .queries
         .iter()
