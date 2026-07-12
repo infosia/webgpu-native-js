@@ -44,6 +44,7 @@ type JSChar = u16;
 type JSPropertyAttributes = u32;
 type JSClassAttributes = u32;
 type JSTypedArrayType = c_int;
+const TYPED_ARRAY_TYPE_UINT32_ARRAY: JSTypedArrayType = 6;
 const TYPED_ARRAY_TYPE_ARRAY_BUFFER: JSTypedArrayType = 9;
 type InitializeCallback = unsafe extern "C" fn(JSContextRef, JSObjectRef);
 type FinalizeCallback = unsafe extern "C" fn(JSObjectRef);
@@ -1386,6 +1387,14 @@ impl core::JsEngine for Engine {
     fn is_callable(cx: Self::Context<'_>, value: Self::Value) -> bool {
         // SAFETY: the object predicate guards the JSValueRef-to-JSObjectRef cast.
         unsafe { JSValueIsObject(cx.ctx, value) && JSObjectIsFunction(cx.ctx, value.cast_mut()) }
+    }
+
+    fn is_uint32array(cx: Self::Context<'_>, value: Self::Value) -> bool {
+        let mut exception = ptr::null();
+        // SAFETY: value belongs to cx. This predicate reads only the view kind
+        // and does not expose or pin its backing-store pointer.
+        let kind = unsafe { JSValueGetTypedArrayType(cx.ctx, value, &mut exception) };
+        exception.is_null() && kind == TYPED_ARRAY_TYPE_UINT32_ARRAY
     }
 
     fn to_f64(cx: Self::Context<'_>, value: Self::Value) -> core::Result<f64, Self::Error> {

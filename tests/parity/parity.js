@@ -893,9 +893,31 @@
                 layout: "auto",
                 compute: { module: computeModule, entryPoint: "main" }
             });
+            var computeBindGroup = device.createBindGroup({
+                layout: computePipeline.getBindGroupLayout(0),
+                entries: []
+            });
             var computeEncoder = device.createCommandEncoder();
             var computePass = computeEncoder.beginComputePass();
             computePass.setPipeline(computePipeline);
+            computePass.setBindGroup(0, computeBindGroup, []);
+            computePass.setBindGroup(0, computeBindGroup, new Uint32Array([]), 0, 0);
+            var computeOffsetsError = caught(function () {
+                computePass.setBindGroup(0, computeBindGroup, [0, -1]);
+            });
+            log("setBindGroup:compute-offsets:" + computeOffsetsError.name);
+            var offsetsWindowError = caught(function () {
+                computePass.setBindGroup(0, computeBindGroup, new Uint32Array([0]), 1, 1);
+            });
+            log("setBindGroup:u32array-window:" + offsetsWindowError.name);
+            var offsetsTypeError = caught(function () {
+                computePass.setBindGroup(0, computeBindGroup, new Int32Array([]), 0, 0);
+            });
+            log("setBindGroup:u32array-type:" + offsetsTypeError.name);
+            var nullBindGroupError = caught(function () {
+                computePass.setBindGroup(0, null, []);
+            });
+            log("setBindGroup:null-bindGroup:" + nullBindGroupError.name);
             computePass.dispatchWorkgroupsIndirect(indirectBuffer, 0);
             var computeTypeError = caught(function () {
                 computePass.dispatchWorkgroupsIndirect({}, 0);
@@ -917,6 +939,10 @@
                     targets: [{ format: "rgba8unorm" }]
                 }
             });
+            var renderBindGroup = device.createBindGroup({
+                layout: renderPipeline.getBindGroupLayout(0),
+                entries: []
+            });
             var texture = device.createTexture({
                 size: [1], format: "rgba8unorm", usage: 16
             });
@@ -929,6 +955,24 @@
                 }]
             });
             renderPass.setPipeline(renderPipeline);
+            renderPass.setBindGroup(0, renderBindGroup, []);
+            renderPass.setBindGroup(0, renderBindGroup, new Uint32Array([]), 0, 0);
+            var renderOffsetsError = caught(function () {
+                renderPass.setBindGroup(0, renderBindGroup, [0, 4294967296]);
+            });
+            log("setBindGroup:render-offsets:" + renderOffsetsError.name);
+            renderPass.setBlendConstant([0.125, 0.25, 0.5, 1]);
+            renderPass.setBlendConstant({ r: 0.75, g: 0.5, b: 0.25, a: 1 });
+            renderPass.setStencilReference(4294967295);
+            log("dynamicState:blend-stencil:ok");
+            var blendError = caught(function () {
+                renderPass.setBlendConstant([0, 1]);
+            });
+            log("dynamicState:blend-length:" + blendError.name);
+            var stencilError = caught(function () {
+                renderPass.setStencilReference(4294967296);
+            });
+            log("dynamicState:stencil-range:" + stencilError.name);
             renderPass.setIndexBuffer(indexBuffer, "uint16");
             renderPass.drawIndirect(indirectBuffer, 0);
             var drawOffsetError = caught(function () {
@@ -945,6 +989,12 @@
                 colorFormats: ["rgba8unorm"]
             });
             bundleEncoder.setPipeline(renderPipeline);
+            bundleEncoder.setBindGroup(0, renderBindGroup, []);
+            bundleEncoder.setBindGroup(0, renderBindGroup, new Uint32Array([]), 0, 0);
+            var bundleOffsetsError = caught(function () {
+                bundleEncoder.setBindGroup(0, renderBindGroup, [1.5]);
+            });
+            log("setBindGroup:bundle-offsets:" + bundleOffsetsError.name);
             bundleEncoder.setIndexBuffer(indexBuffer, "uint16");
             bundleEncoder.drawIndirect(indirectBuffer, 0);
             var bundleTypeError = caught(function () {

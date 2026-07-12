@@ -126,9 +126,18 @@ renderBundle:use-after-finish:OperationError:GPURenderBundleEncoder is finished
 renderBundle:type-confusion:TypeError:GPURenderBundle is required
 renderBundle:sparse-colorFormats:null
 renderBundle:chain:null
+setBindGroup:compute-offsets:TypeError
+setBindGroup:u32array-window:RangeError
+setBindGroup:u32array-type:TypeError
+setBindGroup:null-bindGroup:TypeError
 indirect:dispatchWorkgroupsIndirect:TypeError
+setBindGroup:render-offsets:TypeError
+dynamicState:blend-stencil:ok
+dynamicState:blend-length:TypeError
+dynamicState:stencil-range:TypeError
 indirect:drawIndirect:TypeError
 indirect:drawIndexedIndirect:TypeError
+setBindGroup:bundle-offsets:TypeError
 indirect:bundle.drawIndirect:TypeError
 indirect:bundle.drawIndexedIndirect:TypeError
 scope:indirect-commands:null

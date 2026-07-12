@@ -209,6 +209,8 @@ members = [
   "drawIndexedIndirect",
   "setViewport",
   "setScissorRect",
+  "setBlendConstant",
+  "setStencilReference",
   "beginOcclusionQuery",
   "endOcclusionQuery",
   "executeBundles",
@@ -485,6 +487,16 @@ path = "render_pass_set_viewport"
 interface = "GPURenderPassEncoder"
 member = "setScissorRect"
 path = "render_pass_set_scissor_rect"
+
+[[lifecycle.methods]]
+interface = "GPURenderPassEncoder"
+member = "setBlendConstant"
+path = "render_pass_set_blend_constant"
+
+[[lifecycle.methods]]
+interface = "GPURenderPassEncoder"
+member = "setStencilReference"
+path = "render_pass_set_stencil_reference"
 
 [[lifecycle.methods]]
 interface = "GPURenderPassEncoder"

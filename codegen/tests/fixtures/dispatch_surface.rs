@@ -114,6 +114,8 @@ macro_rules! for_each_gpu_dispatch_entry {
             (render_pass_encoder_draw_indexed_indirect, wgpuRenderPassEncoderDrawIndexedIndirect, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder, indirect_buffer: $crate::WGPUBuffer, indirect_offset: u64)),
             (render_pass_encoder_set_viewport, wgpuRenderPassEncoderSetViewport, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder, x: f32, y: f32, width: f32, height: f32, min_depth: f32, max_depth: f32)),
             (render_pass_encoder_set_scissor_rect, wgpuRenderPassEncoderSetScissorRect, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder, x: u32, y: u32, width: u32, height: u32)),
+            (render_pass_encoder_set_blend_constant, wgpuRenderPassEncoderSetBlendConstant, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder, color: *const $crate::WGPUColor)),
+            (render_pass_encoder_set_stencil_reference, wgpuRenderPassEncoderSetStencilReference, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder, reference: u32)),
             (render_pass_encoder_begin_occlusion_query, wgpuRenderPassEncoderBeginOcclusionQuery, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder, query_index: u32)),
             (render_pass_encoder_end_occlusion_query, wgpuRenderPassEncoderEndOcclusionQuery, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder)),
             (render_pass_encoder_execute_bundles, wgpuRenderPassEncoderExecuteBundles, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder, bundles_count: usize, bundles: *const $crate::WGPURenderBundle)),

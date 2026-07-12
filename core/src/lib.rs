@@ -392,6 +392,8 @@ pub trait JsEngine: Sized {
     fn is_object(cx: Self::Context<'_>, value: Self::Value) -> bool;
     /// Returns true when a JavaScript value is callable.
     fn is_callable(cx: Self::Context<'_>, value: Self::Value) -> bool;
+    /// Returns true only for a `Uint32Array` view.
+    fn is_uint32array(cx: Self::Context<'_>, value: Self::Value) -> bool;
     /// Converts with JavaScript `ToNumber`.
     fn to_f64(cx: Self::Context<'_>, value: Self::Value) -> Result<f64, Self::Error>;
     /// Converts with JavaScript `ToBoolean`.
@@ -2222,18 +2224,35 @@ impl LiveRenderCommands {
         }
     }
 
-    unsafe fn set_bind_group(self, gpu: GpuDispatch, index: u32, bind_group: WGPUBindGroup) {
+    unsafe fn set_bind_group(
+        self,
+        gpu: GpuDispatch,
+        index: u32,
+        bind_group: WGPUBindGroup,
+        dynamic_offsets: &[u32],
+    ) {
+        let offsets = if dynamic_offsets.is_empty() {
+            ptr::null()
+        } else {
+            dynamic_offsets.as_ptr()
+        };
         match self {
             Self::Pass(pass) => unsafe {
-                (gpu.render_pass_encoder_set_bind_group)(pass, index, bind_group, 0, ptr::null())
+                (gpu.render_pass_encoder_set_bind_group)(
+                    pass,
+                    index,
+                    bind_group,
+                    dynamic_offsets.len(),
+                    offsets,
+                )
             },
             Self::Bundle(bundle) => unsafe {
                 (gpu.render_bundle_encoder_set_bind_group)(
                     bundle,
                     index,
                     bind_group,
-                    0,
-                    ptr::null(),
+                    dynamic_offsets.len(),
+                    offsets,
                 )
             },
         }
@@ -5034,13 +5053,18 @@ pub fn compute_pass_set_bind_group<E: JsEngine + 'static>(
             .copied()
             .ok_or_else(|| E::type_error(cx, "bindGroup"))?,
     )?;
+    let dynamic_offsets = convert_dynamic_offsets::<E>(cx, args)?;
     unsafe {
         (E::environment(cx).gpu().compute_pass_encoder_set_bind_group)(
             pass,
             index,
             bind_group,
-            0,
-            ptr::null(),
+            dynamic_offsets.len(),
+            if dynamic_offsets.is_empty() {
+                ptr::null()
+            } else {
+                dynamic_offsets.as_ptr()
+            },
         );
     }
     Ok(E::undefined(cx))
@@ -5190,7 +5214,15 @@ pub fn render_pass_set_bind_group<E: JsEngine + 'static>(
     let encoder = live_render_commands::<E>(cx, this)?;
     let index = enforce_u32::<E>(cx, required_argument::<E>(cx, args, 0, "index")?, "index")?;
     let bind_group = bind_group_handle::<E>(cx, required_argument::<E>(cx, args, 1, "bindGroup")?)?;
-    unsafe { encoder.set_bind_group(E::environment(cx).gpu(), index, bind_group) };
+    let dynamic_offsets = convert_dynamic_offsets::<E>(cx, args)?;
+    unsafe {
+        encoder.set_bind_group(
+            E::environment(cx).gpu(),
+            index,
+            bind_group,
+            &dynamic_offsets,
+        )
+    };
     Ok(E::undefined(cx))
 }
 
@@ -5339,6 +5371,42 @@ pub fn render_pass_set_scissor_rect<E: JsEngine + 'static>(
         (E::environment(cx)
             .gpu()
             .render_pass_encoder_set_scissor_rect)(pass, x, y, width, height)
+    };
+    Ok(E::undefined(cx))
+}
+
+/// Implements `GPURenderPassEncoder.setBlendConstant`.
+pub fn render_pass_set_blend_constant<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let pass = live_render_pass::<E>(cx, this)?;
+    let color = convert_gpu_color::<E>(cx, required_argument::<E>(cx, args, 0, "color")?)?;
+    unsafe {
+        (E::environment(cx)
+            .gpu()
+            .render_pass_encoder_set_blend_constant)(pass, ptr::from_ref(&color))
+    };
+    Ok(E::undefined(cx))
+}
+
+/// Implements `GPURenderPassEncoder.setStencilReference`.
+pub fn render_pass_set_stencil_reference<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let pass = live_render_pass::<E>(cx, this)?;
+    let reference = enforce_u32::<E>(
+        cx,
+        required_argument::<E>(cx, args, 0, "reference")?,
+        "reference",
+    )?;
+    unsafe {
+        (E::environment(cx)
+            .gpu()
+            .render_pass_encoder_set_stencil_reference)(pass, reference)
     };
     Ok(E::undefined(cx))
 }
@@ -6074,6 +6142,96 @@ fn convert_sequence<E: JsEngine, T>(
         return Err(E::type_error(cx, &format!("{name} is not iterable")));
     };
     convert_sequence_from_method::<E, _>(cx, value, iterator_method, name, convert)
+}
+
+fn convert_dynamic_offsets<E: JsEngine>(
+    cx: E::Context<'_>,
+    args: &[E::Value],
+) -> Result<Vec<u32>, E::Error> {
+    // Four or more supplied arguments select the Uint32Array-window overload.
+    if args.len() >= 4 {
+        let data = required_argument::<E>(cx, args, 2, "dynamicOffsetsData")?;
+        if !E::is_uint32array(cx, data) {
+            return Err(E::type_error(cx, "dynamicOffsetsData"));
+        }
+        let source = convert_buffer_source::<E>(cx, data)?;
+        if source.bytes_per_element != 4 || source.byte_length % 4 != 0 {
+            return Err(E::type_error(cx, "dynamicOffsetsData"));
+        }
+        let start = enforce_u64::<E>(
+            cx,
+            required_argument::<E>(cx, args, 3, "dynamicOffsetsDataStart")?,
+            "dynamicOffsetsDataStart",
+        )?;
+        let length = enforce_u32::<E>(
+            cx,
+            required_argument::<E>(cx, args, 4, "dynamicOffsetsDataLength")?,
+            "dynamicOffsetsDataLength",
+        )?;
+        let end = start
+            .checked_add(u64::from(length))
+            .filter(|end| *end <= source.byte_length / 4)
+            .ok_or_else(|| {
+                E::range_error(
+                    cx,
+                    "dynamicOffsetsDataStart + dynamicOffsetsDataLength exceeds dynamicOffsetsData length",
+                )
+            })?;
+        let byte_start = source
+            .byte_offset
+            .checked_add(start.checked_mul(4).ok_or_else(|| {
+                E::range_error(
+                    cx,
+                    "dynamicOffsetsDataStart exceeds dynamicOffsetsData length",
+                )
+            })?)
+            .ok_or_else(|| {
+                E::range_error(
+                    cx,
+                    "dynamicOffsetsDataStart exceeds dynamicOffsetsData length",
+                )
+            })?;
+        let byte_end = source
+            .byte_offset
+            .checked_add(end.checked_mul(4).ok_or_else(|| {
+                E::range_error(
+                    cx,
+                    "dynamicOffsetsDataLength exceeds dynamicOffsetsData length",
+                )
+            })?)
+            .ok_or_else(|| {
+                E::range_error(
+                    cx,
+                    "dynamicOffsetsDataLength exceeds dynamicOffsetsData length",
+                )
+            })?;
+        let byte_start = usize::try_from(byte_start)
+            .map_err(|_| E::range_error(cx, "dynamicOffsetsDataStart"))?;
+        let byte_end = usize::try_from(byte_end)
+            .map_err(|_| E::range_error(cx, "dynamicOffsetsDataLength"))?;
+        let bytes = source.bytes.get(byte_start..byte_end).ok_or_else(|| {
+            E::range_error(
+                cx,
+                "dynamicOffsetsDataStart + dynamicOffsetsDataLength exceeds dynamicOffsetsData length",
+            )
+        })?;
+        return bytes
+            .chunks_exact(4)
+            .map(|bytes| {
+                <[u8; 4]>::try_from(bytes)
+                    .map(u32::from_ne_bytes)
+                    .map_err(|_| E::type_error(cx, "dynamicOffsetsData"))
+            })
+            .collect();
+    }
+    match args.get(2).copied() {
+        Some(value) if !E::is_undefined(cx, value) => {
+            convert_sequence::<E, _>(cx, value, "dynamicOffsets", |item| {
+                enforce_u32::<E>(cx, item, "dynamicOffsets")
+            })
+        }
+        _ => Ok(Vec::new()),
+    }
 }
 
 fn sequence_iterator_method<E: JsEngine>(

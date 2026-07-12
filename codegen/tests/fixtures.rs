@@ -200,7 +200,7 @@ fn generated_dispatch_macro_matches_focused_shape_fixture() {
     let expected =
         fs::read_to_string(fixtures().join("dispatch_surface.rs")).expect("dispatch snapshot");
     assert_eq!(dispatch_macro_surface(&emitted), expected);
-    assert_eq!(expected.matches(", unsafe fn(").count(), 126);
+    assert_eq!(expected.matches(", unsafe fn(").count(), 128);
 }
 
 #[test]
@@ -293,6 +293,12 @@ fn generated_lifecycle_covers_every_selected_class_and_retention_set() {
     assert!(emitted.contains(
         "MethodSpec { name: \"setPipeline\", length: 1, call: render_pass_set_pipeline::<E> }"
     ));
+    assert!(emitted.contains(
+        "MethodSpec { name: \"setBlendConstant\", length: 1, call: render_pass_set_blend_constant::<E> }"
+    ));
+    assert!(emitted.contains(
+        "MethodSpec { name: \"setStencilReference\", length: 1, call: render_pass_set_stencil_reference::<E> }"
+    ));
     let bundle_class = emitted
         .split("pub(super) fn render_bundle_encoder_class")
         .nth(1)
@@ -301,6 +307,8 @@ fn generated_lifecycle_covers_every_selected_class_and_retention_set() {
     for absent in [
         "setViewport",
         "setScissorRect",
+        "setBlendConstant",
+        "setStencilReference",
         "beginOcclusionQuery",
         "endOcclusionQuery",
     ] {

@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use boa_engine::builtins::object::OrdinaryObject as BoaObjectBuiltin;
 use boa_engine::builtins::promise::PromiseState;
 use boa_engine::module::{ModuleLoader, Referrer};
-use boa_engine::object::builtins::{AlignedVec, JsArray, JsArrayBuffer, JsPromise};
+use boa_engine::object::builtins::{AlignedVec, JsArray, JsArrayBuffer, JsPromise, JsUint32Array};
 use boa_engine::object::{FunctionObjectBuilder, JsObject, ObjectInitializer};
 use boa_engine::property::Attribute;
 use boa_engine::{
@@ -1143,6 +1143,13 @@ impl core::JsEngine for Engine {
 
     fn is_callable(cx: Self::Context<'_>, value: Self::Value) -> bool {
         cx.arena.get(value).is_callable()
+    }
+
+    fn is_uint32array(cx: Self::Context<'_>, value: Self::Value) -> bool {
+        cx.arena
+            .get(value)
+            .as_object()
+            .is_some_and(|object| JsUint32Array::from_object(object.clone()).is_ok())
     }
 
     fn to_f64(cx: Self::Context<'_>, value: Self::Value) -> core::Result<f64, Self::Error> {

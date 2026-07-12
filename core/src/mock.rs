@@ -2,7 +2,7 @@
 
 use std::any::Any;
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ptr;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -61,6 +61,7 @@ pub struct Runtime {
     detach_noop: Cell<bool>,
     detach_noop_value: Cell<Option<Value>>,
     duplicated_values: RefCell<BTreeMap<Value, usize>>,
+    uint32arrays: RefCell<BTreeSet<Value>>,
     property_errors: RefCell<BTreeMap<(Value, String), String>>,
     property_value_errors: RefCell<BTreeMap<(Value, Value), String>>,
     call_errors: RefCell<BTreeMap<Value, String>>,
@@ -116,6 +117,7 @@ impl Runtime {
             detach_noop: Cell::new(false),
             detach_noop_value: Cell::new(None),
             duplicated_values: RefCell::new(BTreeMap::new()),
+            uint32arrays: RefCell::new(BTreeSet::new()),
             property_errors: RefCell::new(BTreeMap::new()),
             property_value_errors: RefCell::new(BTreeMap::new()),
             call_errors: RefCell::new(BTreeMap::new()),
@@ -200,6 +202,10 @@ impl Runtime {
 
     fn end_pass_on_next_iteration(&self, pass: Value) {
         self.iterator_end_pass.set(Some(pass));
+    }
+
+    fn mark_uint32array(&self, value: Value) {
+        self.uint32arrays.borrow_mut().insert(self.canonical(value));
     }
 
     fn live_scoped_values(&self) -> usize {
@@ -746,6 +752,13 @@ impl<const COPY_IN_COPY_OUT: bool> JsEngine for MockEngine<COPY_IN_COPY_OUT> {
         )
     }
 
+    fn is_uint32array(cx: Self::Context<'_>, value: Self::Value) -> bool {
+        cx.runtime
+            .uint32arrays
+            .borrow()
+            .contains(&cx.runtime.canonical(value))
+    }
+
     fn to_f64(cx: Self::Context<'_>, value: Self::Value) -> Result<f64, Self::Error> {
         if let Some(buffer) = cx.runtime.coercion_unmap.take() {
             let _ = crate::buffer_unmap::<Self>(cx, buffer, &[])?;
@@ -1164,6 +1177,11 @@ struct MockGpuState {
     requested_features: Vec<Vec<crate::WGPUFeatureName>>,
     requested_limits: Vec<Option<(WGPULimits, crate::WGPUCompatibilityModeLimits)>>,
     recording_calls: BTreeMap<&'static str, usize>,
+    compute_bind_group_calls: Vec<RecordedBindGroupCall<WGPUComputePassEncoder>>,
+    render_bind_group_calls: Vec<RecordedBindGroupCall<WGPURenderPassEncoder>>,
+    bundle_bind_group_calls: Vec<RecordedBindGroupCall<WGPURenderBundleEncoder>>,
+    blend_constant_calls: Vec<(WGPURenderPassEncoder, [f64; 4])>,
+    stencil_reference_calls: Vec<(WGPURenderPassEncoder, u32)>,
     clear_buffer_calls: Vec<(WGPUCommandEncoder, WGPUBuffer, u64, u64)>,
     resolve_query_set_calls: Vec<(WGPUCommandEncoder, WGPUQuerySet, u32, u32, WGPUBuffer, u64)>,
     vertex_buffer_ranges: Vec<(u64, u64)>,
@@ -1181,6 +1199,15 @@ struct MockPopError {
     status: WGPUPopErrorScopeStatus,
     type_: WGPUErrorType,
     message: String,
+}
+
+#[derive(Debug, PartialEq)]
+struct RecordedBindGroupCall<H> {
+    encoder: H,
+    index: u32,
+    bind_group: WGPUBindGroup,
+    offsets: Vec<u32>,
+    offsets_were_null: bool,
 }
 
 type RecordedConstants = Vec<(Vec<u8>, f64)>;
@@ -2516,19 +2543,36 @@ unsafe fn compute_pass_encoder_set_pipeline(
             .or_default() += 1;
     });
 }
+
+unsafe fn recorded_dynamic_offsets(offset_count: usize, offsets: *const u32) -> Vec<u32> {
+    if offset_count == 0 {
+        return Vec::new();
+    }
+    assert!(!offsets.is_null());
+    // SAFETY: the binding provides offset_count readable elements for this call.
+    unsafe { std::slice::from_raw_parts(offsets, offset_count) }.to_vec()
+}
+
 unsafe fn compute_pass_encoder_set_bind_group(
-    _pass: WGPUComputePassEncoder,
-    _index: u32,
-    _bind_group: WGPUBindGroup,
-    _offset_count: usize,
-    _offsets: *const u32,
+    pass: WGPUComputePassEncoder,
+    index: u32,
+    bind_group: WGPUBindGroup,
+    offset_count: usize,
+    offsets: *const u32,
 ) {
     GPU_STATE.with(|state| {
+        let mut state = state.borrow_mut();
         *state
-            .borrow_mut()
             .recording_calls
             .entry("compute_set_bind_group")
             .or_default() += 1;
+        state.compute_bind_group_calls.push(RecordedBindGroupCall {
+            encoder: pass,
+            index,
+            bind_group,
+            offsets: recorded_dynamic_offsets(offset_count, offsets),
+            offsets_were_null: offsets.is_null(),
+        });
     });
 }
 unsafe fn compute_pass_encoder_dispatch_workgroups(
@@ -2623,18 +2667,47 @@ unsafe fn render_pass_encoder_set_index_buffer(
     });
 }
 unsafe fn render_pass_encoder_set_bind_group(
-    _pass: WGPURenderPassEncoder,
-    _index: u32,
-    _bind_group: WGPUBindGroup,
-    _offset_count: usize,
-    _offsets: *const u32,
+    pass: WGPURenderPassEncoder,
+    index: u32,
+    bind_group: WGPUBindGroup,
+    offset_count: usize,
+    offsets: *const u32,
 ) {
     GPU_STATE.with(|state| {
+        let mut state = state.borrow_mut();
         *state
-            .borrow_mut()
             .recording_calls
             .entry("render_set_bind_group")
             .or_default() += 1;
+        state.render_bind_group_calls.push(RecordedBindGroupCall {
+            encoder: pass,
+            index,
+            bind_group,
+            offsets: recorded_dynamic_offsets(offset_count, offsets),
+            offsets_were_null: offsets.is_null(),
+        });
+    });
+}
+unsafe fn render_pass_encoder_set_blend_constant(
+    pass: WGPURenderPassEncoder,
+    color: *const crate::WGPUColor,
+) {
+    assert!(!color.is_null());
+    // SAFETY: the binding passes a live WGPUColor for the duration of this call.
+    let color = unsafe { &*color };
+    GPU_STATE.with(|state| {
+        state
+            .borrow_mut()
+            .blend_constant_calls
+            .push((pass, [color.r, color.g, color.b, color.a]));
+    });
+}
+unsafe fn render_pass_encoder_set_stencil_reference(pass: WGPURenderPassEncoder, reference: u32) {
+    GPU_STATE.with(|state| {
+        state
+            .borrow_mut()
+            .stencil_reference_calls
+            .push((pass, reference));
     });
 }
 unsafe fn render_pass_encoder_draw(
@@ -2831,18 +2904,25 @@ unsafe fn render_bundle_encoder_set_index_buffer(
     });
 }
 unsafe fn render_bundle_encoder_set_bind_group(
-    _encoder: WGPURenderBundleEncoder,
-    _index: u32,
-    _bind_group: WGPUBindGroup,
-    _offset_count: usize,
-    _offsets: *const u32,
+    encoder: WGPURenderBundleEncoder,
+    index: u32,
+    bind_group: WGPUBindGroup,
+    offset_count: usize,
+    offsets: *const u32,
 ) {
     GPU_STATE.with(|state| {
+        let mut state = state.borrow_mut();
         *state
-            .borrow_mut()
             .recording_calls
             .entry("bundle_set_bind_group")
             .or_default() += 1;
+        state.bundle_bind_group_calls.push(RecordedBindGroupCall {
+            encoder,
+            index,
+            bind_group,
+            offsets: recorded_dynamic_offsets(offset_count, offsets),
+            offsets_were_null: offsets.is_null(),
+        });
     });
 }
 unsafe fn render_bundle_encoder_draw(
@@ -8608,6 +8688,7 @@ mod tests {
         let encoder = device_create_command_encoder::<Engine>(cx, device, &[]).expect("encoder");
         let pass = crate::command_encoder_begin_compute_pass::<Engine>(cx, encoder, &[])
             .expect("compute pass");
+        let native_pass = crate::live_compute_pass::<Engine>(cx, pass).expect("native pass");
         let pipeline = Engine::new_instance(
             cx,
             crate::GPU_COMPUTE_PIPELINE_CLASS,
@@ -8631,24 +8712,119 @@ mod tests {
             }),
         )
         .expect("bind group");
+        let native_bind_group =
+            crate::bind_group_handle::<Engine>(cx, bind_group).expect("native bind group");
 
         crate::compute_pass_set_pipeline::<Engine>(cx, pass, &[pipeline]).expect("pipeline");
         crate::compute_pass_set_bind_group::<Engine>(cx, pass, &[rt.number(0.0), bind_group])
             .expect("bind group");
+        let dynamic_offsets = rt.set_like(&[rt.number(256.0), rt.number(512.0)]);
+        crate::compute_pass_set_bind_group::<Engine>(
+            cx,
+            pass,
+            &[rt.number(2.0), bind_group, dynamic_offsets],
+        )
+        .expect("bind group with dynamic offsets");
+        let bad_offsets = rt.set_like(&[rt.number(768.0), rt.number(-1.0)]);
+        assert_eq!(
+            crate::compute_pass_set_bind_group::<Engine>(
+                cx,
+                pass,
+                &[rt.number(3.0), bind_group, bad_offsets],
+            )
+            .expect_err("bad dynamic offset"),
+            "TypeError: dynamicOffsets"
+        );
+        assert_eq!(
+            crate::compute_pass_set_bind_group::<Engine>(cx, pass, &[rt.number(4.0), rt.null()],)
+                .expect_err("null bind group remains rejected"),
+            "TypeError: GPUBindGroup is required"
+        );
+        let typed_array_bytes = [64_u32, 128, 256, 512]
+            .into_iter()
+            .flat_map(u32::to_ne_bytes)
+            .collect();
+        let typed_array_buffer = rt.insert(MockValue::ArrayBuffer {
+            bytes: typed_array_bytes,
+            detached: false,
+        });
+        let typed_array_constructor = descriptor(&rt, &[("BYTES_PER_ELEMENT", rt.number(4.0))]);
+        let typed_array = descriptor(
+            &rt,
+            &[
+                ("buffer", typed_array_buffer),
+                ("byteOffset", rt.number(4.0)),
+                ("byteLength", rt.number(12.0)),
+                ("constructor", typed_array_constructor),
+            ],
+        );
+        rt.mark_uint32array(typed_array);
+        crate::compute_pass_set_bind_group::<Engine>(
+            cx,
+            pass,
+            &[
+                rt.number(5.0),
+                bind_group,
+                typed_array,
+                rt.number(1.0),
+                rt.number(2.0),
+            ],
+        )
+        .expect("Uint32Array window overload");
+        assert_eq!(
+            crate::compute_pass_set_bind_group::<Engine>(
+                cx,
+                pass,
+                &[
+                    rt.number(6.0),
+                    bind_group,
+                    typed_array,
+                    rt.number(2.0),
+                    rt.number(2.0),
+                ],
+            )
+            .expect_err("Uint32Array window exceeds view"),
+            "RangeError: dynamicOffsetsDataStart + dynamicOffsetsDataLength exceeds dynamicOffsetsData length"
+        );
         crate::compute_pass_dispatch_workgroups::<Engine>(cx, pass, &[rt.number(2.0)])
             .expect("dispatch");
         crate::compute_pass_end::<Engine>(cx, pass, &[]).expect("end");
 
         GPU_STATE.with(|state| {
             let state = state.borrow();
-            for name in [
-                "compute_set_pipeline",
-                "compute_set_bind_group",
-                "dispatch_workgroups",
-                "compute_end",
-            ] {
+            for name in ["compute_set_pipeline", "dispatch_workgroups", "compute_end"] {
                 assert_eq!(state.recording_calls.get(name), Some(&1), "{name}");
             }
+            assert_eq!(
+                state.recording_calls.get("compute_set_bind_group"),
+                Some(&3)
+            );
+            assert_eq!(
+                state.compute_bind_group_calls,
+                [
+                    RecordedBindGroupCall {
+                        encoder: native_pass,
+                        index: 0,
+                        bind_group: native_bind_group,
+                        offsets: Vec::new(),
+                        offsets_were_null: true,
+                    },
+                    RecordedBindGroupCall {
+                        encoder: native_pass,
+                        index: 2,
+                        bind_group: native_bind_group,
+                        offsets: vec![256, 512],
+                        offsets_were_null: false,
+                    },
+                    RecordedBindGroupCall {
+                        encoder: native_pass,
+                        index: 5,
+                        bind_group: native_bind_group,
+                        offsets: vec![256, 512],
+                        offsets_were_null: false,
+                    },
+                ]
+            );
         });
     }
 
@@ -8984,6 +9160,7 @@ mod tests {
         let pass_desc = descriptor(&rt, &[("colorAttachments", rt.set_like(&[attachment]))]);
         let pass = crate::command_encoder_begin_render_pass::<Engine>(cx, encoder, &[pass_desc])
             .expect("begin render pass");
+        let native_pass = crate::live_render_pass::<Engine>(cx, pass).expect("native render pass");
         let pipeline = Engine::new_instance(
             cx,
             crate::GPU_RENDER_PIPELINE_CLASS,
@@ -9048,8 +9225,71 @@ mod tests {
             }),
         )
         .expect("bind group");
+        let native_bind_group =
+            crate::bind_group_handle::<Engine>(cx, bind_group).expect("native bind group");
         crate::render_pass_set_bind_group::<Engine>(cx, pass, &[rt.number(0.0), bind_group])
             .expect("bind group");
+        let dynamic_offsets = rt.set_like(&[rt.number(1024.0), rt.number(2048.0)]);
+        crate::render_pass_set_bind_group::<Engine>(
+            cx,
+            pass,
+            &[rt.number(1.0), bind_group, dynamic_offsets],
+        )
+        .expect("bind group with dynamic offsets");
+        let bad_offsets = rt.set_like(&[rt.number(4096.0), rt.number(4_294_967_296.0)]);
+        assert_eq!(
+            crate::render_pass_set_bind_group::<Engine>(
+                cx,
+                pass,
+                &[rt.number(2.0), bind_group, bad_offsets],
+            )
+            .expect_err("bad dynamic offset"),
+            "TypeError: dynamicOffsets"
+        );
+        assert_eq!(
+            crate::render_pass_set_bind_group::<Engine>(cx, pass, &[rt.number(3.0), rt.null()],)
+                .expect_err("null bind group remains rejected"),
+            "TypeError: GPUBindGroup is required"
+        );
+        let blend_sequence = rt.set_like(&[
+            rt.number(0.125),
+            rt.number(0.25),
+            rt.number(0.5),
+            rt.number(1.0),
+        ]);
+        crate::render_pass_set_blend_constant::<Engine>(cx, pass, &[blend_sequence])
+            .expect("sequence blend constant");
+        let blend_dictionary = descriptor(
+            &rt,
+            &[
+                ("r", rt.number(0.75)),
+                ("g", rt.number(0.625)),
+                ("b", rt.number(0.375)),
+                ("a", rt.number(0.875)),
+            ],
+        );
+        crate::render_pass_set_blend_constant::<Engine>(cx, pass, &[blend_dictionary])
+            .expect("dictionary blend constant");
+        assert_eq!(
+            crate::render_pass_set_blend_constant::<Engine>(
+                cx,
+                pass,
+                &[rt.set_like(&[rt.number(0.0), rt.number(1.0)])],
+            )
+            .expect_err("wrong blend constant length"),
+            "TypeError: GPUColor sequence length must be 4..=4"
+        );
+        crate::render_pass_set_stencil_reference::<Engine>(cx, pass, &[rt.number(4_294_967_295.0)])
+            .expect("stencil reference");
+        assert_eq!(
+            crate::render_pass_set_stencil_reference::<Engine>(
+                cx,
+                pass,
+                &[rt.number(4_294_967_296.0)],
+            )
+            .expect_err("stencil reference above u32"),
+            "TypeError: reference"
+        );
         crate::render_pass_set_viewport::<Engine>(
             cx,
             pass,
@@ -9161,7 +9401,7 @@ mod tests {
                 ("render_set_pipeline", 1),
                 ("render_set_vertex_buffer", 2),
                 ("render_set_index_buffer", 2),
-                ("render_set_bind_group", 1),
+                ("render_set_bind_group", 2),
                 ("set_viewport", 1),
                 ("set_scissor_rect", 1),
                 ("draw", 1),
@@ -9174,6 +9414,36 @@ mod tests {
             ] {
                 assert_eq!(state.recording_calls.get(name), Some(&expected), "{name}");
             }
+            assert_eq!(
+                state.render_bind_group_calls,
+                [
+                    RecordedBindGroupCall {
+                        encoder: native_pass,
+                        index: 0,
+                        bind_group: native_bind_group,
+                        offsets: Vec::new(),
+                        offsets_were_null: true,
+                    },
+                    RecordedBindGroupCall {
+                        encoder: native_pass,
+                        index: 1,
+                        bind_group: native_bind_group,
+                        offsets: vec![1024, 2048],
+                        offsets_were_null: false,
+                    },
+                ]
+            );
+            assert_eq!(
+                state.blend_constant_calls,
+                [
+                    (native_pass, [0.125, 0.25, 0.5, 1.0]),
+                    (native_pass, [0.75, 0.625, 0.375, 0.875]),
+                ]
+            );
+            assert_eq!(
+                state.stencil_reference_calls,
+                [(native_pass, 4_294_967_295)]
+            );
         });
         release_device_held_values(&rt, cx, device);
     }
@@ -9201,6 +9471,17 @@ mod tests {
         let bundle_encoder =
             crate::device_create_render_bundle_encoder::<Engine>(cx, device, &[encoder_descriptor])
                 .expect("bundle encoder");
+        let native_bundle_encoder =
+            Engine::payload(cx, bundle_encoder, crate::GPU_RENDER_BUNDLE_ENCODER_CLASS)
+                .and_then(|payload| payload.downcast_ref::<crate::RenderBundleEncoderPayload>())
+                .and_then(|payload| {
+                    payload
+                        .state
+                        .lock()
+                        .ok()
+                        .map(|state| state.render_bundle_encoder)
+                })
+                .expect("native bundle encoder");
         GPU_STATE.with(|state| {
             assert_eq!(
                 state.borrow().render_bundle_encoder_descriptors,
@@ -9265,6 +9546,8 @@ mod tests {
         );
         assert!(!methods.contains(&"setViewport"));
         assert!(!methods.contains(&"setScissorRect"));
+        assert!(!methods.contains(&"setBlendConstant"));
+        assert!(!methods.contains(&"setStencilReference"));
         assert!(!methods.contains(&"beginOcclusionQuery"));
 
         let pipeline = Engine::new_instance(
@@ -9301,6 +9584,8 @@ mod tests {
             }),
         )
         .expect("bind group");
+        let native_bind_group =
+            crate::bind_group_handle::<Engine>(cx, bind_group).expect("native bind group");
         crate::render_pass_set_pipeline::<Engine>(cx, bundle_encoder, &[pipeline])
             .expect("shared pipeline body");
         crate::render_pass_set_vertex_buffer::<Engine>(
@@ -9321,6 +9606,16 @@ mod tests {
             &[rt.number(0.0), bind_group],
         )
         .expect("shared bind-group body");
+        crate::render_pass_set_bind_group::<Engine>(
+            cx,
+            bundle_encoder,
+            &[
+                rt.number(3.0),
+                bind_group,
+                rt.set_like(&[rt.number(256.0), rt.number(768.0)]),
+            ],
+        )
+        .expect("shared bind-group body with dynamic offsets");
         crate::render_pass_draw::<Engine>(cx, bundle_encoder, &[rt.number(3.0)])
             .expect("shared draw body");
         crate::render_pass_draw_indexed::<Engine>(cx, bundle_encoder, &[rt.number(3.0)])
@@ -9441,7 +9736,6 @@ mod tests {
                 "bundle_set_pipeline",
                 "bundle_set_vertex_buffer",
                 "bundle_set_index_buffer",
-                "bundle_set_bind_group",
                 "bundle_draw",
                 "bundle_draw_indexed",
                 "bundle_draw_indirect",
@@ -9449,6 +9743,26 @@ mod tests {
             ] {
                 assert_eq!(state.recording_calls.get(name), Some(&1), "{name}");
             }
+            assert_eq!(state.recording_calls.get("bundle_set_bind_group"), Some(&2));
+            assert_eq!(
+                state.bundle_bind_group_calls,
+                [
+                    RecordedBindGroupCall {
+                        encoder: native_bundle_encoder,
+                        index: 0,
+                        bind_group: native_bind_group,
+                        offsets: Vec::new(),
+                        offsets_were_null: true,
+                    },
+                    RecordedBindGroupCall {
+                        encoder: native_bundle_encoder,
+                        index: 3,
+                        bind_group: native_bind_group,
+                        offsets: vec![256, 768],
+                        offsets_were_null: false,
+                    },
+                ]
+            );
             assert_eq!(state.recording_calls.get("execute_bundles"), Some(&2));
             assert_eq!(state.render_bundle_encoder_releases, 1);
             assert_eq!(state.render_bundle_releases, 1);
