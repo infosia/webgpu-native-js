@@ -6,7 +6,7 @@ use std::ptr;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use quickjs_adapter::{HostValue, Runtime};
+use boa_adapter::{HostValue, Runtime};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use webgpu_native_js_ffi::native as wgpu;
 use winit::application::ApplicationHandler;

@@ -11,20 +11,20 @@ test = false
 [features]
 default = ["backend-yawgpu"]
 backend-yawgpu = [
-    "quickjs-adapter/backend-yawgpu",
+    "boa-adapter/backend-yawgpu",
     "webgpu-native-js-ffi/backend-yawgpu",
 ]
 backend-wgpu-native = [
-    "quickjs-adapter/backend-wgpu-native",
+    "boa-adapter/backend-wgpu-native",
     "webgpu-native-js-ffi/backend-wgpu-native",
 ]
 backend-dawn = [
-    "quickjs-adapter/backend-dawn",
+    "boa-adapter/backend-dawn",
     "webgpu-native-js-ffi/backend-dawn",
 ]
 
 [dependencies]
-quickjs-adapter = { path = "../../adapters/quickjs", default-features = false }
+boa-adapter = { path = "../../adapters/boa", default-features = false }
 raw-window-handle = "0.6"
 webgpu-native-js-ffi = { path = "../../ffi", default-features = false }
 winit = "0.30"

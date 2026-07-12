@@ -1,5 +1,9 @@
 # Tracking: the release queue
 
+**Historical engine note (2026-07-12):** QuickJS rows and mechanisms below are
+past measurements. The release queue itself remains required and tested; only
+the removed engine's harness/tests were deleted.
+
 Topic owner: `CLAUDE.md` invariant 4; plan §2.5.
 
 ---

@@ -1,6 +1,11 @@
 # Project Plan: webgpu-native-js
 
 **Status:** Working draft, Rev 2 (2026-07-09). Not a contract — see §0.
+**Engine correction (2026-07-12):** the plan's QuickJS-primary architecture,
+phases, paths, CI matrix, and open questions are superseded by the owner
+decision in `CLAUDE.md` and `specs/blocks/14-boa-engine.md`: Boa is the
+cross-platform Tier 1 and quickjs-ng has been removed. Those passages remain as
+historical planning context and must not be read as current instructions.
 **Rev 1 → Rev 2:** three load-bearing claims in Rev 1 were checked against the
 canonical `webgpu.h` and against `dawn.node`, and found wrong. They are
 corrected in place; the full list and its evidence is in §7 (Revision history),

@@ -1,5 +1,9 @@
 # Tracking: backend deltas
 
+**Historical engine note (2026-07-12):** tables labelled QuickJS record past
+backend measurements and are retained for provenance. Current dual-engine
+verification is Boa and JSC.
+
 Divergences between a backend and the canonical
 [`webgpu-headers`](https://github.com/webgpu-native/webgpu-headers).
 

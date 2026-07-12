@@ -92,11 +92,13 @@ For yawgpu, point it at `target/release` of a yawgpu checkout. That directory is
 self-contained since D6 was fixed upstream: it colocates `libtint_shim.dylib`,
 and `libyawgpu.dylib` resolves it via `@loader_path`.
 
-**Spikes are split.** `spikes/event-loop-pump` and `spikes/release-queue` depend on
-`ffi` and are **workspace members**, gated with `-p <name> --features
-ffi/backend-yawgpu`. `spikes/jsc-detach` and `spikes/quickjs-detach` have no
-workspace dependency and are **excluded**, gated individually with
-`cargo test --offline --manifest-path spikes/<name>/Cargo.toml`.
+**Spikes are split.** `spikes/release-queue` depends on `ffi` and is a
+**workspace member**, gated with `-p release-queue --features
+ffi/backend-yawgpu`. `spikes/jsc-detach` has no workspace dependency and is
+**excluded**, gated individually with
+`cargo test --offline --manifest-path spikes/jsc-detach/Cargo.toml`. The
+QuickJS-only detach and event-loop spikes were removed with that engine on
+2026-07-12; their findings remain in the tracking documents.
 
 **Headless-first** (`CLAUDE.md` principle 7): every gate above must pass with no
 GPU and no window. Real-GPU and native-surface tests are separately gated and
@@ -250,8 +252,3 @@ The block 09 deletion lens proved it: a test binary that dies by signal
 the crate's results simply vanish, and any log grep keyed to those strings
 reports the run cleaner than it is. **Every gate decision keys on the process
 exit code**; result-line greps are for detail, never for the verdict.
-
-Related dev note: `cargo test -p quickjs-adapter` alone does not link — the
-yawgpu backend feature arrives via workspace feature unification. Use the
-documented per-package commands (with the backend feature) or the workspace
-gate.

@@ -33,7 +33,7 @@ binding an already-created `WGPUDevice` and pumps one `tick()` per frame.
   touches a backend's native API, so yawgpu, wgpu-native, and Dawn are
   link-time choices, not code paths.
 - **Engine-parity is a tested claim, not a goal.** The same conformance script
-  ([`tests/parity/parity.js`](tests/parity/parity.js)) runs under QuickJS and
+  ([`tests/parity/parity.js`](tests/parity/parity.js)) runs under Boa and
   JavaScriptCore and must produce **byte-identical output**
   ([`tests/parity/expected.txt`](tests/parity/expected.txt)), asserted by one
   test in each adapter. Promise settlement ordering, label conversion, mapping
@@ -47,7 +47,7 @@ binding an already-created `WGPUDevice` and pumps one `tick()` per frame.
                 ▼
 ┌─────────────────────────────────────────────────┐
 │ adapters/      engine adapters                    │
-│   quickjs/       Tier 1 — quickjs-ng (pinned)     │
+│   boa/           Tier 1 — Boa (exact crates.io pin)│
 │   javascriptcore/ Tier 1 — system JSC, macOS/iOS  │
 │                JsEngine impl, class glue,         │
 │                microtask pump, finalizer→queue    │
@@ -83,7 +83,7 @@ binding an already-created `WGPUDevice` and pumps one `tick()` per frame.
 
 | Tier | Engine | Notes |
 |---|---|---|
-| **1 — Supported** | [quickjs-ng](https://github.com/quickjs-ng/quickjs) (MIT, pinned submodule at v0.15.1) | Primary engine. JIT-less and portable — dev results on desktop predict behavior on mobile. Built from source with raw `bindgen`. |
+| **1 — Supported, all platforms** | [Boa](https://github.com/boa-dev/boa) (MIT/Unlicense, exact crates.io pin) | Primary cross-platform engine. Pure Rust, JIT-less, and portable; it needs no C toolchain or engine-specific `bindgen`, and cross-compiles with an ordinary Cargo target build. |
 | **1 — Supported (Apple platforms)** | JavaScriptCore | Default-on (`jsc` feature; compiles to an empty crate off Apple platforms). **macOS and iOS** — dynamically linked system framework, so there is no bundled engine and no binary-size cost, and the App Store bundled-engine question does not arise. macOS is fully tested on every run; iOS compiles, with on-device verification deferred to mobile bring-up. Born as the engine-boundary validator — it earned the promotion by finding five core defects before code generation could multiply them. |
 
 Cross-engine parity is not assumed, it is asserted: one conformance script
@@ -143,7 +143,7 @@ one that uses it. The four-step order lives in `core/` once; adapters delegate.
 Three rules for script authors:
 
 - **Call `destroy()`. GC is a backstop, not a resource-management strategy.**
-  On QuickJS, forgetting `destroy()` means GPU memory waits for a finalizer.
+  On Boa, forgetting `destroy()` means GPU memory waits for a collection.
   **Under JavaScriptCore, `destroy()` is the only bounded path** — the engine
   may not finalize a dropped wrapper until the context itself dies, and
   neither the host nor the binding can force it.
@@ -191,19 +191,21 @@ operations do not move texel data, so the headless suite deliberately makes no
 claim about texture bytes; byte-level texture tests require a separately gated
 real GPU.
 
-Buffer mapping is strategy-selected per engine: **zero-copy detach** on QuickJS
-(the `ArrayBuffer` aliases the mapping and is detached at `unmap()`), and
-**copy-in/copy-out** on JavaScriptCore, whose public C API cannot detach
-external memory — and where taking a C pointer to a script-visible buffer would
-silently and permanently disable detaching it. Both strategies are implemented
-once, in `core/`. This is a performance difference, not a behavioral one.
+Buffer mapping is strategy-selected per engine. Both supported engines use
+**copy-in/copy-out**: Boa owns its `ArrayBuffer` allocation, while
+JavaScriptCore's public C API cannot detach external memory and taking a C
+pointer to a script-visible buffer would silently and permanently disable
+detaching it. The dormant zero-copy capability remains in `core/` pending an
+explicit owner decision; no supported engine currently selects it. This is a
+performance difference, not a behavioral one.
 
 ## Building and testing
 
-Prerequisites: Rust (stable), a C toolchain, and the two pinned submodules:
+Prerequisites: Rust (stable), the native tooling required by the WebGPU FFI,
+and the two pinned specification/header submodules:
 
 ```sh
-git submodule update --init third_party/quickjs third_party/webgpu-headers
+git submodule update --init third_party/webgpu-headers third_party/gpuweb
 ```
 
 The binding builds **types-only** with no backend. Anything that actually
@@ -222,7 +224,7 @@ WEBGPU_NATIVE_JS_BACKEND_LIB_DIR = "/path/to/backend/lib"
 # engine-agnostic core: no engine, no backend, no GPU
 cargo test -p webgpu-native-js-core
 
-# the full workspace against yawgpu (QuickJS engine), headless
+# the full workspace against yawgpu (Boa engine), headless
 cargo test --workspace --features webgpu-native-js-ffi/backend-yawgpu
 
 # the JavaScriptCore adapter (macOS; default-on)
@@ -269,7 +271,7 @@ Next: mobile bring-up.
 
 Not yet decided — this repository currently ships no license, so all rights
 are reserved in the interim. Third-party components keep their own licenses:
-quickjs-ng is MIT, `webgpu-headers` is BSD-3-Clause, and JavaScriptCore
+Boa is MIT/Unlicense, `webgpu-headers` is BSD-3-Clause, and JavaScriptCore
 (LGPL-2.1) is only ever **dynamically linked** as an Apple system framework
 (the `jsc` feature, default-on, compiles to an empty crate off Apple
 platforms).

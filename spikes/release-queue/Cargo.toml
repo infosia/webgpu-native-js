@@ -12,7 +12,3 @@ backend-dawn = ["webgpu-native-js-ffi/backend-dawn"]
 
 [dependencies]
 webgpu-native-js-ffi = { path = "../../ffi" }
-
-[build-dependencies]
-bindgen = "0.72.1"
-cc = "1"

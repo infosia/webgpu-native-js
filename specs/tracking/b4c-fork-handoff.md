@@ -1,6 +1,10 @@
 # B-4c → quickjs-ng fork: handoff for the fix
 
-**Status: engine defect confirmed and precisely localized; fork created; the
+**MOOT (2026-07-12): quickjs-ng was dropped and its adapter/submodule were
+removed when Boa became the cross-platform Tier 1. No fork fix will be
+integrated. The forensics below are preserved as a historical record.**
+
+**Historical status: engine defect confirmed and precisely localized; fork created; the
 exact off-by-one line and the fix remain.** This document is self-contained so
 any agent (or the owner) can resume the fix work.
 

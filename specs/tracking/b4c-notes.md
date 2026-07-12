@@ -1,5 +1,9 @@
 # B-4c QuickJS GC investigation — encoder-retention hypothesis disproved
 
+**MOOT (2026-07-12): quickjs-ng was dropped in favor of Boa. This investigation
+is preserved unchanged as historical engine-defect evidence; its proposed next
+steps and references to live diagnostics are no longer current work.**
+
 Date: 2026-07-11. The deterministic CTS abort remains open. This audit did not
 find an encoder-retention defect, and no adapter/core fix was made because the
 proposed mechanism is absent from the current tree and its counterfactual stays

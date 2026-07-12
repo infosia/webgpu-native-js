@@ -1,5 +1,10 @@
 # Tracking: engine boundary (`trait JsEngine`)
 
+**Historical engine note (2026-07-12):** the QuickJS selection, pin, detach
+spike, and adapter findings below are retained as the record of earlier
+decisions. QuickJS was later removed for Boa; current engine policy is in
+`CLAUDE.md` and `specs/blocks/14-boa-engine.md`.
+
 Topic owner: the core/adapter boundary — `CLAUDE.md` invariant 1, plan §2.4.
 
 ---

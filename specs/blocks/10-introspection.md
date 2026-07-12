@@ -1,5 +1,9 @@
 # Block 10 — introspection and pipeline-derived handles
 
+**Historical engine note (2026-07-12):** any QuickJS API examples below record
+the adapter in use when this completed block landed. QuickJS was later removed;
+Boa and JSC are the current supported engines.
+
 Owner-approved (2026-07-11, "proceed with A"). Rules **I1–I8**. Verified while
 writing: `GPUSupportedFeatures` is `readonly setlike<DOMString>` (webgpu.idl:63);
 `GPUSupportedLimits` is an interface of readonly numeric attributes;

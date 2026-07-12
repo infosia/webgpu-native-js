@@ -1300,18 +1300,6 @@ impl<E: JsEngine + 'static> DevicePayload<E> {
     fn cache_queue(&self, value: E::Value) {
         self.queue.set(value);
     }
-
-    fn cached_features(&self) -> Option<E::Value> {
-        self.features.get()
-    }
-
-    fn cached_limits(&self) -> Option<E::Value> {
-        self.limits.get()
-    }
-
-    fn cached_adapter_info(&self) -> Option<E::Value> {
-        self.adapter_info.get()
-    }
 }
 
 struct DeviceEventJs<E: JsEngine + 'static> {
@@ -1558,7 +1546,6 @@ unsafe impl<E: JsEngine> Send for HeldValue<E> {}
 /// Payload stored by a `GPUBuffer` wrapper.
 pub struct BufferPayload<E: JsEngine> {
     state: Arc<Mutex<BufferState<E>>>,
-    traced_values: Arc<TracedValues<E>>,
 }
 
 impl<E: JsEngine> BufferPayload<E> {
@@ -1568,68 +1555,13 @@ impl<E: JsEngine> BufferPayload<E> {
         &self.state
     }
 
-    /// Visits every mapped range value held by this payload.
-    pub fn trace_mapped_range_values(&self, mut visit: impl FnMut(E::Value)) {
-        self.traced_values.visit(&mut visit);
-    }
-
     /// Removes tracked mapped ranges and passes their held values to `release`.
     pub fn release_mapped_range_values(&self, mut release: impl FnMut(E::Value)) {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
-        self.traced_values.clear();
         for range in std::mem::take(&mut state.ranges) {
             release(range.value);
-        }
-    }
-}
-
-/// Visits every engine value retained by a core wrapper payload.
-pub fn trace_payload_values<E: JsEngine + 'static>(
-    payload: &(dyn Any + Send),
-    visit: &mut dyn FnMut(E::Value),
-) {
-    if let Some(buffer) = payload.downcast_ref::<BufferPayload<E>>() {
-        buffer.trace_mapped_range_values(&mut *visit);
-    }
-    if let Some(device) = payload.downcast_ref::<DevicePayload<E>>() {
-        for value in [
-            device.cached_queue(),
-            device.cached_features(),
-            device.cached_limits(),
-            device.cached_adapter_info(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            visit(value);
-        }
-        if let Some(js) = device
-            .events
-            .js
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-        {
-            if let Some(handler) = js.handler.get() {
-                visit(handler);
-            }
-            if let Some(promise) = js.lost_promise.get() {
-                visit(promise);
-            }
-        }
-    }
-    if let Some(adapter) = payload.downcast_ref::<AdapterPayload<E>>() {
-        for value in [
-            adapter.features.get(),
-            adapter.limits.get(),
-            adapter.info.get(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            visit(value);
         }
     }
 }
@@ -1668,54 +1600,6 @@ pub fn release_payload_values<E: JsEngine + 'static>(
     }
 }
 
-struct TracedValues<E: JsEngine> {
-    values: std::cell::UnsafeCell<Vec<E::Value>>,
-}
-
-impl<E: JsEngine> TracedValues<E> {
-    fn new() -> Self {
-        Self {
-            values: std::cell::UnsafeCell::new(Vec::new()),
-        }
-    }
-
-    fn push(&self, value: E::Value) {
-        // SAFETY: mapped range tracking is mutated only by JS entry points on
-        // the engine thread. `gc_mark` may read the same vector during QuickJS
-        // GC, which cannot run concurrently with those entry points.
-        unsafe { &mut *self.values.get() }.push(value);
-    }
-
-    fn clear(&self) {
-        // SAFETY: see `push`.
-        unsafe { &mut *self.values.get() }.clear();
-    }
-
-    fn visit(&self, visit: &mut dyn FnMut(E::Value)) {
-        // SAFETY: see `push`; this path must stay allocation- and lock-free for
-        // engine GC tracing.
-        for value in unsafe { &*self.values.get() }.iter().copied() {
-            visit(value);
-        }
-    }
-}
-
-// SAFETY: `push` runs only from `buffer_get_mapped_range` while
-// `with_buffer_payload_state` holds `BufferPayload::state`. Engine-thread clears
-// run under that same lock in `detach_all_ranges`, and an arbitrary-thread
-// finalizer clears only through `BufferPayload::release_mapped_range_values`,
-// which acquires the same mutex first. That mutex is the happens-before edge
-// between the last mutation and finalizer access. The moved elements are opaque
-// engine values passed to the adapter release closure, never dereferenced here.
-unsafe impl<E: JsEngine> Send for TracedValues<E> {}
-// SAFETY: QuickJS is the only adapter whose `trace_payload_values` calls `visit`;
-// its `gc_mark` runs on the engine thread and cannot race a JS entry point.
-// JavaScriptCore tracing is a no-op. Mutation versus a potentially any-thread
-// finalizer is separately ordered by the `BufferPayload::state` mutex described
-// above: `with_buffer_payload_state` holds it for `push`/engine clears, and
-// `release_mapped_range_values` holds it for finalizer clear/release.
-unsafe impl<E: JsEngine> Sync for TracedValues<E> {}
-
 /// Mutable state of a `GPUBuffer` wrapper.
 pub struct BufferState<E: JsEngine> {
     buffer: WGPUBuffer,
@@ -1743,20 +1627,14 @@ impl<E: JsEngine> BufferState<E> {
     }
 }
 
-// SAFETY: `BufferPayload` owns shared `BufferState` containing `WGPUBuffer` and
-// its parent `WGPUDevice` reference. A finalizer may move the payload and lock the
-// state to copy those handle values into `ReleaseRequest::BufferWithDeviceRef`;
-// native buffer/device calls happen either in JS methods on the engine thread or
-// during release-queue drain on the creating `tick()` thread.
-// SAFETY: `WGPUBuffer`/parent `WGPUDevice` are copied by finalizers and released in `tick()`.
-unsafe impl<E: JsEngine> Send for BufferPayload<E> {}
-// SAFETY: `BufferState` carries `WGPUBuffer` and `WGPUDevice` handles plus JS
-// mapped-range bookkeeping. Moving the state between threads is limited to the
-// finalizer path described above; native handles and stored mapped-range pointers
-// are only dereferenced by buffer methods on the creating `tick()` thread. Each
-// mapped-range pointer is used strictly before that thread calls native unmap or
-// destroy. `ReleaseRequest::run()` dereferences only the handles during `tick()`.
-// SAFETY: Buffer state handles/pointers are moved only and dereferenced on `tick()`.
+// SAFETY: `BufferState` crosses threads only behind `BufferPayload::state`'s
+// mutex, which orders a finalizer's access after any engine-thread mutation. On
+// a finalizer thread, adapters may remove and copy opaque engine-value tokens
+// for deferred release, and the core finalizer may copy native handles into the
+// release queue; neither path dereferences a token or mapped pointer or calls an
+// engine or WebGPU API. Engine values and mapped pointers are dereferenced only
+// on the JavaScript thread. A queued native handle is used only later on the
+// creating `tick()` thread, without accessing the finalized state again.
 unsafe impl<E: JsEngine> Send for BufferState<E> {}
 
 /// Payload stored by a `GPU` wrapper.
@@ -3040,7 +2918,6 @@ pub fn device_create_buffer<E: JsEngine + 'static>(
         GPU_BUFFER_CLASS,
         Box::new(BufferPayload::<E> {
             state: Arc::new(Mutex::new(state)),
-            traced_values: Arc::new(TracedValues::new()),
         }),
     ) {
         Ok(value) => Ok(value),
@@ -3060,9 +2937,9 @@ pub fn buffer_destroy<E: JsEngine + 'static>(
     this: E::Value,
     _args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
-    with_buffer_payload_state::<E, _, _>(cx, this, |payload, state| {
+    with_buffer_state::<E, _, _>(cx, this, |state| {
         if !state.destroyed {
-            detach_all_ranges::<E>(cx, payload, state, false)?;
+            detach_all_ranges::<E>(cx, state, false)?;
             unsafe {
                 (E::environment(cx).gpu().buffer_destroy)(state.buffer);
             }
@@ -3482,7 +3359,7 @@ pub fn buffer_get_mapped_range<E: JsEngine + 'static>(
         }
         _ => None,
     };
-    with_buffer_payload_state::<E, _, _>(cx, this, |payload, state| {
+    with_buffer_state::<E, _, _>(cx, this, |state| {
         if state.destroyed || !state.mapped {
             return Err(E::operation_error(cx, "buffer is not mapped"));
         }
@@ -3525,7 +3402,6 @@ pub fn buffer_get_mapped_range<E: JsEngine + 'static>(
             strategy: E::MAPPED_RANGE_STRATEGY,
             map_mode: state.map_mode,
         });
-        payload.traced_values.push(tracked);
         Ok(value)
     })
 }
@@ -3536,12 +3412,12 @@ pub fn buffer_unmap<E: JsEngine + 'static>(
     this: E::Value,
     _args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
-    with_buffer_payload_state::<E, _, _>(cx, this, |payload, state| {
+    with_buffer_state::<E, _, _>(cx, this, |state| {
         if state.destroyed {
             return Ok(E::undefined(cx));
         }
         if state.mapped {
-            detach_all_ranges::<E>(cx, payload, state, true)?;
+            detach_all_ranges::<E>(cx, state, true)?;
             unsafe {
                 (E::environment(cx).gpu().buffer_unmap)(state.buffer);
             }
@@ -6498,18 +6374,6 @@ where
     E: JsEngine + 'static,
     F: FnOnce(&mut BufferState<E>) -> Result<R, E::Error>,
 {
-    with_buffer_payload_state(cx, this, |_payload, state| f(state))
-}
-
-fn with_buffer_payload_state<E, F, R>(
-    cx: E::Context<'_>,
-    this: E::Value,
-    f: F,
-) -> Result<R, E::Error>
-where
-    E: JsEngine + 'static,
-    F: FnOnce(&BufferPayload<E>, &mut BufferState<E>) -> Result<R, E::Error>,
-{
     let Some(payload) = E::payload(cx, this, GPU_BUFFER_CLASS)
         .and_then(|payload| payload.downcast_ref::<BufferPayload<E>>())
     else {
@@ -6521,12 +6385,11 @@ where
     let Ok(mut state) = payload.state.lock() else {
         return Err(E::operation_error(cx, "GPUBuffer state is poisoned"));
     };
-    f(payload, &mut state)
+    f(&mut state)
 }
 
 fn detach_all_ranges<E: JsEngine>(
     cx: E::Context<'_>,
-    payload: &BufferPayload<E>,
     state: &mut BufferState<E>,
     flush: bool,
 ) -> Result<(), E::Error> {
@@ -6564,7 +6427,6 @@ fn detach_all_ranges<E: JsEngine>(
         }
         E::release_value(cx, range.value);
     }
-    payload.traced_values.clear();
     first_error.map_or(Ok(()), Err)
 }
 

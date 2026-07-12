@@ -185,12 +185,12 @@ pub fn format_summary(summary: Summary) -> String {
     )
 }
 
-#[cfg(all(test, feature = "engine-quickjs"))]
+#[cfg(test)]
 mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
 
-    use quickjs_adapter::{HostValue, Runtime};
+    use boa_adapter::{HostValue, Runtime};
 
     use super::*;
 
@@ -205,7 +205,7 @@ mod tests {
     }
 
     fn shim_runtime() -> Runtime {
-        let runtime = Runtime::new().expect("bare QuickJS runtime");
+        let runtime = Runtime::new().expect("bare Boa runtime");
         runtime
             .register_host_function("print", |_| Ok(()))
             .expect("register print");
@@ -327,7 +327,7 @@ mod tests {
 
     #[test]
     fn discarded_timer_removes_its_cancellation_entry() {
-        let runtime = Runtime::new().expect("bare QuickJS runtime");
+        let runtime = Runtime::new().expect("bare Boa runtime");
         runtime
             .register_host_function("print", |_| Ok(()))
             .expect("register print");

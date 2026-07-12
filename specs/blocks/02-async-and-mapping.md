@@ -1,5 +1,10 @@
 # Block 02 — `tick()`, Promises, and buffer mapping
 
+**Historical engine note (2026-07-12):** QuickJS-specific mechanisms, tests,
+and exit criteria below describe the engine used when this block landed.
+QuickJS was later removed for Boa. Shared detach verification and the release
+queue remain current; both supported engines now select `CopyInCopyOut`.
+
 Phase 2, part 1. The public host contract, the Promise bridge, and
 `mapAsync`/`getMappedRange`/`unmap`.
 

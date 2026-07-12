@@ -1,5 +1,9 @@
 # Tracking: Phase Reviews
 
+**Historical engine note (2026-07-12):** QuickJS paths, counts, and findings in
+these completed review logs intentionally remain unchanged. The adapter and
+submodule were later removed when Boa became cross-platform Tier 1.
+
 Per `specs/reference/workflow.md` → "Phase Review (mandatory — Clean Review Then
 Fix)". Findings, triage decisions, fixes, and gate results live here.
 

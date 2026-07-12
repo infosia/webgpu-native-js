@@ -1,7 +1,7 @@
 # Compute example
 
 This headless example creates the native WebGPU instance in Rust, exposes the
-binding's `GPU` wrapper to QuickJS, and requests the adapter and device from
+binding's `GPU` wrapper to Boa, and requests the adapter and device from
 JavaScript. The script runs a WGSL compute kernel that doubles eight `u32`
 values, copies them to a readable buffer, maps it asynchronously, and reports
 the result through a host-registered `print` function.

@@ -479,7 +479,7 @@ checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 name = "cts-runner"
 version = "0.1.0"
 dependencies = [
- "quickjs-adapter",
+ "boa-adapter",
  "webgpu-native-js-ffi",
 ]
 
@@ -620,19 +620,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "event-loop-pump"
-version = "0.1.0"
-dependencies = [
- "bindgen",
- "cc",
- "webgpu-native-js-ffi",
-]
-
-[[package]]
 name = "example-compute"
 version = "0.1.0"
 dependencies = [
- "quickjs-adapter",
+ "boa-adapter",
  "webgpu-native-js-ffi",
 ]
 
@@ -640,7 +631,7 @@ dependencies = [
 name = "example-triangle"
 version = "0.1.0"
 dependencies = [
- "quickjs-adapter",
+ "boa-adapter",
  "raw-window-handle",
  "raw-window-metal",
  "webgpu-native-js-ffi",
@@ -1728,16 +1719,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "quickjs-adapter"
-version = "0.1.0"
-dependencies = [
- "bindgen",
- "cc",
- "webgpu-native-js-core",
- "webgpu-native-js-ffi",
-]
-
-[[package]]
 name = "quote"
 version = "1.0.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1869,8 +1850,6 @@ dependencies = [
 name = "release-queue"
 version = "0.1.0"
 dependencies = [
- "bindgen",
- "cc",
  "webgpu-native-js-ffi",
 ]
 

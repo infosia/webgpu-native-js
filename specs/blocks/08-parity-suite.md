@@ -2,8 +2,8 @@
 
 Owner directive (2026-07-10): *platform parity is the priority; grow the parity
 suite.* Rules **P1–P8**. This block turns J17's 12-line script into the
-project's platform-parity instrument: iOS (a JSC candidate) and Android
-(QuickJS) will agree because this suite says so, not because anyone assumed an
+project's platform-parity instrument: iOS (JSC) and Android
+(Boa) will agree because this suite says so, not because anyone assumed an
 engine.
 
 ## 1. What the suite is for
@@ -15,9 +15,9 @@ engines running identical script** and demands identical bytes. Every line it
 gains is a class of silent engine divergence retired.
 
 **macOS is the parity laboratory** (owner observation, 2026-07-10): it is the
-one platform where JavaScriptCore and QuickJS run side by side in the same
+one platform where JavaScriptCore and Boa run side by side in the same
 checkout, so every dev-machine test run exercises the exact comparison that
-predicts iOS (a JSC candidate) agreeing with Android (QuickJS). That is what
+predicts iOS (JSC) agreeing with Android (Boa). That is what
 makes desktop development *evidence* for mobile parity rather than hope — the
 same argument that chose a JIT-less engine, now applied to the two-engine
 world.

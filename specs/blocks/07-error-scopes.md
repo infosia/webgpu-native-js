@@ -1,5 +1,9 @@
 # Block 07 — error scopes and the error model
 
+**Historical engine note (2026-07-12):** QuickJS-labelled script results below
+are retained as measurements from when this block landed. Current supported
+engine verification is Boa and JSC.
+
 Phase 6 (owner-approved order item 2, after lifecycle emission and B22).
 Rules **S1–S10**. All prior blocks bind; invariant 2 (callback modes) and J1/J2
 (pure-Rust callbacks, one-frame settlement) are the load-bearing ones here.

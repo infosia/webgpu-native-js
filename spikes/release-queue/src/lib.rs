@@ -4,7 +4,9 @@
 //! designated drain thread performs the actual `webgpu.h` calls.
 
 use std::collections::VecDeque;
-use std::ffi::{c_char, c_void, CStr};
+#[cfg(target_os = "macos")]
+use std::ffi::c_char;
+use std::ffi::c_void;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -12,19 +14,6 @@ use std::sync::{Arc, Mutex};
 use std::thread::ThreadId;
 
 use webgpu_native_js_ffi::native as wgpu;
-
-static QUICKJS_CLASS_ID: AtomicUsize = AtomicUsize::new(0);
-
-#[allow(
-    dead_code,
-    clippy::upper_case_acronyms,
-    non_camel_case_types,
-    non_snake_case,
-    non_upper_case_globals
-)]
-mod qjs {
-    include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
-}
 
 #[cfg(target_os = "macos")]
 mod jsc {
@@ -88,8 +77,6 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     /// A C API returned null where a live handle was required.
     Null(&'static str),
-    /// QuickJS raised an exception.
-    QuickJsException(String),
     /// A mutex was poisoned.
     Poisoned(&'static str),
     /// Requesting a WebGPU adapter failed.
@@ -403,15 +390,6 @@ pub fn request_headless_adapter(instance: &Instance) -> Result<wgpu::WGPUAdapter
         .ok_or(Error::Null("request adapter callback"))
 }
 
-#[cfg(test)]
-fn release_adapter(payload: ReleasePayload, log: Arc<ReleaseLog>) {
-    let ReleasePayload::Handle(handle) = payload else {
-        return;
-    };
-    unsafe { wgpu::wgpuAdapterRelease(handle as wgpu::WGPUAdapter) };
-    log.record_release("Adapter");
-}
-
 fn release_adapter_with_parent_instance_ref(payload: ReleasePayload, log: Arc<ReleaseLog>) {
     let ReleasePayload::AdapterWithInstanceRef {
         adapter,
@@ -464,154 +442,6 @@ impl FinalizerPayload {
         #[cfg(test)]
         assert!(!self.panic_after_enqueue, "intentional finalizer panic");
     }
-}
-
-/// A minimal QuickJS runtime/context pair.
-pub struct QuickJs {
-    rt: NonNull<qjs::JSRuntime>,
-    ctx: NonNull<qjs::JSContext>,
-    class_id: qjs::JSClassID,
-}
-
-impl QuickJs {
-    /// Creates a QuickJS runtime, context, and wrapper class.
-    pub fn new() -> Result<Self> {
-        let rt = unsafe { qjs::JS_NewRuntime() };
-        let rt = NonNull::new(rt).ok_or(Error::Null("JS_NewRuntime"))?;
-        let ctx = unsafe { qjs::JS_NewContext(rt.as_ptr()) };
-        let ctx = NonNull::new(ctx).ok_or(Error::Null("JS_NewContext"))?;
-        let mut class_id = qjs::JS_INVALID_CLASS_ID;
-        unsafe {
-            qjs::JS_NewClassID(rt.as_ptr(), &mut class_id);
-        }
-        QUICKJS_CLASS_ID.store(class_id as usize, Ordering::SeqCst);
-        let class_name = c"ReleaseQueueWrapper";
-        let class_def = qjs::JSClassDef {
-            class_name: class_name.as_ptr(),
-            finalizer: Some(qjs_finalizer),
-            gc_mark: Some(qjs_gc_mark),
-            call: None,
-            exotic: ptr::null_mut(),
-        };
-        if unsafe { qjs::JS_NewClass(rt.as_ptr(), class_id, &class_def) } != 0 {
-            return Err(Error::Null("JS_NewClass"));
-        }
-        Ok(Self { rt, ctx, class_id })
-    }
-
-    fn ctx(&self) -> *mut qjs::JSContext {
-        self.ctx.as_ptr()
-    }
-
-    fn runtime(&self) -> *mut qjs::JSRuntime {
-        self.rt.as_ptr()
-    }
-
-    /// Forces a QuickJS garbage collection.
-    pub fn run_gc(&self) {
-        unsafe { qjs::JS_RunGC(self.runtime()) };
-    }
-
-    /// Creates a wrapper object with an optional parent reference.
-    pub fn wrapper(
-        &self,
-        queue: Arc<ReleaseQueue>,
-        request: ReleaseRequest,
-        log: Arc<ReleaseLog>,
-        kind: &'static str,
-        parent: Option<qjs::JSValue>,
-    ) -> Result<qjs::JSValue> {
-        let object = unsafe { qjs::JS_NewObjectClass(self.ctx(), self.class_id) };
-        if unsafe { qjs::JS_IsException(object) } {
-            return self.take_exception("JS_NewObjectClass");
-        }
-        let parent = parent.map(|value| unsafe { qjs::JS_DupValue(self.ctx(), value) });
-        let payload = Box::new(QuickJsPayload {
-            finalizer: FinalizerPayload {
-                queue,
-                request,
-                log,
-                kind,
-                #[cfg(test)]
-                panic_after_enqueue: false,
-            },
-            parent,
-        });
-        unsafe { qjs::JS_SetOpaque(object, Box::into_raw(payload).cast()) };
-        Ok(object)
-    }
-
-    fn take_exception<T>(&self, fallback: &'static str) -> Result<T> {
-        Err(Error::QuickJsException(exception_message(
-            self.ctx(),
-            fallback,
-        )))
-    }
-}
-
-impl Drop for QuickJs {
-    fn drop(&mut self) {
-        unsafe {
-            qjs::JS_FreeContext(self.ctx.as_ptr());
-            qjs::JS_FreeRuntime(self.rt.as_ptr());
-        }
-    }
-}
-
-struct QuickJsPayload {
-    finalizer: FinalizerPayload,
-    parent: Option<qjs::JSValue>,
-}
-
-extern "C" fn qjs_finalizer(rt: *mut qjs::JSRuntime, value: qjs::JSValue) {
-    let class_id = QUICKJS_CLASS_ID.load(Ordering::SeqCst) as qjs::JSClassID;
-    let payload = unsafe { qjs::JS_GetOpaque(value, class_id) }.cast::<QuickJsPayload>();
-    let Some(payload) = NonNull::new(payload) else {
-        return;
-    };
-    let mut payload = unsafe { Box::from_raw(payload.as_ptr()) };
-    let log = Arc::clone(&payload.finalizer.log);
-    let result = catch_unwind(AssertUnwindSafe(|| payload.finalizer.finalize()));
-    if result.is_err() {
-        log.record_panic();
-    }
-    if let Some(parent) = payload.parent.take() {
-        unsafe { qjs::JS_FreeValueRT(rt, parent) };
-    }
-}
-
-unsafe extern "C" fn qjs_gc_mark(
-    rt: *mut qjs::JSRuntime,
-    value: qjs::JSValue,
-    mark_func: qjs::JS_MarkFunc,
-) {
-    let _ = catch_unwind(AssertUnwindSafe(|| {
-        let class_id = QUICKJS_CLASS_ID.load(Ordering::SeqCst) as qjs::JSClassID;
-        let payload = unsafe { qjs::JS_GetOpaque(value, class_id) }.cast::<QuickJsPayload>();
-        let Some(payload) = NonNull::new(payload) else {
-            return;
-        };
-        let payload = unsafe { payload.as_ref() };
-        if let Some(parent) = payload.parent {
-            qjs::JS_MarkValue(rt, parent, mark_func);
-        }
-    }));
-}
-
-fn exception_message(ctx: *mut qjs::JSContext, fallback: &'static str) -> String {
-    let exception = unsafe { qjs::JS_GetException(ctx) };
-    let raw = unsafe { qjs::JS_ToCString(ctx, exception) };
-    let message = if raw.is_null() {
-        fallback.to_owned()
-    } else {
-        let text = unsafe { CStr::from_ptr(raw) }
-            .to_string_lossy()
-            .into_owned();
-        unsafe { qjs::JS_FreeCString(ctx, raw) };
-        text
-    };
-    unsafe { qjs::JS_FreeValue(ctx, exception) };
-    message
 }
 
 #[cfg(target_os = "macos")]
@@ -808,33 +638,6 @@ mod tests {
     }
 
     #[test]
-    fn quickjs_finalizer_enqueues_and_drain_releases_adapter() -> Result<()> {
-        let _guard = test_lock();
-        let instance = Instance::new_headless()?;
-        let adapter = request_headless_adapter(&instance)?;
-        let queue = Arc::new(ReleaseQueue::new());
-        let log = Arc::new(ReleaseLog::new());
-        let js = QuickJs::new()?;
-        let object = js.wrapper(
-            Arc::clone(&queue),
-            ReleaseRequest::new(adapter as usize, release_adapter, Arc::clone(&log)),
-            Arc::clone(&log),
-            "Adapter",
-            None,
-        )?;
-        unsafe { qjs::JS_FreeValue(js.ctx(), object) };
-        js.run_gc();
-
-        assert_eq!(log.finalizer_count(), 1);
-        assert_eq!(log.releases_seen_in_finalizers(), 0);
-        assert_eq!(log.release_count(), 0);
-
-        assert_eq!(queue.drain()?, 1);
-        assert_eq!(log.release_count(), 1);
-        Ok(())
-    }
-
-    #[test]
     fn exactly_once_for_fifo_queue() -> Result<()> {
         let queue = Arc::new(ReleaseQueue::new());
         let log = Arc::new(ReleaseLog::new());
@@ -851,38 +654,7 @@ mod tests {
     }
 
     #[test]
-    fn quickjs_panicking_finalizer_is_contained_and_queue_still_drains() -> Result<()> {
-        let _guard = test_lock();
-        let queue = Arc::new(ReleaseQueue::new());
-        let log = Arc::new(ReleaseLog::new());
-        let js = QuickJs::new()?;
-        let object = unsafe { qjs::JS_NewObjectClass(js.ctx(), js.class_id) };
-        let payload = Box::new(QuickJsPayload {
-            finalizer: FinalizerPayload {
-                queue: Arc::clone(&queue),
-                request: ReleaseRequest::new(7, synthetic_release, Arc::clone(&log)),
-                log: Arc::clone(&log),
-                kind: "Synthetic",
-                panic_after_enqueue: true,
-            },
-            parent: None,
-        });
-        unsafe {
-            qjs::JS_SetOpaque(object, Box::into_raw(payload).cast());
-            qjs::JS_FreeValue(js.ctx(), object);
-        }
-        js.run_gc();
-
-        assert_eq!(log.finalizer_count(), 1);
-        assert_eq!(log.panic_count(), 1);
-        assert_eq!(queue.drain()?, 1);
-        assert_eq!(log.release_count(), 1);
-        assert_eq!(queue.drain()?, 0);
-        Ok(())
-    }
-
-    #[test]
-    fn quickjs_releases_execute_on_drain_thread() -> Result<()> {
+    fn releases_execute_on_drain_thread() -> Result<()> {
         let _guard = test_lock();
         let queue = Arc::new(ReleaseQueue::new());
         let log = Arc::new(ReleaseLog::new());
@@ -924,75 +696,6 @@ mod tests {
             vec!["Instance", "Adapter", "AdapterParentInstanceRef"]
         );
         Ok(())
-    }
-
-    #[test]
-    fn quickjs_ordering_with_parent_reference() -> Result<()> {
-        let _guard = test_lock();
-        let observation = quickjs_ordering(true)?;
-        eprintln!("QuickJS with parent ref: {observation:?}");
-        assert_eq!(observation.gc_count(), 2);
-        assert_eq!(observation.gc_finalizers, vec!["Adapter", "Instance"]);
-        assert!(observation.teardown_finalizers.is_empty());
-        assert_eq!(observation.drains, vec!["Adapter", "Instance"]);
-        Ok(())
-    }
-
-    #[test]
-    fn quickjs_ordering_without_parent_reference_is_observed() -> Result<()> {
-        let _guard = test_lock();
-        let observation = quickjs_ordering(false)?;
-        eprintln!("QuickJS without parent ref: {observation:?}");
-        assert_eq!(observation.gc_count(), 2);
-        assert_eq!(observation.teardown_finalizers.len(), 0);
-        assert_eq!(observation.total_finalizer_count(), 2);
-        assert_eq!(observation.drains, observation.gc_finalizers);
-        Ok(())
-    }
-
-    fn quickjs_ordering(with_parent: bool) -> Result<OrderingObservation> {
-        let instance = Instance::new_headless()?;
-        let raw_instance = instance.raw();
-        unsafe { wgpu::wgpuInstanceAddRef(raw_instance) };
-        let adapter = request_headless_adapter(&instance)?;
-        let queue = Arc::new(ReleaseQueue::new());
-        let log = Arc::new(ReleaseLog::new());
-        let js = QuickJs::new()?;
-        let parent = js.wrapper(
-            Arc::clone(&queue),
-            ReleaseRequest::new(raw_instance as usize, release_instance, Arc::clone(&log)),
-            Arc::clone(&log),
-            "Instance",
-            None,
-        )?;
-        let child_parent = with_parent.then_some(parent);
-        let child = js.wrapper(
-            Arc::clone(&queue),
-            ReleaseRequest::adapter_with_parent_instance_ref(
-                adapter as usize,
-                raw_instance as usize,
-                Arc::clone(&log),
-            ),
-            Arc::clone(&log),
-            "Adapter",
-            child_parent,
-        )?;
-        unsafe {
-            qjs::JS_FreeValue(js.ctx(), child);
-            qjs::JS_FreeValue(js.ctx(), parent);
-        }
-        js.run_gc();
-        let gc_finalizers = log.finalizer_order()?;
-        drop(js);
-        let all_finalizers = log.finalizer_order()?;
-        let teardown_finalizers = all_finalizers[gc_finalizers.len()..].to_vec();
-        queue.drain()?;
-        let drains = log.drain_order()?;
-        Ok(OrderingObservation {
-            gc_finalizers,
-            teardown_finalizers,
-            drains,
-        })
     }
 
     #[cfg(target_os = "macos")]

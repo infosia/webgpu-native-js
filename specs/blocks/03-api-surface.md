@@ -1,5 +1,9 @@
 # Block 03 — filling the API surface
 
+**Historical engine note (2026-07-12):** QuickJS-specific tests and gates below
+record how this completed block was verified. QuickJS was subsequently removed
+and Boa is now the cross-platform Tier 1; shared core/API requirements remain.
+
 Phase 2, part 2. `GPUQueue`, shader modules, bind groups, pipelines, command
 encoders, compute passes — enough of the IDL to answer one question.
 

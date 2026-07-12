@@ -48,9 +48,9 @@ The plan's §7 has the full evidence. These are the conclusions that are now
 **rules**, not proposals:
 
 1. **`trait JsEngine` with associated types is the engine boundary.** There is
-   no engine-agnostic `JsValueHandle` — QuickJS's `JSValue` is a NaN-boxed
-   refcounted union, JSC's `JSValueRef` is an opaque GC pointer needing a
-   context per operation. Descriptor conversion, which is the *bulk* of the
+   no engine-agnostic `JsValueHandle` — Boa's `JsValue` is a Rust enum over a
+   traced `Gc` pointer and is not even `Copy`, JSC's `JSValueRef` is an opaque
+   GC pointer needing a context per operation. Descriptor conversion, which is the *bulk* of the
    work (not method dispatch), is written once in `core/` against the trait and
    monomorphized per engine. No `dyn` on the conversion path. This is the
    project's central design bet.
@@ -89,8 +89,8 @@ The plan's §7 has the full evidence. These are the conclusions that are now
    **The queue is a plain FIFO and never sorts.** Ordering is made irrelevant
    instead: each child wrapper takes a *native* `wgpuXxxAddRef` on its parent
    handle and drops it with the child's release. Finalizer order differs by
-   engine — QuickJS is refcounted and orders child-first; JSC gives no ordering
-   at all — so no design may depend on it (`release-queue.md` → Q2).
+   engine — Boa's tracing collector gives no ordering, and JSC gives none at
+   all — so no design may depend on it (`release-queue.md` → Q2).
 5. **Codegen input is WebIDL joined with `webgpu.yml`.** `webgpu.yml` describes
    the C ABI and carries no dictionary defaults, string enums, flag namespaces,
    `Promise` types, or `[EnforceRange]` coercion. `dawn.node` generates from
@@ -114,11 +114,14 @@ The plan's §7 has the full evidence. These are the conclusions that are now
    JSC's public C API has no ArrayBuffer detach (evidence:
    `specs/tracking/engine-boundary.md` → Q1), so a zero-copy view over GPU
    memory would leave script holding a dangling pointer after `unmap()`. The
-   `JsEngine` capability `MappedRangeStrategy` selects `ZeroCopyDetach`
-   (QuickJS) or `CopyInCopyOut` (JSC). `core/` implements both once, generic
-   over `E`. Copying at `unmap()` is spec-conformant — WebGPU defines mapped
-   contents as becoming visible to the GPU at `unmap()` — so this is a
-   performance difference on the Tier 2 engine, not a behavioural one.
+   `JsEngine` capability `MappedRangeStrategy` selects `ZeroCopyDetach` or
+   `CopyInCopyOut`. **Both supported engines now select `CopyInCopyOut`** — JSC
+   because its public C API has no detach, Boa because it owns its ArrayBuffer
+   allocation and cannot wrap external memory. Copying at `unmap()` is
+   spec-conformant (WebGPU defines mapped contents as becoming visible to the
+   GPU at `unmap()`), so this is a performance property, not a behavioural one.
+   `ZeroCopyDetach` currently has **no engine selecting it** and is therefore
+   untested by construction — see the open question below.
 10. **Under JSC, never take the C bytes pointer of a buffer script can see.**
     `JSObjectGetArrayBufferBytesPtr` and `JSObjectGetTypedArrayBytesPtr` invoke
     WebKit's `pinAndLock()`: the buffer becomes permanently non-detachable, and
@@ -129,21 +132,23 @@ The plan's §7 has the full evidence. These are the conclusions that are now
     protocol in `engine-boundary.md` → Q1b. Treat any C pointer taken from a
     script-reachable buffer as a CRITICAL finding. (Only the two bytes-pointer
     accessors pin; `JSObjectGetArrayBufferByteLength` is safe — E12.)
-11. **Neither engine reports a failed detach.** JSC's `transfer()` silently
-    no-ops on a pinned buffer; QuickJS's `JS_DetachArrayBuffer` returns `void`
-    and no-ops on a non-buffer or an already-detached one. `unmap()` must
-    therefore **verify** detachment and raise a hard error when it did not
-    happen. This check lives in `core/` once, not in each adapter — it is shared
-    behaviour, not engine-specific defensive coding.
+11. **JSC does not report a failed detach; Boa does.** JSC's `transfer()`
+    silently no-ops on a pinned buffer. Boa's
+    `JsArrayBuffer::detach() -> JsResult<AlignedVec<u8>>` reports failure
+    natively — the first engine here that does. Because one engine still lies,
+    `unmap()` must **verify** detachment and raise a hard error when it did not
+    happen, and that check stays in `core/` once, not in each adapter — it is
+    shared behaviour, not engine-specific defensive coding. Do not delete it
+    just because the newer engine is honest.
 
 ## Engine support tiers
 
 | Tier | Engines | Meaning |
 |---|---|---|
-| **Tier 1 — Supported, all platforms** | [quickjs-ng](https://github.com/quickjs-ng/quickjs) (MIT), pinned submodule, raw `bindgen` | The only cross-platform engine. Builds and passes the full test suite on all four platforms. Chosen over Bellard's original for MSVC/CMake support and sanitizer CI; rationale in `specs/tracking/engine-boundary.md` → Q2. |
+| **Tier 1 — Supported, all platforms** | [Boa](https://github.com/boa-dev/boa) (MIT/Unlicense), pure Rust, crates.io exact pin | **Adopted 2026-07-12 (owner decision), replacing quickjs-ng.** The cross-platform engine. Pure Rust: no C toolchain, no engine `bindgen`, and cross-compilation is an ordinary `cargo build --target`. Rationale and evidence: `specs/blocks/14-boa-engine.md`. |
 | **Tier 1 — Supported, Apple platforms** | JavaScriptCore (system framework, LGPL-2.1, dynamic link) | **Promoted 2026-07-10 (owner decision).** `jsc` is a **default** feature; the adapter compiles to an empty crate off Apple platforms, so the default costs nothing elsewhere. macOS is fully tested (the JSC suite is part of the standard workspace gate); iOS compiles (`cargo check` verified) with runtime verification deferred to mobile bring-up (block 06). Android and Windows are unsupported by Apple. Using the system framework removes the App Store 4.7 bundled-engine question entirely. |
 
-**What Tier 1 for two engines means:** iOS(JSC)↔Android(QuickJS) parity is
+**What Tier 1 for two engines means:** iOS(JSC)↔Android(Boa) parity is
 guaranteed by **verification, not by sharing an engine** — the parity suite
 (`specs/blocks/08-parity-suite.md`; one script, byte-identical output, both
 engines, every test run) is load-bearing and grows with the API surface.
@@ -154,7 +159,7 @@ the only bounded release path; and performance claims for in-process JSC on
 iOS stay unwritten until measured (owner-deferred).
 
 **Operational rule (engine-independent core).** `core/` must contain **zero**
-references to QuickJS or JSC types — only `E: JsEngine`. Validation and
+references to Boa or JSC types — only `E: JsEngine`. Validation and
 lifetime rules must behave identically under both engines. If wiring an engine
 adapter forces a change to `core/`'s *logic* (as opposed to adding a method to
 the `JsEngine` trait), that is a signal the boundary was drawn incorrectly —
@@ -272,7 +277,7 @@ descriptor", which never reaches the C ABI in a distinguishable way.
 The binding layer's natural oracle is the **upstream WebGPU CTS itself**, which
 is written in TypeScript and therefore runs *in* the engine under test. This is
 exactly what `dawn.node` does (`src/dawn/node/cts.cjs`, `tools/src/cmd/run-cts`)
-— it is the same trick, one engine down. Running it under QuickJS needs a
+— it is the same trick, one engine down. Running it under Boa needs a
 module loader and some Web shims, which is a real lift and explicitly **not**
 Phase 0–3 scope. But it is the end state worth steering toward, and it is why
 invariant 5 (generate from WebIDL) matters: only an IDL-faithful binding can
@@ -341,8 +346,15 @@ Genuinely undecided. Answer with evidence; do not let the draft plan's guesses
 harden into assumptions.
 
 - **Who owns the GPU-release thread** — the host engine or this project?
-- **Which quickjs-ng revision is pinned?** The fork question is closed
-  (`engine-boundary.md` → Q2); the pin is not.
+- ~~**Which quickjs-ng revision is pinned?**~~ **MOOT (2026-07-12):** quickjs-ng
+  was dropped for Boa (`specs/blocks/14-boa-engine.md`). Boa is pinned exactly
+  from crates.io.
+- **Should `ZeroCopyDetach` be deleted?** Both supported engines select
+  `CopyInCopyOut` (invariant 9), so the zero-copy path and
+  `new_external_arraybuffer` now have **no engine exercising them** — untested
+  by construction, which this repo treats as a liability. Keeping them preserves
+  the abstraction for a future zero-copy engine; deleting them shrinks `core/`
+  and removes dead surface. Decide deliberately; do not let it rot unnoticed.
 - **Full WebIDL coverage vs. a trimmed engine-oriented subset.** Revisit after
   the first codegen pass shows the real effort delta.
 - ~~**Where does `webgpu.idl` come from**, and how is it pinned against the

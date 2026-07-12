@@ -1,5 +1,10 @@
 # Tracking: the host event-loop contract
 
+**Historical engine note (2026-07-12):** QuickJS-specific probes below are
+preserved as the evidence that established the two-queue invariant. The
+QuickJS harness was removed with the engine; Boa and JSC now enforce the same
+shared core contract.
+
 Topic owner: `CLAUDE.md` invariants 2 and 3; plan §2.6 / §2.7.
 
 ---

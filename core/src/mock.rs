@@ -4685,17 +4685,6 @@ mod tests {
         let payload = Engine::payload(cx, device, crate::GPU_DEVICE_CLASS)
             .and_then(|payload| payload.downcast_ref::<DevicePayload<Engine>>())
             .expect("device payload");
-        let mut traced = Vec::new();
-        crate::trace_payload_values::<Engine>(payload, &mut |value| traced.push(value));
-        let lost = payload
-            .events
-            .js
-            .lock()
-            .expect("event state")
-            .as_ref()
-            .and_then(|state| state.lost_promise.get())
-            .expect("lost promise");
-        assert_eq!(traced, [first, lost]);
         let mut released = 0;
         crate::release_payload_values::<Engine>(payload, &mut |value| {
             released += 1;
@@ -6833,7 +6822,7 @@ mod tests {
     }
 
     #[test]
-    fn payload_value_dispatch_traces_and_releases_all_buffer_ranges_once() {
+    fn payload_value_dispatch_releases_all_buffer_ranges_once() {
         reset_gpu();
         let rt = runtime();
         let cx = rt.context();
@@ -6857,10 +6846,6 @@ mod tests {
             .and_then(|payload| payload.downcast_ref::<BufferPayload<Engine>>())
             .expect("buffer payload");
 
-        let mut traced = Vec::new();
-        crate::trace_payload_values::<Engine>(payload, &mut |value| traced.push(value));
-        assert_eq!(traced, [first, second]);
-
         let mut released = Vec::new();
         crate::release_payload_values::<Engine>(payload, &mut |value| {
             released.push(value);
@@ -6868,11 +6853,6 @@ mod tests {
         });
         crate::release_payload_values::<Engine>(payload, &mut |value| released.push(value));
         assert_eq!(released, [first, second]);
-        let mut traced_after_release = Vec::new();
-        crate::trace_payload_values::<Engine>(payload, &mut |value| {
-            traced_after_release.push(value)
-        });
-        assert!(traced_after_release.is_empty());
         rt.env.release_device_event_values::<Engine>(cx);
         assert!(rt.duplicated_values.borrow().is_empty());
     }
@@ -7321,7 +7301,6 @@ mod tests {
         finalize_buffer::<Engine>(
             Box::new(BufferPayload::<Engine> {
                 state: Arc::clone(buffer_payload.state()),
-                traced_values: Arc::new(crate::TracedValues::new()),
             }),
             Engine::environment(cx),
         );

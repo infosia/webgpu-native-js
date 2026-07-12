@@ -11,9 +11,7 @@ a feature branch and is cherry-picked here; this block owns it going forward.
 **M1 — `eval_module(path)` + creation-time loader (landed).** Aliases resolve
 first (exact specifier), then importer-relative paths; misses name specifier
 AND importer; module evaluation returns a completion handle and top-level
-await advances through the ordinary `tick()` (verified against the vendored
-quickjs source: modules compile as async functions, evaluation returns its
-promise). R26 error discipline throughout.
+await advances through the ordinary `tick()`. R26 error discipline throughout.
 
 **M2 — the host transform hook is what makes TS possible.**
 `Runtime::set_module_transform(fn(source: &str, path: &Path) -> Result<String,
@@ -29,8 +27,8 @@ exact-path misses, probe in order: `<spec>` as-is, `<spec>.js`, `<spec>.mjs`,
 No implicit `.ts` probing — the transform hook owns TS, resolution stays
 JS-shaped (what tsc emits).
 
-**M4 — QuickJS-first, recorded.** JSC's public C API has no module loader;
-the CTS path is QuickJS-only until that changes (consistent with the
+**M4 — Boa runner, recorded (corrected 2026-07-12).** JSC's public C API has no
+module loader; the CTS path is Boa-only (consistent with the
 JSC-runs-what-macOS-tests story: the CTS validates the BINDING's shared core,
 whose conversions are engine-generic by construction).
 

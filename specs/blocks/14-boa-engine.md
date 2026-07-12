@@ -1,6 +1,8 @@
 # Block 14 — Boa engine adapter (spike)
 
-**Status: SPIKE.** Goal is a decision, not a shipped tier. Boa
+**Status: ADOPTED (Phase 3 owner decision, 2026-07-12).** Boa is now the
+cross-platform Tier 1 engine and quickjs-ng has been removed. The original
+spike plan and Phase 2 measurements remain below as the decision record. Boa
 ([boa-dev/boa](https://github.com/boa-dev/boa), MIT/Unlicense, v0.21.1) is a
 pure-Rust JavaScript engine. This block adds `adapters/boa/` implementing
 `trait JsEngine`, then *measures*. Tier assignment and QuickJS's fate are owner
@@ -109,12 +111,14 @@ Nothing here is a code deliverable; it is the evidence the tier decision needs.
   the `jsvalue-enum` feature is needed (Boa's NaN-boxing assumes a pointer
   alignment some platforms break) is a bring-up question.
 
-## Phase 3 — the owner's decision (not this block's)
+## Phase 3 — owner decision (2026-07-12)
 
-With B7 and B8 in hand: Boa's tier, and whether QuickJS is kept, demoted, or
-dropped. Dropping it would remove the C toolchain, `bindgen`-for-the-engine, and
-the B-4c fork workstream — but only the numbers can say whether the performance
-cost is acceptable. **This block does not pre-judge that.**
+**Decision: adopt Boa as Tier 1 on all platforms and drop quickjs-ng.** The
+curated 1,312-case validation suite passes under Boa with 0 failures, and the
+shared parity script is byte-identical under Boa and JSC. Phase 3 removes the
+QuickJS adapter/submodule/spikes, makes the CTS runner Boa-only, and closes the
+B-4c fork workstream as moot. The preceding text is retained as the proposal
+that produced this decision, not as current engine policy.
 
 ## Dependency and pinning
 
@@ -188,9 +192,9 @@ sessions of C forensics and is still unfixed.
 
 ### Engine wiring
 
-`tools/cts-runner` is now engine-selectable by cargo feature: `engine-quickjs`
-(default, unchanged) and `engine-boa`. `cfg`-on-engine is forbidden in `core/`;
-this is a tool, so a thin wiring module is fine. The Boa adapter gained host
+At the time of this measurement, `tools/cts-runner` was engine-selectable by
+Cargo feature. **Phase 3 correction:** it is now Boa-only and has no engine
+selection feature. The Boa adapter gained host
 functions, module loading (with block 12's lexical-normalization rule and its
 diamond-import regression test), `clear_global`, and `run_gc`; 23 tests, up
 from 15.

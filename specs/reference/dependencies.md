@@ -12,7 +12,6 @@ Two rules govern everything below, both from `CLAUDE.md`:
 
 | Path | Upstream | Pin | License |
 |---|---|---|---|
-| `third_party/quickjs` | [quickjs-ng](https://github.com/quickjs-ng/quickjs) | `v0.15.1` (`fd0a021`) | MIT |
 | `third_party/webgpu-headers` | [webgpu-headers](https://github.com/webgpu-native/webgpu-headers) | `a11ef44` | BSD-3 |
 | `third_party/gpuweb` | [gpuweb](https://github.com/gpuweb/gpuweb) (for `webgpu.idl`) | pinned (Phase 4) | W3C |
 

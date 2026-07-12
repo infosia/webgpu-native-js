@@ -668,6 +668,20 @@ impl Runtime {
         })
     }
 
+    /// Returns the native render-bundle handle carried by `value`, if it has that class.
+    ///
+    /// The returned handle is borrowed. The host must keep `value` reachable for
+    /// the entire native use or take its own native reference.
+    #[must_use]
+    pub fn native_render_bundle(&self, value: BoaValue) -> Option<ffi_wgpu::WGPURenderBundle> {
+        self.with_scope(|cx| core::native_render_bundle::<Engine>(cx, value))
+    }
+
+    /// Drains the core release queue.
+    pub fn drain_releases(&self) -> std::result::Result<usize, core::QueueError> {
+        self.arena.env.queue().drain()
+    }
+
     /// Returns a thread-safe adopted-device event producer.
     #[must_use]
     pub fn device_event_forwarder(&self) -> DeviceEventForwarder {
@@ -2136,6 +2150,41 @@ mod tests {
         // SAFETY: setup keeps the instance live and this runs on the runtime thread.
         let drained = unsafe { runtime.tick(setup.instance) }.expect("empty tick");
         assert_eq!(drained, 0);
+    }
+
+    #[test]
+    fn drain_releases_reports_an_empty_queue() {
+        let runtime = Runtime::new().expect("Boa runtime");
+        assert_eq!(runtime.drain_releases().expect("drain releases"), 0);
+    }
+
+    #[test]
+    fn native_render_bundle_is_class_checked_and_borrows_the_native_handle() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("Boa runtime");
+        // SAFETY: setup owns the live device until after runtime teardown.
+        let device = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("bundleDevice", device)
+            .expect("set wrapped device");
+        let bundle = runtime
+            .eval(
+                "bundleDevice.createRenderBundleEncoder({ colorFormats: ['rgba8unorm'] }).finish()",
+                "native-render-bundle.js",
+            )
+            .expect("create render bundle");
+        let wrong = runtime
+            .eval("bundleDevice", "wrong-render-bundle.js")
+            .expect("get wrong wrapper class");
+
+        let native = runtime
+            .native_render_bundle(bundle)
+            .expect("render bundle native handle");
+        assert!(!native.is_null());
+        assert_eq!(runtime.native_render_bundle(wrong), None);
+
+        runtime.arena.release(wrong);
+        runtime.arena.release(bundle);
     }
 
     #[test]

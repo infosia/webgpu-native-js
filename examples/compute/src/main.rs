@@ -3,7 +3,7 @@ use std::process::ExitCode;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use quickjs_adapter::{HostValue, Runtime};
+use boa_adapter::{HostValue, Runtime};
 use webgpu_native_js_ffi::native as wgpu;
 
 const COMPUTE_SOURCE: &str = include_str!("../compute.js");
@@ -105,13 +105,13 @@ fn create_instance() -> Result<wgpu::WGPUInstance, String> {
     }
 }
 
-fn eval_discard(runtime: &Runtime, source: &str, name: &str) -> quickjs_adapter::Result<()> {
+fn eval_discard(runtime: &Runtime, source: &str, name: &str) -> boa_adapter::Result<()> {
     let value = runtime.eval(source, name)?;
     runtime.set_global_value("__example_eval_result", value)?;
     runtime.clear_global("__example_eval_result")
 }
 
-fn run(instance: wgpu::WGPUInstance) -> quickjs_adapter::Result<bool> {
+fn run(instance: wgpu::WGPUInstance) -> boa_adapter::Result<bool> {
     let runtime = Runtime::new()?;
     let done = Rc::new(Cell::new(false));
     let ok = Rc::new(Cell::new(false));

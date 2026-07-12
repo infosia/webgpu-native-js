@@ -10,7 +10,7 @@ handbook, and the traps. Read this whole file before dispatching anything.
 ## 0. Why this exists (context for a fresh agent)
 
 This project is a JS binding: it presents the `webgpu.h` C ABI as
-WebGPU-shaped JavaScript inside native engines (QuickJS Tier 1 everywhere;
+WebGPU-shaped JavaScript inside native engines (Boa Tier 1 everywhere;
 JavaScriptCore Tier 1 on Apple platforms). The bug class that defines the
 project is *"the binding mis-converts a descriptor"* — invisible to backend
 test suites, because it never reaches the C ABI in a distinguishable way.
@@ -18,7 +18,7 @@ test suites, because it never reaches the C ABI in a distinguishable way.
 The natural oracle for that bug class is the **upstream WebGPU CTS**
 (https://github.com/gpuweb/cts) — written in TypeScript, therefore able to
 run *inside the engine under test*. This is exactly what dawn.node does one
-engine up (Node instead of QuickJS). CLAUDE.md has named this the end state
+engine up (Node instead of Boa). CLAUDE.md has named this the end state
 since day one ("Testing the binding layer").
 
 **The oracle logic (why failures are attributable):** the Dawn backend was
@@ -50,7 +50,7 @@ A fresh agent should verify these still exist before planning work
 
 | Capability | Where | Notes |
 |---|---|---|
-| ES module evaluation | `adapters/quickjs/src/lib.rs` → `Runtime::eval_module(path)` | Returns a completion handle (`ModuleEvaluation`: Pending/Fulfilled); **top-level await completes through the ordinary `tick()`** — verified against vendored quickjs source. |
+| ES module evaluation | `adapters/boa/src/lib.rs` → `Runtime::eval_module(path)` | Returns a completion handle (`ModuleEvaluation`: Pending/Fulfilled); **top-level await completes through the ordinary `tick()`**. |
 | Bare-specifier aliases | `Runtime::set_module_alias(specifier, path)` | Exact-match wins first; alias target is the probe base. |
 | Source transform hook | `Runtime::set_module_transform(f)` | Runs on EVERY module source (root + imports) before compilation. The TS enabler: the binding ships no transpiler; a runner may plug one. Err(msg) → load error naming the path. Trusted host; must not re-enter the runtime. |
 | Resolution probing | module loader internals, same file | as-is → `.js` → `.mjs` → `/index.js`, importer-relative; miss error lists every probe. **Module identity is lexically normalized** (`./`/`..` collapsed) — the block 12 review's MAJOR; do not regress it. |
@@ -58,7 +58,7 @@ A fresh agent should verify these still exist before planning work
 | Per-frame / call-in | `Runtime::call_global_function(name, &[HostValue])` | Exists on main? **VERIFY** — it was written on the deleted Three.js branch (slice 2, commit 6cd9d96, NOT cherry-picked). If absent, it is Phase A work (small; the design is in the deleted branch's description in `specs/tracking/engine-boundary.md` history and in git reflog if still reachable — otherwise re-derive: one JS call, HostValue args, R26 error surfacing). |
 | WebGPU JS surface | `core/src/lib.rs` + `codegen/policy.toml` (generated) | buffers, textures, samplers, bind groups, pipelines (compute+render), passes, bundles, querySets, error scopes (`pushErrorScope`/`popErrorScope`/GPUError classes), device events (`onuncapturederror`, `device.lost`), `features`(real Set)/`limits`/`adapterInfo`, `getBindGroupLayout`. |
 | Async plumbing | J1/J2 architecture: pure-Rust WebGPU callbacks → settlement queue → one-JS-frame trampoline → microtasks → releases, all inside `tick()` | The CTS's promise-heavy style rides this. |
-| Engine parity | `tests/parity/` (122 lines, byte-identical, 2 engines × yawgpu/Dawn) | The CTS runner is QuickJS-only (JSC has no module C API — recorded in block 12 → M4), but core conversions are engine-generic, so CTS coverage benefits JSC transitively. |
+| Engine parity | `tests/parity/` (122 lines, byte-identical, 2 engines × yawgpu/Dawn) | The CTS runner is Boa-only (JSC has no module C API — recorded in block 12 → M4), but core conversions are engine-generic, so CTS coverage benefits JSC transitively. |
 | Gates & culture | `specs/reference/workflow.md` | Per-slice loop, codex discipline, **gate on exit codes** (crash-shaped failures print no FAILED line), review culture (three lenses + deletion experiments), phase reviews. |
 
 **Known-missing items that become load-bearing here:**
@@ -75,7 +75,7 @@ A fresh agent should verify these still exist before planning work
 4. **enforce_u64 accepts up to 2^64−1** where WebIDL caps at 2^53−1
    (recorded). CTS boundary tests will hit this → expectations entries or a
    revisit.
-5. Whatever JS language features the CTS framework needs beyond QuickJS-ng's
+5. Whatever JS language features the CTS framework needs beyond Boa's
    coverage — **unknown until Phase A measures it**.
 
 ---
@@ -160,7 +160,7 @@ shims added, expectations added/retired, suite growth, timing data
 (cases/second — spike-quality, labeled), and per-phase go/no-go notes.
 
 **C10 — the standing boundaries bind unchanged.** Additive APIs only; core
-stays engine-generic; no JSC changes (QuickJS-first recorded); no
+stays engine-generic; no JSC changes (Boa runner recorded); no
 sibling/absolute paths; commits per slice by the manager; **the owner runs
 all network operations (npm, git push/pull) — the manager NEVER pushes**
 (CLAUDE.md + workflow.md; this rule has history — read the workflow section
@@ -183,7 +183,7 @@ NO WebGPU, isolating: module graph loading, shims, and the runner loop.*
 - **A2**: shims.js + the JS glue: import the framework, list a query
   (`--list` prints case names — proves module graph + framework init), then
   run `unittests:` cases, host-reported results, summary + exit code.
-  EXPECT iteration here: QuickJS language/feature gaps surface as loud
+  EXPECT iteration here: Boa language/feature gaps surface as loud
   errors — polyfill in shims or record. Timeout discipline for codex
   (30-minute ceiling — split; a dead-silent session may still have finished:
   check the tree before assuming loss).
@@ -270,9 +270,9 @@ triaged as presumed binding bugs.*
 ## 5. Open questions Phase A must answer (do not guess in advance)
 
 1. The CTS build output's real layout and entry modules (and whether the
-   ESM build runs un-transformed on QuickJS-ng or needs a downlevel step via
+   ESM build runs un-transformed on Boa or needs a downlevel step via
    the transform hook).
-2. Which JS features the framework needs that QuickJS-ng lacks (if any).
+2. Which JS features the framework needs that Boa lacks (if any).
 3. The device-acquisition/pooling semantics the fixtures expect.
 4. Whether `--list`-style enumeration needs filesystem directory listing
    (the loader currently reads files only — a `read_dir` host capability may

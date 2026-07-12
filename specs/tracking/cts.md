@@ -1,5 +1,10 @@
 # CTS runner — tracking (block 13)
 
+**Engine correction (2026-07-12):** Phase A and early Phase B entries below
+record QuickJS measurements from before the owner decision. The runner is now
+Boa-only; the authoritative retained gates are 1,312/1,312 curated CTS cases
+and byte-identical Boa/JSC parity.
+
 ## Phase A — bootstrap: COMPLETE (2026-07-12)
 
 **Result: `unittests:*` — 1,031/1,031 pass, exit 0, ~10s warm (~102

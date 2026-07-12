@@ -1,5 +1,10 @@
 # Block 01 — `core/`: the engine boundary and the import slice
 
+**Historical engine note (2026-07-12):** this completed block records the
+original QuickJS implementation and measurements. QuickJS was later removed in
+favor of Boa (`specs/blocks/14-boa-engine.md`); its paths and engine-specific
+exit criteria below are retained as history, not current requirements.
+
 Phase 1. Public API and behaviour contract for `trait JsEngine`, the object
 model built on it, and the first vertical slice.
 

@@ -1,5 +1,9 @@
 # Block 04 — the JavaScriptCore adapter
 
+**Historical comparison note (2026-07-12):** this completed block compares JSC
+against the then-primary QuickJS adapter. QuickJS was later removed for Boa;
+the comparison evidence is preserved, while current parity is Boa ↔ JSC.
+
 Phase 3. Rules **J1–J21** (J19–J21 added by the 2026-07-10 review). Blocks 01
 (R1–R27), 02 (A1–A31) and 03 (B1–B22) all still bind.
 
