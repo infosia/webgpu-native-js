@@ -2248,6 +2248,61 @@ enum LiveRenderCommands {
     Bundle(WGPURenderBundleEncoder),
 }
 
+#[derive(Clone, Copy)]
+enum LiveDebugCommands {
+    Command(WGPUCommandEncoder),
+    ComputePass(WGPUComputePassEncoder),
+    RenderPass(WGPURenderPassEncoder),
+    RenderBundle(WGPURenderBundleEncoder),
+}
+
+impl LiveDebugCommands {
+    unsafe fn push_debug_group(self, gpu: GpuDispatch, label: WGPUStringView) {
+        match self {
+            Self::Command(encoder) => unsafe {
+                (gpu.command_encoder_push_debug_group)(encoder, label)
+            },
+            Self::ComputePass(pass) => unsafe {
+                (gpu.compute_pass_encoder_push_debug_group)(pass, label)
+            },
+            Self::RenderPass(pass) => unsafe {
+                (gpu.render_pass_encoder_push_debug_group)(pass, label)
+            },
+            Self::RenderBundle(bundle) => unsafe {
+                (gpu.render_bundle_encoder_push_debug_group)(bundle, label)
+            },
+        }
+    }
+
+    unsafe fn pop_debug_group(self, gpu: GpuDispatch) {
+        match self {
+            Self::Command(encoder) => unsafe { (gpu.command_encoder_pop_debug_group)(encoder) },
+            Self::ComputePass(pass) => unsafe { (gpu.compute_pass_encoder_pop_debug_group)(pass) },
+            Self::RenderPass(pass) => unsafe { (gpu.render_pass_encoder_pop_debug_group)(pass) },
+            Self::RenderBundle(bundle) => unsafe {
+                (gpu.render_bundle_encoder_pop_debug_group)(bundle)
+            },
+        }
+    }
+
+    unsafe fn insert_debug_marker(self, gpu: GpuDispatch, label: WGPUStringView) {
+        match self {
+            Self::Command(encoder) => unsafe {
+                (gpu.command_encoder_insert_debug_marker)(encoder, label)
+            },
+            Self::ComputePass(pass) => unsafe {
+                (gpu.compute_pass_encoder_insert_debug_marker)(pass, label)
+            },
+            Self::RenderPass(pass) => unsafe {
+                (gpu.render_pass_encoder_insert_debug_marker)(pass, label)
+            },
+            Self::RenderBundle(bundle) => unsafe {
+                (gpu.render_bundle_encoder_insert_debug_marker)(bundle, label)
+            },
+        }
+    }
+}
+
 impl LiveRenderCommands {
     unsafe fn set_pipeline(self, gpu: GpuDispatch, pipeline: WGPURenderPipeline) {
         match self {
@@ -4789,6 +4844,67 @@ pub fn command_encoder_resolve_query_set<E: JsEngine + 'static>(
     Ok(E::undefined(cx))
 }
 
+/// Implements the shared `GPUDebugCommandsMixin.pushDebugGroup` body.
+pub fn debug_commands_push_debug_group<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let Some(encoder) = live_debug_commands::<E>(cx, this)? else {
+        return Ok(E::undefined(cx));
+    };
+    let arena = Arena::new();
+    let label = E::to_str(
+        cx,
+        required_argument::<E>(cx, args, 0, "groupLabel")?,
+        &arena,
+    )?;
+    unsafe {
+        encoder.push_debug_group(
+            E::environment(cx).gpu(),
+            WGPUStringView::from_bytes(label.as_bytes()),
+        )
+    };
+    Ok(E::undefined(cx))
+}
+
+/// Implements the shared `GPUDebugCommandsMixin.popDebugGroup` body.
+pub fn debug_commands_pop_debug_group<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    _args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let Some(encoder) = live_debug_commands::<E>(cx, this)? else {
+        return Ok(E::undefined(cx));
+    };
+    unsafe { encoder.pop_debug_group(E::environment(cx).gpu()) };
+    Ok(E::undefined(cx))
+}
+
+/// Implements the shared `GPUDebugCommandsMixin.insertDebugMarker` body.
+pub fn debug_commands_insert_debug_marker<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let Some(encoder) = live_debug_commands::<E>(cx, this)? else {
+        return Ok(E::undefined(cx));
+    };
+    let arena = Arena::new();
+    let label = E::to_str(
+        cx,
+        required_argument::<E>(cx, args, 0, "markerLabel")?,
+        &arena,
+    )?;
+    unsafe {
+        encoder.insert_debug_marker(
+            E::environment(cx).gpu(),
+            WGPUStringView::from_bytes(label.as_bytes()),
+        )
+    };
+    Ok(E::undefined(cx))
+}
+
 /// Implements `GPUCommandEncoder.copyBufferToTexture`.
 pub fn command_encoder_copy_buffer_to_texture<E: JsEngine + 'static>(
     cx: E::Context<'_>,
@@ -6849,6 +6965,49 @@ fn live_render_commands<E: JsEngine + 'static>(
         return Ok(None);
     }
     Ok(Some(LiveRenderCommands::Bundle(
+        state.render_bundle_encoder,
+    )))
+}
+
+fn live_debug_commands<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    value: E::Value,
+) -> Result<Option<LiveDebugCommands>, E::Error> {
+    if E::payload(cx, value, GPU_COMMAND_ENCODER_CLASS)
+        .and_then(|payload| payload.downcast_ref::<CommandEncoderPayload>())
+        .is_some()
+    {
+        return live_command_encoder::<E>(cx, value)
+            .map(|encoder| encoder.map(LiveDebugCommands::Command));
+    }
+    if E::payload(cx, value, GPU_COMPUTE_PASS_ENCODER_CLASS)
+        .and_then(|payload| payload.downcast_ref::<ComputePassEncoderPayload>())
+        .is_some()
+    {
+        return live_compute_pass::<E>(cx, value)
+            .map(|pass| pass.map(LiveDebugCommands::ComputePass));
+    }
+    if E::payload(cx, value, GPU_RENDER_PASS_ENCODER_CLASS)
+        .and_then(|payload| payload.downcast_ref::<RenderPassEncoderPayload>())
+        .is_some()
+    {
+        return live_render_pass::<E>(cx, value)
+            .map(|pass| pass.map(LiveDebugCommands::RenderPass));
+    }
+    let payload = E::payload(cx, value, GPU_RENDER_BUNDLE_ENCODER_CLASS)
+        .and_then(|payload| payload.downcast_ref::<RenderBundleEncoderPayload>())
+        .ok_or_else(|| E::type_error(cx, "debug command encoder is required"))?;
+    let state = payload
+        .state
+        .lock()
+        .map_err(|_| E::operation_error(cx, "GPURenderBundleEncoder state is poisoned"))?;
+    if state.ended {
+        state
+            .error_sink
+            .generate_validation_error("GPURenderBundleEncoder is finished".to_owned());
+        return Ok(None);
+    }
+    Ok(Some(LiveDebugCommands::RenderBundle(
         state.render_bundle_encoder,
     )))
 }

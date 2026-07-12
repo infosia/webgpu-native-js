@@ -51,6 +51,9 @@ commandEncoder:clearBuffer-type:TypeError
 commandEncoder:clearBuffer-offset:TypeError
 commandEncoder:resolveQuerySet-type:TypeError
 commandEncoder:resolveQuerySet-offset:TypeError
+debug:pushDebugGroup:undefined
+debug:insertDebugMarker:undefined
+debug:popDebugGroup:undefined
 querySet:occlusion-pass:ok
 scope:occlusion-query:null
 querySet:destroy:ok

@@ -185,6 +185,12 @@ pub struct GpuDispatch {
     pub command_encoder_copy_texture_to_texture: unsafe fn(WGPUCommandEncoder, *const WGPUTexelCopyTextureInfo, *const WGPUTexelCopyTextureInfo, *const WGPUExtent3D),
     /// `wgpuCommandEncoderResolveQuerySet`.
     pub command_encoder_resolve_query_set: unsafe fn(WGPUCommandEncoder, WGPUQuerySet, u32, u32, WGPUBuffer, u64),
+    /// `wgpuCommandEncoderPushDebugGroup`.
+    pub command_encoder_push_debug_group: unsafe fn(WGPUCommandEncoder, WGPUStringView),
+    /// `wgpuCommandEncoderPopDebugGroup`.
+    pub command_encoder_pop_debug_group: unsafe fn(WGPUCommandEncoder),
+    /// `wgpuCommandEncoderInsertDebugMarker`.
+    pub command_encoder_insert_debug_marker: unsafe fn(WGPUCommandEncoder, WGPUStringView),
     /// `wgpuCommandEncoderFinish`.
     pub command_encoder_finish: unsafe fn(WGPUCommandEncoder, *const WGPUCommandBufferDescriptor) -> WGPUCommandBuffer,
     /// `wgpuComputePassEncoderRelease`.
@@ -197,6 +203,12 @@ pub struct GpuDispatch {
     pub compute_pass_encoder_dispatch_workgroups: unsafe fn(WGPUComputePassEncoder, u32, u32, u32),
     /// `wgpuComputePassEncoderDispatchWorkgroupsIndirect`.
     pub compute_pass_encoder_dispatch_workgroups_indirect: unsafe fn(WGPUComputePassEncoder, WGPUBuffer, u64),
+    /// `wgpuComputePassEncoderPushDebugGroup`.
+    pub compute_pass_encoder_push_debug_group: unsafe fn(WGPUComputePassEncoder, WGPUStringView),
+    /// `wgpuComputePassEncoderPopDebugGroup`.
+    pub compute_pass_encoder_pop_debug_group: unsafe fn(WGPUComputePassEncoder),
+    /// `wgpuComputePassEncoderInsertDebugMarker`.
+    pub compute_pass_encoder_insert_debug_marker: unsafe fn(WGPUComputePassEncoder, WGPUStringView),
     /// `wgpuComputePassEncoderEnd`.
     pub compute_pass_encoder_end: unsafe fn(WGPUComputePassEncoder),
     /// `wgpuRenderPassEncoderRelease`.
@@ -231,6 +243,12 @@ pub struct GpuDispatch {
     pub render_pass_encoder_end_occlusion_query: unsafe fn(WGPURenderPassEncoder),
     /// `wgpuRenderPassEncoderExecuteBundles`.
     pub render_pass_encoder_execute_bundles: unsafe fn(WGPURenderPassEncoder, usize, *const WGPURenderBundle),
+    /// `wgpuRenderPassEncoderPushDebugGroup`.
+    pub render_pass_encoder_push_debug_group: unsafe fn(WGPURenderPassEncoder, WGPUStringView),
+    /// `wgpuRenderPassEncoderPopDebugGroup`.
+    pub render_pass_encoder_pop_debug_group: unsafe fn(WGPURenderPassEncoder),
+    /// `wgpuRenderPassEncoderInsertDebugMarker`.
+    pub render_pass_encoder_insert_debug_marker: unsafe fn(WGPURenderPassEncoder, WGPUStringView),
     /// `wgpuRenderPassEncoderEnd`.
     pub render_pass_encoder_end: unsafe fn(WGPURenderPassEncoder),
     /// `wgpuRenderBundleEncoderRelease`.
@@ -251,6 +269,12 @@ pub struct GpuDispatch {
     pub render_bundle_encoder_draw_indirect: unsafe fn(WGPURenderBundleEncoder, WGPUBuffer, u64),
     /// `wgpuRenderBundleEncoderDrawIndexedIndirect`.
     pub render_bundle_encoder_draw_indexed_indirect: unsafe fn(WGPURenderBundleEncoder, WGPUBuffer, u64),
+    /// `wgpuRenderBundleEncoderPushDebugGroup`.
+    pub render_bundle_encoder_push_debug_group: unsafe fn(WGPURenderBundleEncoder, WGPUStringView),
+    /// `wgpuRenderBundleEncoderPopDebugGroup`.
+    pub render_bundle_encoder_pop_debug_group: unsafe fn(WGPURenderBundleEncoder),
+    /// `wgpuRenderBundleEncoderInsertDebugMarker`.
+    pub render_bundle_encoder_insert_debug_marker: unsafe fn(WGPURenderBundleEncoder, WGPUStringView),
     /// `wgpuRenderBundleEncoderFinish`.
     pub render_bundle_encoder_finish: unsafe fn(WGPURenderBundleEncoder, *const WGPURenderBundleDescriptor) -> WGPURenderBundle,
     /// `wgpuRenderBundleRelease`.
@@ -357,12 +381,18 @@ macro_rules! for_each_gpu_dispatch_entry {
             (command_encoder_copy_texture_to_buffer, wgpuCommandEncoderCopyTextureToBuffer, unsafe fn(command_encoder: $crate::WGPUCommandEncoder, source: *const $crate::WGPUTexelCopyTextureInfo, destination: *const $crate::WGPUTexelCopyBufferInfo, copy_size: *const $crate::WGPUExtent3D)),
             (command_encoder_copy_texture_to_texture, wgpuCommandEncoderCopyTextureToTexture, unsafe fn(command_encoder: $crate::WGPUCommandEncoder, source: *const $crate::WGPUTexelCopyTextureInfo, destination: *const $crate::WGPUTexelCopyTextureInfo, copy_size: *const $crate::WGPUExtent3D)),
             (command_encoder_resolve_query_set, wgpuCommandEncoderResolveQuerySet, unsafe fn(command_encoder: $crate::WGPUCommandEncoder, query_set: $crate::WGPUQuerySet, first_query: u32, query_count: u32, destination: $crate::WGPUBuffer, destination_offset: u64)),
+            (command_encoder_push_debug_group, wgpuCommandEncoderPushDebugGroup, unsafe fn(command_encoder: $crate::WGPUCommandEncoder, group_label: $crate::WGPUStringView)),
+            (command_encoder_pop_debug_group, wgpuCommandEncoderPopDebugGroup, unsafe fn(command_encoder: $crate::WGPUCommandEncoder)),
+            (command_encoder_insert_debug_marker, wgpuCommandEncoderInsertDebugMarker, unsafe fn(command_encoder: $crate::WGPUCommandEncoder, marker_label: $crate::WGPUStringView)),
             (command_encoder_finish, wgpuCommandEncoderFinish, unsafe fn(command_encoder: $crate::WGPUCommandEncoder, descriptor: *const $crate::WGPUCommandBufferDescriptor) -> $crate::WGPUCommandBuffer),
             (compute_pass_encoder_release, wgpuComputePassEncoderRelease, unsafe fn(compute_pass_encoder: $crate::WGPUComputePassEncoder)),
             (compute_pass_encoder_set_pipeline, wgpuComputePassEncoderSetPipeline, unsafe fn(compute_pass_encoder: $crate::WGPUComputePassEncoder, pipeline: $crate::WGPUComputePipeline)),
             (compute_pass_encoder_set_bind_group, wgpuComputePassEncoderSetBindGroup, unsafe fn(compute_pass_encoder: $crate::WGPUComputePassEncoder, group_index: u32, group: $crate::WGPUBindGroup, dynamic_offsets_count: usize, dynamic_offsets: *const u32)),
             (compute_pass_encoder_dispatch_workgroups, wgpuComputePassEncoderDispatchWorkgroups, unsafe fn(compute_pass_encoder: $crate::WGPUComputePassEncoder, workgroup_count_x: u32, workgroup_count_y: u32, workgroup_count_z: u32)),
             (compute_pass_encoder_dispatch_workgroups_indirect, wgpuComputePassEncoderDispatchWorkgroupsIndirect, unsafe fn(compute_pass_encoder: $crate::WGPUComputePassEncoder, indirect_buffer: $crate::WGPUBuffer, indirect_offset: u64)),
+            (compute_pass_encoder_push_debug_group, wgpuComputePassEncoderPushDebugGroup, unsafe fn(compute_pass_encoder: $crate::WGPUComputePassEncoder, group_label: $crate::WGPUStringView)),
+            (compute_pass_encoder_pop_debug_group, wgpuComputePassEncoderPopDebugGroup, unsafe fn(compute_pass_encoder: $crate::WGPUComputePassEncoder)),
+            (compute_pass_encoder_insert_debug_marker, wgpuComputePassEncoderInsertDebugMarker, unsafe fn(compute_pass_encoder: $crate::WGPUComputePassEncoder, marker_label: $crate::WGPUStringView)),
             (compute_pass_encoder_end, wgpuComputePassEncoderEnd, unsafe fn(compute_pass_encoder: $crate::WGPUComputePassEncoder)),
             (render_pass_encoder_release, wgpuRenderPassEncoderRelease, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder)),
             (render_pass_encoder_set_pipeline, wgpuRenderPassEncoderSetPipeline, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder, pipeline: $crate::WGPURenderPipeline)),
@@ -380,6 +410,9 @@ macro_rules! for_each_gpu_dispatch_entry {
             (render_pass_encoder_begin_occlusion_query, wgpuRenderPassEncoderBeginOcclusionQuery, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder, query_index: u32)),
             (render_pass_encoder_end_occlusion_query, wgpuRenderPassEncoderEndOcclusionQuery, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder)),
             (render_pass_encoder_execute_bundles, wgpuRenderPassEncoderExecuteBundles, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder, bundles_count: usize, bundles: *const $crate::WGPURenderBundle)),
+            (render_pass_encoder_push_debug_group, wgpuRenderPassEncoderPushDebugGroup, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder, group_label: $crate::WGPUStringView)),
+            (render_pass_encoder_pop_debug_group, wgpuRenderPassEncoderPopDebugGroup, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder)),
+            (render_pass_encoder_insert_debug_marker, wgpuRenderPassEncoderInsertDebugMarker, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder, marker_label: $crate::WGPUStringView)),
             (render_pass_encoder_end, wgpuRenderPassEncoderEnd, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder)),
             (render_bundle_encoder_release, wgpuRenderBundleEncoderRelease, unsafe fn(render_bundle_encoder: $crate::WGPURenderBundleEncoder)),
             (render_bundle_encoder_set_pipeline, wgpuRenderBundleEncoderSetPipeline, unsafe fn(render_bundle_encoder: $crate::WGPURenderBundleEncoder, pipeline: $crate::WGPURenderPipeline)),
@@ -390,6 +423,9 @@ macro_rules! for_each_gpu_dispatch_entry {
             (render_bundle_encoder_draw_indexed, wgpuRenderBundleEncoderDrawIndexed, unsafe fn(render_bundle_encoder: $crate::WGPURenderBundleEncoder, index_count: u32, instance_count: u32, first_index: u32, base_vertex: i32, first_instance: u32)),
             (render_bundle_encoder_draw_indirect, wgpuRenderBundleEncoderDrawIndirect, unsafe fn(render_bundle_encoder: $crate::WGPURenderBundleEncoder, indirect_buffer: $crate::WGPUBuffer, indirect_offset: u64)),
             (render_bundle_encoder_draw_indexed_indirect, wgpuRenderBundleEncoderDrawIndexedIndirect, unsafe fn(render_bundle_encoder: $crate::WGPURenderBundleEncoder, indirect_buffer: $crate::WGPUBuffer, indirect_offset: u64)),
+            (render_bundle_encoder_push_debug_group, wgpuRenderBundleEncoderPushDebugGroup, unsafe fn(render_bundle_encoder: $crate::WGPURenderBundleEncoder, group_label: $crate::WGPUStringView)),
+            (render_bundle_encoder_pop_debug_group, wgpuRenderBundleEncoderPopDebugGroup, unsafe fn(render_bundle_encoder: $crate::WGPURenderBundleEncoder)),
+            (render_bundle_encoder_insert_debug_marker, wgpuRenderBundleEncoderInsertDebugMarker, unsafe fn(render_bundle_encoder: $crate::WGPURenderBundleEncoder, marker_label: $crate::WGPUStringView)),
             (render_bundle_encoder_finish, wgpuRenderBundleEncoderFinish, unsafe fn(render_bundle_encoder: $crate::WGPURenderBundleEncoder, descriptor: *const $crate::WGPURenderBundleDescriptor) -> $crate::WGPURenderBundle),
             (render_bundle_release, wgpuRenderBundleRelease, unsafe fn(render_bundle: $crate::WGPURenderBundle)),
             (command_buffer_release, wgpuCommandBufferRelease, unsafe fn(command_buffer: $crate::WGPUCommandBuffer)),
@@ -5071,6 +5107,9 @@ pub(super) fn command_encoder_class<E: JsEngine + 'static>() -> &'static ClassSp
             MethodSpec { name: "copyBufferToBuffer", length: 5, call: command_encoder_copy_buffer_to_buffer::<E> },
             MethodSpec { name: "clearBuffer", length: 1, call: command_encoder_clear_buffer::<E> },
             MethodSpec { name: "resolveQuerySet", length: 5, call: command_encoder_resolve_query_set::<E> },
+            MethodSpec { name: "pushDebugGroup", length: 1, call: debug_commands_push_debug_group::<E> },
+            MethodSpec { name: "popDebugGroup", length: 0, call: debug_commands_pop_debug_group::<E> },
+            MethodSpec { name: "insertDebugMarker", length: 1, call: debug_commands_insert_debug_marker::<E> },
             MethodSpec { name: "beginComputePass", length: 0, call: command_encoder_begin_compute_pass::<E> },
             MethodSpec { name: "beginRenderPass", length: 1, call: command_encoder_begin_render_pass::<E> },
             MethodSpec { name: "copyBufferToTexture", length: 3, call: command_encoder_copy_buffer_to_texture::<E> },
@@ -5093,6 +5132,9 @@ pub(super) fn compute_pass_encoder_class<E: JsEngine + 'static>() -> &'static Cl
             MethodSpec { name: "setBindGroup", length: 2, call: compute_pass_set_bind_group::<E> },
             MethodSpec { name: "dispatchWorkgroups", length: 1, call: compute_pass_dispatch_workgroups::<E> },
             MethodSpec { name: "dispatchWorkgroupsIndirect", length: 2, call: compute_pass_dispatch_workgroups_indirect::<E> },
+            MethodSpec { name: "pushDebugGroup", length: 1, call: debug_commands_push_debug_group::<E> },
+            MethodSpec { name: "popDebugGroup", length: 0, call: debug_commands_pop_debug_group::<E> },
+            MethodSpec { name: "insertDebugMarker", length: 1, call: debug_commands_insert_debug_marker::<E> },
             MethodSpec { name: "end", length: 0, call: compute_pass_end::<E> },
         ])),
         finalizer: finalize_compute_pass_encoder,
@@ -5121,6 +5163,9 @@ pub(super) fn render_pass_encoder_class<E: JsEngine + 'static>() -> &'static Cla
             MethodSpec { name: "beginOcclusionQuery", length: 1, call: render_pass_begin_occlusion_query::<E> },
             MethodSpec { name: "endOcclusionQuery", length: 0, call: render_pass_end_occlusion_query::<E> },
             MethodSpec { name: "executeBundles", length: 1, call: render_pass_execute_bundles::<E> },
+            MethodSpec { name: "pushDebugGroup", length: 1, call: debug_commands_push_debug_group::<E> },
+            MethodSpec { name: "popDebugGroup", length: 0, call: debug_commands_pop_debug_group::<E> },
+            MethodSpec { name: "insertDebugMarker", length: 1, call: debug_commands_insert_debug_marker::<E> },
             MethodSpec { name: "end", length: 0, call: render_pass_end::<E> },
         ])),
         finalizer: finalize_render_pass_encoder,
@@ -5142,6 +5187,9 @@ pub(super) fn render_bundle_encoder_class<E: JsEngine + 'static>() -> &'static C
             MethodSpec { name: "drawIndexed", length: 1, call: render_pass_draw_indexed::<E> },
             MethodSpec { name: "drawIndirect", length: 2, call: render_pass_draw_indirect::<E> },
             MethodSpec { name: "drawIndexedIndirect", length: 2, call: render_pass_draw_indexed_indirect::<E> },
+            MethodSpec { name: "pushDebugGroup", length: 1, call: debug_commands_push_debug_group::<E> },
+            MethodSpec { name: "popDebugGroup", length: 0, call: debug_commands_pop_debug_group::<E> },
+            MethodSpec { name: "insertDebugMarker", length: 1, call: debug_commands_insert_debug_marker::<E> },
             MethodSpec { name: "finish", length: 0, call: render_bundle_encoder_finish::<E> },
         ])),
         finalizer: finalize_render_bundle_encoder,

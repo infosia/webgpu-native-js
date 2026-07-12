@@ -608,6 +608,12 @@
                 encoder.clearBuffer(destination);
                 encoder.clearBuffer(destination, 256, 256);
                 encoder.resolveQuerySet(parityQuerySet, 0, 4, destination, 0);
+                log("debug:pushDebugGroup:" +
+                    (encoder.pushDebugGroup("group\0🌞") === undefined ? "undefined" : "other"));
+                log("debug:insertDebugMarker:" +
+                    (encoder.insertDebugMarker("a\uD800b") === undefined ? "undefined" : "other"));
+                log("debug:popDebugGroup:" +
+                    (encoder.popDebugGroup() === undefined ? "undefined" : "other"));
                 device.queue.submit([encoder.finish()]);
                 log("querySet:occlusion-pass:ok");
             });

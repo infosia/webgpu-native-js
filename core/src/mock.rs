@@ -1184,6 +1184,7 @@ struct MockGpuState {
     stencil_reference_calls: Vec<(WGPURenderPassEncoder, u32)>,
     clear_buffer_calls: Vec<(WGPUCommandEncoder, WGPUBuffer, u64, u64)>,
     resolve_query_set_calls: Vec<(WGPUCommandEncoder, WGPUQuerySet, u32, u32, WGPUBuffer, u64)>,
+    debug_calls: Vec<(&'static str, usize, Option<Vec<u8>>)>,
     vertex_buffer_ranges: Vec<(u64, u64)>,
     index_buffer_ranges: Vec<(u64, u64)>,
     indirect_calls: Vec<(&'static str, WGPUBuffer, u64)>,
@@ -2445,6 +2446,73 @@ unsafe fn command_encoder_resolve_query_set(
             destination_offset,
         ));
     });
+}
+
+unsafe fn command_encoder_push_debug_group(encoder: WGPUCommandEncoder, label: WGPUStringView) {
+    record_debug_call("command.push", encoder as usize, Some(read_view(label)));
+}
+
+unsafe fn command_encoder_pop_debug_group(encoder: WGPUCommandEncoder) {
+    record_debug_call("command.pop", encoder as usize, None);
+}
+
+unsafe fn command_encoder_insert_debug_marker(encoder: WGPUCommandEncoder, label: WGPUStringView) {
+    record_debug_call("command.marker", encoder as usize, Some(read_view(label)));
+}
+
+unsafe fn compute_pass_encoder_push_debug_group(
+    pass: WGPUComputePassEncoder,
+    label: WGPUStringView,
+) {
+    record_debug_call("compute.push", pass as usize, Some(read_view(label)));
+}
+
+unsafe fn compute_pass_encoder_pop_debug_group(pass: WGPUComputePassEncoder) {
+    record_debug_call("compute.pop", pass as usize, None);
+}
+
+unsafe fn compute_pass_encoder_insert_debug_marker(
+    pass: WGPUComputePassEncoder,
+    label: WGPUStringView,
+) {
+    record_debug_call("compute.marker", pass as usize, Some(read_view(label)));
+}
+
+unsafe fn render_pass_encoder_push_debug_group(pass: WGPURenderPassEncoder, label: WGPUStringView) {
+    record_debug_call("render.push", pass as usize, Some(read_view(label)));
+}
+
+unsafe fn render_pass_encoder_pop_debug_group(pass: WGPURenderPassEncoder) {
+    record_debug_call("render.pop", pass as usize, None);
+}
+
+unsafe fn render_pass_encoder_insert_debug_marker(
+    pass: WGPURenderPassEncoder,
+    label: WGPUStringView,
+) {
+    record_debug_call("render.marker", pass as usize, Some(read_view(label)));
+}
+
+unsafe fn render_bundle_encoder_push_debug_group(
+    encoder: WGPURenderBundleEncoder,
+    label: WGPUStringView,
+) {
+    record_debug_call("bundle.push", encoder as usize, Some(read_view(label)));
+}
+
+unsafe fn render_bundle_encoder_pop_debug_group(encoder: WGPURenderBundleEncoder) {
+    record_debug_call("bundle.pop", encoder as usize, None);
+}
+
+unsafe fn render_bundle_encoder_insert_debug_marker(
+    encoder: WGPURenderBundleEncoder,
+    label: WGPUStringView,
+) {
+    record_debug_call("bundle.marker", encoder as usize, Some(read_view(label)));
+}
+
+fn record_debug_call(name: &'static str, encoder: usize, label: Option<Vec<u8>>) {
+    GPU_STATE.with(|state| state.borrow_mut().debug_calls.push((name, encoder, label)));
 }
 
 unsafe fn command_encoder_begin_compute_pass(
@@ -9066,6 +9134,145 @@ mod tests {
     }
 
     #[test]
+    fn debug_commands_forward_all_encoder_handles_labels_and_stop_after_end() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+
+        let command = device_create_command_encoder::<Engine>(cx, device, &[]).expect("command");
+        let native_command = crate::live_command_encoder::<Engine>(cx, command)
+            .expect("command handle")
+            .expect("live command");
+
+        let compute_parent =
+            device_create_command_encoder::<Engine>(cx, device, &[]).expect("compute parent");
+        let compute = crate::command_encoder_begin_compute_pass::<Engine>(cx, compute_parent, &[])
+            .expect("compute pass");
+        let native_compute = crate::live_compute_pass::<Engine>(cx, compute)
+            .expect("compute handle")
+            .expect("live compute");
+
+        let render_parent =
+            device_create_command_encoder::<Engine>(cx, device, &[]).expect("render parent");
+        let render_descriptor = descriptor(&rt, &[("colorAttachments", rt.set_like(&[]))]);
+        let render = crate::command_encoder_begin_render_pass::<Engine>(
+            cx,
+            render_parent,
+            &[render_descriptor],
+        )
+        .expect("render pass");
+        let native_render = crate::live_render_pass::<Engine>(cx, render)
+            .expect("render handle")
+            .expect("live render");
+
+        let bundle_descriptor = descriptor(&rt, &[("colorFormats", rt.set_like(&[]))]);
+        let bundle =
+            crate::device_create_render_bundle_encoder::<Engine>(cx, device, &[bundle_descriptor])
+                .expect("bundle encoder");
+        let native_bundle = Engine::payload(cx, bundle, crate::GPU_RENDER_BUNDLE_ENCODER_CLASS)
+            .and_then(|payload| payload.downcast_ref::<crate::RenderBundleEncoderPayload>())
+            .and_then(|payload| {
+                payload
+                    .state
+                    .lock()
+                    .ok()
+                    .map(|state| state.render_bundle_encoder)
+            })
+            .expect("bundle handle");
+
+        let group = rt.string("group\0🌞");
+        let marker = rt.string("marker\0👆");
+        for encoder in [command, compute, render, bundle] {
+            crate::debug_commands_push_debug_group::<Engine>(cx, encoder, &[group])
+                .expect("push debug group");
+            crate::debug_commands_insert_debug_marker::<Engine>(cx, encoder, &[marker])
+                .expect("insert debug marker");
+            crate::debug_commands_pop_debug_group::<Engine>(cx, encoder, &[])
+                .expect("pop debug group");
+        }
+        assert_eq!(
+            crate::debug_commands_push_debug_group::<Engine>(cx, command, &[])
+                .expect_err("missing group label"),
+            "TypeError: groupLabel"
+        );
+        assert_eq!(
+            crate::debug_commands_insert_debug_marker::<Engine>(cx, command, &[])
+                .expect_err("missing marker label"),
+            "TypeError: markerLabel"
+        );
+
+        let group_bytes = Some("group\0🌞".as_bytes().to_vec());
+        let marker_bytes = Some("marker\0👆".as_bytes().to_vec());
+        GPU_STATE.with(|state| {
+            assert_eq!(
+                state.borrow().debug_calls,
+                [
+                    ("command.push", native_command as usize, group_bytes.clone()),
+                    (
+                        "command.marker",
+                        native_command as usize,
+                        marker_bytes.clone()
+                    ),
+                    ("command.pop", native_command as usize, None),
+                    ("compute.push", native_compute as usize, group_bytes.clone()),
+                    (
+                        "compute.marker",
+                        native_compute as usize,
+                        marker_bytes.clone()
+                    ),
+                    ("compute.pop", native_compute as usize, None),
+                    ("render.push", native_render as usize, group_bytes.clone()),
+                    (
+                        "render.marker",
+                        native_render as usize,
+                        marker_bytes.clone()
+                    ),
+                    ("render.pop", native_render as usize, None),
+                    ("bundle.push", native_bundle as usize, group_bytes),
+                    ("bundle.marker", native_bundle as usize, marker_bytes),
+                    ("bundle.pop", native_bundle as usize, None),
+                ]
+            );
+        });
+
+        command_encoder_finish::<Engine>(cx, command, &[]).expect("finish command");
+        crate::compute_pass_end::<Engine>(cx, compute, &[]).expect("end compute");
+        crate::render_pass_end::<Engine>(cx, render, &[]).expect("end render");
+        crate::render_bundle_encoder_finish::<Engine>(cx, bundle, &[]).expect("finish bundle");
+        let calls_before_ended_checks = GPU_STATE.with(|state| state.borrow().debug_calls.len());
+
+        device_push_error_scope::<Engine>(cx, device, &[rt.string("validation")])
+            .expect("command scope");
+        crate::debug_commands_insert_debug_marker::<Engine>(cx, command, &[marker])
+            .expect("finished command returns");
+        assert_validation_scope_error(&rt, cx, device, "GPUCommandEncoder is finished");
+
+        device_push_error_scope::<Engine>(cx, device, &[rt.string("validation")])
+            .expect("compute scope");
+        crate::debug_commands_pop_debug_group::<Engine>(cx, compute, &[])
+            .expect("ended compute returns");
+        assert_validation_scope_error(&rt, cx, device, "GPUComputePassEncoder is ended");
+
+        device_push_error_scope::<Engine>(cx, device, &[rt.string("validation")])
+            .expect("render scope");
+        crate::debug_commands_push_debug_group::<Engine>(cx, render, &[group])
+            .expect("ended render returns");
+        assert_validation_scope_error(&rt, cx, device, "GPURenderPassEncoder is ended");
+
+        device_push_error_scope::<Engine>(cx, device, &[rt.string("validation")])
+            .expect("bundle scope");
+        crate::debug_commands_insert_debug_marker::<Engine>(cx, bundle, &[marker])
+            .expect("finished bundle returns");
+        assert_validation_scope_error(&rt, cx, device, "GPURenderBundleEncoder is finished");
+
+        GPU_STATE.with(|state| {
+            assert_eq!(state.borrow().debug_calls.len(), calls_before_ended_checks);
+        });
+        release_device_held_values(&rt, cx, device);
+    }
+
+    #[test]
     fn command_encoder_clear_and_resolve_forward_values_sentinels_and_reject_bad_arguments() {
         reset_gpu();
         let rt = runtime();
@@ -9642,6 +9849,9 @@ mod tests {
                 "drawIndexed",
                 "drawIndirect",
                 "drawIndexedIndirect",
+                "pushDebugGroup",
+                "popDebugGroup",
+                "insertDebugMarker",
                 "finish",
             ]
         );

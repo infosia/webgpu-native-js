@@ -183,6 +183,9 @@ members = [
   "copyTextureToBuffer",
   "copyTextureToTexture",
   "resolveQuerySet",
+  "pushDebugGroup",
+  "popDebugGroup",
+  "insertDebugMarker",
   "finish",
 ]
 
@@ -193,6 +196,9 @@ members = [
   "setBindGroup",
   "dispatchWorkgroups",
   "dispatchWorkgroupsIndirect",
+  "pushDebugGroup",
+  "popDebugGroup",
+  "insertDebugMarker",
   "end",
 ]
 
@@ -214,6 +220,9 @@ members = [
   "beginOcclusionQuery",
   "endOcclusionQuery",
   "executeBundles",
+  "pushDebugGroup",
+  "popDebugGroup",
+  "insertDebugMarker",
   "end",
 ]
 
@@ -228,6 +237,9 @@ members = [
   "drawIndexed",
   "drawIndirect",
   "drawIndexedIndirect",
+  "pushDebugGroup",
+  "popDebugGroup",
+  "insertDebugMarker",
   "finish",
 ]
 
@@ -385,6 +397,21 @@ path = "command_encoder_resolve_query_set"
 
 [[lifecycle.methods]]
 interface = "GPUCommandEncoder"
+member = "pushDebugGroup"
+path = "debug_commands_push_debug_group"
+
+[[lifecycle.methods]]
+interface = "GPUCommandEncoder"
+member = "popDebugGroup"
+path = "debug_commands_pop_debug_group"
+
+[[lifecycle.methods]]
+interface = "GPUCommandEncoder"
+member = "insertDebugMarker"
+path = "debug_commands_insert_debug_marker"
+
+[[lifecycle.methods]]
+interface = "GPUCommandEncoder"
 member = "beginComputePass"
 path = "command_encoder_begin_compute_pass"
 
@@ -432,6 +459,24 @@ path = "compute_pass_dispatch_workgroups"
 interface = "GPUComputePassEncoder"
 member = "dispatchWorkgroupsIndirect"
 path = "compute_pass_dispatch_workgroups_indirect"
+
+[[lifecycle.methods]]
+interface = "GPUComputePassEncoder"
+member = "pushDebugGroup"
+path = "debug_commands_push_debug_group"
+reason = "GPUDebugCommandsMixin shares one body across all four encoder interfaces"
+
+[[lifecycle.methods]]
+interface = "GPUComputePassEncoder"
+member = "popDebugGroup"
+path = "debug_commands_pop_debug_group"
+reason = "GPUDebugCommandsMixin shares one body across all four encoder interfaces"
+
+[[lifecycle.methods]]
+interface = "GPUComputePassEncoder"
+member = "insertDebugMarker"
+path = "debug_commands_insert_debug_marker"
+reason = "GPUDebugCommandsMixin shares one body across all four encoder interfaces"
 
 [[lifecycle.methods]]
 interface = "GPUComputePassEncoder"
@@ -515,6 +560,24 @@ path = "render_pass_execute_bundles"
 
 [[lifecycle.methods]]
 interface = "GPURenderPassEncoder"
+member = "pushDebugGroup"
+path = "debug_commands_push_debug_group"
+reason = "GPUDebugCommandsMixin shares one body across all four encoder interfaces"
+
+[[lifecycle.methods]]
+interface = "GPURenderPassEncoder"
+member = "popDebugGroup"
+path = "debug_commands_pop_debug_group"
+reason = "GPUDebugCommandsMixin shares one body across all four encoder interfaces"
+
+[[lifecycle.methods]]
+interface = "GPURenderPassEncoder"
+member = "insertDebugMarker"
+path = "debug_commands_insert_debug_marker"
+reason = "GPUDebugCommandsMixin shares one body across all four encoder interfaces"
+
+[[lifecycle.methods]]
+interface = "GPURenderPassEncoder"
 member = "end"
 path = "render_pass_end"
 
@@ -565,6 +628,24 @@ interface = "GPURenderBundleEncoder"
 member = "drawIndexedIndirect"
 path = "render_pass_draw_indexed_indirect"
 reason = "GPURenderCommandsMixin reuses the render-command body with bundle-specific dispatch"
+
+[[lifecycle.methods]]
+interface = "GPURenderBundleEncoder"
+member = "pushDebugGroup"
+path = "debug_commands_push_debug_group"
+reason = "GPUDebugCommandsMixin shares one body across all four encoder interfaces"
+
+[[lifecycle.methods]]
+interface = "GPURenderBundleEncoder"
+member = "popDebugGroup"
+path = "debug_commands_pop_debug_group"
+reason = "GPUDebugCommandsMixin shares one body across all four encoder interfaces"
+
+[[lifecycle.methods]]
+interface = "GPURenderBundleEncoder"
+member = "insertDebugMarker"
+path = "debug_commands_insert_debug_marker"
+reason = "GPUDebugCommandsMixin shares one body across all four encoder interfaces"
 
 [[lifecycle.methods]]
 interface = "GPURenderBundleEncoder"
