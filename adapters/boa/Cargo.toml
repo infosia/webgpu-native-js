@@ -1,0 +1,20 @@
+[package]
+name = "boa-adapter"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["backend-yawgpu"]
+backend-yawgpu = ["webgpu-native-js-ffi/backend-yawgpu"]
+backend-wgpu-native = ["webgpu-native-js-ffi/backend-wgpu-native"]
+backend-dawn = ["webgpu-native-js-ffi/backend-dawn"]
+
+[dependencies]
+webgpu-native-js-core = { path = "../../core" }
+webgpu-native-js-ffi = { path = "../../ffi" }
+# Pre-1.0 and self-described as experimental: the pin is exact and moves deliberately.
+boa_engine = "=0.21.1"
+boa_gc = "=0.21.1"
+
+[dev-dependencies]
+webgpu-native-js-ffi = { path = "../../ffi" }
