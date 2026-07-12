@@ -112,6 +112,46 @@
             return adapter.requestDevice({ requiredFeatures: requested });
         }).then(function (requestedDevice) {
             log("features:requested:" + Array.from(requestedDevice.features).join(","));
+            requestedDevice.pushErrorScope("validation");
+            var timestampQuerySet = requestedDevice.createQuerySet({
+                type: "timestamp",
+                count: 4
+            });
+            var target = requestedDevice.createTexture({
+                size: [1],
+                format: "rgba8unorm",
+                usage: 16
+            });
+            var encoder = requestedDevice.createCommandEncoder();
+            var renderPass = encoder.beginRenderPass({
+                colorAttachments: [{
+                    view: target.createView(),
+                    loadOp: "clear",
+                    storeOp: "store"
+                }],
+                timestampWrites: {
+                    querySet: timestampQuerySet,
+                    beginningOfPassWriteIndex: 0,
+                    endOfPassWriteIndex: 1
+                }
+            });
+            renderPass.end();
+            var computePass = encoder.beginComputePass({
+                timestampWrites: {
+                    querySet: timestampQuerySet,
+                    beginningOfPassWriteIndex: 2,
+                    endOfPassWriteIndex: 3
+                }
+            });
+            computePass.end();
+            requestedDevice.queue.submit([encoder.finish()]);
+            return requestedDevice.popErrorScope().then(function (error) {
+                log("timestampWrites:render-compute:" +
+                    (error === null ? "null" : error.constructor.name));
+                timestampQuerySet.destroy();
+                target.destroy();
+                requestedDevice.destroy();
+            });
         });
     }
 

@@ -1143,7 +1143,6 @@ fn validate_policy(
         }
     }
     let mut seen_idl_maps = BTreeSet::new();
-    let mut seen_c_maps = BTreeSet::new();
     for entry in &policy.name_map {
         if entry.reason.trim().is_empty() {
             return Err(CodegenError::Policy(format!(
@@ -1151,7 +1150,9 @@ fn validate_policy(
                 entry.idl, entry.c
             )));
         }
-        if !seen_idl_maps.insert(entry.idl.as_str()) || !seen_c_maps.insert(entry.c.as_str()) {
+        // Multiple WebIDL dictionaries may intentionally share one C struct
+        // (for example the render- and compute-pass timestamp-write twins).
+        if !seen_idl_maps.insert(entry.idl.as_str()) {
             return Err(CodegenError::Policy(format!(
                 "duplicate name-map {} -> {}",
                 entry.idl, entry.c

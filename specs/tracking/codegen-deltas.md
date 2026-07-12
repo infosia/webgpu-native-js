@@ -13,7 +13,7 @@ generator's report; this file is the committed, reviewable index.
 | ~~`GPUBindGroupLayoutEntry.sampler` / `.texture` / `.storageTexture`~~ | **shipped in block 09 slice 2 (2026-07-11)** — the "buffer-only" rejections converted to positive tests | historical: rejected 2026-07-10 (slice 2b) until the texture surface existed |
 | `GPUShaderModuleDescriptor.compilationHints` | reject-if-present | recorded deferral (block 03 §7) |
 | `GPUProgrammableStage.constants` | reject-if-present | pipeline constants deferred (block 03 §7); silent drop retired by the Phase 4 review |
-| `GPUComputePassDescriptor.timestampWrites` | reject-if-present | query sets out of scope |
+| ~~`GPUComputePassDescriptor.timestampWrites` / `GPURenderPassDescriptor.timestampWrites`~~ | **RETIRED 2026-07-12 — both IDL dictionaries emit through the shared `WGPUPassTimestampWrites` C struct** | historical: rejected until `requiredFeatures` plumbing made timestamp-query devices testable |
 | ~~`GPURenderPassDescriptor.maxDrawCount`~~ | **RETIRED 2026-07-12 — emitted through `WGPURenderPassMaxDrawCount` only when present** | historical: rejected while optional extension-chain emission was unavailable |
 | `GPUDevice.importExternalTexture`; `GPUQueue.copyExternalImageToTexture` | not in subset | external-texture surface out of scope; join-report mismatch entries |
 | `GPUDevice.lost`, `.onuncapturederror` | ~~not in subset~~ **shipped in Phase 6 (P6b)** | see the Phase 6 additions below |
@@ -111,11 +111,13 @@ enum sentinels `Undefined` / `BindingNotUsed` (emitted only for absent optionals
 - **`isFallbackAdapter` derives from `adapterType == CPU`.** The C ABI has no
   direct fallback field; CPU adapters are what the fallback request yields.
   A conformant-enough proxy, recorded as a derivation rather than a fact.
-- **`requiredFeatures`/`requiredLimits` are unplumbed in `requestDevice`**
-  (`requiredFeatureCount` is hard-coded 0). Consequences, all recorded at
-  their sites: `timestamp` query sets cannot be created (untested),
-  `timestampWrites` stays policy-skipped for this reason (both policy twins
-  now carry the same reason). The plumbing is a known, deliberate gap.
-- **Compute-pass `timestampWrites` reason corrected** — it read "out of scope
-  until query sets" after query sets shipped; both twins now cite the
-  requiredFeatures gap.
+- ~~**`requiredFeatures`/`requiredLimits` are unplumbed in `requestDevice`**
+  (`requiredFeatureCount` is hard-coded 0).~~ **RETIRED 2026-07-12:**
+  `requestDevice` now converts both fields, passes the feature slice and its
+  real length, and parity requests a `timestamp-query` device. The historical
+  consequence was that timestamp query sets and `timestampWrites` could not be
+  exercised; both timestamp-write policy skips are now retired.
+- ~~**Compute-pass `timestampWrites` reason corrected** — it read "out of scope
+  until query sets" after query sets shipped; both twins cited the
+  requiredFeatures gap.~~ **RETIRED 2026-07-12:** the gap and both skips are
+  gone; the two IDL dictionaries map to the shared C timestamp-write struct.

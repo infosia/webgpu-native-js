@@ -274,3 +274,29 @@ The two expected-fails are honest and reasoned, not swept under the rug:
 **The earlier engine-crash exclusion list is retired.** `buffer_binding_overlap`,
 `vertex_buffer_OOB`, and `createView` — the three families excluded as crashers —
 are all in the suite now and all green.
+
+**timestampWrites landed (2026-07-12) — and the record that justified skipping it
+was false.** `timestampWrites` was policy-skipped in both twins with
+`reject_if_present`, reasoned "timestamp-query feature not yet requested in
+tests". That reason had expired: `requiredFeatures`/`requiredLimits` are fully
+plumbed through `requestDevice`, and the parity suite already proved it
+(`features:requested:core-features-and-limits,timestamp-query`). Worse,
+`codegen-deltas.md` still asserted "`requiredFeatures`/`requiredLimits` are
+unplumbed in `requestDevice` (`requiredFeatureCount` is hard-coded 0)" — **flatly
+false against the code**. Both the skip and the stale record are now retired
+(annotated, not erased).
+
+Both IDL dictionaries (`GPUComputePassTimestampWrites`,
+`GPURenderPassTimestampWrites`) emit through the single shared C struct
+`WGPUPassTimestampWrites`; the optional write indices use the header's sentinel
+when absent.
+
+Unblocked three families that had been gated behind the skip:
+`encoding,beginRenderPass:*` 3 pass/1 fail → **4/0**; `encoding,queries,*`
+**22/0**; `query_set,*` **4/0**. All three added to the suite, which grows
+**2,822 → 2,852 cases**, 3/3 stable, exit 0, 0 fail.
+
+Lesson worth keeping: a policy skip's *reason* is a claim with an expiry date.
+Two of them (`maxDrawCount`, `timestampWrites`) turned out to be stale within a
+day of each other, and one tracking record was simply wrong. Re-read skip
+reasons against the code before trusting them.

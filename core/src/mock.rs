@@ -3036,11 +3036,12 @@ mod tests {
         convert_buffer_binding_layout, convert_buffer_descriptor, convert_color_dict,
         convert_color_target_state, convert_command_buffer_descriptor,
         convert_command_encoder_descriptor, convert_compute_pass_descriptor,
-        convert_compute_pipeline_descriptor, convert_depth_stencil_state, convert_gpu_color,
-        convert_gpu_extent3d, convert_gpu_origin3d, convert_multisample_state,
-        convert_pipeline_layout_descriptor, convert_primitive_state, convert_query_set_descriptor,
-        convert_render_pass_color_attachment, convert_render_pass_depth_stencil_attachment,
-        convert_render_pass_descriptor, convert_render_pipeline_descriptor,
+        convert_compute_pass_timestamp_writes, convert_compute_pipeline_descriptor,
+        convert_depth_stencil_state, convert_gpu_color, convert_gpu_extent3d, convert_gpu_origin3d,
+        convert_multisample_state, convert_pipeline_layout_descriptor, convert_primitive_state,
+        convert_query_set_descriptor, convert_render_pass_color_attachment,
+        convert_render_pass_depth_stencil_attachment, convert_render_pass_descriptor,
+        convert_render_pass_timestamp_writes, convert_render_pipeline_descriptor,
         convert_sampler_binding_layout, convert_sampler_descriptor,
         convert_shader_module_descriptor, convert_stencil_face_state,
         convert_storage_texture_binding_layout, convert_texel_copy_buffer_info,
@@ -4363,13 +4364,124 @@ mod tests {
                 .expect_err("present compilationHints must fail"),
             "TypeError: compilationHints are not supported yet"
         );
+    }
 
-        let pass = descriptor(&rt, &[("timestampWrites", descriptor(&rt, &[]))]);
-        assert_eq!(
-            convert_compute_pass_descriptor::<Engine>(cx, pass, &arena)
-                .expect_err("present timestampWrites must fail"),
-            "TypeError: timestampWrites are not supported yet"
+    #[test]
+    fn pass_timestamp_writes_convert_shared_shape_sentinels_and_errors() {
+        let rt = runtime();
+        let cx = rt.context();
+        let query_set = Engine::new_instance(
+            cx,
+            crate::GPU_QUERY_SET_CLASS,
+            Box::new(QuerySetPayload {
+                query_set: fake_handle(43),
+                destroyed: AtomicBool::new(false),
+                label: Mutex::new(String::new()),
+            }),
+        )
+        .expect("query set");
+
+        let both_indices = descriptor(
+            &rt,
+            &[
+                ("querySet", query_set),
+                ("beginningOfPassWriteIndex", rt.number(2.0)),
+                ("endOfPassWriteIndex", rt.number(3.0)),
+            ],
         );
+        let compute_arena = Arena::new();
+        let compute = convert_compute_pass_descriptor::<Engine>(
+            cx,
+            descriptor(&rt, &[("timestampWrites", both_indices)]),
+            &compute_arena,
+        )
+        .expect("compute timestamp writes");
+        let compute_writes = unsafe { compute.timestampWrites.as_ref() }.expect("timestamp writes");
+        assert!(compute_writes.nextInChain.is_null());
+        assert_eq!(compute_writes.querySet, fake_handle(43));
+        assert_eq!(compute_writes.beginningOfPassWriteIndex, 2);
+        assert_eq!(compute_writes.endOfPassWriteIndex, 3);
+
+        let compute_end_only = convert_compute_pass_timestamp_writes::<Engine>(
+            cx,
+            descriptor(
+                &rt,
+                &[
+                    ("querySet", query_set),
+                    ("endOfPassWriteIndex", rt.number(7.0)),
+                ],
+            ),
+        )
+        .expect("compute end-only timestamp write");
+        assert_eq!(
+            compute_end_only.beginningOfPassWriteIndex,
+            crate::WGPU_QUERY_SET_INDEX_UNDEFINED
+        );
+        assert_eq!(compute_end_only.endOfPassWriteIndex, 7);
+
+        let render_begin_only = descriptor(
+            &rt,
+            &[
+                ("querySet", query_set),
+                ("beginningOfPassWriteIndex", rt.number(11.0)),
+            ],
+        );
+        let render_arena = Arena::new();
+        let mut created_texture_views = crate::CreatedTextureViewCapture::new::<Engine>(cx);
+        let render = convert_render_pass_descriptor::<Engine>(
+            cx,
+            descriptor(
+                &rt,
+                &[
+                    ("colorAttachments", rt.set_like(&[])),
+                    ("timestampWrites", render_begin_only),
+                ],
+            ),
+            &render_arena,
+            &mut created_texture_views,
+        )
+        .expect("render beginning-only timestamp write descriptor");
+        let render_begin_only =
+            unsafe { render.timestampWrites.as_ref() }.expect("render timestamp writes");
+        assert_eq!(render_begin_only.beginningOfPassWriteIndex, 11);
+        assert_eq!(
+            render_begin_only.endOfPassWriteIndex,
+            crate::WGPU_QUERY_SET_INDEX_UNDEFINED
+        );
+
+        let absent_compute =
+            convert_compute_pass_descriptor::<Engine>(cx, descriptor(&rt, &[]), &Arena::new())
+                .expect("absent compute timestamp writes");
+        assert!(absent_compute.timestampWrites.is_null());
+        let absent_render = convert_render_pass_descriptor::<Engine>(
+            cx,
+            descriptor(&rt, &[("colorAttachments", rt.set_like(&[]))]),
+            &Arena::new(),
+            &mut created_texture_views,
+        )
+        .expect("absent render timestamp writes");
+        assert!(absent_render.timestampWrites.is_null());
+
+        for convert in [
+            convert_compute_pass_timestamp_writes::<Engine>,
+            convert_render_pass_timestamp_writes::<Engine>,
+        ] {
+            assert_eq!(
+                convert(cx, descriptor(&rt, &[])).expect_err("querySet is required"),
+                "TypeError: querySet"
+            );
+        }
+
+        for field in ["beginningOfPassWriteIndex", "endOfPassWriteIndex"] {
+            for bad in [-1.0, 1.5, f64::INFINITY, 4_294_967_296.0] {
+                let writes = descriptor(&rt, &[("querySet", query_set), (field, rt.number(bad))]);
+                assert_eq!(
+                    convert_compute_pass_timestamp_writes::<Engine>(cx, writes)
+                        .expect_err("invalid timestamp write index"),
+                    format!("TypeError: {field}")
+                );
+            }
+        }
     }
 
     #[test]

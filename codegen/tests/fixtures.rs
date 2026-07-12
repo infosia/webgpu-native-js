@@ -434,7 +434,7 @@ fn new_descriptor_policy_reasons_are_surfaced_in_the_report() {
     );
     for reason in [
         "recorded deferral: block 03 section 7",
-        "timestamp-query feature not yet requested in tests",
+        "the pinned C ABI shares one timestamp-write struct between compute and render passes",
         "the pinned C ABI represents maxDrawCount with an optional typed chained struct",
         "WebIDL names the reusable programmable stage",
     ] {
@@ -474,13 +474,6 @@ fn new_descriptor_policy_kinds_reject_missing_and_dead_entries() {
         (
             policy.replace("enum_value = \"auto\"", "enum_value = \"missing\""),
             "missing",
-        ),
-        (
-            policy.replace(
-                "member = \"timestampWrites\"\nreason = \"timestamp-query feature not yet requested in tests\"",
-                "member = \"timestampWrites\"\nreason = \"timestamp-query feature not yet requested in tests\"\n\n[[descriptor.skips]]\nmember = \"notTimestampWrites\"\nreason = \"dead test entry\"",
-            ),
-            "notTimestampWrites",
         ),
     ];
     for (bad_policy, needle) in cases {

@@ -749,6 +749,16 @@ idl = "GPUColorDict"
 c = "WGPUColor"
 reason = "the WebIDL dictionary suffix is absent from the C standalone struct"
 
+[[name_map]]
+idl = "GPUComputePassTimestampWrites"
+c = "WGPUPassTimestampWrites"
+reason = "the pinned C ABI shares one timestamp-write struct between compute and render passes"
+
+[[name_map]]
+idl = "GPURenderPassTimestampWrites"
+c = "WGPUPassTimestampWrites"
+reason = "the pinned C ABI shares one timestamp-write struct between compute and render passes"
+
 [[dict_or_sequence_union]]
 typedef = "GPUExtent3D"
 dictionary = "GPUExtent3DDict"
@@ -837,6 +847,21 @@ member = "depthClearValue"
 value = "WGPU_DEPTH_CLEAR_VALUE_UNDEFINED"
 
 [[descriptor]]
+dictionary = "GPURenderPassTimestampWrites"
+
+[[descriptor.handles]]
+member = "querySet"
+helper = "query_set_handle"
+
+[[descriptor.absent_constants]]
+member = "beginningOfPassWriteIndex"
+value = "WGPU_QUERY_SET_INDEX_UNDEFINED"
+
+[[descriptor.absent_constants]]
+member = "endOfPassWriteIndex"
+value = "WGPU_QUERY_SET_INDEX_UNDEFINED"
+
+[[descriptor]]
 dictionary = "GPURenderPassDescriptor"
 created_view_capture = "created_texture_views"
 
@@ -847,11 +872,6 @@ nullable = false
 [[descriptor.handles]]
 member = "occlusionQuerySet"
 helper = "query_set_handle"
-
-[[descriptor.skips]]
-member = "timestampWrites"
-reason = "timestamp-query feature not yet requested in tests"
-reject_if_present = true
 
 [[descriptor.chains]]
 member = "maxDrawCount"
@@ -1184,16 +1204,26 @@ member = "label"
 nullable = false
 
 [[descriptor]]
+dictionary = "GPUComputePassTimestampWrites"
+
+[[descriptor.handles]]
+member = "querySet"
+helper = "query_set_handle"
+
+[[descriptor.absent_constants]]
+member = "beginningOfPassWriteIndex"
+value = "WGPU_QUERY_SET_INDEX_UNDEFINED"
+
+[[descriptor.absent_constants]]
+member = "endOfPassWriteIndex"
+value = "WGPU_QUERY_SET_INDEX_UNDEFINED"
+
+[[descriptor]]
 dictionary = "GPUComputePassDescriptor"
 
 [[descriptor.strings]]
 member = "label"
 nullable = false
-
-[[descriptor.skips]]
-member = "timestampWrites"
-reason = "timestamp-query feature not yet requested in tests"
-reject_if_present = true
 
 [[descriptor]]
 dictionary = "GPUBufferBindingLayout"

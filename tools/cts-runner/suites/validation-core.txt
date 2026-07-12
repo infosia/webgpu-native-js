@@ -40,3 +40,10 @@ webgpu:api,validation,encoding,queries,resolveQuerySet:*
 webgpu:api,validation,encoding,encoder_state:*
 webgpu:api,validation,encoding,render_bundle:*
 webgpu:api,validation,createView:*
+
+# timestampWrites landed (2026-07-12): the skip's reason ("timestamp-query
+# feature not yet requested in tests") expired once requiredFeatures/
+# requiredLimits were plumbed. These three families were gated behind it.
+webgpu:api,validation,encoding,beginRenderPass:*
+webgpu:api,validation,encoding,queries,*
+webgpu:api,validation,query_set,*

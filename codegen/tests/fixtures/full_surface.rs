@@ -1061,6 +1061,34 @@ pub(super) fn convert_render_pass_depth_stencil_attachment<E: JsEngine + 'static
     })
 }
 
+/// Converts a JavaScript `GPURenderPassTimestampWrites` into `WGPUPassTimestampWrites`.
+pub(super) fn convert_render_pass_timestamp_writes<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    value: E::Value,
+) -> Result<WGPUPassTimestampWrites, E::Error> {
+    // DR-M3: required dictionary members reject undefined.
+    let query_set_value = required_member::<E>(cx, value, "querySet")?;
+    let beginning_of_pass_write_index_value = dictionary_member::<E>(cx, value, "beginningOfPassWriteIndex")?;
+    let end_of_pass_write_index_value = dictionary_member::<E>(cx, value, "endOfPassWriteIndex")?;
+    let query_set = query_set_handle::<E>(cx, query_set_value)?;
+    Ok(WGPUPassTimestampWrites {
+        nextInChain: ptr::null_mut(),
+        querySet: query_set,
+        // R8: `[EnforceRange]` GPUSize32 is checked at the 32-bit boundary.
+        beginningOfPassWriteIndex: if E::is_undefined(cx, beginning_of_pass_write_index_value) {
+            WGPU_QUERY_SET_INDEX_UNDEFINED
+        } else {
+            enforce_u32::<E>(cx, beginning_of_pass_write_index_value, "beginningOfPassWriteIndex")?
+        },
+        // R8: `[EnforceRange]` GPUSize32 is checked at the 32-bit boundary.
+        endOfPassWriteIndex: if E::is_undefined(cx, end_of_pass_write_index_value) {
+            WGPU_QUERY_SET_INDEX_UNDEFINED
+        } else {
+            enforce_u32::<E>(cx, end_of_pass_write_index_value, "endOfPassWriteIndex")?
+        },
+    })
+}
+
 /// Converts a JavaScript `GPURenderPassDescriptor` into `WGPURenderPassDescriptor`.
 pub(super) fn convert_render_pass_descriptor<E: JsEngine + 'static>(
     cx: E::Context<'_>,
@@ -1074,10 +1102,6 @@ pub(super) fn convert_render_pass_descriptor<E: JsEngine + 'static>(
     let depth_stencil_attachment_value = dictionary_member::<E>(cx, value, "depthStencilAttachment")?;
     let occlusion_query_set_value = dictionary_member::<E>(cx, value, "occlusionQuerySet")?;
     let timestamp_writes_value = dictionary_member::<E>(cx, value, "timestampWrites")?;
-    // Policy skip: reject present unsupported API instead of ignoring it.
-    if !E::is_undefined(cx, timestamp_writes_value) {
-        return Err(E::type_error(cx, "timestampWrites are not supported yet"));
-    }
     let max_draw_count_value = dictionary_member::<E>(cx, value, "maxDrawCount")?;
     // B4: non-nullable strings default only for undefined; null is stringified.
     let label = if E::is_undefined(cx, label_value) {
@@ -1119,6 +1143,13 @@ pub(super) fn convert_render_pass_descriptor<E: JsEngine + 'static>(
     } else {
         query_set_handle::<E>(cx, occlusion_query_set_value)?
     };
+    // T5: an absent optional dictionary is a null pointer in the pinned C ABI.
+    let timestamp_writes = if E::is_undefined(cx, timestamp_writes_value) {
+        ptr::null()
+    } else {
+        let converted = convert_render_pass_timestamp_writes::<E>(cx, timestamp_writes_value)?;
+        arena.alloc_slice(vec![converted]).as_ptr()
+    };
     let max_draw_count_chain = if E::is_undefined(cx, max_draw_count_value) {
         ptr::null_mut()
     } else {
@@ -1145,8 +1176,7 @@ pub(super) fn convert_render_pass_descriptor<E: JsEngine + 'static>(
         },
         depthStencilAttachment: depth_stencil_attachment,
         occlusionQuerySet: occlusion_query_set,
-        // Policy skip: timestamp-query feature not yet requested in tests.
-        timestampWrites: ptr::null(),
+        timestampWrites: timestamp_writes,
     })
 }
 
@@ -3154,29 +3184,59 @@ pub(super) fn convert_command_buffer_descriptor<E: JsEngine>(
     })
 }
 
+/// Converts a JavaScript `GPUComputePassTimestampWrites` into `WGPUPassTimestampWrites`.
+pub(super) fn convert_compute_pass_timestamp_writes<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    value: E::Value,
+) -> Result<WGPUPassTimestampWrites, E::Error> {
+    // DR-M3: required dictionary members reject undefined.
+    let query_set_value = required_member::<E>(cx, value, "querySet")?;
+    let beginning_of_pass_write_index_value = dictionary_member::<E>(cx, value, "beginningOfPassWriteIndex")?;
+    let end_of_pass_write_index_value = dictionary_member::<E>(cx, value, "endOfPassWriteIndex")?;
+    let query_set = query_set_handle::<E>(cx, query_set_value)?;
+    Ok(WGPUPassTimestampWrites {
+        nextInChain: ptr::null_mut(),
+        querySet: query_set,
+        // R8: `[EnforceRange]` GPUSize32 is checked at the 32-bit boundary.
+        beginningOfPassWriteIndex: if E::is_undefined(cx, beginning_of_pass_write_index_value) {
+            WGPU_QUERY_SET_INDEX_UNDEFINED
+        } else {
+            enforce_u32::<E>(cx, beginning_of_pass_write_index_value, "beginningOfPassWriteIndex")?
+        },
+        // R8: `[EnforceRange]` GPUSize32 is checked at the 32-bit boundary.
+        endOfPassWriteIndex: if E::is_undefined(cx, end_of_pass_write_index_value) {
+            WGPU_QUERY_SET_INDEX_UNDEFINED
+        } else {
+            enforce_u32::<E>(cx, end_of_pass_write_index_value, "endOfPassWriteIndex")?
+        },
+    })
+}
+
 /// Converts a JavaScript `GPUComputePassDescriptor` into `WGPUComputePassDescriptor`.
-pub(super) fn convert_compute_pass_descriptor<E: JsEngine>(
+pub(super) fn convert_compute_pass_descriptor<E: JsEngine + 'static>(
     cx: E::Context<'_>,
     value: E::Value,
     arena: &Arena,
 ) -> Result<WGPUComputePassDescriptor, E::Error> {
     let label_value = dictionary_member::<E>(cx, value, "label")?;
     let timestamp_writes_value = dictionary_member::<E>(cx, value, "timestampWrites")?;
-    // Policy skip: reject present unsupported API instead of ignoring it.
-    if !E::is_undefined(cx, timestamp_writes_value) {
-        return Err(E::type_error(cx, "timestampWrites are not supported yet"));
-    }
     // B4: non-nullable strings default only for undefined; null is stringified.
     let label = if E::is_undefined(cx, label_value) {
         ""
     } else {
         E::to_str(cx, label_value, arena)?
     };
+    // T5: an absent optional dictionary is a null pointer in the pinned C ABI.
+    let timestamp_writes = if E::is_undefined(cx, timestamp_writes_value) {
+        ptr::null()
+    } else {
+        let converted = convert_compute_pass_timestamp_writes::<E>(cx, timestamp_writes_value)?;
+        arena.alloc_slice(vec![converted]).as_ptr()
+    };
     Ok(WGPUComputePassDescriptor {
         nextInChain: ptr::null_mut(),
         label: WGPUStringView::from_bytes(label.as_bytes()),
-        // Policy skip: timestamp-query feature not yet requested in tests.
-        timestampWrites: ptr::null(),
+        timestampWrites: timestamp_writes,
     })
 }
 

@@ -151,4 +151,5 @@ order:promise-all:resolved
 order:then-chain:first,second
 order:await:true,true
 features:requested:core-features-and-limits,timestamp-query
+timestampWrites:render-compute:null
 destroy:ok
