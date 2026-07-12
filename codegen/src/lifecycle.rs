@@ -934,11 +934,21 @@ fn emit_create(output: &mut String, standard: &StandardInterface<'_>) -> Result<
     );
     let _ = writeln!(output, "pub fn {function}<E: JsEngine + 'static>(");
     output.push_str("    cx: E::Context<'_>,\n    this: E::Value,\n    args: &[E::Value],\n) -> Result<E::Value, E::Error> {\n");
-    let _ = writeln!(
-        output,
-        "    let {} = {creator_base}_handle::<E>(cx, this)?;",
-        standard.creator_handle_field
-    );
+    if standard.stateful_encoder {
+        output.push_str("    let device_payload = device_wrapper_payload::<E>(cx, this)?;\n");
+        let _ = writeln!(
+            output,
+            "    let {} = device_payload.device;",
+            standard.creator_handle_field
+        );
+        output.push_str("    let error_sink: Arc<dyn DeviceErrorSink> = Arc::clone(&device_payload.events) as Arc<dyn DeviceErrorSink>;\n");
+    } else {
+        let _ = writeln!(
+            output,
+            "    let {} = {creator_base}_handle::<E>(cx, this)?;",
+            standard.creator_handle_field
+        );
+    }
     output.push_str("    let arena = Arena::new();\n");
     if optional && null_optional {
         output.push_str("    let native = match args.first().copied() {\n");
@@ -1055,7 +1065,7 @@ fn emit_create(output: &mut String, standard: &StandardInterface<'_>) -> Result<
         );
         let _ = writeln!(output, "        state: Arc::new(Mutex::new({state} {{");
         let _ = writeln!(output, "            {},", standard.handle_field);
-        output.push_str("            ended: false,\n        })),\n");
+        output.push_str("            ended: false,\n            error_sink,\n        })),\n");
     } else {
         let _ = writeln!(output, "        {},", standard.handle_field);
         for retained in &standard.retained {

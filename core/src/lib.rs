@@ -627,6 +627,7 @@ enum SettlementRequest<E: JsEngine + 'static> {
         status: WGPUPopErrorScopeStatus,
         type_: WGPUErrorType,
         message: String,
+        synthetic_error: Option<SyntheticDeviceError>,
     },
     UncapturedError {
         state: Arc<DeviceEventState<E>>,
@@ -860,6 +861,7 @@ impl<E: JsEngine + 'static> SettlementRequest<E> {
                 status,
                 type_,
                 message,
+                synthetic_error,
             } => {
                 if status != WGPUPopErrorScopeStatus_WGPUPopErrorScopeStatus_Success {
                     // S8: WebGPU specifies a DOMException here. This binding's
@@ -874,6 +876,11 @@ impl<E: JsEngine + 'static> SettlementRequest<E> {
                         Err(E::async_error_value(cx, "OperationError", &message)),
                     ));
                 }
+                let (type_, message) = if type_ == WGPUErrorType_WGPUErrorType_NoError {
+                    synthetic_error.map_or((type_, message), |error| (error.type_, error.message))
+                } else {
+                    (type_, message)
+                };
                 if type_ == WGPUErrorType_WGPUErrorType_NoError {
                     return SettlementOutcome::Deferred((deferred, Ok(E::null(cx))));
                 }
@@ -1323,6 +1330,21 @@ struct DeviceEventState<E: JsEngine + 'static> {
     wrapper_finalized: AtomicBool,
     lost_settled: AtomicBool,
     js: Mutex<Option<Box<DeviceEventJs<E>>>>,
+    error_scopes: Mutex<Vec<SyntheticErrorScope>>,
+}
+
+struct SyntheticDeviceError {
+    type_: WGPUErrorType,
+    message: String,
+}
+
+struct SyntheticErrorScope {
+    filter: WGPUErrorFilter,
+    error: Option<SyntheticDeviceError>,
+}
+
+trait DeviceErrorSink: Send + Sync {
+    fn generate_validation_error(&self, message: String);
 }
 
 impl<E: JsEngine + 'static> DeviceEventState<E> {
@@ -1334,6 +1356,7 @@ impl<E: JsEngine + 'static> DeviceEventState<E> {
             wrapper_finalized: AtomicBool::new(false),
             lost_settled: AtomicBool::new(false),
             js: Mutex::new(None),
+            error_scopes: Mutex::new(Vec::new()),
         });
         let _ = state.self_weak.set(Arc::downgrade(&state));
         state
@@ -1438,6 +1461,24 @@ impl<E: JsEngine + 'static> DeviceEventState<E> {
             })
     }
 
+    fn push_error_scope(&self, filter: WGPUErrorFilter) {
+        self.error_scopes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(SyntheticErrorScope {
+                filter,
+                error: None,
+            });
+    }
+
+    fn pop_error_scope(&self) -> Option<SyntheticDeviceError> {
+        self.error_scopes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop()
+            .and_then(|scope| scope.error)
+    }
+
     fn enqueue_lost(
         &self,
         reason: WGPUDeviceLostReason,
@@ -1470,6 +1511,30 @@ impl<E: JsEngine + 'static> DeviceEventState<E> {
         if let Some(promise) = js.lost_promise.take() {
             E::release_value(cx, promise);
         }
+    }
+}
+
+impl<E: JsEngine + 'static> DeviceErrorSink for DeviceEventState<E> {
+    fn generate_validation_error(&self, message: String) {
+        let mut scopes = self
+            .error_scopes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(scope) = scopes
+            .iter_mut()
+            .rev()
+            .find(|scope| scope.filter == WGPUErrorFilter_WGPUErrorFilter_Validation)
+        {
+            if scope.error.is_none() {
+                scope.error = Some(SyntheticDeviceError {
+                    type_: WGPUErrorType_WGPUErrorType_Validation,
+                    message,
+                });
+            }
+            return;
+        }
+        drop(scopes);
+        let _ = self.enqueue_uncaptured(WGPUErrorType_WGPUErrorType_Validation, message);
     }
 }
 
@@ -2087,6 +2152,8 @@ unsafe impl Send for CommandBufferPayload {}
 struct CommandBufferState {
     command_buffer: WGPUCommandBuffer,
     consumed: bool,
+    invalid: bool,
+    error_sink: Arc<dyn DeviceErrorSink>,
 }
 
 // SAFETY: `CommandBufferState` contains a `WGPUCommandBuffer` and a consumed
@@ -2122,6 +2189,7 @@ unsafe impl Send for RenderPassEncoderPayload {}
 /// Payload stored by a reusable `GPURenderBundle` wrapper.
 pub struct RenderBundlePayload {
     render_bundle: WGPURenderBundle,
+    invalid: bool,
 }
 
 /// Returns the native handle stored by a `GPURenderBundle` wrapper.
@@ -2153,6 +2221,7 @@ unsafe impl Send for RenderBundlePayload {}
 struct CommandEncoderState {
     encoder: WGPUCommandEncoder,
     ended: bool,
+    error_sink: Arc<dyn DeviceErrorSink>,
 }
 
 // SAFETY: `CommandEncoderState` contains a `WGPUCommandEncoder` and an ended
@@ -2166,6 +2235,7 @@ unsafe impl Send for CommandEncoderState {}
 struct RenderBundleEncoderState {
     render_bundle_encoder: WGPURenderBundleEncoder,
     ended: bool,
+    error_sink: Arc<dyn DeviceErrorSink>,
 }
 
 // SAFETY: the non-thread-safe native encoder is dereferenced only by JS methods
@@ -2359,6 +2429,7 @@ struct ComputePassState {
     pass: WGPUComputePassEncoder,
     ended: bool,
     parent: Arc<Mutex<CommandEncoderState>>,
+    error_sink: Arc<dyn DeviceErrorSink>,
 }
 
 // SAFETY: `ComputePassState` contains a `WGPUComputePassEncoder` and a parent
@@ -2373,6 +2444,7 @@ struct RenderPassState {
     pass: WGPURenderPassEncoder,
     ended: bool,
     parent: Arc<Mutex<CommandEncoderState>>,
+    error_sink: Arc<dyn DeviceErrorSink>,
 }
 
 // SAFETY: the handle and parent state follow the same thread/release discipline
@@ -2867,14 +2939,15 @@ pub fn device_push_error_scope<E: JsEngine + 'static>(
     this: E::Value,
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
-    let device = device_handle::<E>(cx, this)?;
+    let payload = device_wrapper_payload::<E>(cx, this)?;
     let filter = convert_gpu_error_filter::<E>(
         cx,
         args.first().copied().unwrap_or_else(|| E::undefined(cx)),
     )?;
     unsafe {
-        (E::environment(cx).gpu().device_push_error_scope)(device, filter);
+        (E::environment(cx).gpu().device_push_error_scope)(payload.device, filter);
     }
+    payload.events.push_error_scope(filter);
     Ok(E::undefined(cx))
 }
 
@@ -2885,10 +2958,11 @@ pub fn device_pop_error_scope<E: JsEngine + 'static>(
     _args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
     promise_operation::<E>(cx, |deferred| {
-        let device = device_handle::<E>(cx, this)?;
+        let payload = device_wrapper_payload::<E>(cx, this)?;
         let mut request = Box::new(PopErrorScopeRequest::<E> {
             deferred: deferred.take(),
             settlements: Arc::clone(E::environment(cx).settlements()),
+            synthetic_error: payload.events.pop_error_scope(),
             _registration: None,
         });
         request._registration = Some(E::register_deferred(
@@ -2903,7 +2977,7 @@ pub fn device_pop_error_scope<E: JsEngine + 'static>(
             userdata2: ptr::null_mut(),
         };
         unsafe {
-            (E::environment(cx).gpu().device_pop_error_scope)(device, info);
+            (E::environment(cx).gpu().device_pop_error_scope)(payload.device, info);
         }
         Ok(())
     })
@@ -4530,12 +4604,16 @@ pub fn queue_submit<E: JsEngine + 'static>(
     let arena = Arena::new();
     let command_states = convert_command_buffer_sequence::<E>(cx, commands_value)?;
     let mut command_handles = Vec::with_capacity(command_states.len());
+    let mut invalid_sink = None;
     for state in &command_states {
         let state = state
             .lock()
             .map_err(|_| E::operation_error(cx, "GPUCommandBuffer state is poisoned"))?;
         if state.consumed {
             return Err(E::operation_error(cx, "GPUCommandBuffer is consumed"));
+        }
+        if state.invalid && invalid_sink.is_none() {
+            invalid_sink = Some(Arc::clone(&state.error_sink));
         }
         command_handles.push(state.command_buffer);
     }
@@ -4544,6 +4622,10 @@ pub fn queue_submit<E: JsEngine + 'static>(
             .lock()
             .map_err(|_| E::operation_error(cx, "GPUCommandBuffer state is poisoned"))?
             .consumed = true;
+    }
+    if let Some(error_sink) = invalid_sink {
+        error_sink.generate_validation_error("GPUCommandBuffer is invalid".to_owned());
+        return Ok(E::undefined(cx));
     }
     let commands = arena.alloc_slice(command_handles);
     unsafe {
@@ -4604,7 +4686,9 @@ pub fn command_encoder_copy_buffer_to_buffer<E: JsEngine + 'static>(
     this: E::Value,
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
-    let encoder = live_command_encoder::<E>(cx, this)?;
+    let Some(encoder) = live_command_encoder::<E>(cx, this)? else {
+        return Ok(E::undefined(cx));
+    };
     let src = buffer_handle::<E>(
         cx,
         args.first()
@@ -4654,7 +4738,9 @@ pub fn command_encoder_clear_buffer<E: JsEngine + 'static>(
     this: E::Value,
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
-    let encoder = live_command_encoder::<E>(cx, this)?;
+    let Some(encoder) = live_command_encoder::<E>(cx, this)? else {
+        return Ok(E::undefined(cx));
+    };
     let buffer = buffer_handle::<E>(cx, required_argument::<E>(cx, args, 0, "buffer")?)?;
     let offset = optional_gpu_size64_to_u64::<E>(cx, args.get(1).copied(), "offset", 0)?;
     let size = optional_gpu_size64_to_u64::<E>(cx, args.get(2).copied(), "size", u64::MAX)?;
@@ -4670,7 +4756,9 @@ pub fn command_encoder_resolve_query_set<E: JsEngine + 'static>(
     this: E::Value,
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
-    let encoder = live_command_encoder::<E>(cx, this)?;
+    let Some(encoder) = live_command_encoder::<E>(cx, this)? else {
+        return Ok(E::undefined(cx));
+    };
     let query_set = query_set_handle::<E>(cx, required_argument::<E>(cx, args, 0, "querySet")?)?;
     let first_query = enforce_u32::<E>(
         cx,
@@ -4707,7 +4795,9 @@ pub fn command_encoder_copy_buffer_to_texture<E: JsEngine + 'static>(
     this: E::Value,
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
-    let encoder = live_command_encoder::<E>(cx, this)?;
+    let Some(encoder) = live_command_encoder::<E>(cx, this)? else {
+        return Ok(E::undefined(cx));
+    };
     let source =
         convert_texel_copy_buffer_info::<E>(cx, required_argument::<E>(cx, args, 0, "source")?)?;
     let destination = convert_texel_copy_texture_info::<E>(
@@ -4735,7 +4825,9 @@ pub fn command_encoder_copy_texture_to_buffer<E: JsEngine + 'static>(
     this: E::Value,
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
-    let encoder = live_command_encoder::<E>(cx, this)?;
+    let Some(encoder) = live_command_encoder::<E>(cx, this)? else {
+        return Ok(E::undefined(cx));
+    };
     let source =
         convert_texel_copy_texture_info::<E>(cx, required_argument::<E>(cx, args, 0, "source")?)?;
     let destination = convert_texel_copy_buffer_info::<E>(
@@ -4763,7 +4855,9 @@ pub fn command_encoder_copy_texture_to_texture<E: JsEngine + 'static>(
     this: E::Value,
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
-    let encoder = live_command_encoder::<E>(cx, this)?;
+    let Some(encoder) = live_command_encoder::<E>(cx, this)? else {
+        return Ok(E::undefined(cx));
+    };
     let source =
         convert_texel_copy_texture_info::<E>(cx, required_argument::<E>(cx, args, 0, "source")?)?;
     let destination = convert_texel_copy_texture_info::<E>(
@@ -4792,15 +4886,28 @@ pub fn command_encoder_begin_render_pass<E: JsEngine + 'static>(
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
     let parent = command_encoder_state::<E>(cx, this)?;
-    let encoder = {
+    let (encoder, error_sink, finished) = {
         let state = parent
             .lock()
             .map_err(|_| E::operation_error(cx, "GPUCommandEncoder state is poisoned"))?;
-        if state.ended {
-            return Err(E::operation_error(cx, "GPUCommandEncoder is finished"));
-        }
-        state.encoder
+        (state.encoder, Arc::clone(&state.error_sink), state.ended)
     };
+    if finished {
+        error_sink.generate_validation_error("GPUCommandEncoder is finished".to_owned());
+        let _ = E::register_class(cx, render_pass_encoder_class::<E>())?;
+        return E::new_instance(
+            cx,
+            GPU_RENDER_PASS_ENCODER_CLASS,
+            Box::new(RenderPassEncoderPayload {
+                state: Arc::new(Mutex::new(RenderPassState {
+                    pass: ptr::null_mut(),
+                    ended: false,
+                    parent,
+                    error_sink,
+                })),
+            }),
+        );
+    }
     let arena = Arena::new();
     let mut created_texture_views = CreatedTextureViewCapture::new::<E>(cx);
     let descriptor = convert_render_pass_descriptor::<E>(
@@ -4833,6 +4940,7 @@ pub fn command_encoder_begin_render_pass<E: JsEngine + 'static>(
                 pass,
                 ended: false,
                 parent,
+                error_sink,
             })),
         }),
     ) {
@@ -4851,15 +4959,28 @@ pub fn command_encoder_begin_compute_pass<E: JsEngine + 'static>(
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
     let parent = command_encoder_state::<E>(cx, this)?;
-    let encoder = {
+    let (encoder, error_sink, finished) = {
         let state = parent
             .lock()
             .map_err(|_| E::operation_error(cx, "GPUCommandEncoder state is poisoned"))?;
-        if state.ended {
-            return Err(E::operation_error(cx, "GPUCommandEncoder is finished"));
-        }
-        state.encoder
+        (state.encoder, Arc::clone(&state.error_sink), state.ended)
     };
+    if finished {
+        error_sink.generate_validation_error("GPUCommandEncoder is finished".to_owned());
+        let _ = E::register_class(cx, compute_pass_encoder_class::<E>())?;
+        return E::new_instance(
+            cx,
+            GPU_COMPUTE_PASS_ENCODER_CLASS,
+            Box::new(ComputePassEncoderPayload {
+                state: Arc::new(Mutex::new(ComputePassState {
+                    pass: ptr::null_mut(),
+                    ended: false,
+                    parent,
+                    error_sink,
+                })),
+            }),
+        );
+    }
     let arena = Arena::new();
     let native = match args.first().copied() {
         Some(value) if !E::is_undefined(cx, value) => {
@@ -4891,6 +5012,7 @@ pub fn command_encoder_begin_compute_pass<E: JsEngine + 'static>(
                 pass,
                 ended: false,
                 parent,
+                error_sink,
             })),
         }),
     ) {
@@ -4916,16 +5038,30 @@ pub fn command_encoder_finish<E: JsEngine + 'static>(
         }
         _ => None,
     };
-    let encoder = {
+    let (encoder, error_sink, finished) = {
         let mut state = state
             .lock()
             .map_err(|_| E::operation_error(cx, "GPUCommandEncoder state is poisoned"))?;
-        if state.ended {
-            return Err(E::operation_error(cx, "GPUCommandEncoder is finished"));
-        }
+        let finished = state.ended;
         state.ended = true;
-        state.encoder
+        (state.encoder, Arc::clone(&state.error_sink), finished)
     };
+    if finished {
+        error_sink.generate_validation_error("GPUCommandEncoder is finished".to_owned());
+        let _ = E::register_class(cx, command_buffer_class::<E>())?;
+        return E::new_instance(
+            cx,
+            GPU_COMMAND_BUFFER_CLASS,
+            Box::new(CommandBufferPayload {
+                state: Arc::new(Mutex::new(CommandBufferState {
+                    command_buffer: ptr::null_mut(),
+                    consumed: false,
+                    invalid: true,
+                    error_sink,
+                })),
+            }),
+        );
+    }
     let command_buffer = unsafe {
         (E::environment(cx).gpu().command_encoder_finish)(
             encoder,
@@ -4949,6 +5085,8 @@ pub fn command_encoder_finish<E: JsEngine + 'static>(
             state: Arc::new(Mutex::new(CommandBufferState {
                 command_buffer,
                 consumed: false,
+                invalid: false,
+                error_sink,
             })),
         }),
     ) {
@@ -4976,17 +5114,31 @@ pub fn render_bundle_encoder_finish<E: JsEngine + 'static>(
         }
         _ => None,
     };
-    let encoder = {
+    let (encoder, error_sink, finished) = {
         let mut state = payload
             .state
             .lock()
             .map_err(|_| E::operation_error(cx, "GPURenderBundleEncoder state is poisoned"))?;
-        if state.ended {
-            return Err(E::operation_error(cx, "GPURenderBundleEncoder is finished"));
-        }
+        let finished = state.ended;
         state.ended = true;
-        state.render_bundle_encoder
+        (
+            state.render_bundle_encoder,
+            Arc::clone(&state.error_sink),
+            finished,
+        )
     };
+    if finished {
+        error_sink.generate_validation_error("GPURenderBundleEncoder is finished".to_owned());
+        let _ = E::register_class(cx, render_bundle_class::<E>())?;
+        return E::new_instance(
+            cx,
+            GPU_RENDER_BUNDLE_CLASS,
+            Box::new(RenderBundlePayload {
+                render_bundle: ptr::null_mut(),
+                invalid: true,
+            }),
+        );
+    }
     let render_bundle = unsafe {
         (E::environment(cx).gpu().render_bundle_encoder_finish)(
             encoder,
@@ -5006,7 +5158,10 @@ pub fn render_bundle_encoder_finish<E: JsEngine + 'static>(
     match E::new_instance(
         cx,
         GPU_RENDER_BUNDLE_CLASS,
-        Box::new(RenderBundlePayload { render_bundle }),
+        Box::new(RenderBundlePayload {
+            render_bundle,
+            invalid: false,
+        }),
     ) {
         Ok(value) => Ok(value),
         Err(error) => {
@@ -5022,7 +5177,9 @@ pub fn compute_pass_set_pipeline<E: JsEngine + 'static>(
     this: E::Value,
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
-    let pass = live_compute_pass::<E>(cx, this)?;
+    let Some(pass) = live_compute_pass::<E>(cx, this)? else {
+        return Ok(E::undefined(cx));
+    };
     let pipeline = compute_pipeline_handle::<E>(
         cx,
         args.first()
@@ -5039,7 +5196,9 @@ pub fn compute_pass_set_bind_group<E: JsEngine + 'static>(
     this: E::Value,
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
-    let pass = live_compute_pass::<E>(cx, this)?;
+    let Some(pass) = live_compute_pass::<E>(cx, this)? else {
+        return Ok(E::undefined(cx));
+    };
     let index = enforce_u32::<E>(
         cx,
         args.first()
@@ -5076,7 +5235,9 @@ pub fn compute_pass_dispatch_workgroups<E: JsEngine + 'static>(
     this: E::Value,
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
-    let pass = live_compute_pass::<E>(cx, this)?;
+    let Some(pass) = live_compute_pass::<E>(cx, this)? else {
+        return Ok(E::undefined(cx));
+    };
     let x = enforce_u32::<E>(
         cx,
         args.first()
@@ -5100,7 +5261,9 @@ pub fn compute_pass_dispatch_workgroups_indirect<E: JsEngine + 'static>(
     this: E::Value,
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
-    let pass = live_compute_pass::<E>(cx, this)?;
+    let Some(pass) = live_compute_pass::<E>(cx, this)? else {
+        return Ok(E::undefined(cx));
+    };
     let indirect_buffer =
         buffer_handle::<E>(cx, required_argument::<E>(cx, args, 0, "indirectBuffer")?)?;
     let indirect_offset = enforce_u64::<E>(
@@ -5141,14 +5304,20 @@ pub fn compute_pass_end<E: JsEngine + 'static>(
         .lock()
         .map_err(|_| E::operation_error(cx, "GPUComputePassEncoder state is poisoned"))?;
     if state.ended {
-        return Err(E::operation_error(cx, "GPUComputePassEncoder is ended"));
+        state
+            .error_sink
+            .generate_validation_error("GPUComputePassEncoder is ended".to_owned());
+        return Ok(E::undefined(cx));
     }
     let parent = state
         .parent
         .lock()
         .map_err(|_| E::operation_error(cx, "GPUCommandEncoder state is poisoned"))?;
     if parent.ended {
-        return Err(E::operation_error(cx, "GPUCommandEncoder is finished"));
+        state
+            .error_sink
+            .generate_validation_error("GPUCommandEncoder is finished".to_owned());
+        return Ok(E::undefined(cx));
     }
     drop(parent);
     unsafe { (E::environment(cx).gpu().compute_pass_encoder_end)(state.pass) };
@@ -5162,7 +5331,9 @@ pub fn render_pass_set_pipeline<E: JsEngine + 'static>(
     this: E::Value,
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
-    let encoder = live_render_commands::<E>(cx, this)?;
+    let Some(encoder) = live_render_commands::<E>(cx, this)? else {
+        return Ok(E::undefined(cx));
+    };
     let pipeline =
         render_pipeline_handle::<E>(cx, required_argument::<E>(cx, args, 0, "pipeline")?)?;
     unsafe { encoder.set_pipeline(E::environment(cx).gpu(), pipeline) };
@@ -5175,7 +5346,9 @@ pub fn render_pass_set_vertex_buffer<E: JsEngine + 'static>(
     this: E::Value,
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
-    let encoder = live_render_commands::<E>(cx, this)?;
+    let Some(encoder) = live_render_commands::<E>(cx, this)? else {
+        return Ok(E::undefined(cx));
+    };
     let slot = enforce_u32::<E>(cx, required_argument::<E>(cx, args, 0, "slot")?, "slot")?;
     let buffer_value = required_argument::<E>(cx, args, 1, "buffer")?;
     let buffer = if E::is_null(cx, buffer_value) {
@@ -5195,7 +5368,9 @@ pub fn render_pass_set_index_buffer<E: JsEngine + 'static>(
     this: E::Value,
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
-    let encoder = live_render_commands::<E>(cx, this)?;
+    let Some(encoder) = live_render_commands::<E>(cx, this)? else {
+        return Ok(E::undefined(cx));
+    };
     let buffer = buffer_handle::<E>(cx, required_argument::<E>(cx, args, 0, "buffer")?)?;
     let format =
         convert_gpu_index_format::<E>(cx, required_argument::<E>(cx, args, 1, "indexFormat")?)?;
@@ -5211,7 +5386,9 @@ pub fn render_pass_set_bind_group<E: JsEngine + 'static>(
     this: E::Value,
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
-    let encoder = live_render_commands::<E>(cx, this)?;
+    let Some(encoder) = live_render_commands::<E>(cx, this)? else {
+        return Ok(E::undefined(cx));
+    };
     let index = enforce_u32::<E>(cx, required_argument::<E>(cx, args, 0, "index")?, "index")?;
     let bind_group = bind_group_handle::<E>(cx, required_argument::<E>(cx, args, 1, "bindGroup")?)?;
     let dynamic_offsets = convert_dynamic_offsets::<E>(cx, args)?;
@@ -5232,7 +5409,9 @@ pub fn render_pass_draw<E: JsEngine + 'static>(
     this: E::Value,
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
-    let encoder = live_render_commands::<E>(cx, this)?;
+    let Some(encoder) = live_render_commands::<E>(cx, this)? else {
+        return Ok(E::undefined(cx));
+    };
     let vertex_count = enforce_u32::<E>(
         cx,
         required_argument::<E>(cx, args, 0, "vertexCount")?,
@@ -5259,7 +5438,9 @@ pub fn render_pass_draw_indexed<E: JsEngine + 'static>(
     this: E::Value,
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
-    let encoder = live_render_commands::<E>(cx, this)?;
+    let Some(encoder) = live_render_commands::<E>(cx, this)? else {
+        return Ok(E::undefined(cx));
+    };
     let index_count = enforce_u32::<E>(
         cx,
         required_argument::<E>(cx, args, 0, "indexCount")?,
@@ -5293,7 +5474,9 @@ pub fn render_pass_draw_indirect<E: JsEngine + 'static>(
     this: E::Value,
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
-    let encoder = live_render_commands::<E>(cx, this)?;
+    let Some(encoder) = live_render_commands::<E>(cx, this)? else {
+        return Ok(E::undefined(cx));
+    };
     let indirect_buffer =
         buffer_handle::<E>(cx, required_argument::<E>(cx, args, 0, "indirectBuffer")?)?;
     let indirect_offset = enforce_u64::<E>(
@@ -5313,7 +5496,9 @@ pub fn render_pass_draw_indexed_indirect<E: JsEngine + 'static>(
     this: E::Value,
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
-    let encoder = live_render_commands::<E>(cx, this)?;
+    let Some(encoder) = live_render_commands::<E>(cx, this)? else {
+        return Ok(E::undefined(cx));
+    };
     let indirect_buffer =
         buffer_handle::<E>(cx, required_argument::<E>(cx, args, 0, "indirectBuffer")?)?;
     let indirect_offset = enforce_u64::<E>(
@@ -5333,7 +5518,9 @@ pub fn render_pass_set_viewport<E: JsEngine + 'static>(
     this: E::Value,
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
-    let pass = live_render_pass::<E>(cx, this)?;
+    let Some(pass) = live_render_pass::<E>(cx, this)? else {
+        return Ok(E::undefined(cx));
+    };
     let x = restricted_f32::<E>(cx, required_argument::<E>(cx, args, 0, "x")?, "x")?;
     let y = restricted_f32::<E>(cx, required_argument::<E>(cx, args, 1, "y")?, "y")?;
     let width = restricted_f32::<E>(cx, required_argument::<E>(cx, args, 2, "width")?, "width")?;
@@ -5362,7 +5549,9 @@ pub fn render_pass_set_scissor_rect<E: JsEngine + 'static>(
     this: E::Value,
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
-    let pass = live_render_pass::<E>(cx, this)?;
+    let Some(pass) = live_render_pass::<E>(cx, this)? else {
+        return Ok(E::undefined(cx));
+    };
     let x = enforce_u32::<E>(cx, required_argument::<E>(cx, args, 0, "x")?, "x")?;
     let y = enforce_u32::<E>(cx, required_argument::<E>(cx, args, 1, "y")?, "y")?;
     let width = enforce_u32::<E>(cx, required_argument::<E>(cx, args, 2, "width")?, "width")?;
@@ -5381,7 +5570,9 @@ pub fn render_pass_set_blend_constant<E: JsEngine + 'static>(
     this: E::Value,
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
-    let pass = live_render_pass::<E>(cx, this)?;
+    let Some(pass) = live_render_pass::<E>(cx, this)? else {
+        return Ok(E::undefined(cx));
+    };
     let color = convert_gpu_color::<E>(cx, required_argument::<E>(cx, args, 0, "color")?)?;
     unsafe {
         (E::environment(cx)
@@ -5397,7 +5588,9 @@ pub fn render_pass_set_stencil_reference<E: JsEngine + 'static>(
     this: E::Value,
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
-    let pass = live_render_pass::<E>(cx, this)?;
+    let Some(pass) = live_render_pass::<E>(cx, this)? else {
+        return Ok(E::undefined(cx));
+    };
     let reference = enforce_u32::<E>(
         cx,
         required_argument::<E>(cx, args, 0, "reference")?,
@@ -5417,7 +5610,9 @@ pub fn render_pass_begin_occlusion_query<E: JsEngine + 'static>(
     this: E::Value,
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
-    let pass = live_render_pass::<E>(cx, this)?;
+    let Some(pass) = live_render_pass::<E>(cx, this)? else {
+        return Ok(E::undefined(cx));
+    };
     let query_index = enforce_u32::<E>(
         cx,
         required_argument::<E>(cx, args, 0, "queryIndex")?,
@@ -5437,7 +5632,9 @@ pub fn render_pass_end_occlusion_query<E: JsEngine + 'static>(
     this: E::Value,
     _args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
-    let pass = live_render_pass::<E>(cx, this)?;
+    let Some(pass) = live_render_pass::<E>(cx, this)? else {
+        return Ok(E::undefined(cx));
+    };
     unsafe {
         (E::environment(cx)
             .gpu()
@@ -5454,7 +5651,9 @@ pub fn render_pass_execute_bundles<E: JsEngine + 'static>(
 ) -> Result<E::Value, E::Error> {
     let value = required_argument::<E>(cx, args, 0, "bundles")?;
     let bundles = convert_render_bundle_sequence::<E>(cx, value)?;
-    let pass = live_render_pass::<E>(cx, this)?;
+    let Some(pass) = live_render_pass::<E>(cx, this)? else {
+        return Ok(E::undefined(cx));
+    };
     unsafe {
         (E::environment(cx).gpu().render_pass_encoder_execute_bundles)(
             pass,
@@ -5488,14 +5687,20 @@ pub fn render_pass_end<E: JsEngine + 'static>(
         .lock()
         .map_err(|_| E::operation_error(cx, "GPURenderPassEncoder state is poisoned"))?;
     if state.ended {
-        return Err(E::operation_error(cx, "GPURenderPassEncoder is ended"));
+        state
+            .error_sink
+            .generate_validation_error("GPURenderPassEncoder is ended".to_owned());
+        return Ok(E::undefined(cx));
     }
     let parent = state
         .parent
         .lock()
         .map_err(|_| E::operation_error(cx, "GPUCommandEncoder state is poisoned"))?;
     if parent.ended {
-        return Err(E::operation_error(cx, "GPUCommandEncoder is finished"));
+        state
+            .error_sink
+            .generate_validation_error("GPUCommandEncoder is finished".to_owned());
+        return Ok(E::undefined(cx));
     }
     drop(parent);
     unsafe { (E::environment(cx).gpu().render_pass_encoder_end)(state.pass) };
@@ -5522,6 +5727,9 @@ pub fn finalize_command_buffer(payload: Box<dyn Any + Send>, env: &Environment) 
     let Ok(state) = payload.state.lock() else {
         return;
     };
+    if state.invalid {
+        return;
+    }
     let _ = env.queue().enqueue(ReleaseRequest::CommandBuffer {
         command_buffer: state.command_buffer,
         gpu: env.gpu(),
@@ -5533,6 +5741,9 @@ pub fn finalize_render_bundle(payload: Box<dyn Any + Send>, env: &Environment) {
     let Ok(payload) = payload.downcast::<RenderBundlePayload>() else {
         return;
     };
+    if payload.invalid {
+        return;
+    }
     let _ = env.queue().enqueue(ReleaseRequest::RenderBundle {
         render_bundle: payload.render_bundle,
         gpu: env.gpu(),
@@ -5547,6 +5758,9 @@ pub fn finalize_compute_pass_encoder(payload: Box<dyn Any + Send>, env: &Environ
     let Ok(state) = payload.state.lock() else {
         return;
     };
+    if state.pass.is_null() {
+        return;
+    }
     let _ = env.queue().enqueue(ReleaseRequest::ComputePassEncoder {
         pass: state.pass,
         gpu: env.gpu(),
@@ -5561,6 +5775,9 @@ pub fn finalize_render_pass_encoder(payload: Box<dyn Any + Send>, env: &Environm
     let Ok(state) = payload.state.lock() else {
         return;
     };
+    if state.pass.is_null() {
+        return;
+    }
     let _ = env.queue().enqueue(ReleaseRequest::RenderPassEncoder {
         pass: state.pass,
         gpu: env.gpu(),
@@ -5639,6 +5856,7 @@ struct QueueWorkDoneRequest<E: JsEngine + 'static> {
 struct PopErrorScopeRequest<E: JsEngine + 'static> {
     deferred: Option<Deferred<E>>,
     settlements: Arc<SettlementQueue>,
+    synthetic_error: Option<SyntheticDeviceError>,
     _registration: Option<E::DeferredRegistration>,
 }
 
@@ -6062,6 +6280,7 @@ unsafe extern "C" fn pop_error_scope_callback<E: JsEngine + 'static>(
             status,
             type_,
             message: unsafe { callback_string(message) },
+            synthetic_error: request.synthetic_error.take(),
         };
         let _ = request.settlements.enqueue::<E>(settlement);
     }));
@@ -6531,22 +6750,25 @@ fn command_encoder_state<E: JsEngine + 'static>(
 fn live_command_encoder<E: JsEngine + 'static>(
     cx: E::Context<'_>,
     value: E::Value,
-) -> Result<WGPUCommandEncoder, E::Error> {
+) -> Result<Option<WGPUCommandEncoder>, E::Error> {
     let state = command_encoder_state::<E>(cx, value)?;
     let state = state
         .lock()
         .map_err(|_| E::operation_error(cx, "GPUCommandEncoder state is poisoned"))?;
     if state.ended {
-        Err(E::operation_error(cx, "GPUCommandEncoder is finished"))
+        state
+            .error_sink
+            .generate_validation_error("GPUCommandEncoder is finished".to_owned());
+        Ok(None)
     } else {
-        Ok(state.encoder)
+        Ok(Some(state.encoder))
     }
 }
 
 fn live_compute_pass<E: JsEngine + 'static>(
     cx: E::Context<'_>,
     value: E::Value,
-) -> Result<WGPUComputePassEncoder, E::Error> {
+) -> Result<Option<WGPUComputePassEncoder>, E::Error> {
     let payload = E::payload(cx, value, GPU_COMPUTE_PASS_ENCODER_CLASS)
         .and_then(|payload| payload.downcast_ref::<ComputePassEncoderPayload>())
         .ok_or_else(|| E::type_error(cx, "GPUComputePassEncoder is required"))?;
@@ -6555,22 +6777,28 @@ fn live_compute_pass<E: JsEngine + 'static>(
         .lock()
         .map_err(|_| E::operation_error(cx, "GPUComputePassEncoder state is poisoned"))?;
     if state.ended {
-        return Err(E::operation_error(cx, "GPUComputePassEncoder is ended"));
+        state
+            .error_sink
+            .generate_validation_error("GPUComputePassEncoder is ended".to_owned());
+        return Ok(None);
     }
     let parent = state
         .parent
         .lock()
         .map_err(|_| E::operation_error(cx, "GPUCommandEncoder state is poisoned"))?;
     if parent.ended {
-        return Err(E::operation_error(cx, "GPUCommandEncoder is finished"));
+        state
+            .error_sink
+            .generate_validation_error("GPUCommandEncoder is finished".to_owned());
+        return Ok(None);
     }
-    Ok(state.pass)
+    Ok(Some(state.pass))
 }
 
 fn live_render_pass<E: JsEngine + 'static>(
     cx: E::Context<'_>,
     value: E::Value,
-) -> Result<WGPURenderPassEncoder, E::Error> {
+) -> Result<Option<WGPURenderPassEncoder>, E::Error> {
     let payload = E::payload(cx, value, GPU_RENDER_PASS_ENCODER_CLASS)
         .and_then(|payload| payload.downcast_ref::<RenderPassEncoderPayload>())
         .ok_or_else(|| E::type_error(cx, "GPURenderPassEncoder is required"))?;
@@ -6579,27 +6807,33 @@ fn live_render_pass<E: JsEngine + 'static>(
         .lock()
         .map_err(|_| E::operation_error(cx, "GPURenderPassEncoder state is poisoned"))?;
     if state.ended {
-        return Err(E::operation_error(cx, "GPURenderPassEncoder is ended"));
+        state
+            .error_sink
+            .generate_validation_error("GPURenderPassEncoder is ended".to_owned());
+        return Ok(None);
     }
     let parent = state
         .parent
         .lock()
         .map_err(|_| E::operation_error(cx, "GPUCommandEncoder state is poisoned"))?;
     if parent.ended {
-        return Err(E::operation_error(cx, "GPUCommandEncoder is finished"));
+        state
+            .error_sink
+            .generate_validation_error("GPUCommandEncoder is finished".to_owned());
+        return Ok(None);
     }
-    Ok(state.pass)
+    Ok(Some(state.pass))
 }
 
 fn live_render_commands<E: JsEngine + 'static>(
     cx: E::Context<'_>,
     value: E::Value,
-) -> Result<LiveRenderCommands, E::Error> {
+) -> Result<Option<LiveRenderCommands>, E::Error> {
     if E::payload(cx, value, GPU_RENDER_PASS_ENCODER_CLASS)
         .and_then(|payload| payload.downcast_ref::<RenderPassEncoderPayload>())
         .is_some()
     {
-        return live_render_pass::<E>(cx, value).map(LiveRenderCommands::Pass);
+        return live_render_pass::<E>(cx, value).map(|pass| pass.map(LiveRenderCommands::Pass));
     }
     let payload = E::payload(cx, value, GPU_RENDER_BUNDLE_ENCODER_CLASS)
         .and_then(|payload| payload.downcast_ref::<RenderBundleEncoderPayload>())
@@ -6609,9 +6843,14 @@ fn live_render_commands<E: JsEngine + 'static>(
         .lock()
         .map_err(|_| E::operation_error(cx, "GPURenderBundleEncoder state is poisoned"))?;
     if state.ended {
-        return Err(E::operation_error(cx, "GPURenderBundleEncoder is finished"));
+        state
+            .error_sink
+            .generate_validation_error("GPURenderBundleEncoder is finished".to_owned());
+        return Ok(None);
     }
-    Ok(LiveRenderCommands::Bundle(state.render_bundle_encoder))
+    Ok(Some(LiveRenderCommands::Bundle(
+        state.render_bundle_encoder,
+    )))
 }
 
 fn enforce_u64<E: JsEngine>(

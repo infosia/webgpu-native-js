@@ -4737,7 +4737,9 @@ pub fn device_create_command_encoder<E: JsEngine + 'static>(
     this: E::Value,
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
-    let device = device_handle::<E>(cx, this)?;
+    let device_payload = device_wrapper_payload::<E>(cx, this)?;
+    let device = device_payload.device;
+    let error_sink: Arc<dyn DeviceErrorSink> = Arc::clone(&device_payload.events) as Arc<dyn DeviceErrorSink>;
     let arena = Arena::new();
     let native = match args.first().copied() {
         Some(value) if !E::is_undefined(cx, value) => Some(convert_command_encoder_descriptor::<E>(cx, value, &arena)?),
@@ -4757,6 +4759,7 @@ pub fn device_create_command_encoder<E: JsEngine + 'static>(
         state: Arc::new(Mutex::new(CommandEncoderState {
             encoder,
             ended: false,
+            error_sink,
         })),
     })) {
         Ok(value) => Ok(value),
@@ -4782,7 +4785,9 @@ pub fn device_create_render_bundle_encoder<E: JsEngine + 'static>(
     this: E::Value,
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
-    let device = device_handle::<E>(cx, this)?;
+    let device_payload = device_wrapper_payload::<E>(cx, this)?;
+    let device = device_payload.device;
+    let error_sink: Arc<dyn DeviceErrorSink> = Arc::clone(&device_payload.events) as Arc<dyn DeviceErrorSink>;
     let arena = Arena::new();
     let descriptor = args.first().copied().ok_or_else(|| E::type_error(cx, "GPURenderBundleEncoderDescriptor"))?;
     let native = convert_render_bundle_encoder_descriptor::<E>(cx, descriptor, &arena)?;
@@ -4800,6 +4805,7 @@ pub fn device_create_render_bundle_encoder<E: JsEngine + 'static>(
         state: Arc::new(Mutex::new(RenderBundleEncoderState {
             render_bundle_encoder,
             ended: false,
+            error_sink,
         })),
     })) {
         Ok(value) => Ok(value),

@@ -738,10 +738,29 @@
             }]
         });
         statePass.end();
+        device.pushErrorScope("validation");
         var doubleEnd = caught(function () { statePass.end(); });
-        log("renderPass:double-end:" + doubleEnd.name);
-        var methodAfterEnd = caught(function () { statePass.draw(3); });
-        log(errorLine("renderPass:method-after-end", methodAfterEnd));
+        if (doubleEnd !== null) {
+            throw new Error("render pass double end threw: " + doubleEnd);
+        }
+        return device.popErrorScope().then(function (error) {
+            if (!(error instanceof GPUValidationError)) {
+                throw new Error("render pass double end did not emit validation");
+            }
+            log("renderPass:double-end:" + error.constructor.name + ":returned");
+
+            device.pushErrorScope("validation");
+            var methodAfterEnd = caught(function () { statePass.draw(3); });
+            if (methodAfterEnd !== null) {
+                throw new Error("render pass method after end threw: " + methodAfterEnd);
+            }
+            return device.popErrorScope();
+        }).then(function (error) {
+            if (!(error instanceof GPUValidationError)) {
+                throw new Error("render pass method after end did not emit validation");
+            }
+            log("renderPass:method-after-end:" +
+                error.constructor.name + ":returned");
 
         var missingTexture = caught(function () {
             device.createCommandEncoder().copyTextureToTexture(
@@ -820,6 +839,7 @@
             }
             log("copy:texture-validation:no-validation-error");
         });
+        });
     }
 
     function runRenderBundles() {
@@ -855,8 +875,17 @@
         bundleEncoder.setPipeline(pipeline);
         bundleEncoder.draw(3);
         var bundle = bundleEncoder.finish();
+        device.pushErrorScope("validation");
         var useAfterFinish = caught(function () { bundleEncoder.draw(3); });
-        log(errorLine("renderBundle:use-after-finish", useAfterFinish));
+        if (useAfterFinish !== null) {
+            throw new Error("render bundle use after finish threw: " + useAfterFinish);
+        }
+        return device.popErrorScope().then(function (error) {
+            if (!(error instanceof GPUValidationError)) {
+                throw new Error("render bundle use after finish did not emit validation");
+            }
+            log("renderBundle:use-after-finish:" +
+                error.constructor.name + ":returned");
 
         var encoder = device.createCommandEncoder();
         var pass = encoder.beginRenderPass({
@@ -878,6 +907,7 @@
                 (error === null ? "null" : error.constructor.name));
             log("renderBundle:chain:" +
                 (error === null ? "null" : error.constructor.name));
+        });
         });
     }
 

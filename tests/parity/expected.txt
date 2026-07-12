@@ -115,14 +115,14 @@ renderPass:maxDrawCount-negative:TypeError
 renderPass:maxDrawCount-2^64:TypeError
 renderPass:maxDrawCount-fractional:TypeError
 renderPass:texture-as-view:ok
-renderPass:double-end:OperationError
-renderPass:method-after-end:OperationError:GPURenderPassEncoder is ended
+renderPass:double-end:GPUValidationError:returned
+renderPass:method-after-end:GPUValidationError:returned
 copy:missing-texture:TypeError
 renderPass:chain-ok
 renderPass:clearValue-dict-sequence:no-validation-error
 copy:texture-validation:no-validation-error
 renderBundle:format-rejection:TypeError:GPUTextureFormat
-renderBundle:use-after-finish:OperationError:GPURenderBundleEncoder is finished
+renderBundle:use-after-finish:GPUValidationError:returned
 renderBundle:type-confusion:TypeError:GPURenderBundle is required
 renderBundle:sparse-colorFormats:null
 renderBundle:chain:null

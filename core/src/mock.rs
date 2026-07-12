@@ -3109,6 +3109,27 @@ mod tests {
         ));
     }
 
+    fn assert_validation_scope_error(
+        rt: &Runtime,
+        cx: Context<'_>,
+        device: Value,
+        expected_message: &str,
+    ) {
+        let promise = device_pop_error_scope::<Engine>(cx, device, &[]).expect("pop scope");
+        rt.env
+            .settlements()
+            .drain::<Engine>(cx)
+            .expect("drain scope result");
+        let error = rt
+            .promise_result(promise)
+            .expect("scope promise settled")
+            .expect("scope promise resolved");
+        let payload = Engine::payload(cx, error, crate::GPU_VALIDATION_ERROR_CLASS)
+            .and_then(|payload| payload.downcast_ref::<ErrorPayload>())
+            .expect("GPUValidationError");
+        assert_eq!(payload.message, expected_message);
+    }
+
     fn shader_module(_rt: &Runtime, cx: Context<'_>, handle: usize) -> Value {
         Engine::new_instance(
             cx,
@@ -7202,7 +7223,7 @@ mod tests {
     }
 
     #[test]
-    fn pass_end_rejects_after_parent_encoder_is_finished_without_calling_ffi() {
+    fn pass_end_after_parent_finish_emits_validation_without_calling_ffi() {
         reset_gpu();
         let rt = runtime();
         let cx = rt.context();
@@ -7214,11 +7235,11 @@ mod tests {
             crate::command_encoder_begin_compute_pass::<Engine>(cx, compute_encoder, &[])
                 .expect("compute pass");
         command_encoder_finish::<Engine>(cx, compute_encoder, &[]).expect("finish parent");
-        assert_eq!(
-            crate::compute_pass_end::<Engine>(cx, compute_pass, &[])
-                .expect_err("compute end after parent finish"),
-            "OperationError: GPUCommandEncoder is finished"
-        );
+        device_push_error_scope::<Engine>(cx, device, &[rt.string("validation")])
+            .expect("compute validation scope");
+        crate::compute_pass_end::<Engine>(cx, compute_pass, &[])
+            .expect("compute end returns normally");
+        assert_validation_scope_error(&rt, cx, device, "GPUCommandEncoder is finished");
 
         let render_encoder =
             device_create_command_encoder::<Engine>(cx, device, &[]).expect("render encoder");
@@ -7230,17 +7251,91 @@ mod tests {
         )
         .expect("render pass");
         command_encoder_finish::<Engine>(cx, render_encoder, &[]).expect("finish parent");
-        assert_eq!(
-            crate::render_pass_end::<Engine>(cx, render_pass, &[])
-                .expect_err("render end after parent finish"),
-            "OperationError: GPUCommandEncoder is finished"
-        );
+        device_push_error_scope::<Engine>(cx, device, &[rt.string("validation")])
+            .expect("render validation scope");
+        crate::render_pass_end::<Engine>(cx, render_pass, &[])
+            .expect("render end returns normally");
+        assert_validation_scope_error(&rt, cx, device, "GPUCommandEncoder is finished");
 
         GPU_STATE.with(|state| {
             let state = state.borrow();
             assert_eq!(state.recording_calls.get("compute_end"), None);
             assert_eq!(state.recording_calls.get("render_end"), None);
         });
+    }
+
+    #[test]
+    fn ended_encoder_emits_one_uncaptured_validation_without_ffi_or_throwing() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let handler = rt.insert(MockValue::Callable(MockCallable::Handler));
+        device_on_uncaptured_error_set::<Engine>(cx, device, handler).expect("set handler");
+        let encoder = device_create_command_encoder::<Engine>(cx, device, &[]).expect("encoder");
+        let descriptor = descriptor(&rt, &[("colorAttachments", rt.set_like(&[]))]);
+        let pass = crate::command_encoder_begin_render_pass::<Engine>(cx, encoder, &[descriptor])
+            .expect("pass");
+        crate::render_pass_end::<Engine>(cx, pass, &[]).expect("end pass");
+
+        let handler_calls = rt.calls.get();
+        crate::render_pass_draw::<Engine>(cx, pass, &[rt.number(3.0)])
+            .expect("ended draw returns normally");
+        assert_eq!(
+            GPU_STATE.with(|state| {
+                state
+                    .borrow()
+                    .recording_calls
+                    .get("draw")
+                    .copied()
+                    .unwrap_or(0)
+            }),
+            0,
+            "ended draw must not reach FFI"
+        );
+        assert_eq!(rt.env.settlements().drain::<Engine>(cx), Ok(0));
+        assert_eq!(rt.calls.get() - handler_calls, 1, "exactly one event");
+        let error = rt.call_args.borrow()[0];
+        let payload = Engine::payload(cx, error, crate::GPU_VALIDATION_ERROR_CLASS)
+            .and_then(|payload| payload.downcast_ref::<ErrorPayload>())
+            .expect("GPUValidationError");
+        assert_eq!(payload.message, "GPURenderPassEncoder is ended");
+    }
+
+    #[test]
+    fn finished_command_encoder_returns_invalid_results_and_validation_errors() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let encoder = device_create_command_encoder::<Engine>(cx, device, &[]).expect("encoder");
+        command_encoder_finish::<Engine>(cx, encoder, &[]).expect("initial finish");
+
+        device_push_error_scope::<Engine>(cx, device, &[rt.string("validation")])
+            .expect("begin scope");
+        let invalid_pass = crate::command_encoder_begin_compute_pass::<Engine>(cx, encoder, &[])
+            .expect("begin returns an invalid pass");
+        assert_validation_scope_error(&rt, cx, device, "GPUCommandEncoder is finished");
+
+        device_push_error_scope::<Engine>(cx, device, &[rt.string("validation")])
+            .expect("invalid pass scope");
+        crate::compute_pass_end::<Engine>(cx, invalid_pass, &[])
+            .expect("invalid pass end returns normally");
+        assert_validation_scope_error(&rt, cx, device, "GPUCommandEncoder is finished");
+
+        device_push_error_scope::<Engine>(cx, device, &[rt.string("validation")])
+            .expect("repeat finish scope");
+        let invalid_buffer = command_encoder_finish::<Engine>(cx, encoder, &[])
+            .expect("repeat finish returns an invalid command buffer");
+        assert_validation_scope_error(&rt, cx, device, "GPUCommandEncoder is finished");
+
+        let queue = device_queue_get::<Engine>(cx, device).expect("queue");
+        device_push_error_scope::<Engine>(cx, device, &[rt.string("validation")])
+            .expect("invalid submit scope");
+        queue_submit::<Engine>(cx, queue, &[rt.set_like(&[invalid_buffer])])
+            .expect("invalid command buffer submit returns normally");
+        assert_validation_scope_error(&rt, cx, device, "GPUCommandBuffer is invalid");
+        release_device_held_values(&rt, cx, device);
     }
 
     #[test]
@@ -8688,7 +8783,9 @@ mod tests {
         let encoder = device_create_command_encoder::<Engine>(cx, device, &[]).expect("encoder");
         let pass = crate::command_encoder_begin_compute_pass::<Engine>(cx, encoder, &[])
             .expect("compute pass");
-        let native_pass = crate::live_compute_pass::<Engine>(cx, pass).expect("native pass");
+        let native_pass = crate::live_compute_pass::<Engine>(cx, pass)
+            .expect("native pass")
+            .expect("live pass");
         let pipeline = Engine::new_instance(
             cx,
             crate::GPU_COMPUTE_PIPELINE_CLASS,
@@ -8997,7 +9094,9 @@ mod tests {
         let native_query_set =
             crate::query_set_handle::<Engine>(cx, query_set).expect("query-set handle");
         let encoder = device_create_command_encoder::<Engine>(cx, device, &[]).expect("encoder");
-        let native_encoder = crate::live_command_encoder::<Engine>(cx, encoder).expect("handle");
+        let native_encoder = crate::live_command_encoder::<Engine>(cx, encoder)
+            .expect("handle")
+            .expect("live encoder");
 
         command_encoder_clear_buffer::<Engine>(cx, encoder, &[destination])
             .expect("clear with both optionals absent");
@@ -9160,7 +9259,9 @@ mod tests {
         let pass_desc = descriptor(&rt, &[("colorAttachments", rt.set_like(&[attachment]))]);
         let pass = crate::command_encoder_begin_render_pass::<Engine>(cx, encoder, &[pass_desc])
             .expect("begin render pass");
-        let native_pass = crate::live_render_pass::<Engine>(cx, pass).expect("native render pass");
+        let native_pass = crate::live_render_pass::<Engine>(cx, pass)
+            .expect("native render pass")
+            .expect("live render pass");
         let pipeline = Engine::new_instance(
             cx,
             crate::GPU_RENDER_PIPELINE_CLASS,
@@ -9331,15 +9432,15 @@ mod tests {
         )
         .is_err());
         crate::render_pass_end::<Engine>(cx, pass, &[]).expect("end");
-        assert_eq!(
-            crate::render_pass_end::<Engine>(cx, pass, &[]).expect_err("double end"),
-            "OperationError: GPURenderPassEncoder is ended"
-        );
-        assert_eq!(
-            crate::render_pass_draw::<Engine>(cx, pass, &[rt.number(3.0)])
-                .expect_err("use after end"),
-            "OperationError: GPURenderPassEncoder is ended"
-        );
+        device_push_error_scope::<Engine>(cx, device, &[rt.string("validation")])
+            .expect("double-end scope");
+        crate::render_pass_end::<Engine>(cx, pass, &[]).expect("double end returns normally");
+        assert_validation_scope_error(&rt, cx, device, "GPURenderPassEncoder is ended");
+        device_push_error_scope::<Engine>(cx, device, &[rt.string("validation")])
+            .expect("use-after-end scope");
+        crate::render_pass_draw::<Engine>(cx, pass, &[rt.number(3.0)])
+            .expect("use after end returns normally");
+        assert_validation_scope_error(&rt, cx, device, "GPURenderPassEncoder is ended");
 
         let copy_encoder =
             device_create_command_encoder::<Engine>(cx, device, &[]).expect("copy encoder");
@@ -9639,16 +9740,16 @@ mod tests {
             &[descriptor(&rt, &[("label", rt.string("finished bundle"))])],
         )
         .expect("finish bundle");
-        assert_eq!(
-            crate::render_pass_draw::<Engine>(cx, bundle_encoder, &[rt.number(3.0)])
-                .expect_err("use after finish"),
-            "OperationError: GPURenderBundleEncoder is finished"
-        );
-        assert_eq!(
-            crate::render_bundle_encoder_finish::<Engine>(cx, bundle_encoder, &[])
-                .expect_err("double finish"),
-            "OperationError: GPURenderBundleEncoder is finished"
-        );
+        device_push_error_scope::<Engine>(cx, device, &[rt.string("validation")])
+            .expect("use-after-finish scope");
+        crate::render_pass_draw::<Engine>(cx, bundle_encoder, &[rt.number(3.0)])
+            .expect("use after finish returns normally");
+        assert_validation_scope_error(&rt, cx, device, "GPURenderBundleEncoder is finished");
+        device_push_error_scope::<Engine>(cx, device, &[rt.string("validation")])
+            .expect("double-finish scope");
+        crate::render_bundle_encoder_finish::<Engine>(cx, bundle_encoder, &[])
+            .expect("double finish returns an invalid bundle");
+        assert_validation_scope_error(&rt, cx, device, "GPURenderBundleEncoder is finished");
         GPU_STATE.with(|state| {
             let state = state.borrow();
             assert!(state.bundle_encoder_retained_indirect_buffers.is_empty());
@@ -9726,6 +9827,7 @@ mod tests {
         crate::finalize_render_bundle(
             Box::new(crate::RenderBundlePayload {
                 render_bundle: native_bundle,
+                invalid: false,
             }),
             &rt.env,
         );
@@ -9795,17 +9897,18 @@ mod tests {
             crate::GPU_RENDER_BUNDLE_CLASS,
             Box::new(crate::RenderBundlePayload {
                 render_bundle: fake_handle(15_100),
+                invalid: false,
             }),
         )
         .expect("render bundle");
         let bundles = rt.set_like(&[bundle]);
         rt.end_pass_on_next_iteration(pass);
 
-        assert_eq!(
-            crate::render_pass_execute_bundles::<Engine>(cx, pass, &[bundles])
-                .expect_err("iterator ended pass"),
-            "OperationError: GPURenderPassEncoder is ended"
-        );
+        device_push_error_scope::<Engine>(cx, device, &[rt.string("validation")])
+            .expect("iterator liveness scope");
+        crate::render_pass_execute_bundles::<Engine>(cx, pass, &[bundles])
+            .expect("ended pass returns normally");
+        assert_validation_scope_error(&rt, cx, device, "GPURenderPassEncoder is ended");
         GPU_STATE.with(|state| {
             assert_eq!(
                 state
