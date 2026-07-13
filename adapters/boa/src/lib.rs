@@ -1167,6 +1167,36 @@ impl core::JsEngine for Engine {
         Ok(())
     }
 
+    fn define_data_property_value(
+        cx: Self::Context<'_>,
+        obj: Self::Value,
+        key: Self::Value,
+        value: Self::Value,
+        writable: bool,
+        enumerable: bool,
+        configurable: bool,
+    ) -> core::Result<(), Self::Error> {
+        let object = object(cx, obj)?;
+        let key = cx
+            .arena
+            .get(key)
+            .to_property_key(cx.boa())
+            .map_err(|error| insert_error(cx, error))?;
+        object
+            .define_property_or_throw(
+                key,
+                PropertyDescriptor::builder()
+                    .value(cx.arena.get(value))
+                    .writable(writable)
+                    .enumerable(enumerable)
+                    .configurable(configurable)
+                    .build(),
+                cx.boa(),
+            )
+            .map_err(|error| insert_error(cx, error))?;
+        Ok(())
+    }
+
     fn get_property_value(
         cx: Self::Context<'_>,
         obj: Self::Value,
@@ -1390,14 +1420,19 @@ impl core::JsEngine for Engine {
             .and_then(|constructor| constructor.parent)
         {
             let parent_prototype = match parent {
-                core::ClassParent::Class(parent) => cx
-                    .arena
-                    .classes
-                    .borrow()
-                    .get(&parent)
-                    .map(|entry| cx.arena.get(entry.prototype))
-                    .and_then(|value| value.as_object())
-                    .ok_or_else(|| Self::operation_error(cx, "parent class is not registered"))?,
+                core::ClassParent::Class(parent) => {
+                    let prototype = cx
+                        .arena
+                        .classes
+                        .borrow()
+                        .get(&parent)
+                        .map(|entry| entry.prototype);
+                    prototype
+                        .and_then(|prototype| cx.arena.get(prototype).as_object())
+                        .ok_or_else(|| {
+                            Self::operation_error(cx, "parent class is not registered")
+                        })?
+                }
                 core::ClassParent::IntrinsicError => cx
                     .boa()
                     .realm()
@@ -1432,19 +1467,23 @@ impl core::JsEngine for Engine {
         payload: Box<dyn Any + Send>,
     ) -> core::Result<Self::Value, Self::Error> {
         let classes = cx.arena.classes.borrow();
-        let entry = classes
-            .get(&class)
-            .ok_or_else(|| Self::operation_error(cx, "class is not registered"))?;
-        let prototype = cx
-            .arena
-            .get(entry.prototype)
-            .as_object()
-            .expect("registered prototype is an object");
+        let Some(entry) = classes.get(&class) else {
+            drop(classes);
+            return Err(Self::operation_error(cx, "class is not registered"));
+        };
+        let prototype = cx.arena.get(entry.prototype).as_object();
+        let finalizer = entry.spec.finalizer;
+        // No Arena RefCell borrow may cross a Boa allocation: collection can
+        // run finalizers that re-enter the arena.
+        drop(classes);
+        let prototype = prototype.ok_or_else(|| {
+            Self::operation_error(cx, "registered class prototype is not an object")
+        })?;
         let object = ObjectInitializer::with_native_data_and_proto(
             WrapperData {
                 class,
                 payload: RefCell::new(Some(payload)),
-                finalizer: entry.spec.finalizer,
+                finalizer,
                 arena: cx.arena.weak_self.clone(),
             },
             prototype,

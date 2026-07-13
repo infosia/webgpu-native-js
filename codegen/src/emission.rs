@@ -15,10 +15,18 @@ pub(crate) fn emit_namespaces(report: &JoinReport) -> String {
 
     let mut output = String::new();
     output.push_str(
-        "pub(super) fn register_generated_namespaces<E: JsEngine>(\n    cx: E::Context<'_>,\n) -> Result<(), E::Error> {\n    let global = E::global(cx);\n",
+        "pub(super) fn register_generated_namespaces<E: JsEngine>(\n    cx: E::Context<'_>,\n) -> Result<(), E::Error> {\n    let global = E::global(cx);\n    let symbol = E::get_property(cx, global, \"Symbol\")?;\n    let to_string_tag = E::get_property(cx, symbol, \"toStringTag\")?;\n",
     );
     for namespace in &report.namespaces {
         output.push_str("    {\n        let namespace = E::new_object(cx)?;\n");
+        let _ = writeln!(
+            output,
+            "        let tag = E::string(cx, \"{}\")?;",
+            namespace.name
+        );
+        output.push_str(
+            "        E::define_data_property_value(cx, namespace, to_string_tag, tag, false, false, true)?;\n",
+        );
         for constant in &namespace.constants {
             let _ = writeln!(
                 output,

@@ -294,6 +294,15 @@ unsafe extern "C" {
         property_key: JSValueRef,
         exception: *mut JSValueRef,
     ) -> JSValueRef;
+    /// Sets an object property using a JavaScript property key.
+    fn JSObjectSetPropertyForKey(
+        ctx: JSContextRef,
+        object: JSObjectRef,
+        property_key: JSValueRef,
+        value: JSValueRef,
+        attributes: JSPropertyAttributes,
+        exception: *mut JSValueRef,
+    );
     /// Sets a named object property.
     fn JSObjectSetProperty(
         ctx: JSContextRef,
@@ -1363,6 +1372,38 @@ impl core::JsEngine for Engine {
                 attributes,
                 &mut exception,
             )
+        };
+        if exception.is_null() {
+            Ok(())
+        } else {
+            Err(exception)
+        }
+    }
+
+    fn define_data_property_value(
+        cx: Self::Context<'_>,
+        obj: Self::Value,
+        key: Self::Value,
+        value: Self::Value,
+        writable: bool,
+        enumerable: bool,
+        configurable: bool,
+    ) -> core::Result<(), Self::Error> {
+        let object = value_to_object(cx, obj)?;
+        let mut attributes = PROPERTY_NONE;
+        if !writable {
+            attributes |= PROPERTY_READ_ONLY;
+        }
+        if !enumerable {
+            attributes |= PROPERTY_DONT_ENUM;
+        }
+        if !configurable {
+            attributes |= PROPERTY_DONT_DELETE;
+        }
+        let mut exception = ptr::null();
+        // SAFETY: object, key, and value belong to the live context.
+        unsafe {
+            JSObjectSetPropertyForKey(cx.ctx, object, key, value, attributes, &mut exception)
         };
         if exception.is_null() {
             Ok(())

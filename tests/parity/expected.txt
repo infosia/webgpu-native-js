@@ -4,6 +4,7 @@ namespace:GPUBufferUsage:readonly:true
 namespace:GPUBufferUsage:enumerable:10
 namespace:GPUBufferUsage:constant-descriptor:false,true,false
 namespace:GPUBufferUsage:global-descriptor:true,false,true
+namespace:GPUBufferUsage:tag:[object GPUBufferUsage]
 interface:GPURenderPassEncoder:function:true
 interface:GPURenderPassEncoder:setBindGroup:true
 interface:GPUSupportedLimits:illegal-constructor:true:Illegal constructor

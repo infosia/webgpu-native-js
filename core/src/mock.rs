@@ -765,6 +765,62 @@ impl JsEngine for MockEngine {
         Ok(())
     }
 
+    fn define_data_property_value(
+        cx: Self::Context<'_>,
+        obj: Self::Value,
+        key: Self::Value,
+        value: Self::Value,
+        writable: bool,
+        enumerable: bool,
+        configurable: bool,
+    ) -> Result<(), Self::Error> {
+        let obj = cx.runtime.canonical(obj);
+        let key = cx.runtime.canonical(key);
+        let value = cx.runtime.canonical(value);
+        if !Self::is_object(cx, obj) {
+            return Err("TypeError: value is not an object".to_owned());
+        }
+        if key != cx.runtime.symbol_to_string_tag {
+            return Err("TypeError: unsupported mock property key".to_owned());
+        }
+        cx.runtime.to_string_tags.borrow_mut().insert(obj, value);
+        let property = (obj, key);
+        if enumerable {
+            cx.runtime
+                .non_enumerable_value_properties
+                .borrow_mut()
+                .remove(&property);
+        } else {
+            cx.runtime
+                .non_enumerable_value_properties
+                .borrow_mut()
+                .insert(property);
+        }
+        if writable {
+            cx.runtime
+                .non_writable_value_properties
+                .borrow_mut()
+                .remove(&property);
+        } else {
+            cx.runtime
+                .non_writable_value_properties
+                .borrow_mut()
+                .insert(property);
+        }
+        if configurable {
+            cx.runtime
+                .non_configurable_value_properties
+                .borrow_mut()
+                .remove(&property);
+        } else {
+            cx.runtime
+                .non_configurable_value_properties
+                .borrow_mut()
+                .insert(property);
+        }
+        Ok(())
+    }
+
     fn get_property_value(
         cx: Self::Context<'_>,
         obj: Self::Value,
@@ -3680,6 +3736,34 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn installed_flag_namespace_has_webidl_to_string_tag() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let _gpu = crate::wrap_gpu::<Engine>(cx, fake_handle(40_004)).expect("wrap GPU");
+        let global = Engine::global(cx);
+        let symbol = Engine::get_property(cx, global, "Symbol").expect("Symbol");
+        let tag_key = Engine::get_property(cx, symbol, "toStringTag").expect("toStringTag");
+        let namespace = Engine::get_property(cx, global, "GPUBufferUsage").expect("GPUBufferUsage");
+        let tag = Engine::get_property_value(cx, namespace, tag_key).expect("namespace tag");
+
+        assert!(matches!(rt.get(tag), MockValue::String(value) if value == "GPUBufferUsage"));
+        let property = (rt.canonical(namespace), rt.symbol_to_string_tag);
+        assert!(rt
+            .non_enumerable_value_properties
+            .borrow()
+            .contains(&property));
+        assert!(rt
+            .non_writable_value_properties
+            .borrow()
+            .contains(&property));
+        assert!(!rt
+            .non_configurable_value_properties
+            .borrow()
+            .contains(&property));
     }
 
     #[test]

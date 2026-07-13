@@ -75,6 +75,8 @@
     log("namespace:GPUBufferUsage:global-descriptor:" +
         namespaceDescriptor.writable + "," + namespaceDescriptor.enumerable + "," +
         namespaceDescriptor.configurable);
+    log("namespace:GPUBufferUsage:tag:" +
+        Object.prototype.toString.call(GPUBufferUsage));
     log("interface:GPURenderPassEncoder:function:" +
         (typeof GPURenderPassEncoder === "function"));
     log("interface:GPURenderPassEncoder:setBindGroup:" +

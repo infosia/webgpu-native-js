@@ -383,6 +383,16 @@ pub trait JsEngine: Sized {
         enumerable: bool,
         configurable: bool,
     ) -> Result<(), Self::Error>;
+    /// Defines an own data property whose key is itself a JavaScript value.
+    fn define_data_property_value(
+        cx: Self::Context<'_>,
+        obj: Self::Value,
+        key: Self::Value,
+        value: Self::Value,
+        writable: bool,
+        enumerable: bool,
+        configurable: bool,
+    ) -> Result<(), Self::Error>;
     /// Gets an object property whose key is itself a JavaScript value.
     fn get_property_value(
         cx: Self::Context<'_>,

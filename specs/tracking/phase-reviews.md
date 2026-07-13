@@ -1241,3 +1241,38 @@ first line of any real script, and a parity guarantee that was not guaranteeing
 anything — in a tree where **every gate was green and had been green for days**. Four
 lenses cost four subagents. The cheapest of them, the one that just deletes things and
 re-runs, found three guards that could not fail.
+
+### Second-pass addendum (2026-07-13, different reviewer model)
+
+A second clean-review pass was attempted with fresh agents on a different model; the
+agents hit a usage limit immediately, so the planner ran the same lens targets inline
+instead — explicitly NOT a clean review (full session context), recorded as such. Its
+targets were the first pass's own fixes and the code that landed after the review
+(which no lens had ever seen).
+
+Findings, both MINOR, both fixed:
+
+- **Namespace objects lacked `@@toStringTag`** (WebIDL requires it on namespace
+  objects too: value = identifier, `{writable: false, enumerable: false,
+  configurable: true}`). `Object.prototype.toString.call(GPUBufferUsage)` said
+  `[object Object]`. Identical on both engines, so no parity break — which is exactly
+  why the parity suite could not catch it. Now emitted by the generator and pinned by
+  a parity line.
+- **`new_instance` held `classes.borrow()` across an allocating Boa call** — the
+  first pass had observed this "holds by luck" and not filed it. If any future
+  finalizer touches `arena.classes`, the failure is a BorrowError panic inside GC
+  finalization, which aborts the process. The borrow is now dropped before
+  allocation, the internal-invariant `expect` became a proper error (principle 8),
+  and the implementer's full-file audit found and fixed **one more** site with the
+  same shape (the `register_class` parent-lookup path). The rule is now stated in a
+  comment at the site: no Arena RefCell borrow may be held across a Boa allocation.
+
+Checked clean in the same pass: teardown root-release completeness (every Rust-held
+GC root enumerated with a reason), the `HostFunctionCapture` raw pointer left by
+design (deref only during a live context; finalize is a no-op), the JSC synthesized
+function factory (finalizer wired for the dispatch Box, error paths scope-tracked,
+shorthand-method semantics supply non-constructibility/name/length), and the Boa
+`new.target` guard.
+
+Verdict unchanged: blocks 13/14 remain COMPLETE; these were hardening, not gate
+findings.

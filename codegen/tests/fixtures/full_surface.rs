@@ -5661,8 +5661,12 @@ pub(super) fn register_generated_namespaces<E: JsEngine>(
     cx: E::Context<'_>,
 ) -> Result<(), E::Error> {
     let global = E::global(cx);
+    let symbol = E::get_property(cx, global, "Symbol")?;
+    let to_string_tag = E::get_property(cx, symbol, "toStringTag")?;
     {
         let namespace = E::new_object(cx)?;
+        let tag = E::string(cx, "GPUBufferUsage")?;
+        E::define_data_property_value(cx, namespace, to_string_tag, tag, false, false, true)?;
         let value = E::number(cx, 1.0)?;
         E::define_data_property(cx, namespace, "MAP_READ", value, false, true, false)?;
         let value = E::number(cx, 2.0)?;
@@ -5687,6 +5691,8 @@ pub(super) fn register_generated_namespaces<E: JsEngine>(
     }
     {
         let namespace = E::new_object(cx)?;
+        let tag = E::string(cx, "GPUMapMode")?;
+        E::define_data_property_value(cx, namespace, to_string_tag, tag, false, false, true)?;
         let value = E::number(cx, 1.0)?;
         E::define_data_property(cx, namespace, "READ", value, false, true, false)?;
         let value = E::number(cx, 2.0)?;
@@ -5695,6 +5701,8 @@ pub(super) fn register_generated_namespaces<E: JsEngine>(
     }
     {
         let namespace = E::new_object(cx)?;
+        let tag = E::string(cx, "GPUTextureUsage")?;
+        E::define_data_property_value(cx, namespace, to_string_tag, tag, false, false, true)?;
         let value = E::number(cx, 1.0)?;
         E::define_data_property(cx, namespace, "COPY_SRC", value, false, true, false)?;
         let value = E::number(cx, 2.0)?;
@@ -5711,6 +5719,8 @@ pub(super) fn register_generated_namespaces<E: JsEngine>(
     }
     {
         let namespace = E::new_object(cx)?;
+        let tag = E::string(cx, "GPUShaderStage")?;
+        E::define_data_property_value(cx, namespace, to_string_tag, tag, false, false, true)?;
         let value = E::number(cx, 1.0)?;
         E::define_data_property(cx, namespace, "VERTEX", value, false, true, false)?;
         let value = E::number(cx, 2.0)?;
@@ -5721,6 +5731,8 @@ pub(super) fn register_generated_namespaces<E: JsEngine>(
     }
     {
         let namespace = E::new_object(cx)?;
+        let tag = E::string(cx, "GPUColorWrite")?;
+        E::define_data_property_value(cx, namespace, to_string_tag, tag, false, false, true)?;
         let value = E::number(cx, 1.0)?;
         E::define_data_property(cx, namespace, "RED", value, false, true, false)?;
         let value = E::number(cx, 2.0)?;
