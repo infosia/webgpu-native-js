@@ -390,11 +390,12 @@ to prevent, and it is currently the largest known one. It should be an explicit
 open question in `CLAUDE.md`, not a line inside a test-tooling block.
 
 **This gap is now owned by block 16** (`specs/blocks/16-jsc-modules.md`), which
-is an *investigation*: it establishes, against the actual Apple SDK and a running
-spike, whether JavaScriptCore can be given real ES modules at all, and prices
-that against simply requiring game code to be bundled at build time. Nothing is
-planned against it here, because every candidate answer rests on claims about the
-SDK that cannot be verified from the environment this block was written in.
+runs on macOS and establishes — against the actual Apple SDK and a running spike
+— whether JavaScriptCore can be given real ES modules at all, then implements
+either that or the fallback (game code bundled to a single script at build time).
+Nothing is planned against it here, because every candidate answer rests on claims
+about the SDK that cannot be verified from the environment this block was written
+in.
 
 The only thing block 15 asserts about it is the part that is already proven on
 `main`: **Boa has modules and JavaScriptCore has none**, and block 15 does not
