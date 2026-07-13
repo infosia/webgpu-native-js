@@ -1,12 +1,17 @@
 # Block 16 — ES modules under JavaScriptCore
 
-**Status: COMPLETE (2026-07-13). Outcome: candidate D — build-time bundling.**
+**Status: REOPENED by planner review (2026-07-13). One MAJOR is open — see §10.**
+**Outcome (unchanged and accepted): candidate D — build-time bundling.**
 **Trigger: D4 — the only path to JSC modules is non-public API.**
 
 Phase 1's evidence and the decision are in `specs/tracking/engine-boundary.md` →
 Q11. Block 12 → M4 is corrected. Phase 2D shipped: the parity suite runs a
 bundler-shaped script under both engines with byte-identical output, and the
 README states the shipping constraint.
+
+**The decision and its evidence stand. §10 is about the shipped test fixture, not
+the conclusion.** Per CLAUDE.md, a phase cannot be COMPLETE with an open MAJOR;
+close §10 and this block is done.
 
 **The one-line answer:** JavaScriptCore's module API is not missing — it is
 **unpublished**. `JSScript` links (it is in the SDK's `.tbd`) but has no public
@@ -356,3 +361,91 @@ consolation.**
 6. If §6 shipped: the OS floor is recorded where a reader will find it (L19), and
    `core/` gained no changes and `JsEngine` gained no methods (L17).
 7. Phase Review clean of CRITICAL and MAJOR.
+
+---
+
+## 10. Planner review of Phase 2D (2026-07-13) — what must change
+
+Reviewed at `33a1208` against §9. **The decision, the evidence in Q11, the M4
+correction, and the README constraint are all accepted as-is.** Q11 is the most
+carefully cited document in this repository and the L-Q3 deviation was recorded
+rather than buried, which is exactly what L2 and L10 asked for. None of that is
+reopened.
+
+What follows is about the *test fixture* Phase 2D shipped.
+
+### L21 — MAJOR: the bundle fixture claims to be bundler-shaped, and on the error path it is not
+
+`tests/parity/parity.js`'s registry caches a module *before* evaluating its
+factory and never removes the entry if that factory throws:
+
+```js
+__cache[id] = module;
+__modules[id](module, module.exports, __require);   // if this throws...
+```
+
+So a second `__require` of a throwing module **silently returns its partial
+exports** — no re-run, no re-throw. The fixture asserts this, and
+`expected.txt` now pins it:
+
+```
+bundle:throw:cached-partial:before-throw
+```
+
+**No module system behaves that way.** Under ES modules — which is what this
+bundle is standing in for, since the entire premise is that game code is authored
+as modules and bundled — a module that throws during evaluation is permanently
+errored, and every later import **re-throws the same error**. Partial exports are
+never handed out. The fixture's error path therefore diverges from the semantics
+it exists to stand in for, and the golden has frozen the divergence: the next
+person who *fixes* the registry will break the parity gate and be told they are
+wrong.
+
+The fixture's comment claims it is *"the CommonJS-style shape emitted by bundlers
+such as esbuild and Metro."* **That claim was never checked against esbuild's or
+Metro's actual output.** Phase 1 was scrupulous about exactly this — it opened the
+SDK headers rather than trusting M4 — and then Phase 2 asserted a bundler's
+behaviour from recollection. CLAUDE.md's rule does not stop at Apple's headers.
+
+**The fix, and it makes the test stronger rather than smaller:**
+
+1. `delete __cache[id]` when a factory throws, and assert that a second
+   `__require` **re-runs the factory and re-throws**. That exercises exception
+   propagation through a nested require chain twice and a factory re-entry —
+   genuinely more than the current assertion does.
+2. Update `expected.txt` accordingly.
+3. **Verify the comment's claim by construction:** bundle a small multi-file
+   fixture with a real esbuild (or Metro) invocation, read what it actually emits
+   on the error path, and either match it or delete the claim. Do not keep both a
+   fidelity claim and a semantic no bundler has.
+
+### L22 — MINOR: `import()` is the one uncited claim in Q11
+
+Q11 → L-Q7 states that dynamic `import()` is out of reach. **It was not tested.**
+Unlike an `import` *declaration*, a dynamic `import()` call is syntactically legal
+in the Script goal, so whether a bare `JSGlobalContextRef` rejects it at runtime is
+an *empirical* question, not one the headers answer. Every other line of Q11 carries
+a citation; this one carries a recollection wearing the same clothes.
+
+Add a small test to the JSC suite establishing what actually happens, or mark the
+claim untested in Q11. The stakes are low either way — game code must not rely on
+`import()` under candidate D regardless — but Q11's value is that a reader can trust
+every line of it.
+
+### L23 — process: the Phase Review did not run
+
+Exit criterion 7 requires a Phase Review, and the block shipped in two commits with
+no review artifact. The MAJOR above is exactly what that gate exists to catch, and it
+went straight past. Run the review over the cumulative diff before closing.
+
+### Exit criteria for the reopen
+
+1. L21 fixed: the registry drops a throwing module from the cache, the fixture
+   asserts the re-throw, `expected.txt` is regenerated, and the bundler-fidelity
+   claim is either verified against a real bundler's output or removed.
+2. L22 answered or explicitly marked untested in Q11.
+3. L23: a Phase Review runs over block 16's cumulative diff and is clean of
+   CRITICAL and MAJOR.
+4. The parity suite is byte-identical under **both** engines again after the golden
+   changes (P1) — the whole point of the fixture.
+5. Standard gates green.
