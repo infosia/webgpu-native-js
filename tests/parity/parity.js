@@ -58,6 +58,23 @@
         }
     }
 
+    log("namespace:GPUBufferUsage:object:" +
+        (typeof GPUBufferUsage === "object"));
+    log("namespace:GPUBufferUsage:VERTEX:" + GPUBufferUsage.VERTEX);
+    var originalVertexUsage = GPUBufferUsage.VERTEX;
+    caught(function () { GPUBufferUsage.VERTEX = 0; });
+    log("namespace:GPUBufferUsage:readonly:" +
+        (GPUBufferUsage.VERTEX === originalVertexUsage));
+    log("namespace:GPUBufferUsage:enumerable:" +
+        Object.keys(GPUBufferUsage).length);
+    var vertexDescriptor = Object.getOwnPropertyDescriptor(GPUBufferUsage, "VERTEX");
+    log("namespace:GPUBufferUsage:constant-descriptor:" +
+        vertexDescriptor.writable + "," + vertexDescriptor.enumerable + "," +
+        vertexDescriptor.configurable);
+    var namespaceDescriptor = Object.getOwnPropertyDescriptor(globalThis, "GPUBufferUsage");
+    log("namespace:GPUBufferUsage:global-descriptor:" +
+        namespaceDescriptor.writable + "," + namespaceDescriptor.enumerable + "," +
+        namespaceDescriptor.configurable);
     log("interface:GPURenderPassEncoder:function:" +
         (typeof GPURenderPassEncoder === "function"));
     log("interface:GPURenderPassEncoder:setBindGroup:" +
@@ -96,9 +113,12 @@
     }
 
     function runOrdering() {
-        var orderingBuffer = device.createBuffer({ size: 4, usage: 1 });
+        var orderingBuffer = device.createBuffer({
+            size: 4,
+            usage: GPUBufferUsage.MAP_READ
+        });
         var sameTickOrder = [];
-        var mapPromise = orderingBuffer.mapAsync(1, 0, 4).then(function () {
+        var mapPromise = orderingBuffer.mapAsync(GPUMapMode.READ, 0, 4).then(function () {
             sameTickOrder.push("mapAsync");
         });
         var workPromise = device.queue.onSubmittedWorkDone().then(function () {
@@ -155,7 +175,7 @@
             var target = requestedDevice.createTexture({
                 size: [1],
                 format: "rgba8unorm",
-                usage: 16
+                usage: GPUTextureUsage.RENDER_ATTACHMENT
             });
             var encoder = requestedDevice.createCommandEncoder();
             var renderPass = encoder.beginRenderPass({
@@ -191,7 +211,7 @@
     }
 
     function runErrorScopes() {
-        var scopedBuffer = device.createBuffer({ size: 4, usage: 8 });
+        var scopedBuffer = device.createBuffer({ size: 4, usage: GPUBufferUsage.COPY_DST });
         device.pushErrorScope("validation");
         device.pushErrorScope("out-of-memory");
         device.queue.writeBuffer(scopedBuffer, 8, new Uint8Array(4));
@@ -221,10 +241,13 @@
     function runOffsetWindowRoundTrip() {
         var source = device.createBuffer({
             size: 12,
-            usage: 4,
+            usage: GPUBufferUsage.COPY_SRC,
             mappedAtCreation: true
         });
-        var destination = device.createBuffer({ size: 4, usage: 9 });
+        var destination = device.createBuffer({
+            size: 4,
+            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+        });
         var window = source.getMappedRange(8, 4);
         new Uint8Array(window).set([21, 22, 23, 24]);
         source.unmap();
@@ -233,7 +256,7 @@
         encoder.copyBufferToBuffer(source, 8, destination, 0, 4);
         device.queue.submit([encoder.finish()]);
         return device.queue.onSubmittedWorkDone().then(function () {
-            return destination.mapAsync(1, 0, 4);
+            return destination.mapAsync(GPUMapMode.READ, 0, 4);
         }).then(function () {
             log("mapping:offset-window:" + bytesOf(destination.getMappedRange()));
             destination.unmap();
@@ -245,10 +268,13 @@
     function runMappedAtCreationRoundTrip() {
         var mapped = device.createBuffer({
             size: 8,
-            usage: 4,
+            usage: GPUBufferUsage.COPY_SRC,
             mappedAtCreation: true
         });
-        var readback = device.createBuffer({ size: 8, usage: 9 });
+        var readback = device.createBuffer({
+            size: 8,
+            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+        });
         var mappedRange = mapped.getMappedRange(0, 4);
         new Uint8Array(mappedRange).set([7, 8, 9, 10]);
         mapped.unmap();
@@ -257,7 +283,7 @@
         encoder.copyBufferToBuffer(mapped, 0, readback, 0, 8);
         device.queue.submit([encoder.finish()]);
         return device.queue.onSubmittedWorkDone().then(function () {
-            return readback.mapAsync(1, 0, 8);
+            return readback.mapAsync(GPUMapMode.READ, 0, 8);
         }).then(function () {
             log("mappedAtCreation:" + bytesOf(readback.getMappedRange()));
             readback.unmap();
@@ -269,7 +295,7 @@
     function runMappingDetach() {
         var mapped = device.createBuffer({
             size: 12,
-            usage: 4,
+            usage: GPUBufferUsage.COPY_SRC,
             mappedAtCreation: true
         });
         var first = mapped.getMappedRange(0, 4);
@@ -283,14 +309,18 @@
         mapped.destroy();
 
         var sizeTwoError = caught(function () {
-            device.createBuffer({ size: 2, usage: 2, mappedAtCreation: true });
+            device.createBuffer({
+                size: 2,
+                usage: GPUBufferUsage.MAP_WRITE,
+                mappedAtCreation: true
+            });
         });
         log("coerce:mappedAtCreation-size-2:" + sizeTwoError.name);
 
-        var destroyed = device.createBuffer({ size: 4, usage: 1 });
+        var destroyed = device.createBuffer({ size: 4, usage: GPUBufferUsage.MAP_READ });
         destroyed.destroy();
         device.pushErrorScope("validation");
-        return destroyed.mapAsync(1, 0, 4).then(function () {
+        return destroyed.mapAsync(GPUMapMode.READ, 0, 4).then(function () {
             throw new Error("destroyed mapAsync unexpectedly resolved");
         }, function (destroyedMapError) {
             log(errorLine("reject:mapAsync", destroyedMapError));
@@ -304,9 +334,9 @@
     }
 
     function runMappedRangeOverlap() {
-        var buffer = device.createBuffer({ size: 16, usage: 1 });
+        var buffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.MAP_READ });
         var overlap;
-        return buffer.mapAsync(1, 0, 16).then(function () {
+        return buffer.mapAsync(GPUMapMode.READ, 0, 16).then(function () {
             buffer.getMappedRange(0, 8);
             overlap = caught(function () {
                 buffer.getMappedRange(4, 4);
@@ -318,7 +348,7 @@
             buffer.getMappedRange(8, 0);
             buffer.getMappedRange(8, 8);
             buffer.unmap();
-            return buffer.mapAsync(1, 0, 16);
+            return buffer.mapAsync(GPUMapMode.READ, 0, 16);
         }).then(function () {
             buffer.getMappedRange(0, 8);
             buffer.unmap();
@@ -328,8 +358,14 @@
     }
 
     function runWriteBufferRoundTrip() {
-        var source = device.createBuffer({ size: 12, usage: 12 });
-        var destination = device.createBuffer({ size: 12, usage: 9 });
+        var source = device.createBuffer({
+            size: 12,
+            usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
+        });
+        var destination = device.createBuffer({
+            size: 12,
+            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+        });
         var bytes = new ArrayBuffer(8);
         new Uint8Array(bytes).set([3, 1, 4, 1, 5, 9, 2, 6]);
         device.queue.writeBuffer(source, 0, bytes, 0, 8);
@@ -341,7 +377,7 @@
         encoder.copyBufferToBuffer(source, 0, destination, 0, 12);
         device.queue.submit([encoder.finish()]);
         return device.queue.onSubmittedWorkDone().then(function () {
-            return destination.mapAsync(1, 0, 12);
+            return destination.mapAsync(GPUMapMode.READ, 0, 12);
         }).then(function () {
             var range = destination.getMappedRange();
             var result = new Uint8Array(range);
@@ -354,10 +390,10 @@
     }
 
     function runMapAsyncErrorRouting() {
-        var mapped = device.createBuffer({ size: 4, usage: 1 });
-        return mapped.mapAsync(1, 0, 4).then(function () {
+        var mapped = device.createBuffer({ size: 4, usage: GPUBufferUsage.MAP_READ });
+        return mapped.mapAsync(GPUMapMode.READ, 0, 4).then(function () {
             device.pushErrorScope("validation");
-            var repeat = mapped.mapAsync(1, 0, 4).then(function () {
+            var repeat = mapped.mapAsync(GPUMapMode.READ, 0, 4).then(function () {
                 throw new Error("mapped mapAsync unexpectedly resolved");
             }, function (error) {
                 return error;
@@ -375,8 +411,8 @@
             mapped.unmap();
             mapped.destroy();
 
-            var canceled = device.createBuffer({ size: 4, usage: 1 });
-            var pending = canceled.mapAsync(1, 0, 4);
+            var canceled = device.createBuffer({ size: 4, usage: GPUBufferUsage.MAP_READ });
+            var pending = canceled.mapAsync(GPUMapMode.READ, 0, 4);
             canceled.unmap();
             return pending.then(function () {
                 throw new Error("canceled mapAsync unexpectedly resolved");
@@ -391,9 +427,9 @@
     }
 
     function runMapStateParity() {
-        var buffer = device.createBuffer({ size: 4, usage: 1 });
+        var buffer = device.createBuffer({ size: 4, usage: GPUBufferUsage.MAP_READ });
         log("mapState:" + buffer.mapState);
-        var pending = buffer.mapAsync(1, 0, 4);
+        var pending = buffer.mapAsync(GPUMapMode.READ, 0, 4);
         log("mapState:" + buffer.mapState);
         return pending.then(function () {
             log("mapState:" + buffer.mapState);
@@ -420,10 +456,12 @@
         }
 
         var texture2d = device.createTexture({
-            size: [1, 1, 1], dimension: "2d", format: "rgba8unorm", usage: 16
+            size: [1, 1, 1], dimension: "2d", format: "rgba8unorm",
+            usage: GPUTextureUsage.RENDER_ATTACHMENT
         });
         var texture3d = device.createTexture({
-            size: [1, 1, 1], dimension: "3d", format: "rgba8unorm", usage: 16
+            size: [1, 1, 1], dimension: "3d", format: "rgba8unorm",
+            usage: GPUTextureUsage.RENDER_ATTACHMENT
         });
         device.pushErrorScope("validation");
         record(texture2d, 0xffffffff);
@@ -632,7 +670,7 @@
         var texture = device.createTexture({
             size: { width: 4, height: 2 },
             format: "r8unorm",
-            usage: 4
+            usage: GPUTextureUsage.TEXTURE_BINDING
         });
         log("texture:create:ok");
         log("texture:width:" + texture.width);
@@ -643,18 +681,18 @@
         log("texture:dimension:" + texture.dimension);
         log("texture:format:" + texture.format);
         log("texture:usage:" + texture.usage);
-        texture.createView({ usage: 4 });
+        texture.createView({ usage: GPUTextureUsage.TEXTURE_BINDING });
         log("texture:view-usage:ok");
 
         var dictTexture = device.createTexture({
             size: { width: 4, height: 2 },
             format: "r8unorm",
-            usage: 4
+            usage: GPUTextureUsage.TEXTURE_BINDING
         });
         var sequenceTexture = device.createTexture({
             size: [4, 2],
             format: "r8unorm",
-            usage: 4
+            usage: GPUTextureUsage.TEXTURE_BINDING
         });
         var dictAttributes = textureAttributes(dictTexture);
         var sequenceAttributes = textureAttributes(sequenceTexture);
@@ -663,26 +701,42 @@
         log("texture:extent-equal:" + (dictAttributes === sequenceAttributes));
 
         var formatError = caught(function () {
-            device.createTexture({ size: [1], format: "not-a-format", usage: 4 });
+            device.createTexture({
+                size: [1],
+                format: "not-a-format",
+                usage: GPUTextureUsage.TEXTURE_BINDING
+            });
         });
         log(errorLine("texture:format-rejection", formatError));
         var lengthError = caught(function () {
-            device.createTexture({ size: [], format: "r8unorm", usage: 4 });
+            device.createTexture({
+                size: [],
+                format: "r8unorm",
+                usage: GPUTextureUsage.TEXTURE_BINDING
+            });
         });
         log(errorLine("texture:extent-length", lengthError));
         var overLengthError = caught(function () {
-            device.createTexture({ size: [1, 2, 3, 4], format: "r8unorm", usage: 4 });
+            device.createTexture({
+                size: [1, 2, 3, 4],
+                format: "r8unorm",
+                usage: GPUTextureUsage.TEXTURE_BINDING
+            });
         });
         log(errorLine("texture:extent-over-length", overLengthError));
         var primitiveExtentError = caught(function () {
-            device.createTexture({ size: "12", format: "r8unorm", usage: 4 });
+            device.createTexture({
+                size: "12",
+                format: "r8unorm",
+                usage: GPUTextureUsage.TEXTURE_BINDING
+            });
         });
         log(errorLine("texture:extent-primitive", primitiveExtentError));
 
         var retainedTexture = device.createTexture({
             size: [1],
             format: "r8unorm",
-            usage: 4
+            usage: GPUTextureUsage.TEXTURE_BINDING
         });
         retainedTextureView = retainedTexture.createView();
         retainedTexture = null;
@@ -705,17 +759,17 @@
     function runBindGroups() {
         var layout = device.createBindGroupLayout({
             entries: [
-                { binding: 0, visibility: 4, buffer: { type: "uniform" } },
-                { binding: 1, visibility: 4, sampler: { type: "filtering" } },
-                { binding: 2, visibility: 4, texture: {
+                { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
+                { binding: 1, visibility: GPUShaderStage.COMPUTE, sampler: { type: "filtering" } },
+                { binding: 2, visibility: GPUShaderStage.COMPUTE, texture: {
                     sampleType: "float", viewDimension: "2d", multisampled: false
                 } }
             ]
         });
-        var resourceBuffer = device.createBuffer({ size: 4, usage: 64 });
+        var resourceBuffer = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM });
         var resourceSampler = device.createSampler();
         var resourceTexture = device.createTexture({
-            size: [1], format: "rgba8unorm", usage: 4
+            size: [1], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING
         });
         var resourceView = resourceTexture.createView();
         retainedBindGroup = device.createBindGroup({
@@ -740,7 +794,11 @@
 
         var samplerTypeError = caught(function () {
             device.createBindGroupLayout({
-                entries: [{ binding: 0, visibility: 4, sampler: { type: "bad" } }]
+                entries: [{
+                    binding: 0,
+                    visibility: GPUShaderStage.COMPUTE,
+                    sampler: { type: "bad" }
+                }]
             });
         });
         log(errorLine("bindGroup:sampler-type-rejection", samplerTypeError));
@@ -879,7 +937,8 @@
         }).then(function () {
             return validationScope("occlusion-query", function () {
                 var texture = device.createTexture({
-                    size: [1], format: "rgba8unorm", usage: 16
+                    size: [1], format: "rgba8unorm",
+                    usage: GPUTextureUsage.RENDER_ATTACHMENT
                 });
                 var encoder = device.createCommandEncoder();
                 var pass = encoder.beginRenderPass({
@@ -893,7 +952,10 @@
                 pass.beginOcclusionQuery(2);
                 pass.endOcclusionQuery();
                 pass.end();
-                var destination = device.createBuffer({ size: 1024, usage: 520 });
+                var destination = device.createBuffer({
+                    size: 1024,
+                    usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_DST
+                });
                 var clearTypeError = caught(function () {
                     encoder.clearBuffer(null);
                 });
@@ -978,14 +1040,20 @@
             fragment: {
                 module: module,
                 entryPoint: "fragment_main",
-                targets: [{ format: "rgba8unorm" }]
+                targets: [{ format: "rgba8unorm", writeMask: GPUColorWrite.ALL }]
             }
         });
         var sourceTexture = device.createTexture({
-            size: [4, 4], format: "rgba8unorm", usage: 19
+            size: [4, 4], format: "rgba8unorm",
+            usage: GPUTextureUsage.COPY_SRC |
+                GPUTextureUsage.COPY_DST |
+                GPUTextureUsage.RENDER_ATTACHMENT
         });
         var destinationTexture = device.createTexture({
-            size: [4, 4], format: "rgba8unorm", usage: 19
+            size: [4, 4], format: "rgba8unorm",
+            usage: GPUTextureUsage.COPY_SRC |
+                GPUTextureUsage.COPY_DST |
+                GPUTextureUsage.RENDER_ATTACHMENT
         });
         var view = sourceTexture.createView();
 
@@ -1125,7 +1193,10 @@
             }
             log("renderPass:clearValue-dict-sequence:no-validation-error");
 
-            var buffer = device.createBuffer({ size: 1024, usage: 12 });
+            var buffer = device.createBuffer({
+                size: 1024,
+                usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
+            });
             var bufferInfo = {
                 buffer: buffer, bytesPerRow: 256, rowsPerImage: 4
             };
@@ -1178,7 +1249,8 @@
             }
         });
         var texture = device.createTexture({
-            size: [4, 4], format: "rgba8unorm", usage: 16
+            size: [4, 4], format: "rgba8unorm",
+            usage: GPUTextureUsage.RENDER_ATTACHMENT
         });
         var bundleEncoder = device.createRenderBundleEncoder({
             colorFormats: ["rgba8unorm"]
@@ -1224,8 +1296,11 @@
 
     function runIndirectCommands() {
         return validationScope("indirect-commands", function () {
-            var indirectBuffer = device.createBuffer({ size: 32, usage: 256 });
-            var indexBuffer = device.createBuffer({ size: 8, usage: 16 });
+            var indirectBuffer = device.createBuffer({
+                size: 32,
+                usage: GPUBufferUsage.INDIRECT
+            });
+            var indexBuffer = device.createBuffer({ size: 8, usage: GPUBufferUsage.INDEX });
 
             var computeModule = device.createShaderModule({
                 code: "@compute @workgroup_size(1) fn main() {}"
@@ -1285,7 +1360,8 @@
                 entries: []
             });
             var texture = device.createTexture({
-                size: [1], format: "rgba8unorm", usage: 16
+                size: [1], format: "rgba8unorm",
+                usage: GPUTextureUsage.RENDER_ATTACHMENT
             });
             var renderEncoder = device.createCommandEncoder();
             var renderPass = renderEncoder.beginRenderPass({
@@ -1381,40 +1457,52 @@
     }
 
     function runStrings() {
-        var bmp = device.createBuffer({ size: 4, usage: 8, label: "ラベルé" });
+        var bmp = device.createBuffer({
+            size: 4,
+            usage: GPUBufferUsage.COPY_DST,
+            label: "ラベルé"
+        });
         log("string:bmp:" + bmp.label);
         bmp.destroy();
 
-        var pair = device.createBuffer({ size: 4, usage: 8, label: "🎮" });
+        var pair = device.createBuffer({
+            size: 4,
+            usage: GPUBufferUsage.COPY_DST,
+            label: "🎮"
+        });
         log("string:pair:" + pair.label);
         pair.destroy();
 
         var loneSurrogate = device.createBuffer({
             size: 4,
-            usage: 8,
+            usage: GPUBufferUsage.COPY_DST,
             label: "a\uD800b"
         });
         log("string:lone-surrogate:" + loneSurrogate.label);
         loneSurrogate.destroy();
 
-        var empty = device.createBuffer({ size: 4, usage: 8, label: "" });
+        var empty = device.createBuffer({
+            size: 4,
+            usage: GPUBufferUsage.COPY_DST,
+            label: ""
+        });
         log("string:empty:" + empty.label.length);
         empty.destroy();
 
-        var absent = device.createBuffer({ size: 4, usage: 8 });
+        var absent = device.createBuffer({ size: 4, usage: GPUBufferUsage.COPY_DST });
         log("string:absent:" + absent.label.length);
         absent.destroy();
     }
 
     function runCoercions() {
-        createAndDestroyBuffer(0, 8);
+        createAndDestroyBuffer(0, GPUBufferUsage.COPY_DST);
         log("coerce:size-0:ok");
-        createAndDestroyBuffer(4294967295, 8);
+        createAndDestroyBuffer(4294967295, GPUBufferUsage.COPY_DST);
         log("coerce:size-u32-max:ok");
 
         // specs/tracking/codegen-deltas.md records that enforce_u64 accepts
         // integral values through 2^64-1 instead of WebIDL's 2^53-1 cap.
-        createAndDestroyBuffer(9007199254740992, 8);
+        createAndDestroyBuffer(9007199254740992, GPUBufferUsage.COPY_DST);
         log("coerce:size-2^53:ok");
 
         var cases = [
@@ -1426,7 +1514,7 @@
         ];
         cases.forEach(function (entry) {
             var error = caught(function () {
-                createAndDestroyBuffer(entry[1], 8);
+                createAndDestroyBuffer(entry[1], GPUBufferUsage.COPY_DST);
             });
             log("coerce:size-" + entry[0] + ":" + error.name);
         });
@@ -1438,7 +1526,7 @@
         log("typeerror-name:" + usageError.name);
 
         var sizeBigintError = caught(function () {
-            createAndDestroyBuffer(BigInt(8), 8);
+            createAndDestroyBuffer(BigInt(8), GPUBufferUsage.COPY_DST);
         });
         log("bigint:size:" + sizeBigintError.name);
 
@@ -1447,13 +1535,17 @@
         });
         log("bigint:writeBuffer-offset:" + offsetBigintError.name);
 
-        var numberLabel = device.createBuffer({ size: 4, usage: 8, label: 42 });
+        var numberLabel = device.createBuffer({
+            size: 4,
+            usage: GPUBufferUsage.COPY_DST,
+            label: 42
+        });
         log("label:number:" + numberLabel.label);
         numberLabel.destroy();
 
         var negativeZeroLabel = device.createBuffer({
             size: 4,
-            usage: 8,
+            usage: GPUBufferUsage.COPY_DST,
             label: -0
         });
         log("label:-0:" + negativeZeroLabel.label);
@@ -1461,7 +1553,7 @@
 
         var exponentialLabel = device.createBuffer({
             size: 4,
-            usage: 8,
+            usage: GPUBufferUsage.COPY_DST,
             label: 1e21
         });
         log("label:1e21:" + exponentialLabel.label);
@@ -1469,7 +1561,7 @@
 
         var objectLabel = device.createBuffer({
             size: 4,
-            usage: 8,
+            usage: GPUBufferUsage.COPY_DST,
             label: { toString: function () { return "object-label"; } }
         });
         log("label:object:" + objectLabel.label);
@@ -1515,13 +1607,17 @@
 
     try {
         var stableMethod = device.createBuffer === device.createBuffer;
-        labelBuffer = device.createBuffer({ size: 4, usage: 8, label: null });
+        labelBuffer = device.createBuffer({
+            size: 4,
+            usage: GPUBufferUsage.COPY_DST,
+            label: null
+        });
         var nullLabel = labelBuffer.label;
         labelBuffer.label = "round-trip";
         log("buffer:" + nullLabel + "," + labelBuffer.label + ";method:" + stableMethod);
         var embeddedNulLabel = "null\0in\0label";
         var embeddedNulBuffer = device.createBuffer({
-            size: 4, usage: 8, label: embeddedNulLabel
+            size: 4, usage: GPUBufferUsage.COPY_DST, label: embeddedNulLabel
         });
         var embeddedNulRoundTrip = embeddedNulBuffer.label === embeddedNulLabel;
         embeddedNulBuffer.destroy();
@@ -1541,6 +1637,33 @@
             methodDescriptor.enumerable + "," + constructorDescriptor.enumerable + ":" +
             (reflectedKeys.indexOf("label") !== -1) + "," +
             (reflectedKeys.indexOf("size") !== -1));
+        var interfacePrototypeDescriptor = Object.getOwnPropertyDescriptor(
+            GPUBuffer,
+            "prototype"
+        );
+        log("webidl:interface.prototype:" + interfacePrototypeDescriptor.writable + "," +
+            interfacePrototypeDescriptor.enumerable + "," +
+            interfacePrototypeDescriptor.configurable);
+        log("webidl:interface.keys:" + Object.keys(GPUBuffer).join(","));
+        var reflectedMethod = GPUBuffer.prototype.mapAsync;
+        log("webidl:method:" + (reflectedMethod instanceof Function) + "," +
+            (Object.getPrototypeOf(reflectedMethod) === Function.prototype) + "," +
+            reflectedMethod.name + "," + reflectedMethod.length + "," +
+            typeof reflectedMethod.call + "," + typeof reflectedMethod.bind);
+        var reflectedGetter = Object.getOwnPropertyDescriptor(
+            GPUBuffer.prototype,
+            "size"
+        ).get;
+        log("webidl:getter:" + (reflectedGetter instanceof Function) + "," +
+            (Object.getPrototypeOf(reflectedGetter) === Function.prototype) + "," +
+            reflectedGetter.name + "," + reflectedGetter.length + "," +
+            typeof reflectedGetter.call + "," + typeof reflectedGetter.bind);
+        var illegalInterfaceCall = caught(function () {
+            GPUPipelineError("message", { reason: "internal" });
+        });
+        log("webidl:constructible-call:" + illegalInterfaceCall.name);
+        log("webidl:object-tag:" + Object.prototype.toString.call(labelBuffer));
+        log("webidl:prototype-tag:" + GPUBuffer.prototype[Symbol.toStringTag]);
         log("identity:queue:" + (device.queue === device.queue));
         log("identity:lost:" + (device.lost === device.lost));
         log("features:" + Array.from(device.features).join(","));
@@ -1552,7 +1675,10 @@
         log("identity:limits:" + (device.limits === device.limits));
         log("identity:adapterInfo:" + (device.adapterInfo === device.adapterInfo));
         log("typeof:device.createBuffer:" + typeof device.createBuffer);
-        var prototypeBuffer = device.createBuffer({ size: 4, usage: 8 });
+        var prototypeBuffer = device.createBuffer({
+            size: 4,
+            usage: GPUBufferUsage.COPY_DST
+        });
         log("identity:cross-instance-prototype:" +
             (Object.getPrototypeOf(labelBuffer) ===
                 Object.getPrototypeOf(prototypeBuffer)));

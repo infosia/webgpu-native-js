@@ -156,6 +156,7 @@ pub struct Environment {
     queue: Arc<ReleaseQueue>,
     settlements: Arc<SettlementQueue>,
     device_events: Arc<DeviceEventRegistry>,
+    namespace_globals_installed: AtomicBool,
 }
 
 #[derive(Default)]
@@ -178,6 +179,7 @@ impl Environment {
             queue,
             settlements: Arc::new(SettlementQueue::new()),
             device_events: Arc::new(DeviceEventRegistry::default()),
+            namespace_globals_installed: AtomicBool::new(false),
         }
     }
 
@@ -369,6 +371,18 @@ pub trait JsEngine: Sized {
     ) -> Result<Vec<String>, Self::Error>;
     /// Returns the engine's global object as a call-scoped owned value.
     fn global(cx: Self::Context<'_>) -> Self::Value;
+    /// Creates an ordinary JavaScript object whose prototype is `Object.prototype`.
+    fn new_object(cx: Self::Context<'_>) -> Result<Self::Value, Self::Error>;
+    /// Defines an own data property with the supplied WebIDL descriptor attributes.
+    fn define_data_property(
+        cx: Self::Context<'_>,
+        obj: Self::Value,
+        key: &str,
+        value: Self::Value,
+        writable: bool,
+        enumerable: bool,
+        configurable: bool,
+    ) -> Result<(), Self::Error>;
     /// Gets an object property whose key is itself a JavaScript value.
     fn get_property_value(
         cx: Self::Context<'_>,
@@ -1215,6 +1229,7 @@ pub struct ConstructorSpec<E: JsEngine + 'static> {
 
 /// Parent of a registered class's instance prototype.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum ClassParent {
     /// Another class registered by the binding.
     Class(ClassId),
@@ -1776,8 +1791,10 @@ impl<E: JsEngine> HeldValue<E> {
 // release closure; it never dereferences it or calls a context-taking engine API.
 unsafe impl<E: JsEngine> Send for HeldValue<E> {}
 
-// SAFETY: listener tokens are duplicated/released only on the engine thread.
-// Arbitrary-thread native callbacks never inspect this payload.
+// SAFETY: a JSC finalizer may move this payload's Box to an arbitrary thread
+// and inspect it to release held listener tokens. The listener list is guarded
+// by its mutex; opaque engine-value handles are only moved into adapter release
+// closures and are never dereferenced off the creating `tick()` thread.
 unsafe impl<E: JsEngine> Send for EventTargetPayload<E> {}
 
 /// Payload stored by a `GPUBuffer` wrapper.
@@ -2714,30 +2731,11 @@ struct MappedRange<E: JsEngine> {
     map_mode: WGPUMapMode,
 }
 
-/// Registers the GPUDevice class.
-pub fn register_device_class<E: JsEngine + 'static>(
-    cx: E::Context<'_>,
-) -> Result<ClassId, E::Error> {
-    E::register_class(cx, device_class::<E>())
-}
-
 /// Registers the GPUBuffer class.
 pub fn register_buffer_class<E: JsEngine + 'static>(
     cx: E::Context<'_>,
 ) -> Result<ClassId, E::Error> {
     E::register_class(cx, buffer_class::<E>())
-}
-
-/// Registers the GPU class.
-pub fn register_gpu_class<E: JsEngine + 'static>(cx: E::Context<'_>) -> Result<ClassId, E::Error> {
-    E::register_class(cx, gpu_class::<E>())
-}
-
-/// Registers the GPUAdapter class.
-pub fn register_adapter_class<E: JsEngine + 'static>(
-    cx: E::Context<'_>,
-) -> Result<ClassId, E::Error> {
-    E::register_class(cx, adapter_class::<E>())
 }
 
 /// Registers the script-visible WebGPU error classes.
@@ -2786,7 +2784,18 @@ fn register_all_classes<E: JsEngine + 'static>(cx: E::Context<'_>) -> Result<(),
     let _ = register_device_lost_info_class::<E>(cx)?;
     let _ = E::register_class(cx, supported_limits_class::<E>())?;
     let _ = E::register_class(cx, adapter_info_class::<E>())?;
-    register_generated_classes::<E>(cx)
+    register_generated_classes::<E>(cx)?;
+    let environment = E::environment(cx);
+    if !environment
+        .namespace_globals_installed
+        .load(Ordering::Acquire)
+    {
+        register_generated_namespaces::<E>(cx)?;
+        environment
+            .namespace_globals_installed
+            .store(true, Ordering::Release);
+    }
+    Ok(())
 }
 
 /// Wraps a native instance as a JavaScript `GPU`.
@@ -8846,9 +8855,10 @@ fn mapped_ranges_overlap(
     let Some(second_end) = second_offset.checked_add(second_size) else {
         return true;
     };
-    // WebGPU defines disjointness by either range starting at or after the
-    // other's end. Consequently, an empty range at a boundary is disjoint,
-    // while an empty range strictly inside a non-empty range overlaps it.
+    // WebGPU's CTS-required boundary rule treats ranges as disjoint when either
+    // starts at or after the other's end. Consequently, an empty range at a
+    // boundary is disjoint, while one strictly inside a non-empty range overlaps.
+    // This is intentionally not the naive empty-set interpretation of [start, end).
     !(first_offset >= second_end || second_offset >= first_end)
 }
 

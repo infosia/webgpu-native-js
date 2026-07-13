@@ -4,8 +4,9 @@ pub struct SamplerPayload {
     pub(super) label: Mutex<String>,
 }
 
-// SAFETY: `SamplerPayload` stores WGPU handle values. Finalization only moves those values
-// into `ReleaseRequest`; native handles are dereferenced only by
+// SAFETY: a JSC finalizer may move `SamplerPayload`'s Box to an arbitrary thread.
+// Non-handle fields are owned or synchronized Send-safe Rust data. Finalization
+// only moves native handles into `ReleaseRequest`; they are dereferenced only by
 // `ReleaseRequest::run()` during release-queue drain on the creating `tick()` thread.
 unsafe impl Send for SamplerPayload {}
     /// Release a `GPUSampler` and its retained descriptor handles.

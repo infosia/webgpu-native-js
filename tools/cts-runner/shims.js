@@ -270,20 +270,6 @@
   globalThis.MessageEvent = MessageEvent;
   globalThis.EventTarget = EventTargetBase;
 
-  // Native interface wrappers have their WebGPU prototypes, but the binding does not
-  // install non-constructible WebGPU interface objects on the global object. The CTS
-  // fixture uses this one solely to distinguish devices during cleanup.
-  globalThis.GPUDevice = globalThis.GPUDevice || class GPUDevice {
-    constructor() { throw new TypeError("Illegal constructor"); }
-    static [Symbol.hasInstance](value) {
-      __shimLog("GPUDevice[Symbol.hasInstance]");
-      return typeof value === "object" && value !== null &&
-        typeof value.requestDevice === "undefined" &&
-        typeof value.createBuffer === "function" &&
-        typeof value.pushErrorScope === "function" &&
-        "queue" in value && "lost" in value;
-    }
-  };
   globalThis.navigator = { gpu: globalThis.gpu };
   globalThis.self = globalThis;
 })();

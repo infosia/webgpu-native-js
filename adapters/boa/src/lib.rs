@@ -13,7 +13,7 @@ use std::io::Cursor;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Component, Path, PathBuf};
 use std::ptr::NonNull;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::{Arc, Mutex};
 
 use boa_engine::builtins::object::OrdinaryObject as BoaObjectBuiltin;
@@ -23,8 +23,8 @@ use boa_engine::object::builtins::{AlignedVec, JsArray, JsArrayBuffer, JsPromise
 use boa_engine::object::{FunctionObjectBuilder, JsObject, ObjectInitializer};
 use boa_engine::property::{Attribute, PropertyDescriptor};
 use boa_engine::{
-    Context as BoaContext, JsData, JsError, JsNativeError, JsResult, JsString, JsValue, Module,
-    NativeFunction, Source,
+    Context as BoaContext, JsData, JsError, JsNativeError, JsResult, JsString, JsSymbol, JsValue,
+    Module, NativeFunction, Source,
 };
 use boa_gc::{Finalize, Trace};
 use webgpu_native_js_core as core;
@@ -85,6 +85,7 @@ struct ClassEntry {
 }
 
 struct Arena {
+    weak_self: Weak<Arena>,
     env: core::Environment,
     slots: RefCell<Vec<Option<Slot>>>,
     free: RefCell<Vec<u32>>,
@@ -98,8 +99,9 @@ struct Arena {
 }
 
 impl Arena {
-    fn new(gpu: core::GpuDispatch) -> Self {
+    fn new(gpu: core::GpuDispatch, weak_self: Weak<Arena>) -> Self {
         Self {
+            weak_self,
             env: core::Environment::new(gpu, Arc::new(core::ReleaseQueue::new())),
             slots: RefCell::new(Vec::new()),
             free: RefCell::new(Vec::new()),
@@ -332,17 +334,19 @@ struct WrapperData {
     class: core::ClassId,
     payload: RefCell<Option<Box<dyn Any + Send>>>,
     finalizer: core::FinalizerFn,
-    arena: *const Arena,
+    arena: Weak<Arena>,
 }
 
 impl Finalize for WrapperData {
     fn finalize(&self) {
+        // Boa's thread-local heap can outlive Runtime. A late finalizer must be
+        // inert once the arena owner has gone away.
+        let Some(arena) = self.arena.upgrade() else {
+            return;
+        };
         let Some(payload) = self.payload.borrow_mut().take() else {
             return;
         };
-        // SAFETY: every WrapperData is created from the live runtime arena and
-        // Boa finalizes its objects before that arena is dropped.
-        let arena = unsafe { &*self.arena };
         core::release_payload_values::<Engine>(payload.as_ref(), &mut |value| {
             arena.release(value);
         });
@@ -352,8 +356,10 @@ impl Finalize for WrapperData {
 
 impl JsData for WrapperData {}
 
-// SAFETY: wrapper payloads contain native handles and `BoaValue` indices, not
-// direct Boa GC pointers; all JavaScript values are traced by the arena slots.
+// SAFETY: `WrapperData` contains no Boa GC pointer: payloads use native handles
+// and `BoaValue` indices, while `Weak<Arena>` is Rust reference-counted state.
+// While the arena is live, its `JsValue` slots are the corresponding GC roots;
+// after it is dropped, the weak reference cannot expose those indices.
 unsafe impl Trace for WrapperData {
     boa_gc::empty_trace!();
 }
@@ -434,7 +440,7 @@ impl Drop for DeferredRegistration {
 /// A Boa runtime configured with the WebGPU binding environment.
 pub struct Runtime {
     context: UnsafeCell<Option<BoaContext>>,
-    arena: Box<Arena>,
+    arena: Rc<Arena>,
     module_loader: Rc<FileModuleLoader>,
 }
 
@@ -488,13 +494,13 @@ impl Runtime {
     }
 
     fn new_with_dispatch(gpu: core::GpuDispatch) -> Result<Self> {
-        let arena = Box::new(Arena::new(gpu));
+        let arena = Rc::new_cyclic(|weak_self| Arena::new(gpu, weak_self.clone()));
         let module_loader = Rc::new(FileModuleLoader::default());
         let mut context = BoaContext::builder()
             .module_loader(module_loader.clone())
             .build()
             .map_err(|error| Error::Exception(error.to_string()))?;
-        context.insert_data(ArenaPointer((&*arena) as *const Arena));
+        context.insert_data(ArenaPointer(Rc::as_ptr(&arena)));
         let runtime = Self {
             context: UnsafeCell::new(Some(context)),
             arena,
@@ -569,7 +575,7 @@ impl Runtime {
             functions.len() - 1
         };
         let capture = HostFunctionCapture {
-            arena: (&*self.arena) as *const Arena,
+            arena: Rc::as_ptr(&self.arena),
             index,
         };
         // SAFETY: no other Boa operation overlaps this host-facing call.
@@ -752,12 +758,25 @@ impl Drop for Runtime {
         arena.free.borrow_mut().clear();
         arena.classes.borrow_mut().clear();
         arena.settle_trampoline.borrow_mut().take();
+        // `slots` above is the adapter's `JsValue` root set; classes, scopes,
+        // settlements, device events, and the trampoline contain only indices
+        // into it and have already been released or become inert. Rust callback
+        // closures can capture arbitrary host data, so release those too.
+        arena.host_functions.borrow_mut().clear();
+        // Parsed Modules are the loader's direct Boa GC roots. Drop them before
+        // the teardown collection so module environments cannot retain
+        // wrappers. The transform is also an arbitrary Rust callback; aliases
+        // contain paths only and cannot root GC data.
+        self.module_loader.modules.borrow_mut().clear();
+        self.module_loader.transform.borrow_mut().take();
         // SAFETY: drop has exclusive access to Runtime and no adapter context
         // handle survives this teardown point.
         let context = unsafe { &mut *self.context.get() }.take();
         drop(context);
-        // Finalize wrappers while their WrapperData arena pointer and binding
-        // environment are still live; Boa's collector is thread-local.
+        // Finalize wrappers while their weak arena references can still be
+        // upgraded and the binding environment is live. Boa's collector is
+        // thread-local; a wrapper retained by an unanticipated root remains
+        // safe because its late finalizer will observe a dead Weak<Arena>.
         boa_gc::force_collect();
         let _ = arena.env.queue().drain();
     }
@@ -802,8 +821,8 @@ fn arena_pointer(context: &BoaContext) -> *const Arena {
 
 fn callback_context(context: &mut BoaContext) -> Context<'_> {
     let pointer = arena_pointer(context);
-    // SAFETY: Runtime keeps the arena allocation alive and address-stable for
-    // the entire lifetime of its Boa context.
+    // SAFETY: Runtime's `Rc<Arena>` keeps this allocation alive and
+    // address-stable for the entire lifetime of its Boa context.
     let arena = unsafe { &*pointer };
     Context {
         ctx: context as *mut BoaContext,
@@ -826,7 +845,8 @@ struct HostFunctionCapture {
 
 impl Finalize for HostFunctionCapture {}
 
-// SAFETY: the capture contains no Boa GC pointer and Runtime keeps the arena live.
+// SAFETY: the capture contains no Boa GC pointer. Runtime's `Rc<Arena>` keeps
+// the captured allocation alive and address-stable while callbacks can run.
 unsafe impl Trace for HostFunctionCapture {
     boa_gc::empty_trace!();
 }
@@ -856,7 +876,8 @@ fn host_function_callback(
     context: &mut BoaContext,
 ) -> JsResult<JsValue> {
     let result = catch_unwind(AssertUnwindSafe(|| {
-        // SAFETY: Runtime keeps the address-stable arena alive for every callback.
+        // SAFETY: Runtime's `Rc<Arena>` keeps the captured allocation alive
+        // and address-stable for every callback invocation.
         let arena = unsafe { &*capture.arena };
         let function = arena
             .host_functions
@@ -949,7 +970,8 @@ fn method_callback(
     context: &mut BoaContext,
 ) -> JsResult<JsValue> {
     let pointer = arena_pointer(context);
-    // SAFETY: callback execution occurs while Runtime owns the stable arena Box.
+    // SAFETY: callback execution occurs while Runtime's `Rc<Arena>` keeps the
+    // allocation alive and address-stable.
     let arena = unsafe { &*pointer };
     let _scope = Scope::new(arena);
     let cx = callback_context(context);
@@ -965,7 +987,8 @@ fn getter_callback(
     context: &mut BoaContext,
 ) -> JsResult<JsValue> {
     let pointer = arena_pointer(context);
-    // SAFETY: callback execution occurs while Runtime owns the stable arena Box.
+    // SAFETY: callback execution occurs while Runtime's `Rc<Arena>` keeps the
+    // allocation alive and address-stable.
     let arena = unsafe { &*pointer };
     let _scope = Scope::new(arena);
     let cx = callback_context(context);
@@ -980,7 +1003,8 @@ fn setter_callback(
     context: &mut BoaContext,
 ) -> JsResult<JsValue> {
     let pointer = arena_pointer(context);
-    // SAFETY: callback execution occurs while Runtime owns the stable arena Box.
+    // SAFETY: callback execution occurs while Runtime's `Rc<Arena>` keeps the
+    // allocation alive and address-stable.
     let arena = unsafe { &*pointer };
     let _scope = Scope::new(arena);
     let cx = callback_context(context);
@@ -997,8 +1021,14 @@ fn constructor_callback(
     capture: &ConstructorCapture,
     context: &mut BoaContext,
 ) -> JsResult<JsValue> {
+    if new_target.is_undefined() {
+        return Err(JsNativeError::typ()
+            .with_message("Illegal constructor")
+            .into());
+    }
     let pointer = arena_pointer(context);
-    // SAFETY: callback execution occurs while Runtime owns the stable arena Box.
+    // SAFETY: callback execution occurs while Runtime's `Rc<Arena>` keeps the
+    // allocation alive and address-stable.
     let arena = unsafe { &*pointer };
     let _scope = Scope::new(arena);
     let cx = callback_context(context);
@@ -1105,6 +1135,36 @@ impl core::JsEngine for Engine {
 
     fn global(cx: Self::Context<'_>) -> Self::Value {
         cx.arena.insert(cx.boa().global_object().into())
+    }
+
+    fn new_object(cx: Self::Context<'_>) -> core::Result<Self::Value, Self::Error> {
+        let object = ObjectInitializer::new(cx.boa()).build();
+        Ok(cx.arena.insert(object.into()))
+    }
+
+    fn define_data_property(
+        cx: Self::Context<'_>,
+        obj: Self::Value,
+        key: &str,
+        value: Self::Value,
+        writable: bool,
+        enumerable: bool,
+        configurable: bool,
+    ) -> core::Result<(), Self::Error> {
+        let object = object(cx, obj)?;
+        object
+            .define_property_or_throw(
+                JsString::from(key),
+                PropertyDescriptor::builder()
+                    .value(cx.arena.get(value))
+                    .writable(writable)
+                    .enumerable(enumerable)
+                    .configurable(configurable)
+                    .build(),
+                cx.boa(),
+            )
+            .map_err(|error| insert_error(cx, error))?;
+        Ok(())
     }
 
     fn get_property_value(
@@ -1218,18 +1278,30 @@ impl core::JsEngine for Engine {
         let mut initializer = ObjectInitializer::new(cx.boa());
         for property in spec.properties {
             let getter = property.get.map(|callback| {
-                NativeFunction::from_copy_closure_with_captures(
-                    getter_callback,
-                    GetterCapture(callback),
+                FunctionObjectBuilder::new(
+                    initializer.context().realm(),
+                    NativeFunction::from_copy_closure_with_captures(
+                        getter_callback,
+                        GetterCapture(callback),
+                    ),
                 )
-                .to_js_function(initializer.context().realm())
+                .name(format!("get {}", property.name))
+                .length(0)
+                .constructor(false)
+                .build()
             });
             let setter = property.set.map(|callback| {
-                NativeFunction::from_copy_closure_with_captures(
-                    setter_callback,
-                    SetterCapture(callback),
+                FunctionObjectBuilder::new(
+                    initializer.context().realm(),
+                    NativeFunction::from_copy_closure_with_captures(
+                        setter_callback,
+                        SetterCapture(callback),
+                    ),
                 )
-                .to_js_function(initializer.context().realm())
+                .name(format!("set {}", property.name))
+                .length(1)
+                .constructor(false)
+                .build()
             });
             initializer.accessor(
                 JsString::from(property.name),
@@ -1256,6 +1328,11 @@ impl core::JsEngine for Engine {
                 Attribute::WRITABLE | Attribute::ENUMERABLE | Attribute::CONFIGURABLE,
             );
         }
+        initializer.property(
+            JsSymbol::to_string_tag(),
+            JsString::from(spec.name),
+            Attribute::READONLY | Attribute::NON_ENUMERABLE | Attribute::CONFIGURABLE,
+        );
         let prototype = initializer.build();
         drop(initializer);
         let prototype_handle = cx.arena.insert(prototype.clone().into());
@@ -1284,10 +1361,14 @@ impl core::JsEngine for Engine {
             .build()
         };
         constructor
-            .set(
+            .define_property_or_throw(
                 JsString::from("prototype"),
-                prototype.clone(),
-                true,
+                PropertyDescriptor::builder()
+                    .value(prototype.clone())
+                    .writable(false)
+                    .enumerable(false)
+                    .configurable(false)
+                    .build(),
                 cx.boa(),
             )
             .map_err(|error| insert_error(cx, error))?;
@@ -1324,6 +1405,7 @@ impl core::JsEngine for Engine {
                     .constructors()
                     .error()
                     .prototype(),
+                _ => return Err(Self::operation_error(cx, "unsupported class parent")),
             };
             if !prototype.set_prototype(Some(parent_prototype)) {
                 return Err(Self::operation_error(cx, "failed to set parent prototype"));
@@ -1363,7 +1445,7 @@ impl core::JsEngine for Engine {
                 class,
                 payload: RefCell::new(Some(payload)),
                 finalizer: entry.spec.finalizer,
-                arena: cx.arena as *const Arena,
+                arena: cx.arena.weak_self.clone(),
             },
             prototype,
             cx.boa(),
@@ -1641,10 +1723,10 @@ mod tests {
     use std::fs;
     use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::path::{Path, PathBuf};
-    use std::ptr;
+    use std::ptr::{self, NonNull};
     use std::rc::Rc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     use boa_engine::object::ObjectInitializer;
@@ -1652,7 +1734,8 @@ mod tests {
     use boa_gc::{Finalize, Trace};
 
     use super::{
-        core, ffi_wgpu as wgpu, BoaValue, Engine, HostValue, ModuleEvaluationStatus, Runtime,
+        core, ffi_wgpu as wgpu, gpu_dispatch, BoaValue, Engine, HostValue, ModuleEvaluationStatus,
+        Runtime,
     };
     use webgpu_native_js_core::JsEngine;
 
@@ -1672,6 +1755,29 @@ mod tests {
     // Boa GC pointers.
     unsafe impl Trace for FinalizeProbe {
         boa_gc::empty_trace!();
+    }
+
+    static MODULE_DEVICE_TEST_LOCK: Mutex<()> = Mutex::new(());
+    static MODULE_DEVICE_ADD_REFS: AtomicUsize = AtomicUsize::new(0);
+    static MODULE_DEVICE_RELEASES: AtomicUsize = AtomicUsize::new(0);
+
+    // SAFETY: the callback treats the test handle as opaque and never
+    // dereferences it; the caller supplies the non-null sentinel value.
+    unsafe fn count_module_device_add_ref(_device: wgpu::WGPUDevice) {
+        MODULE_DEVICE_ADD_REFS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    // SAFETY: the callback treats the test handle as opaque and never
+    // dereferences it; the caller supplies the non-null sentinel value.
+    unsafe fn count_module_device_release(_device: wgpu::WGPUDevice) {
+        MODULE_DEVICE_RELEASES.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn counted_device_dispatch() -> core::GpuDispatch {
+        let mut dispatch = gpu_dispatch();
+        dispatch.device_add_ref = count_module_device_add_ref;
+        dispatch.device_release = count_module_device_release;
+        dispatch
     }
 
     struct AdapterRequestState {
@@ -1847,6 +1953,23 @@ mod tests {
             .to_string(context)
             .expect("stringify evaluation")
             .to_std_string_lossy()
+    }
+
+    fn hold_value_in_module(runtime: &Runtime, files: &TempModules, value: BoaValue) {
+        runtime
+            .set_global_value("moduleRootCandidate", value)
+            .expect("set module root candidate");
+        let entry = files.write(
+            "root-wrapper.mjs",
+            "const moduleRoot = globalThis.moduleRootCandidate; globalThis.moduleRootCandidate = undefined;",
+        );
+        let evaluation = runtime
+            .eval_module(&entry)
+            .expect("evaluate module holding wrapper");
+        assert_eq!(
+            evaluation.status().expect("module status"),
+            ModuleEvaluationStatus::Fulfilled
+        );
     }
 
     struct TempModules(PathBuf);
@@ -2112,6 +2235,61 @@ mod tests {
     }
 
     #[test]
+    fn module_rooted_wrapper_is_finalized_before_a_second_runtime_collects() {
+        let _guard = MODULE_DEVICE_TEST_LOCK.lock().expect("module device lock");
+        MODULE_DEVICE_ADD_REFS.store(0, Ordering::Relaxed);
+        MODULE_DEVICE_RELEASES.store(0, Ordering::Relaxed);
+        let files = TempModules::new();
+        let device = NonNull::<wgpu::WGPUDeviceImpl>::dangling().as_ptr();
+        {
+            let runtime =
+                Runtime::new_with_dispatch(counted_device_dispatch()).expect("first Boa runtime");
+            // SAFETY: the fake handle is non-null and the test dispatch treats
+            // it only as an opaque value in its add-ref and release functions.
+            let wrapper = unsafe { runtime.wrap_device(device) }.expect("wrap fake device");
+            hold_value_in_module(&runtime, &files, wrapper);
+        }
+        let releases_after_first_drop = MODULE_DEVICE_RELEASES.load(Ordering::Relaxed);
+
+        let second = Runtime::new().expect("second Boa runtime");
+        second.run_gc();
+        assert_eq!(
+            releases_after_first_drop, 1,
+            "the first runtime must finalize its module-rooted wrapper during teardown"
+        );
+        assert_eq!(
+            MODULE_DEVICE_RELEASES.load(Ordering::Relaxed),
+            1,
+            "the second runtime's collection must not late-finalize the first runtime's wrapper"
+        );
+    }
+
+    #[test]
+    fn runtime_drop_drains_release_for_a_module_rooted_native_wrapper() {
+        let _guard = MODULE_DEVICE_TEST_LOCK.lock().expect("module device lock");
+        MODULE_DEVICE_ADD_REFS.store(0, Ordering::Relaxed);
+        MODULE_DEVICE_RELEASES.store(0, Ordering::Relaxed);
+        let files = TempModules::new();
+        let device = NonNull::<wgpu::WGPUDeviceImpl>::dangling().as_ptr();
+        {
+            let runtime =
+                Runtime::new_with_dispatch(counted_device_dispatch()).expect("Boa runtime");
+            // SAFETY: the fake handle is non-null and the test dispatch treats
+            // it only as an opaque value in its add-ref and release functions.
+            let wrapper = unsafe { runtime.wrap_device(device) }.expect("wrap fake device");
+            hold_value_in_module(&runtime, &files, wrapper);
+            assert_eq!(MODULE_DEVICE_ADD_REFS.load(Ordering::Relaxed), 1);
+            assert_eq!(MODULE_DEVICE_RELEASES.load(Ordering::Relaxed), 0);
+        }
+
+        assert_eq!(
+            MODULE_DEVICE_RELEASES.load(Ordering::Relaxed),
+            1,
+            "runtime teardown must finalize the wrapper and drain its native release"
+        );
+    }
+
+    #[test]
     fn set_global_value_adopts_the_handle_and_sets_the_property() {
         let runtime = Runtime::new().expect("Boa runtime");
         let value = retained_value(&runtime, JsValue::from(37));
@@ -2205,6 +2383,78 @@ mod tests {
                     constructError instanceof TypeError && constructError.message.includes("Illegal constructor")
             "#,
             "eager-interface-objects.js",
+        ));
+    }
+
+    #[test]
+    fn webidl_interface_object_and_function_reflection_is_conformant() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("Boa runtime");
+        // SAFETY: setup owns the live device until after runtime teardown.
+        let device = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("reflectionDevice", device)
+            .expect("set device");
+        assert!(eval_bool(
+            &runtime,
+            r#"
+                (() => {
+                    const interfaceDescriptor = Object.getOwnPropertyDescriptor(
+                        GPUBuffer,
+                        "prototype"
+                    );
+                    const originalPrototype = GPUBuffer.prototype;
+                    GPUBuffer.prototype = {};
+                    const method = GPUBuffer.prototype.mapAsync;
+                    const label = Object.getOwnPropertyDescriptor(
+                        GPUBuffer.prototype,
+                        "label"
+                    );
+                    const tagDescriptor = Object.getOwnPropertyDescriptor(
+                        GPUBuffer.prototype,
+                        Symbol.toStringTag
+                    );
+                    let callError;
+                    try { GPUPipelineError("message", { reason: "internal" }); }
+                    catch (error) { callError = error; }
+                    const buffer = reflectionDevice.createBuffer({
+                        size: 4,
+                        usage: GPUBufferUsage.COPY_DST
+                    });
+                    GPUBuffer.prototype.unmap.call(buffer);
+                    GPUBuffer.prototype.unmap.bind(buffer)();
+                    Reflect.apply(GPUBuffer.prototype.unmap, buffer, []);
+                    label.set.call(buffer, "reflected-label");
+                    const reflected = interfaceDescriptor.writable === false &&
+                        interfaceDescriptor.enumerable === false &&
+                        interfaceDescriptor.configurable === false &&
+                        Object.keys(GPUBuffer).length === 0 &&
+                        GPUBuffer.prototype === originalPrototype &&
+                        method instanceof Function &&
+                        Object.getPrototypeOf(method) === Function.prototype &&
+                        method.name === "mapAsync" && method.length === 1 &&
+                        Object.prototype.hasOwnProperty.call(method, "name") &&
+                        Object.prototype.hasOwnProperty.call(method, "length") &&
+                        typeof method.call === "function" &&
+                        typeof method.apply === "function" &&
+                        typeof method.bind === "function" &&
+                        label.get instanceof Function && label.get.name === "get label" &&
+                        label.get.length === 0 &&
+                        label.set instanceof Function && label.set.name === "set label" &&
+                        label.set.length === 1 &&
+                        label.get.call(buffer) === "reflected-label" &&
+                        callError instanceof TypeError &&
+                        callError.message.includes("Illegal constructor") &&
+                        tagDescriptor.value === "GPUBuffer" &&
+                        tagDescriptor.writable === false &&
+                        tagDescriptor.enumerable === false &&
+                        tagDescriptor.configurable === true &&
+                        Object.prototype.toString.call(buffer) === "[object GPUBuffer]";
+                    buffer.destroy();
+                    return reflected;
+                })()
+            "#,
+            "webidl-reflection.js",
         ));
     }
 

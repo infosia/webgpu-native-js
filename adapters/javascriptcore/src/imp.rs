@@ -128,7 +128,9 @@ impl JSClassDefinition {
 }
 
 const PROPERTY_NONE: JSPropertyAttributes = 0;
+const PROPERTY_READ_ONLY: JSPropertyAttributes = 1 << 1;
 const PROPERTY_DONT_ENUM: JSPropertyAttributes = 1 << 2;
+const PROPERTY_DONT_DELETE: JSPropertyAttributes = 1 << 3;
 
 #[link(name = "JavaScriptCore", kind = "framework")]
 unsafe extern "C" {
@@ -1315,6 +1317,60 @@ impl core::JsEngine for Engine {
         value
     }
 
+    fn new_object(cx: Self::Context<'_>) -> core::Result<Self::Value, Self::Error> {
+        // SAFETY: a null class requests an ordinary object in the live context.
+        let object = unsafe { JSObjectMake(cx.ctx, ptr::null_mut(), ptr::null_mut()) };
+        if object.is_null() {
+            return Err(Self::operation_error(
+                cx,
+                "ordinary object allocation failed",
+            ));
+        }
+        let value = object.cast_const();
+        cx.scope.track(value);
+        Ok(value)
+    }
+
+    fn define_data_property(
+        cx: Self::Context<'_>,
+        obj: Self::Value,
+        key: &str,
+        value: Self::Value,
+        writable: bool,
+        enumerable: bool,
+        configurable: bool,
+    ) -> core::Result<(), Self::Error> {
+        let object = value_to_object(cx, obj)?;
+        let key = JsString::new(key).map_err(|_| Self::type_error(cx, "invalid property name"))?;
+        let mut attributes = PROPERTY_NONE;
+        if !writable {
+            attributes |= PROPERTY_READ_ONLY;
+        }
+        if !enumerable {
+            attributes |= PROPERTY_DONT_ENUM;
+        }
+        if !configurable {
+            attributes |= PROPERTY_DONT_DELETE;
+        }
+        let mut exception = ptr::null();
+        // SAFETY: object, value, and property name belong to the live context.
+        unsafe {
+            JSObjectSetProperty(
+                cx.ctx,
+                object,
+                key.as_raw(),
+                value,
+                attributes,
+                &mut exception,
+            )
+        };
+        if exception.is_null() {
+            Ok(())
+        } else {
+            Err(exception)
+        }
+    }
+
     fn get_property_value(
         cx: Self::Context<'_>,
         obj: Self::Value,
@@ -1499,7 +1555,7 @@ impl core::JsEngine for Engine {
         }
         let mut methods = Vec::with_capacity(spec.methods.len());
         for method in spec.methods {
-            let value = match make_method(cx, method.call) {
+            let value = match make_method(cx, method) {
                 Ok(value) => value,
                 Err(error) => {
                     // SAFETY: the class has not entered the registry, so this
@@ -1551,20 +1607,6 @@ impl core::JsEngine for Engine {
             });
         }
         let constructor = make_interface_function(cx, spec, native_constructor)?;
-        // SAFETY: interface function and prototype belong to the live cx.
-        unsafe {
-            JSObjectSetProperty(
-                cx.ctx,
-                constructor,
-                prototype.as_raw(),
-                child_prototype.cast_const(),
-                PROPERTY_NONE,
-                &mut exception,
-            )
-        };
-        if !exception.is_null() {
-            return Err(exception);
-        }
         for method in &methods {
             let name = JsString::new(method.name)
                 .map_err(|_| Self::type_error(cx, "method name contains a nul byte"))?;
@@ -1585,6 +1627,7 @@ impl core::JsEngine for Engine {
         for property in spec.properties {
             define_prototype_accessor(cx, child_prototype, property)?;
         }
+        define_to_string_tag(cx, child_prototype, spec.name)?;
         let constructor_name = JsString::new("constructor")
             .map_err(|_| Self::operation_error(cx, "constructor string failed"))?;
         // JSObjectMakeConstructor pre-populates an enumerable `constructor`
@@ -1679,6 +1722,7 @@ impl core::JsEngine for Engine {
                     }
                     parent_prototype
                 }
+                _ => return Err(Self::operation_error(cx, "unsupported class parent")),
             };
             // SAFETY: prototype values belong to the live cx. This creates
             // JS inheritance without a native JSClass finalizer chain.
@@ -2719,25 +2763,23 @@ unsafe extern "C" fn method_finalize(object: JSObjectRef) {
 
 fn make_method(
     cx: Context<'_>,
-    call: core::MethodFn<Engine>,
+    method: &core::MethodSpec<Engine>,
 ) -> core::Result<JSValueRef, JSValueRef> {
-    let target = Box::new(MethodTarget::Method(call));
-    let raw = Box::into_raw(target).cast();
-    let state = state_from_context(cx.ctx);
-    // SAFETY: method_class is live and adopts raw as private data.
-    let object = unsafe { JSObjectMake(cx.ctx, state.method_class, raw) };
-    if object.is_null() {
-        // SAFETY: JSObjectMake did not adopt private data on failure.
-        unsafe { drop(Box::from_raw(raw.cast::<MethodTarget>())) };
-        Err(Engine::operation_error(cx, "JSObjectMake(method) failed"))
-    } else {
-        let value = object.cast_const();
-        cx.scope.track(value);
-        Ok(value)
-    }
+    let native = make_native_callable(cx, MethodTarget::Method(method.call), "method")?;
+    make_function_wrapper(
+        cx,
+        native,
+        method.name,
+        method.length,
+        FunctionWrapperKind::Method,
+    )
 }
 
-fn make_accessor(cx: Context<'_>, target: MethodTarget) -> core::Result<JSValueRef, JSValueRef> {
+fn make_native_callable(
+    cx: Context<'_>,
+    target: MethodTarget,
+    kind: &str,
+) -> core::Result<JSObjectRef, JSValueRef> {
     let raw = Box::into_raw(Box::new(target)).cast();
     let state = state_from_context(cx.ctx);
     // SAFETY: method_class is live and adopts raw as private dispatch data.
@@ -2745,12 +2787,141 @@ fn make_accessor(cx: Context<'_>, target: MethodTarget) -> core::Result<JSValueR
     if object.is_null() {
         // SAFETY: JSObjectMake did not adopt private data on failure.
         unsafe { drop(Box::from_raw(raw.cast::<MethodTarget>())) };
-        Err(Engine::operation_error(cx, "JSObjectMake(accessor) failed"))
+        Err(Engine::operation_error(
+            cx,
+            &format!("JSObjectMake({kind}) failed"),
+        ))
     } else {
         let value = object.cast_const();
         cx.scope.track(value);
-        Ok(value)
+        Ok(object)
     }
+}
+
+#[derive(Clone, Copy)]
+enum FunctionWrapperKind {
+    Method,
+    Getter,
+    Setter,
+}
+
+fn make_function_wrapper(
+    cx: Context<'_>,
+    native: JSObjectRef,
+    name: &str,
+    length: u8,
+    kind: FunctionWrapperKind,
+) -> core::Result<JSValueRef, JSValueRef> {
+    let parameters = (0..length)
+        .map(|index| format!("arg{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    // JSObjectMakeFunctionWithCallback creates a genuine function but accepts
+    // neither private dispatch data nor an arity. JSObjectSetPrivate cannot add
+    // private storage to that API's plain function objects. Keep the existing
+    // payload-owning native callable, and close over it from a non-constructible
+    // method/accessor function with WebIDL's observable name and length.
+    let body = match kind {
+        FunctionWrapperKind::Method => format!(
+            "return {{ [functionName]({parameters}) {{ \
+             return Reflect.apply(nativeCallable, this, arguments); \
+             }} }}[functionName];"
+        ),
+        FunctionWrapperKind::Getter => String::from(
+            "return Object.getOwnPropertyDescriptor({ \
+             get [functionName]() { \
+             return Reflect.apply(nativeCallable, this, arguments); \
+             } }, functionName).get;",
+        ),
+        FunctionWrapperKind::Setter => String::from(
+            "return Object.getOwnPropertyDescriptor({ \
+             set [functionName](value) { \
+             return Reflect.apply(nativeCallable, this, arguments); \
+             } }, functionName).set;",
+        ),
+    };
+    let factory_name = JsString::new("createWebGpuFunction")
+        .map_err(|_| Engine::operation_error(cx, "function factory name failed"))?;
+    let native_parameter = JsString::new("nativeCallable")
+        .map_err(|_| Engine::operation_error(cx, "function factory parameter failed"))?;
+    let name_parameter = JsString::new("functionName")
+        .map_err(|_| Engine::operation_error(cx, "function name parameter failed"))?;
+    let body = JsString::new(&body)
+        .map_err(|_| Engine::operation_error(cx, "function wrapper body failed"))?;
+    let source = JsString::new("webgpu-native-js-function.js")
+        .map_err(|_| Engine::operation_error(cx, "function source URL failed"))?;
+    let parameter_names = [native_parameter.as_raw(), name_parameter.as_raw()];
+    let mut exception = ptr::null();
+    // SAFETY: all strings and the parameter pointer remain live for the call,
+    // and JSObjectMakeFunction copies the source into a function owned by cx.
+    let factory = unsafe {
+        JSObjectMakeFunction(
+            cx.ctx,
+            factory_name.as_raw(),
+            parameter_names.len() as u32,
+            parameter_names.as_ptr(),
+            body.as_raw(),
+            source.as_raw(),
+            1,
+            &mut exception,
+        )
+    };
+    if !exception.is_null() {
+        return Err(exception);
+    }
+    if factory.is_null() {
+        return Err(Engine::operation_error(
+            cx,
+            "JSObjectMakeFunction(function factory) failed",
+        ));
+    }
+    let function_name = JsString::new(name)
+        .map_err(|_| Engine::type_error(cx, "function name contains a nul byte"))?;
+    // SAFETY: function_name remains live for this conversion and belongs to cx.
+    let function_name = unsafe { JSValueMakeString(cx.ctx, function_name.as_raw()) };
+    let arguments = [native.cast_const(), function_name];
+    // SAFETY: factory, native, and arguments belong to the live cx.
+    let function = unsafe {
+        JSObjectCallAsFunction(
+            cx.ctx,
+            factory,
+            ptr::null_mut(),
+            arguments.len(),
+            arguments.as_ptr(),
+            &mut exception,
+        )
+    };
+    if !exception.is_null() {
+        return Err(exception);
+    }
+    // SAFETY: the factory bodies above return a method or accessor function.
+    let function = unsafe { JSValueToObject(cx.ctx, function, &mut exception) };
+    if !exception.is_null() || function.is_null() {
+        return Err(if exception.is_null() {
+            Engine::operation_error(cx, "function factory returned no function")
+        } else {
+            exception
+        });
+    }
+    let value = function.cast_const();
+    cx.scope.track(value);
+    Ok(value)
+}
+
+fn make_accessor(
+    cx: Context<'_>,
+    property_name: &str,
+    target: MethodTarget,
+) -> core::Result<JSValueRef, JSValueRef> {
+    let (length, kind) = match &target {
+        MethodTarget::Getter(_) => (0, FunctionWrapperKind::Getter),
+        MethodTarget::Setter(_) => (1, FunctionWrapperKind::Setter),
+        MethodTarget::Method(_) | MethodTarget::Host(_) => {
+            return Err(Engine::operation_error(cx, "invalid accessor target"));
+        }
+    };
+    let native = make_native_callable(cx, target, "accessor")?;
+    make_function_wrapper(cx, native, property_name, length, kind)
 }
 
 fn define_prototype_accessor(
@@ -2791,7 +2962,7 @@ fn define_prototype_accessor(
         ("set", property.set.map(MethodTarget::Setter)),
     ] {
         let Some(target) = target else { continue };
-        let callback = make_accessor(cx, target)?;
+        let callback = make_accessor(cx, property.name, target)?;
         let name = JsString::new(name)
             .map_err(|_| Engine::operation_error(cx, "accessor callback name failed"))?;
         unsafe {
@@ -2865,6 +3036,73 @@ fn define_prototype_accessor(
     }
 }
 
+fn define_to_string_tag(
+    cx: Context<'_>,
+    prototype: JSObjectRef,
+    interface_name: &str,
+) -> core::Result<(), JSValueRef> {
+    let factory_name = JsString::new("defineWebGpuToStringTag")
+        .map_err(|_| Engine::operation_error(cx, "tag factory name failed"))?;
+    let prototype_parameter = JsString::new("prototype")
+        .map_err(|_| Engine::operation_error(cx, "tag prototype parameter failed"))?;
+    let name_parameter = JsString::new("interfaceName")
+        .map_err(|_| Engine::operation_error(cx, "tag name parameter failed"))?;
+    let body = JsString::new(
+        "Object.defineProperty(prototype, Symbol.toStringTag, { \
+         value: interfaceName, writable: false, enumerable: false, configurable: true \
+         });",
+    )
+    .map_err(|_| Engine::operation_error(cx, "tag factory body failed"))?;
+    let source = JsString::new("webgpu-native-js-tag.js")
+        .map_err(|_| Engine::operation_error(cx, "tag source URL failed"))?;
+    let parameter_names = [prototype_parameter.as_raw(), name_parameter.as_raw()];
+    let mut exception = ptr::null();
+    // SAFETY: all strings and the parameter pointer remain live for the call,
+    // and JSObjectMakeFunction copies the source into a function owned by cx.
+    let factory = unsafe {
+        JSObjectMakeFunction(
+            cx.ctx,
+            factory_name.as_raw(),
+            parameter_names.len() as u32,
+            parameter_names.as_ptr(),
+            body.as_raw(),
+            source.as_raw(),
+            1,
+            &mut exception,
+        )
+    };
+    if !exception.is_null() {
+        return Err(exception);
+    }
+    if factory.is_null() {
+        return Err(Engine::operation_error(
+            cx,
+            "JSObjectMakeFunction(tag factory) failed",
+        ));
+    }
+    let tag = JsString::new(interface_name)
+        .map_err(|_| Engine::type_error(cx, "interface name contains a nul byte"))?;
+    // SAFETY: tag remains live for this conversion and belongs to cx.
+    let tag = unsafe { JSValueMakeString(cx.ctx, tag.as_raw()) };
+    let arguments = [prototype.cast_const(), tag];
+    // SAFETY: factory, prototype, and arguments belong to the live cx.
+    unsafe {
+        JSObjectCallAsFunction(
+            cx.ctx,
+            factory,
+            ptr::null_mut(),
+            arguments.len(),
+            arguments.as_ptr(),
+            &mut exception,
+        )
+    };
+    if exception.is_null() {
+        Ok(())
+    } else {
+        Err(exception)
+    }
+}
+
 fn make_interface_function(
     cx: Context<'_>,
     spec: &'static core::ClassSpec<Engine>,
@@ -2880,19 +3118,29 @@ fn make_interface_function(
         .join(", ");
     let body = if spec.constructor.is_some() {
         format!(
-            "return function {}({parameters}) {{ \
+            "const interfaceObject = function {}({parameters}) {{ \
              if (!new.target) {{ throw new TypeError('Illegal constructor'); }} \
              return Reflect.construct(nativeConstructor, \
              Array.prototype.slice.call(arguments), new.target); \
-             }};",
+             }}; \
+             Object.defineProperty(interfaceObject, 'prototype', {{ \
+             value: nativeConstructor.prototype, writable: false, \
+             enumerable: false, configurable: false \
+             }}); \
+             return interfaceObject;",
             spec.name
         )
     } else {
         format!(
-            "return function {}() {{ \
+            "const interfaceObject = function {}() {{ \
              void nativeConstructor; \
              throw new TypeError('Illegal constructor'); \
-             }};",
+             }}; \
+             Object.defineProperty(interfaceObject, 'prototype', {{ \
+             value: nativeConstructor.prototype, writable: false, \
+             enumerable: false, configurable: false \
+             }}); \
+             return interfaceObject;",
             spec.name
         )
     };
@@ -3353,6 +3601,135 @@ mod tests {
                 }
             "#,
             "eager-interface-objects.js",
+        );
+    }
+
+    #[test]
+    fn webidl_interface_object_and_function_reflection_is_conformant() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("JSC runtime");
+        let device = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime
+            .set_global_value("reflectionDevice", device)
+            .expect("set device");
+        eval(
+            &runtime,
+            r#"
+                let reflectionStep = "interface descriptor";
+                try {
+                const interfaceDescriptor = Object.getOwnPropertyDescriptor(
+                    GPUBuffer,
+                    "prototype"
+                );
+                reflectionStep = "prototype assignment";
+                const originalPrototype = GPUBuffer.prototype;
+                GPUBuffer.prototype = {};
+                reflectionStep = "method reflection";
+                const method = GPUBuffer.prototype.mapAsync;
+                reflectionStep = "accessor reflection";
+                const label = Object.getOwnPropertyDescriptor(
+                    GPUBuffer.prototype,
+                    "label"
+                );
+                const tagDescriptor = Object.getOwnPropertyDescriptor(
+                    GPUBuffer.prototype,
+                    Symbol.toStringTag
+                );
+                reflectionStep = "constructor call";
+                let callError;
+                try { GPUPipelineError("message", { reason: "internal" }); }
+                catch (error) { callError = error; }
+                reflectionStep = "buffer creation";
+                const buffer = reflectionDevice.createBuffer({
+                    size: 4,
+                    usage: GPUBufferUsage.COPY_DST
+                });
+                GPUBuffer.prototype.unmap.call(buffer);
+                GPUBuffer.prototype.unmap.bind(buffer)();
+                Reflect.apply(GPUBuffer.prototype.unmap, buffer, []);
+                label.set.call(buffer, "reflected-label");
+                const accessorCallWorks = label.get.call(buffer) === "reflected-label";
+                buffer.destroy();
+                reflectionStep = "object tag";
+                let objectTag;
+                try { objectTag = Object.prototype.toString.call(buffer); }
+                catch (error) { objectTag = error.name + ": " + error.message; }
+                const checks = [];
+                reflectionStep = "descriptor check";
+                checks.push(interfaceDescriptor.writable === false &&
+                    interfaceDescriptor.enumerable === false &&
+                    interfaceDescriptor.configurable === false);
+                reflectionStep = "interface keys";
+                checks.push(Object.keys(GPUBuffer).length === 0);
+                reflectionStep = "prototype identity";
+                checks.push(GPUBuffer.prototype === originalPrototype);
+                reflectionStep = "method instanceof";
+                checks.push(method instanceof Function);
+                reflectionStep = "method prototype";
+                checks.push(Object.getPrototypeOf(method) === Function.prototype);
+                reflectionStep = "method metadata";
+                checks.push(method.name === "mapAsync" && method.length === 1 &&
+                    Object.prototype.hasOwnProperty.call(method, "name") &&
+                    Object.prototype.hasOwnProperty.call(method, "length"));
+                reflectionStep = "method helpers";
+                checks.push(typeof method.call === "function" &&
+                    typeof method.apply === "function" &&
+                    typeof method.bind === "function");
+                reflectionStep = "getter metadata";
+                checks.push(label.get instanceof Function && label.get.name === "get label" &&
+                    label.get.length === 0);
+                reflectionStep = "setter metadata";
+                checks.push(label.set instanceof Function && label.set.name === "set label" &&
+                    label.set.length === 1);
+                reflectionStep = "accessor call";
+                checks.push(accessorCallWorks);
+                reflectionStep = "illegal call";
+                checks.push(callError instanceof TypeError &&
+                    callError.message.includes("Illegal constructor"));
+                reflectionStep = "tag value";
+                checks.push(tagDescriptor.value === "GPUBuffer" &&
+                    tagDescriptor.writable === false &&
+                    tagDescriptor.enumerable === false &&
+                    tagDescriptor.configurable === true);
+                reflectionStep = "object tag value";
+                checks.push(objectTag === "[object GPUBuffer]");
+                const reflected = checks.every(Boolean);
+                if (!reflected) {
+                    throw new Error("WebIDL reflection invariants failed: " + [
+                        interfaceDescriptor.writable + "," +
+                            interfaceDescriptor.enumerable + "," +
+                            interfaceDescriptor.configurable,
+                        Object.keys(GPUBuffer).join(","),
+                        GPUBuffer.prototype === originalPrototype,
+                        method instanceof Function,
+                        Object.getPrototypeOf(method) === Function.prototype,
+                        method.name,
+                        method.length,
+                        typeof method.call,
+                        typeof method.apply,
+                        typeof method.bind,
+                        label.get instanceof Function,
+                        label.get.name,
+                        label.get.length,
+                        label.set instanceof Function,
+                        label.set.name,
+                        label.set.length,
+                        accessorCallWorks,
+                        callError && callError.name,
+                        callError && callError.message,
+                        tagDescriptor.value,
+                        tagDescriptor.writable,
+                        tagDescriptor.enumerable,
+                        tagDescriptor.configurable,
+                        checks.join(","),
+                        objectTag
+                    ].join("|"));
+                }
+                } catch (error) {
+                    throw new Error(reflectionStep + ": " + error.name + ": " + error.message);
+                }
+            "#,
+            "webidl-reflection.js",
         );
     }
 

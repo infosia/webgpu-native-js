@@ -15,7 +15,7 @@ reference increment a fix.
 The debug command from the handoff reproduces consistently:
 
 ```sh
-CTS_PATH=$HOME/Documents/workspace/Rust/webgpu-cts/out \
+CTS_PATH=<cts-out> \
   ./target/debug/cts-runner \
   --query 'webgpu:api,validation,encoding,cmds,render,draw:buffer_binding_overlap:drawType="drawIndexed"' \
   --timeout-secs 200

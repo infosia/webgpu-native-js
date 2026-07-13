@@ -8,6 +8,40 @@ use crate::{
     JoinReport, MemberPair, Policy, SkipPolicy, TypePair, UnionFlattenPolicy, ValueModel,
 };
 
+pub(crate) fn emit_namespaces(report: &JoinReport) -> String {
+    if report.namespaces.is_empty() {
+        return String::new();
+    }
+
+    let mut output = String::new();
+    output.push_str(
+        "pub(super) fn register_generated_namespaces<E: JsEngine>(\n    cx: E::Context<'_>,\n) -> Result<(), E::Error> {\n    let global = E::global(cx);\n",
+    );
+    for namespace in &report.namespaces {
+        output.push_str("    {\n        let namespace = E::new_object(cx)?;\n");
+        for constant in &namespace.constants {
+            let _ = writeln!(
+                output,
+                "        let value = E::number(cx, {}.0)?;",
+                constant.value
+            );
+            let _ = writeln!(
+                output,
+                "        E::define_data_property(cx, namespace, \"{}\", value, false, true, false)?;",
+                constant.name
+            );
+        }
+        let _ = writeln!(
+            output,
+            "        E::define_data_property(cx, global, \"{}\", namespace, true, false, true)?;",
+            namespace.name
+        );
+        output.push_str("    }\n");
+    }
+    output.push_str("    Ok(())\n}\n");
+    output
+}
+
 /// Emits all descriptor conversions selected by `policy` from `report`.
 ///
 /// The descriptor name, member names, coercions, defaults, integer widths,

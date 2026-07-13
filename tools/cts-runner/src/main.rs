@@ -20,7 +20,6 @@ const CTS_MODULE_ALIASES: &[(&str, &str)] = &[
     ("cts/logger", "common/internal/logging/logger.js"),
     ("cts/log_message", "common/internal/logging/log_message.js"),
     ("cts/test_config", "common/framework/test_config.js"),
-    ("cts/webgpu_constants", "webgpu/constants.js"),
 ];
 
 #[derive(Debug)]

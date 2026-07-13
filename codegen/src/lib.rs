@@ -225,6 +225,19 @@ pub struct JoinReport {
     pub mismatches: Vec<Mismatch>,
     /// Joined interfaces or members omitted by the policy subset.
     pub skips: Vec<String>,
+    namespaces: Vec<NamespaceModel>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NamespaceModel {
+    name: String,
+    constants: Vec<NamespaceConstantModel>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NamespaceConstantModel {
+    name: String,
+    value: u32,
 }
 
 /// The committed code-generation policy embedded as a fingerprinted crate source.
@@ -241,7 +254,7 @@ pub fn join_inputs_with_policy(
     yaml: &str,
     policy: &str,
 ) -> Result<JoinReport, CodegenError> {
-    let (cooked, rewrites) = preprocess_namespace_consts(idl)?;
+    let (cooked, rewrites, namespaces) = preprocess_namespace_consts(idl)?;
     let (remaining, definitions) = Definitions::parse(&cooked)
         .map_err(|error| CodegenError::Idl(format!("weedle2: {error:?}")))?;
     if !remaining.is_empty() {
@@ -264,7 +277,15 @@ pub fn join_inputs_with_policy(
 
     let index = IdlIndex::new(&definitions);
     validate_policy(&policy, &index, &yaml)?;
-    let report = build_report(idl, definitions.len(), rewrites, &index, &yaml, &policy);
+    let report = build_report(
+        idl,
+        definitions.len(),
+        rewrites,
+        namespaces,
+        &index,
+        &yaml,
+        &policy,
+    );
     emission::validate_policy(&report, &policy)?;
     Ok(report)
 }
@@ -306,6 +327,11 @@ pub fn generate_core_with_policy(
     if !lifecycle.is_empty() {
         output.push('\n');
         output.push_str(&lifecycle);
+    }
+    let namespaces = emission::emit_namespaces(&report);
+    if !namespaces.is_empty() {
+        output.push('\n');
+        output.push_str(&namespaces);
     }
     Ok(output)
 }
@@ -993,20 +1019,68 @@ impl<'a> IdlIndex<'a> {
     }
 }
 
-fn preprocess_namespace_consts(idl: &str) -> Result<(String, Vec<String>), CodegenError> {
+fn preprocess_namespace_consts(
+    idl: &str,
+) -> Result<(String, Vec<String>, Vec<NamespaceModel>), CodegenError> {
     let mut cooked = String::with_capacity(idl.len());
     let mut rewrites = Vec::new();
-    let mut in_namespace = false;
+    let mut namespaces = Vec::<NamespaceModel>::new();
+    let mut current_namespace = None;
     for line in idl.lines() {
-        if line.contains("namespace ") {
-            in_namespace = true;
-        }
         let trimmed = line.trim();
-        if in_namespace && trimmed.starts_with("const ") {
+        let namespace = trimmed
+            .strip_prefix("namespace ")
+            .or_else(|| trimmed.strip_prefix("partial namespace "));
+        if let Some(namespace) = namespace {
+            if current_namespace.is_some() {
+                return Err(CodegenError::Idl(
+                    "nested namespace declaration in namespace pre-pass".to_owned(),
+                ));
+            }
+            let name = namespace
+                .split(|character: char| character.is_whitespace() || character == '{')
+                .next()
+                .filter(|name| !name.is_empty())
+                .ok_or_else(|| {
+                    CodegenError::Idl(format!("malformed namespace declaration: {trimmed}"))
+                })?;
+            let index = namespaces
+                .iter()
+                .position(|namespace| namespace.name == name)
+                .unwrap_or_else(|| {
+                    namespaces.push(NamespaceModel {
+                        name: name.to_owned(),
+                        constants: Vec::new(),
+                    });
+                    namespaces.len() - 1
+                });
+            current_namespace = Some(index);
+        }
+        if let Some(namespace) = current_namespace.filter(|_| trimmed.starts_with("const ")) {
             let declaration = trimmed.trim_start_matches("const ");
-            let (left, _) = declaration.split_once('=').ok_or_else(|| {
+            let (left, right) = declaration.split_once('=').ok_or_else(|| {
                 CodegenError::Idl(format!("malformed namespace constant: {trimmed}"))
             })?;
+            let mut left_parts = left.split_whitespace().collect::<Vec<_>>();
+            let name = left_parts.pop().ok_or_else(|| {
+                CodegenError::Idl(format!("missing namespace constant name: {trimmed}"))
+            })?;
+            let type_name = left_parts.join(" ");
+            if type_name.is_empty() {
+                return Err(CodegenError::Idl(format!(
+                    "missing namespace constant type: {trimmed}"
+                )));
+            }
+            let literal = right.trim().strip_suffix(';').ok_or_else(|| {
+                CodegenError::Idl(format!("unterminated namespace constant: {trimmed}"))
+            })?;
+            let value = parse_namespace_constant(literal, trimmed)?;
+            namespaces[namespace]
+                .constants
+                .push(NamespaceConstantModel {
+                    name: name.to_owned(),
+                    value,
+                });
             rewrites.push(trimmed.to_owned());
             cooked.push_str("    readonly attribute ");
             cooked.push_str(left.trim());
@@ -1015,11 +1089,28 @@ fn preprocess_namespace_consts(idl: &str) -> Result<(String, Vec<String>), Codeg
             cooked.push_str(line);
             cooked.push('\n');
         }
-        if in_namespace && trimmed == "};" {
-            in_namespace = false;
+        if current_namespace.is_some() && trimmed == "};" {
+            current_namespace = None;
         }
     }
-    Ok((cooked, rewrites))
+    if current_namespace.is_some() {
+        return Err(CodegenError::Idl(
+            "unterminated namespace declaration in namespace pre-pass".to_owned(),
+        ));
+    }
+    Ok((cooked, rewrites, namespaces))
+}
+
+fn parse_namespace_constant(literal: &str, declaration: &str) -> Result<u32, CodegenError> {
+    let (digits, radix) = literal
+        .strip_prefix("0x")
+        .or_else(|| literal.strip_prefix("0X"))
+        .map_or((literal, 10), |digits| (digits, 16));
+    u32::from_str_radix(digits, radix).map_err(|error| {
+        CodegenError::Idl(format!(
+            "invalid namespace constant value in {declaration}: {error}"
+        ))
+    })
 }
 
 fn validate_policy(
@@ -1274,6 +1365,7 @@ fn build_report(
     raw_idl: &str,
     definition_count: usize,
     rewrites: Vec<String>,
+    namespaces: Vec<NamespaceModel>,
     index: &IdlIndex<'_>,
     yaml: &YamlRoot,
     policy: &Policy,
@@ -1301,6 +1393,7 @@ fn build_report(
             saw_same_object: raw_idl.contains("SameObject"),
             saw_exposed: raw_idl.contains("Exposed="),
         },
+        namespaces,
         ..JoinReport::default()
     };
 
@@ -2489,8 +2582,18 @@ mod tests {
             "enum GPUConstText { \"contains const text\" };\n",
             "namespace GPUFlags {\n const unsigned long ONE = 0x1;\n};\n",
         );
-        let (cooked, rewrites) = preprocess_namespace_consts(idl).expect("pre-pass");
+        let (cooked, rewrites, namespaces) = preprocess_namespace_consts(idl).expect("pre-pass");
         assert_eq!(rewrites, vec!["const unsigned long ONE = 0x1;"]);
+        assert_eq!(
+            namespaces,
+            vec![NamespaceModel {
+                name: "GPUFlags".to_owned(),
+                constants: vec![NamespaceConstantModel {
+                    name: "ONE".to_owned(),
+                    value: 1,
+                }],
+            }]
+        );
         assert!(cooked.contains("readonly attribute unsigned long ONE;"));
         assert!(cooked.contains("// const unsigned long COMMENT_ONLY = 0x0;"));
         assert!(cooked.contains("const unsigned long INTERFACE_CONST = 0x2;"));

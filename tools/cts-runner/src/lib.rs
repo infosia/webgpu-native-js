@@ -1,16 +1,26 @@
+#![warn(missing_docs)]
+
+//! Parsing and result-classification support for the standalone WebGPU CTS runner.
+
 use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 
+/// Outcome reported by one selected CTS case or recorded in an expectation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Status {
+    /// The case completed successfully.
     Pass,
+    /// The case failed.
     Fail,
+    /// The case was skipped.
     Skip,
+    /// The case completed with a warning that requires an expectation.
     Warn,
 }
 
 impl Status {
+    /// Parses the lowercase status vocabulary used by suite results and expectations.
     pub fn parse(value: &str) -> Result<Self, String> {
         match value {
             "pass" => Ok(Self::Pass),
@@ -24,20 +34,29 @@ impl Status {
     }
 }
 
+/// Result reported for one concrete CTS query.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TestResult {
+    /// Fully qualified CTS query identifying the case.
     pub query: String,
+    /// Outcome reported by the CTS harness.
     pub status: Status,
+    /// Diagnostic supplied by the CTS harness.
     pub message: String,
 }
 
+/// Reasoned expected outcome for a query prefix.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Expectation {
+    /// Exact query or `*`-suffixed query prefix covered by this entry.
     pub query_prefix: String,
+    /// Accepted status for matching queries.
     pub expected: Status,
+    /// Human-readable reason the expectation exists.
     pub reason: String,
 }
 
+/// Parses the reasoned expectation-file format.
 pub fn parse_expectations(source: &str) -> Result<Vec<Expectation>, String> {
     let mut expectations = Vec::new();
     for (index, raw_line) in source.lines().enumerate() {
@@ -71,12 +90,14 @@ pub fn parse_expectations(source: &str) -> Result<Vec<Expectation>, String> {
     Ok(expectations)
 }
 
+/// Reads and parses an expectation file from `path`.
 pub fn load_expectations(path: &Path) -> Result<Vec<Expectation>, String> {
     let source = fs::read_to_string(path)
         .map_err(|error| format!("could not read expectations '{}': {error}", path.display()))?;
     parse_expectations(&source)
 }
 
+/// Parses non-empty, non-comment suite queries from `source`.
 pub fn parse_suite(source: &str) -> Vec<String> {
     source
         .lines()
@@ -87,25 +108,36 @@ pub fn parse_suite(source: &str) -> Vec<String> {
         .collect()
 }
 
+/// Reads and parses a suite query file from `path`.
 pub fn load_suite(path: &Path) -> Result<Vec<String>, String> {
     let source = fs::read_to_string(path)
         .map_err(|error| format!("could not read suite '{}': {error}", path.display()))?;
     Ok(parse_suite(&source))
 }
 
+/// Classification counters for one CTS run.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Summary {
+    /// Cases that passed without a matching failure expectation.
     pub pass: usize,
+    /// Cases that failed without a matching failure expectation.
     pub fail: usize,
+    /// Cases that were skipped without an incompatible expectation.
     pub skip: usize,
+    /// Cases that reported warnings.
     pub warn: usize,
+    /// Failures accepted by matching failure expectations.
     pub expected_fail: usize,
+    /// Passing cases that still have matching failure expectations.
     pub unexpected_pass: usize,
+    /// Results whose status differs from a non-failure expectation.
     pub expectation_mismatch: usize,
+    /// Warnings without a matching expectation.
     pub unexpected_warn: usize,
 }
 
 impl Summary {
+    /// Returns whether the counters represent a successful runner exit.
     pub fn exit_success(self) -> bool {
         self.fail == 0
             && self.unexpected_pass == 0
@@ -114,6 +146,7 @@ impl Summary {
     }
 }
 
+/// Classifies CTS results against expectations and formats actionable failure lines.
 pub fn summarize(results: &[TestResult], expectations: &[Expectation]) -> (Summary, String) {
     let mut summary = Summary::default();
     let mut failures = String::new();
@@ -170,6 +203,7 @@ pub fn summarize(results: &[TestResult], expectations: &[Expectation]) -> (Summa
     (summary, failures)
 }
 
+/// Formats all summary counters as a compact two-line table.
 pub fn format_summary(summary: Summary) -> String {
     format!(
         "pass  fail  skip  warn  expected-fail  unexpected-pass  expectation-mismatch  unexpected-warn\n\
@@ -246,28 +280,6 @@ mod tests {
         let error =
             parse_expectations("webgpu:* flaky # not vocabulary\n").expect_err("unknown status");
         assert!(error.contains("unknown status"), "{error}");
-    }
-
-    #[test]
-    fn gpu_device_interface_shim_is_non_constructible_and_supports_cleanup_checks() {
-        let runtime = shim_runtime();
-        eval_drop(
-            &runtime,
-            r#"
-              const fakeDevice = {
-                createBuffer() {},
-                pushErrorScope() {},
-                queue: {},
-                lost: Promise.resolve(),
-              };
-              if (!(fakeDevice instanceof GPUDevice)) throw new Error('device not recognized');
-              if ({} instanceof GPUDevice) throw new Error('plain object recognized as device');
-              let threw = false;
-              try { new GPUDevice(); } catch (e) { threw = e instanceof TypeError; }
-              if (!threw) throw new Error('GPUDevice shim was constructible');
-            "#,
-            "cts-runner-gpu-device-shim-test.js",
-        );
     }
 
     #[test]
@@ -411,6 +423,23 @@ mod tests {
         assert_eq!(summary.warn, 1);
         assert!(!summary.exit_success());
         assert!(lines.contains("WARN warn:case"));
+    }
+
+    #[test]
+    fn unexpected_failure_is_counted_reported_and_fails_the_run() {
+        let result = TestResult {
+            query: "webgpu:api,operation,unexpected_failure".to_owned(),
+            status: Status::Fail,
+            message: "validation unexpectedly failed".to_owned(),
+        };
+
+        let (summary, lines) = summarize(&[result], &[]);
+
+        assert_eq!(summary.fail, 1);
+        assert!(!summary.exit_success());
+        assert!(lines.contains(
+            "FAIL webgpu:api,operation,unexpected_failure: validation unexpectedly failed"
+        ));
     }
 
     #[test]

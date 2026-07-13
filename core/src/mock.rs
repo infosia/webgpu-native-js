@@ -55,8 +55,20 @@ pub struct Runtime {
     values: RefCell<Vec<MockValue>>,
     global: Value,
     symbol_iterator: Value,
+    symbol_to_string_tag: Value,
     classes: RefCell<BTreeMap<ClassId, MockClassEntry>>,
+    function_objects: RefCell<BTreeSet<Value>>,
+    function_names: RefCell<BTreeMap<Value, Value>>,
+    function_lengths: RefCell<BTreeMap<Value, Value>>,
+    accessor_getters: RefCell<BTreeMap<(Value, String), Value>>,
+    accessor_setters: RefCell<BTreeMap<(Value, String), Value>>,
+    to_string_tags: RefCell<BTreeMap<Value, Value>>,
+    non_enumerable_value_properties: RefCell<BTreeSet<(Value, Value)>>,
+    non_writable_value_properties: RefCell<BTreeSet<(Value, Value)>>,
+    non_configurable_value_properties: RefCell<BTreeSet<(Value, Value)>>,
     non_enumerable_properties: RefCell<BTreeSet<(Value, String)>>,
+    non_writable_properties: RefCell<BTreeSet<(Value, String)>>,
+    non_configurable_properties: RefCell<BTreeSet<(Value, String)>>,
     reclaimed_values: Cell<usize>,
     reclaimed_handles: RefCell<Vec<Value>>,
     detach_noop: Cell<bool>,
@@ -93,8 +105,10 @@ impl Runtime {
         let boolean = Value(5);
         let global = Value(6);
         let error = Value(7);
+        let symbol_to_string_tag = Value(8);
         let mut symbol_properties = BTreeMap::new();
         symbol_properties.insert("iterator".to_owned(), symbol_iterator);
+        symbol_properties.insert("toStringTag".to_owned(), symbol_to_string_tag);
         let mut global_properties = BTreeMap::new();
         global_properties.insert("Symbol".to_owned(), symbol);
         global_properties.insert("Array".to_owned(), array_constructor);
@@ -112,11 +126,24 @@ impl Runtime {
                 MockValue::Callable(MockCallable::Boolean),
                 MockValue::Object(global_properties),
                 MockValue::Callable(MockCallable::IntrinsicError),
+                MockValue::SymbolToStringTag,
             ]),
             global,
             symbol_iterator,
+            symbol_to_string_tag,
             classes: RefCell::new(BTreeMap::new()),
+            function_objects: RefCell::new(BTreeSet::new()),
+            function_names: RefCell::new(BTreeMap::new()),
+            function_lengths: RefCell::new(BTreeMap::new()),
+            accessor_getters: RefCell::new(BTreeMap::new()),
+            accessor_setters: RefCell::new(BTreeMap::new()),
+            to_string_tags: RefCell::new(BTreeMap::new()),
+            non_enumerable_value_properties: RefCell::new(BTreeSet::new()),
+            non_writable_value_properties: RefCell::new(BTreeSet::new()),
+            non_configurable_value_properties: RefCell::new(BTreeSet::new()),
             non_enumerable_properties: RefCell::new(BTreeSet::new()),
+            non_writable_properties: RefCell::new(BTreeSet::new()),
+            non_configurable_properties: RefCell::new(BTreeSet::new()),
             reclaimed_values: Cell::new(0),
             reclaimed_handles: RefCell::new(Vec::new()),
             detach_noop: Cell::new(false),
@@ -384,6 +411,24 @@ impl Runtime {
         Value(values.len() - 1)
     }
 
+    fn webidl_function(&self, name: String, length: u8) -> Value {
+        let function = self.insert(MockValue::Callable(MockCallable::Handler));
+        let name = self.insert(MockValue::String(name));
+        let length = self.insert(MockValue::Number(f64::from(length)));
+        self.function_objects.borrow_mut().insert(function);
+        self.function_names.borrow_mut().insert(function, name);
+        self.function_lengths.borrow_mut().insert(function, length);
+        for property in ["name", "length"] {
+            self.non_enumerable_properties
+                .borrow_mut()
+                .insert((function, property.to_owned()));
+            self.non_writable_properties
+                .borrow_mut()
+                .insert((function, property.to_owned()));
+        }
+        function
+    }
+
     fn tracked_alias(&self, scope: &Scope<'_>, value: Value) -> Value {
         let owned = self.insert(MockValue::Scoped(self.canonical(value)));
         scope.owned.borrow_mut().push(owned);
@@ -496,6 +541,7 @@ enum MockValue {
     Scoped(Value),
     Reclaimed,
     SymbolIterator,
+    SymbolToStringTag,
     Null,
     Number(f64),
     Bool(bool),
@@ -597,6 +643,24 @@ impl JsEngine for MockEngine {
                 .borrow()
                 .get(&class)
                 .map_or_else(|| cx.runtime.undefined(), |entry| entry.prototype),
+            MockValue::Callable(MockCallable::Handler) => match key {
+                "name" => cx
+                    .runtime
+                    .function_names
+                    .borrow()
+                    .get(&cx.runtime.canonical(obj))
+                    .copied()
+                    .unwrap_or_else(|| cx.runtime.undefined()),
+                "length" => cx
+                    .runtime
+                    .function_lengths
+                    .borrow()
+                    .get(&cx.runtime.canonical(obj))
+                    .copied()
+                    .unwrap_or_else(|| cx.runtime.undefined()),
+                "call" | "apply" | "bind" => cx.runtime.canonical(obj),
+                _ => cx.runtime.undefined(),
+            },
             MockValue::Instance { class, .. } => cx
                 .runtime
                 .classes
@@ -636,6 +700,71 @@ impl JsEngine for MockEngine {
         cx.runtime.tracked_alias(cx.scope, cx.runtime.global)
     }
 
+    fn new_object(cx: Self::Context<'_>) -> Result<Self::Value, Self::Error> {
+        Ok(cx.runtime.tracked_alias(
+            cx.scope,
+            cx.runtime.insert(MockValue::Object(BTreeMap::new())),
+        ))
+    }
+
+    fn define_data_property(
+        cx: Self::Context<'_>,
+        obj: Self::Value,
+        key: &str,
+        value: Self::Value,
+        writable: bool,
+        enumerable: bool,
+        configurable: bool,
+    ) -> Result<(), Self::Error> {
+        let obj = cx.runtime.canonical(obj);
+        let value = cx.runtime.canonical(value);
+        let inserted = cx.runtime.with_value(obj, |stored| {
+            let MockValue::Object(properties) = stored else {
+                return false;
+            };
+            properties.insert(key.to_owned(), value);
+            true
+        });
+        if inserted != Some(true) {
+            return Err("TypeError: value is not an object".to_owned());
+        }
+        let property = (obj, key.to_owned());
+        if enumerable {
+            cx.runtime
+                .non_enumerable_properties
+                .borrow_mut()
+                .remove(&property);
+        } else {
+            cx.runtime
+                .non_enumerable_properties
+                .borrow_mut()
+                .insert(property.clone());
+        }
+        if writable {
+            cx.runtime
+                .non_writable_properties
+                .borrow_mut()
+                .remove(&property);
+        } else {
+            cx.runtime
+                .non_writable_properties
+                .borrow_mut()
+                .insert(property.clone());
+        }
+        if configurable {
+            cx.runtime
+                .non_configurable_properties
+                .borrow_mut()
+                .remove(&property);
+        } else {
+            cx.runtime
+                .non_configurable_properties
+                .borrow_mut()
+                .insert(property);
+        }
+        Ok(())
+    }
+
     fn get_property_value(
         cx: Self::Context<'_>,
         obj: Self::Value,
@@ -659,6 +788,23 @@ impl JsEngine for MockEngine {
             MockValue::Iterable {
                 iterator_method, ..
             } if key == cx.runtime.symbol_iterator => iterator_method,
+            _ if key == cx.runtime.symbol_to_string_tag => {
+                let owner = match cx.runtime.get(obj) {
+                    MockValue::Instance { class, .. } => cx
+                        .runtime
+                        .classes
+                        .borrow()
+                        .get(&class)
+                        .map_or(obj, |entry| entry.prototype),
+                    _ => obj,
+                };
+                cx.runtime
+                    .to_string_tags
+                    .borrow()
+                    .get(&owner)
+                    .copied()
+                    .unwrap_or_else(|| cx.runtime.undefined())
+            }
             _ => cx.runtime.undefined(),
         };
         Ok(cx.runtime.tracked_alias(cx.scope, value))
@@ -740,15 +886,8 @@ impl JsEngine for MockEngine {
                 return Err("TypeError: mock Error is not callable".to_owned());
             }
             MockValue::Callable(MockCallable::Interface(class)) => {
-                let call = cx
-                    .runtime
-                    .classes
-                    .borrow()
-                    .get(&class)
-                    .and_then(|entry| entry.spec.constructor.as_ref())
-                    .map(|constructor| constructor.call)
-                    .ok_or_else(|| "TypeError: Illegal constructor".to_owned())?;
-                call(cx, &args)?
+                let _ = class;
+                return Err("TypeError: Illegal constructor".to_owned());
             }
             _ => return Err("TypeError: value is not callable".to_owned()),
         };
@@ -855,6 +994,7 @@ impl JsEngine for MockEngine {
             | MockValue::Scoped(_)
             | MockValue::Reclaimed
             | MockValue::SymbolIterator
+            | MockValue::SymbolToStringTag
             | MockValue::Null
             | MockValue::Object(_)
             | MockValue::Iterable { .. }
@@ -872,7 +1012,7 @@ impl JsEngine for MockEngine {
         match cx.runtime.get(value) {
             MockValue::Undefined => false,
             MockValue::Scoped(_) | MockValue::Reclaimed => false,
-            MockValue::SymbolIterator => true,
+            MockValue::SymbolIterator | MockValue::SymbolToStringTag => true,
             MockValue::Null => false,
             MockValue::Bool(value) => value,
             MockValue::Number(value) => value != 0.0 && !value.is_nan(),
@@ -898,6 +1038,7 @@ impl JsEngine for MockEngine {
             MockValue::Undefined => Ok(arena.alloc_str("undefined")),
             MockValue::Scoped(_) | MockValue::Reclaimed => Ok(arena.alloc_str("undefined")),
             MockValue::SymbolIterator => Ok(arena.alloc_str("Symbol(Symbol.iterator)")),
+            MockValue::SymbolToStringTag => Ok(arena.alloc_str("Symbol(Symbol.toStringTag)")),
             MockValue::Null => Ok(arena.alloc_str("null")),
             MockValue::Number(value) => Ok(arena.alloc_str(&value.to_string())),
             MockValue::Bool(value) => Ok(arena.alloc_str(if value { "true" } else { "false" })),
@@ -923,16 +1064,55 @@ impl JsEngine for MockEngine {
         }
         let mut prototype_properties = BTreeMap::new();
         for method in spec.methods {
-            prototype_properties.insert(
-                method.name.to_owned(),
-                cx.runtime
-                    .insert(MockValue::Callable(MockCallable::Handler)),
-            );
+            let function = cx
+                .runtime
+                .webidl_function(method.name.to_owned(), method.length);
+            prototype_properties.insert(method.name.to_owned(), function);
         }
+        let mut getters = Vec::new();
+        let mut setters = Vec::new();
         for property in spec.properties {
+            if property.get.is_some() {
+                let function = cx
+                    .runtime
+                    .webidl_function(format!("get {}", property.name), 0);
+                getters.push((property.name.to_owned(), function));
+            }
+            if property.set.is_some() {
+                let function = cx
+                    .runtime
+                    .webidl_function(format!("set {}", property.name), 1);
+                setters.push((property.name.to_owned(), function));
+            }
             prototype_properties.insert(property.name.to_owned(), cx.runtime.undefined());
         }
         let prototype = cx.runtime.insert(MockValue::Object(prototype_properties));
+        for (name, function) in getters {
+            cx.runtime
+                .accessor_getters
+                .borrow_mut()
+                .insert((prototype, name), function);
+        }
+        for (name, function) in setters {
+            cx.runtime
+                .accessor_setters
+                .borrow_mut()
+                .insert((prototype, name), function);
+        }
+        let tag = cx.runtime.insert(MockValue::String(spec.name.to_owned()));
+        cx.runtime
+            .to_string_tags
+            .borrow_mut()
+            .insert(prototype, tag);
+        let tag_property = (prototype, cx.runtime.symbol_to_string_tag);
+        cx.runtime
+            .non_enumerable_value_properties
+            .borrow_mut()
+            .insert(tag_property);
+        cx.runtime
+            .non_writable_value_properties
+            .borrow_mut()
+            .insert(tag_property);
         let interface = cx
             .runtime
             .insert(MockValue::Callable(MockCallable::Interface(spec.id)));
@@ -946,6 +1126,19 @@ impl JsEngine for MockEngine {
             .non_enumerable_properties
             .borrow_mut()
             .insert((prototype, "constructor".to_owned()));
+        let interface_prototype = (interface, "prototype".to_owned());
+        cx.runtime
+            .non_enumerable_properties
+            .borrow_mut()
+            .insert(interface_prototype.clone());
+        cx.runtime
+            .non_writable_properties
+            .borrow_mut()
+            .insert(interface_prototype.clone());
+        cx.runtime
+            .non_configurable_properties
+            .borrow_mut()
+            .insert(interface_prototype);
         let _ = cx.runtime.with_value(cx.runtime.global, |value| {
             let MockValue::Object(properties) = value else {
                 return;
@@ -2211,9 +2404,9 @@ fn overlaps_outstanding_range(
     is_const: bool,
 ) -> bool {
     state.mapped_ranges.get(&buffer).is_some_and(|ranges| {
-        ranges
-            .iter()
-            .any(|range| offset < range.end && range.offset < end && !(is_const && range.is_const))
+        ranges.iter().any(|range| {
+            !(offset >= range.end || range.offset >= end || is_const && range.is_const)
+        })
     })
 }
 
@@ -3304,14 +3497,20 @@ mod tests {
         let MockValue::Object(properties) = rt.get(reason) else {
             panic!("rejection reason is not an error object");
         };
-        assert!(matches!(
-            properties.get("name").copied().map(|value| rt.get(value)),
-            Some(MockValue::String(actual)) if actual == name
-        ));
-        assert!(matches!(
-            properties.get("message").copied().map(|value| rt.get(value)),
-            Some(MockValue::String(actual)) if actual == message
-        ));
+        let Some(MockValue::String(actual_name)) =
+            properties.get("name").copied().map(|value| rt.get(value))
+        else {
+            panic!("rejection name is not a string");
+        };
+        let Some(MockValue::String(actual_message)) = properties
+            .get("message")
+            .copied()
+            .map(|value| rt.get(value))
+        else {
+            panic!("rejection message is not a string");
+        };
+        assert_eq!(actual_name, name);
+        assert_eq!(actual_message, message);
     }
 
     #[test]
@@ -3359,6 +3558,128 @@ mod tests {
             cx,
             Engine::get_property(cx, pass, "setBindGroup").expect("inherited method")
         ));
+    }
+
+    #[test]
+    fn install_exposes_all_pinned_flag_namespaces_with_webidl_attributes() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let _gpu = crate::wrap_gpu::<Engine>(cx, fake_handle(40_002)).expect("wrap GPU");
+
+        let expected: [(&str, &[(&str, u32)]); 5] = [
+            (
+                "GPUBufferUsage",
+                &[
+                    ("MAP_READ", 0x0001),
+                    ("MAP_WRITE", 0x0002),
+                    ("COPY_SRC", 0x0004),
+                    ("COPY_DST", 0x0008),
+                    ("INDEX", 0x0010),
+                    ("VERTEX", 0x0020),
+                    ("UNIFORM", 0x0040),
+                    ("STORAGE", 0x0080),
+                    ("INDIRECT", 0x0100),
+                    ("QUERY_RESOLVE", 0x0200),
+                ],
+            ),
+            ("GPUMapMode", &[("READ", 0x0001), ("WRITE", 0x0002)]),
+            (
+                "GPUTextureUsage",
+                &[
+                    ("COPY_SRC", 0x01),
+                    ("COPY_DST", 0x02),
+                    ("TEXTURE_BINDING", 0x04),
+                    ("STORAGE_BINDING", 0x08),
+                    ("RENDER_ATTACHMENT", 0x10),
+                    ("TRANSIENT_ATTACHMENT", 0x20),
+                ],
+            ),
+            (
+                "GPUShaderStage",
+                &[("VERTEX", 0x1), ("FRAGMENT", 0x2), ("COMPUTE", 0x4)],
+            ),
+            (
+                "GPUColorWrite",
+                &[
+                    ("RED", 0x1),
+                    ("GREEN", 0x2),
+                    ("BLUE", 0x4),
+                    ("ALPHA", 0x8),
+                    ("ALL", 0xF),
+                ],
+            ),
+        ];
+
+        let global = Engine::global(cx);
+        let enumerable_globals = Engine::own_property_names(cx, global).expect("global keys");
+        let first_buffer_usage =
+            Engine::get_property(cx, global, "GPUBufferUsage").expect("first namespace global");
+        let _second_gpu =
+            crate::wrap_gpu::<Engine>(cx, fake_handle(40_003)).expect("wrap GPU again");
+        let second_buffer_usage =
+            Engine::get_property(cx, global, "GPUBufferUsage").expect("second namespace global");
+        assert!(Engine::same_value(
+            cx,
+            first_buffer_usage,
+            second_buffer_usage
+        ));
+        for (namespace_name, constants) in expected {
+            let namespace =
+                Engine::get_property(cx, global, namespace_name).expect("namespace global");
+            assert!(Engine::is_object(cx, namespace), "{namespace_name}");
+            assert!(
+                !enumerable_globals.iter().any(|name| name == namespace_name),
+                "{namespace_name} must be non-enumerable on the global"
+            );
+            let global_property = (rt.canonical(global), namespace_name.to_owned());
+            assert!(
+                !rt.non_writable_properties
+                    .borrow()
+                    .contains(&global_property),
+                "{namespace_name} must be writable on the global"
+            );
+            assert!(
+                !rt.non_configurable_properties
+                    .borrow()
+                    .contains(&global_property),
+                "{namespace_name} must be configurable on the global"
+            );
+
+            let enumerable_constants =
+                Engine::own_property_names(cx, namespace).expect("namespace keys");
+            assert_eq!(
+                enumerable_constants.len(),
+                constants.len(),
+                "{namespace_name}"
+            );
+            for &(constant_name, expected_value) in constants {
+                assert!(
+                    enumerable_constants
+                        .iter()
+                        .any(|name| name == constant_name),
+                    "{namespace_name}.{constant_name} must be enumerable"
+                );
+                let value =
+                    Engine::get_property(cx, namespace, constant_name).expect("namespace constant");
+                assert!(
+                    matches!(rt.get(value), MockValue::Number(actual) if actual == f64::from(expected_value)),
+                    "{namespace_name}.{constant_name}"
+                );
+                assert!(
+                    rt.non_writable_properties
+                        .borrow()
+                        .contains(&(rt.canonical(namespace), constant_name.to_owned())),
+                    "{namespace_name}.{constant_name} must be non-writable"
+                );
+                assert!(
+                    rt.non_configurable_properties
+                        .borrow()
+                        .contains(&(rt.canonical(namespace), constant_name.to_owned())),
+                    "{namespace_name}.{constant_name} must be non-configurable"
+                );
+            }
+        }
     }
 
     #[test]
@@ -7506,6 +7827,94 @@ mod tests {
     }
 
     #[test]
+    fn webidl_interface_objects_functions_and_tags_have_required_reflection() {
+        let rt = runtime();
+        let cx = rt.context();
+        crate::register_buffer_class::<Engine>(cx).expect("register buffer class");
+        let global = Engine::global(cx);
+        let interface = Engine::get_property(cx, global, "GPUBuffer").expect("GPUBuffer interface");
+        let interface = rt.canonical(interface);
+        let interface_prototype = (interface, "prototype".to_owned());
+        assert!(rt
+            .non_enumerable_properties
+            .borrow()
+            .contains(&interface_prototype));
+        assert!(rt
+            .non_writable_properties
+            .borrow()
+            .contains(&interface_prototype));
+        assert!(rt
+            .non_configurable_properties
+            .borrow()
+            .contains(&interface_prototype));
+        assert!(Engine::own_property_names(cx, interface)
+            .expect("interface keys")
+            .is_empty());
+
+        let prototype = rt.canonical(
+            Engine::get_property(cx, interface, "prototype").expect("interface prototype"),
+        );
+        let method = rt
+            .canonical(Engine::get_property(cx, prototype, "mapAsync").expect("prototype method"));
+        assert!(rt.function_objects.borrow().contains(&method));
+        let method_name = Engine::get_property(cx, method, "name").expect("method name");
+        let method_length = Engine::get_property(cx, method, "length").expect("method length");
+        assert!(matches!(rt.get(method_name), MockValue::String(name) if name == "mapAsync"));
+        assert!(matches!(rt.get(method_length), MockValue::Number(1.0)));
+        for helper in ["call", "apply", "bind"] {
+            assert!(Engine::is_callable(
+                cx,
+                Engine::get_property(cx, method, helper).expect("function helper")
+            ));
+        }
+
+        let getter = *rt
+            .accessor_getters
+            .borrow()
+            .get(&(prototype, "size".to_owned()))
+            .expect("size getter");
+        assert!(rt.function_objects.borrow().contains(&getter));
+        let getter_name = Engine::get_property(cx, getter, "name").expect("getter name");
+        let getter_length = Engine::get_property(cx, getter, "length").expect("getter length");
+        assert!(matches!(rt.get(getter_name), MockValue::String(name) if name == "get size"));
+        assert!(matches!(rt.get(getter_length), MockValue::Number(0.0)));
+
+        let symbol = Engine::get_property(cx, global, "Symbol").expect("Symbol");
+        let tag_key = Engine::get_property(cx, symbol, "toStringTag").expect("toStringTag");
+        let prototype_tag =
+            Engine::get_property_value(cx, prototype, tag_key).expect("prototype tag");
+        assert!(matches!(rt.get(prototype_tag), MockValue::String(tag) if tag == "GPUBuffer"));
+        let symbol_property = (prototype, rt.symbol_to_string_tag);
+        assert!(rt
+            .non_enumerable_value_properties
+            .borrow()
+            .contains(&symbol_property));
+        assert!(rt
+            .non_writable_value_properties
+            .borrow()
+            .contains(&symbol_property));
+        assert!(!rt
+            .non_configurable_value_properties
+            .borrow()
+            .contains(&symbol_property));
+        let instance = Engine::new_instance(cx, crate::GPU_BUFFER_CLASS, Box::new(()))
+            .expect("buffer instance");
+        let instance_tag = Engine::get_property_value(cx, instance, tag_key).expect("instance tag");
+        let arena = Arena::new();
+        let instance_tag = Engine::to_str(cx, instance_tag, &arena).expect("tag string");
+        assert_eq!(format!("[object {instance_tag}]"), "[object GPUBuffer]");
+
+        Engine::register_class(cx, crate::pipeline_error_class::<Engine>())
+            .expect("register constructible interface");
+        let pipeline_error =
+            Engine::get_property(cx, global, "GPUPipelineError").expect("pipeline error interface");
+        let error = Engine::call(cx, pipeline_error, Engine::undefined(cx), &[])
+            .expect_err("constructible interface call must fail before its constructor body");
+        assert!(error.contains("TypeError"), "{error}");
+        assert!(error.contains("Illegal constructor"), "{error}");
+    }
+
+    #[test]
     fn r13_null_create_buffer_is_an_error() {
         reset_gpu();
         set_null_create_buffer(true);
@@ -7513,7 +7922,11 @@ mod tests {
         let cx = rt.context();
         let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
         let desc = descriptor(&rt, &[("size", rt.number(16.0)), ("usage", rt.number(8.0))]);
-        assert!(device_create_buffer::<Engine>(cx, device, &[desc]).is_err());
+        assert_eq!(
+            device_create_buffer::<Engine>(cx, device, &[desc])
+                .expect_err("null native buffer must fail"),
+            "OperationError: wgpuDeviceCreateBuffer returned null"
+        );
     }
 
     #[test]
@@ -7845,74 +8258,98 @@ mod tests {
         assert_eq!(supplied_size_error, "TypeError: size");
     }
 
-    #[test]
-    fn get_mapped_range_rejects_only_overlapping_tracked_ranges_and_resets_on_remap() {
+    fn assert_mapped_range_pair(
+        first: (f64, f64),
+        second: (f64, f64),
+        succeeds: bool,
+        label: &str,
+    ) {
         reset_gpu();
         let rt = runtime();
         let cx = rt.context();
         let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
-        let cases = [
-            ((8.0, 0.0), (8.0, 8.0), true, "empty at same start"),
-            ((16.0, 0.0), (8.0, 8.0), true, "empty at end"),
-            ((8.0, 8.0), (8.0, 0.0), true, "empty at same start reversed"),
-            ((8.0, 8.0), (16.0, 0.0), true, "empty at end reversed"),
-            ((0.0, 8.0), (8.0, 8.0), true, "adjacent non-empty ranges"),
-            ((16.0, 20.0), (24.0, 0.0), false, "empty inside range"),
-            ((24.0, 0.0), (16.0, 20.0), false, "range around empty"),
-            ((16.0, 20.0), (8.0, 20.0), false, "partial overlap"),
-            ((0.0, 80.0), (16.0, 20.0), false, "contained range"),
-        ];
+        let desc = descriptor(&rt, &[("size", rt.number(80.0)), ("usage", rt.number(2.0))]);
+        let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("buffer");
+        let promise =
+            buffer_map_async::<Engine>(cx, buffer, &[rt.number(2.0)]).expect("mapAsync promise");
+        rt.env
+            .settlements()
+            .drain::<Engine>(cx)
+            .expect("map settlement");
+        assert!(matches!(rt.promise_result(promise), Some(Ok(_))), "{label}");
 
-        for (first, second, succeeds, label) in cases {
-            let desc = descriptor(&rt, &[("size", rt.number(80.0)), ("usage", rt.number(1.0))]);
-            let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("buffer");
-            let promise = buffer_map_async::<Engine>(cx, buffer, &[rt.number(1.0)])
-                .expect("mapAsync promise");
-            rt.env
-                .settlements()
-                .drain::<Engine>(cx)
-                .expect("map settlement");
-            assert!(matches!(rt.promise_result(promise), Some(Ok(_))), "{label}");
-
-            buffer_get_mapped_range::<Engine>(
-                cx,
-                buffer,
-                &[rt.number(first.0), rt.number(first.1)],
-            )
+        buffer_get_mapped_range::<Engine>(cx, buffer, &[rt.number(first.0), rt.number(first.1)])
             .expect("first range");
-            let calls_before_second =
-                GPU_STATE.with(|state| state.borrow().const_mapped_range_calls);
-            let second_result = buffer_get_mapped_range::<Engine>(
-                cx,
-                buffer,
-                &[rt.number(second.0), rt.number(second.1)],
+        let calls_before_second = GPU_STATE.with(|state| state.borrow().mapped_range_calls);
+        let second_result = buffer_get_mapped_range::<Engine>(
+            cx,
+            buffer,
+            &[rt.number(second.0), rt.number(second.1)],
+        );
+        if succeeds {
+            second_result.expect(label);
+            assert_eq!(
+                GPU_STATE.with(|state| state.borrow().mapped_range_calls),
+                calls_before_second + 1,
+                "{label}: disjoint range must reach the permissive backend"
             );
-            if succeeds {
-                second_result.expect(label);
-                assert_eq!(
-                    GPU_STATE.with(|state| state.borrow().const_mapped_range_calls),
-                    calls_before_second + 1,
-                    "{label}: disjoint range must reach the permissive backend"
-                );
-            } else {
-                assert_eq!(
-                    second_result.expect_err(label),
-                    "OperationError: mapped range overlaps an existing mapped range"
-                );
-                assert_eq!(
-                    GPU_STATE.with(|state| state.borrow().const_mapped_range_calls),
-                    calls_before_second,
-                    "{label}: overlap must be rejected before the permissive backend"
-                );
-            }
-            buffer_unmap::<Engine>(cx, buffer, &[]).expect("unmap");
+        } else {
+            assert_eq!(
+                second_result.expect_err(label),
+                "OperationError: mapped range overlaps an existing mapped range"
+            );
+            assert_eq!(
+                GPU_STATE.with(|state| state.borrow().mapped_range_calls),
+                calls_before_second,
+                "{label}: overlap must be rejected before the permissive backend"
+            );
         }
+        buffer_unmap::<Engine>(cx, buffer, &[]).expect("unmap");
+        release_device_held_values(&rt, cx, device);
+    }
 
-        let desc = descriptor(&rt, &[("size", rt.number(80.0)), ("usage", rt.number(1.0))]);
+    #[test]
+    fn get_mapped_range_allows_empty_range_at_existing_range_start_boundary() {
+        assert_mapped_range_pair((8.0, 8.0), (8.0, 0.0), true, "empty at start boundary");
+    }
+
+    #[test]
+    fn get_mapped_range_allows_empty_range_at_existing_range_end_boundary() {
+        assert_mapped_range_pair((8.0, 8.0), (16.0, 0.0), true, "empty at end boundary");
+    }
+
+    #[test]
+    fn get_mapped_range_rejects_empty_range_strictly_inside_existing_range() {
+        assert_mapped_range_pair(
+            (16.0, 20.0),
+            (24.0, 0.0),
+            false,
+            "empty range strictly inside [16, 36)",
+        );
+    }
+
+    #[test]
+    fn get_mapped_range_allows_ranges_that_only_touch() {
+        assert_mapped_range_pair((0.0, 8.0), (8.0, 8.0), true, "touching ranges");
+    }
+
+    #[test]
+    fn get_mapped_range_rejects_genuinely_overlapping_ranges() {
+        assert_mapped_range_pair((16.0, 20.0), (8.0, 20.0), false, "partial overlap");
+    }
+
+    #[test]
+    fn get_mapped_range_tracked_ranges_reset_on_remap() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+
+        let desc = descriptor(&rt, &[("size", rt.number(80.0)), ("usage", rt.number(2.0))]);
         let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("remap buffer");
         for map_index in 0..2 {
             let promise =
-                buffer_map_async::<Engine>(cx, buffer, &[rt.number(1.0)]).expect("remap promise");
+                buffer_map_async::<Engine>(cx, buffer, &[rt.number(2.0)]).expect("remap promise");
             rt.env
                 .settlements()
                 .drain::<Engine>(cx)
@@ -8056,6 +8493,72 @@ mod tests {
             .and_then(|payload| payload.downcast_ref::<ErrorPayload>())
             .expect("GPUValidationError");
         assert_eq!(payload.message, "GPURenderPassEncoder is ended");
+    }
+
+    #[test]
+    fn lost_device_suppresses_generated_validation_errors() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let handler = rt.insert(MockValue::Callable(MockCallable::Handler));
+        device_on_uncaptured_error_set::<Engine>(cx, device, handler).expect("set handler");
+        let events = Engine::payload(cx, device, crate::GPU_DEVICE_CLASS)
+            .and_then(|payload| payload.downcast_ref::<DevicePayload<Engine>>())
+            .map(|payload| Arc::clone(&payload.events))
+            .expect("device events");
+
+        device_push_error_scope::<Engine>(cx, device, &[rt.string("validation")])
+            .expect("validation scope");
+        device_destroy::<Engine>(cx, device, &[]).expect("lose device");
+        let handler_calls = rt.calls.get();
+
+        crate::DeviceErrorSink::generate_validation_error(
+            &*events,
+            "scoped error after loss".to_owned(),
+        );
+        assert!(
+            events
+                .error_scopes
+                .lock()
+                .expect("error scopes")
+                .first()
+                .is_some_and(|scope| scope.error.is_none()),
+            "lost-device validation must not be captured by an open scope"
+        );
+        assert_null_scope(&rt, cx, device);
+
+        crate::DeviceErrorSink::generate_validation_error(
+            &*events,
+            "uncaptured error after loss".to_owned(),
+        );
+        assert_eq!(rt.env.settlements().drain::<Engine>(cx), Ok(0));
+        assert_eq!(
+            rt.calls.get(),
+            handler_calls,
+            "lost-device validation must not dispatch an uncaptured error"
+        );
+        release_device_held_values(&rt, cx, device);
+    }
+
+    #[test]
+    fn validation_error_scope_captures_the_first_matching_error() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let events = Engine::payload(cx, device, crate::GPU_DEVICE_CLASS)
+            .and_then(|payload| payload.downcast_ref::<DevicePayload<Engine>>())
+            .map(|payload| Arc::clone(&payload.events))
+            .expect("device events");
+
+        device_push_error_scope::<Engine>(cx, device, &[rt.string("validation")])
+            .expect("validation scope");
+        crate::DeviceErrorSink::generate_validation_error(&*events, "first error".to_owned());
+        crate::DeviceErrorSink::generate_validation_error(&*events, "second error".to_owned());
+
+        assert_validation_scope_error(&rt, cx, device, "first error");
+        release_device_held_values(&rt, cx, device);
     }
 
     #[test]
@@ -8661,7 +9164,7 @@ mod tests {
             .settlements()
             .drain::<Engine>(cx)
             .expect("drain settlements");
-        assert!(matches!(rt.promise_result(second), Some(Err(_))));
+        assert_rejection(&rt, second, "OperationError", "mapAsync error");
         assert_eq!(rt.promise_result(first), None);
         resolve_pending_map(0, crate::WGPUMapAsyncStatus_WGPUMapAsyncStatus_Success);
         Engine::environment(cx)
@@ -8669,6 +9172,60 @@ mod tests {
             .drain::<Engine>(cx)
             .expect("drain settlements");
         assert!(matches!(rt.promise_result(first), Some(Ok(_))));
+    }
+
+    #[test]
+    fn map_async_callback_statuses_select_error_names_and_fallback_messages() {
+        reset_gpu();
+        PENDING_MAP_CALLBACKS.with(|callbacks| callbacks.borrow_mut().clear());
+        let mut gpu = dispatch();
+        gpu.buffer_map_async = pending_buffer_map_async;
+        let rt = Runtime::new(gpu);
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let cases = [
+            (
+                crate::WGPUMapAsyncStatus_WGPUMapAsyncStatus_Error,
+                "OperationError",
+                "mapAsync error",
+            ),
+            (
+                crate::WGPUMapAsyncStatus_WGPUMapAsyncStatus_Aborted,
+                "AbortError",
+                "mapAsync aborted",
+            ),
+            (
+                crate::WGPUMapAsyncStatus_WGPUMapAsyncStatus_CallbackCancelled,
+                "AbortError",
+                "mapAsync callback cancelled",
+            ),
+            (
+                crate::WGPUMapAsyncStatus_WGPUMapAsyncStatus_Force32,
+                "OperationError",
+                "mapAsync failed",
+            ),
+        ];
+
+        for (index, (status, name, message)) in cases.into_iter().enumerate() {
+            let desc = descriptor(&rt, &[("size", rt.number(8.0)), ("usage", rt.number(2.0))]);
+            let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("buffer");
+            let promise =
+                buffer_map_async::<Engine>(cx, buffer, &[rt.number(2.0)]).expect("map promise");
+            PENDING_MAP_CALLBACKS.with(|callbacks| assert_eq!(callbacks.borrow().len(), 1));
+
+            resolve_pending_map(0, status);
+            rt.env
+                .settlements()
+                .drain::<Engine>(cx)
+                .expect("drain map rejection");
+            assert_rejection(&rt, promise, name, message);
+            assert_eq!(
+                buffer_map_state_string(cx, buffer),
+                "unmapped",
+                "case {index}"
+            );
+        }
+        release_device_held_values(&rt, cx, device);
     }
 
     #[test]
@@ -8918,17 +9475,12 @@ mod tests {
         let limits = descriptor(&rt, &[("notALimit", rt.number(1.0))]);
         let request = descriptor(&rt, &[("requiredLimits", limits)]);
         let promise = adapter_request_device::<Engine>(cx, adapter, &[request]).expect("promise");
-        let reason = rt
-            .promise_result(promise)
-            .expect("settled")
-            .expect_err("unknown limit rejection");
-        let MockValue::Object(properties) = rt.get(reason) else {
-            panic!("rejection must be named error object");
-        };
-        assert!(matches!(
-            properties.get("name").map(|value| rt.get(*value)),
-            Some(MockValue::String(name)) if name == "OperationError"
-        ));
+        assert_rejection(
+            &rt,
+            promise,
+            "OperationError",
+            "unknown required limit: notALimit",
+        );
         assert!(GPU_STATE.with(|state| state.borrow().requested_limits.is_empty()));
     }
 

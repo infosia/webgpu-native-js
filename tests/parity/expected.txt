@@ -1,3 +1,9 @@
+namespace:GPUBufferUsage:object:true
+namespace:GPUBufferUsage:VERTEX:32
+namespace:GPUBufferUsage:readonly:true
+namespace:GPUBufferUsage:enumerable:10
+namespace:GPUBufferUsage:constant-descriptor:false,true,false
+namespace:GPUBufferUsage:global-descriptor:true,false,true
 interface:GPURenderPassEncoder:function:true
 interface:GPURenderPassEncoder:setBindGroup:true
 interface:GPUSupportedLimits:illegal-constructor:true:Illegal constructor
@@ -5,6 +11,13 @@ interface:GPUComputePassEncoder:instanceof:true
 buffer:null,round-trip;method:true
 label:nul-round-trip-destroy:true:true
 enumerable:label-method-constructor:true,true,false:true,true
+webidl:interface.prototype:false,false,false
+webidl:interface.keys:
+webidl:method:true,true,mapAsync,1,function,function
+webidl:getter:true,true,get size,0,function,function
+webidl:constructible-call:TypeError
+webidl:object-tag:[object GPUBuffer]
+webidl:prototype-tag:GPUBuffer
 identity:queue:true
 identity:lost:true
 features:core-features-and-limits

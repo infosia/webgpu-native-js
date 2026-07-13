@@ -1070,3 +1070,174 @@ landed first and its five MAJORs were fixed before the other two ran.
 Workspace 277 (exit 0), core 136 env-unset, quickjs/JSC suites green, both
 clippys `-D warnings`, fmt clean; parity **122 lines byte-identical on yawgpu
 and (gated) Dawn**, two engines each.
+
+## Block 13 + 14 Phase Review — 2026-07-13 ("Clean Review Then Fix")
+
+Scope: `f48ab763..HEAD` — 85 files, ~18.8k insertions. Two blocks had landed without
+a review: the CTS runner (13) and the replacement of quickjs-ng with Boa (14).
+
+**Four lenses, all fresh no-context subagents, run in parallel.** The deletion lens
+got its own `git worktree` — block 03's lesson: a reviewer licensed to edit the tree
+must not be able to inject a phantom defect into another reviewer's run.
+
+Findings: **1 CRITICAL / 9 MAJOR / ~12 MINOR.** All CRITICAL and MAJOR fixed; the
+MINORs fixed in the same pass except where noted.
+
+### CRITICAL — the Boa arena outlived by its own wrappers
+
+`Runtime::drop` called `boa_gc::force_collect()` intending to finalize every wrapper
+"while their `WrapperData` arena pointer and binding environment are still live". The
+`WrapperData` SAFETY comment asserted exactly that: *"Boa finalizes its objects before
+that arena is dropped."*
+
+**It does not.** `force_collect()` only finalizes what it can prove unreachable, and
+`Runtime.module_loader`'s module cache is a live Rust-side GC root at that moment —
+a cached `Module` roots its own environment, including any wrapper bound at module top
+level. Struct fields then drop in declaration order, so `arena: Box<Arena>` was freed
+**before** `module_loader` released the modules, leaving those wrappers holding a
+dangling `*const Arena`. The next collection on the thread ran their finalizers, which
+dereferenced freed memory and enqueued into a freed `ReleaseQueue`.
+
+The reviewer did not argue this — it *built an instrumented probe and ran it*: one ES
+module holding a wrapper, drop the runtime, create a second runtime, and the finalizer
+fires with the freed pointer. Swapping the module for a plain `eval` makes it vanish,
+which is what identifies the module cache as the specific root.
+
+**And a second, unconditional consequence: every CTS run leaked.** `boa_gc`'s
+thread-local teardown path runs only `drop_fn`, never `run_finalizer`, so in the
+ordinary single-runtime case those module-rooted wrappers were never finalized at all
+— their native WGPU handles were never released. The runner evaluates `glue.mjs` as a
+module, so this fired on every invocation. **Silent both ways: the process exits 0.**
+
+Fixed in both directions the reviewer named: `WrapperData` now holds a `Weak<Arena>`
+(the raw-pointer dereference is gone entirely, not merely guarded), and teardown
+releases the Rust-held GC roots — modules, transform, host callbacks — *before* the
+collect. Regression test runs under `MallocScribble=1`.
+
+Two things worth keeping from this one. First, the JSC adapter had solved the same
+problem correctly — it stores an `Arc<FinalizerState>` in its payload, so a late
+finalizer is refcount-safe — and Boa reached for a raw pointer to do the same job.
+**When two adapters implement the same hazard differently, one of them is wrong.**
+Second, this is the SAFETY-comment failure mode CLAUDE.md warns about, caught in the
+wild: the comment was not vague, it was *false*, and it read as reassuring.
+
+### MAJOR — the WebIDL flag namespaces did not exist, and the runner was hiding it
+
+`GPUBufferUsage`, `GPUTextureUsage`, `GPUColorWrite`, `GPUShaderStage`, `GPUMapMode`
+are in the pinned IDL and were in no part of the binding. A first-party script — *the
+actual product* — writing `usage: GPUBufferUsage.VERTEX` got a `ReferenceError`. Every
+script in this repo worked around it with bare numeric literals, which was the symptom
+sitting in plain sight.
+
+**The CTS could not see it**, because `tools/cts-runner/glue.mjs` injected the five
+namespaces into `globalThis` from the CTS's own constants module before any test ran.
+23,305 green cases said nothing about the gap. That is a shim standing where the thing
+under test should be — the exact hazard the block's own rules were written to prevent,
+and a reminder that **a shim's blast radius is everything it makes untestable**, not
+just what it makes convenient.
+
+The namespaces are now emitted from the IDL by the generator, installed as real
+globals, and the shim is deleted so the CTS exercises the real surface. Also
+unrecorded in `codegen-deltas.md` at the time — CLAUDE.md invariant 5 names *flag
+namespaces* explicitly as a reason codegen must consume WebIDL, which makes the
+omission doubly pointed.
+
+### MAJOR ×4 — the interface *object*, which the previous slice never looked at
+
+Phase C had fixed the property attributes on the interface **prototype** object and
+stopped. The reviewer found the same class of bug one level up, and measured each one
+under both engines rather than reasoning about it:
+
+| | Boa | JSC |
+|---|---|---|
+| prototype methods are `Function` objects (`.call`/`.bind`/`.name`/`.length`) | yes | **no** — a custom callable class |
+| interface object's `prototype` descriptor (spec: all three false) | `{true,true,true}` | `{true,false,false}` |
+| calling a constructible interface object without `new` | **no throw** | TypeError |
+| `@@toStringTag` | **absent** | `"CallbackObject"` — a JSC-internal name leaking into script |
+
+Consequences: `GPUBuffer.prototype.mapAsync.call(buf, 1)` throws **on iOS only**;
+`GPUBuffer.prototype = {}` silently succeeds on both engines and permanently breaks
+`instanceof`; the standard brand test `Object.prototype.toString.call(x)` gives
+different answers on iOS and Android.
+
+**Four of four were engine-divergent** — which means the parity suite, the mechanism
+CLAUDE.md names as *the* guarantee of iOS↔Android behavioural parity, was not
+reflecting over the WebIDL object graph at all and could not have caught any of them.
+That blind spot was the real finding. Closing it (13 new parity lines over descriptors,
+`Object.keys`, function-object identity, and tags) matters more than the four fixes.
+
+### MAJOR ×3 — guards that could not fail (the deletion lens)
+
+The lens deletes a guard and re-runs. Anything still green is a tautology.
+
+- **The CTS runner never tested an unexpected FAIL — its entire reason to exist.**
+  Deleting the `Status::Fail` arm (a real failure counted as a skip) → exit 0.
+  Deleting the `fail == 0` term from `exit_success()` → exit 0. The test that looks
+  like it covers this covers unexpected *pass*, unexpected *warn*, and mismatch — but
+  no bare failure. A regression in failure bucketing would have made the 23k-case
+  oracle exit SUCCESS on real failures, silently.
+- **Device-lost error suppression was untested** — deleting it changed nothing. The
+  *inverse* was pinned by five tests. That asymmetry is the tell: a rule tested in one
+  direction only is half a rule.
+- **`buffer_map_callback`'s status→error-class table was dead code to the tests** —
+  replacing all four arms with a bogus constant → exit 0. The one test that fed a
+  failing status asserted `matches!(result, Some(Err(_)))`: an assertion with an
+  invisible failure mode, which passes for any class and any message.
+  `OperationError`-vs-`AbortError` is JS-visible spec behaviour.
+
+Every fix was verified by *breaking the guard, watching the new test fail, restoring
+it, and watching it pass* — the standard the lens itself set.
+
+### The one place a finding produced a wrong fix — and how it was caught
+
+The lens observed that `getMappedRange`'s empty-range semantics were unpinned and that
+the code's rule "looked wrong" against a half-open-interval reading. The implementer
+then reasoned from the spec's `[offset, offset + rangeSize)` notation — an empty
+interval is the empty set, and the empty set overlaps nothing — and *changed the
+behaviour*.
+
+**Dawn refuted it.** `buffer,mapping` went 35/0 → 34/1, on exactly one subcase:
+existing range `[16,36)`, request `[24,24)` — an empty range strictly *inside* an
+existing one, which the CTS requires to throw. Invisible on yawgpu, so the local gate
+stayed green.
+
+The original predicate was right, and had already satisfied both boundary rows. The
+missing thing was a **test**, not a change. Reverted, and the four boundary rows are
+now pinned individually.
+
+Worth stating plainly, because it cuts against instinct: **the mathematical reading of
+the prose was not the spec's intent, and the oracle knew it before we did.** A lens
+that says "nothing pins this" is asking for a test. It is not a licence to decide what
+the behaviour should be.
+
+### MINORs fixed
+
+Three dead `pub fn`s (`register_device_class`/`_gpu_`/`_adapter_class` — orphaned when
+`register_all_classes` landed, zero callers, no tests) deleted. `tools/cts-runner`
+gained `#![warn(missing_docs)]` and docs — it was the one crate escaping the doc gate,
+which is why `-D warnings` stayed green over it. A stale shim comment in `shims.js`
+("the binding does not install non-constructible interface objects") and its only test
+— which exercised the now-dead branch exclusively — deleted. `ClassParent` gained
+`#[non_exhaustive]`. Two SAFETY comments that had drifted out of truth corrected (one
+in `core/`, one in the generator's emission). A home-directory path in
+`specs/tracking/b4c-notes.md` removed, and a stray QuickJS debug artifact deleted from
+the repo root.
+
+`PipelineParent` / `HostValue` / `QueueError` still lack `#[non_exhaustive]`
+(pre-existing); adding it churns downstream exhaustive matches across runner, examples
+and adapters. **Recorded, not fixed** — a deliberate deferral, not an oversight.
+
+### Gate
+
+Workspace tests, clippy `-D warnings`, fmt, engine-agnostic core, parity byte-identical
+under Boa AND JSC (196 lines), curated CTS 23,305/0 exit 0 on yawgpu, and the Dawn
+oracle green on every family touched. **Zero open CRITICAL or MAJOR. Blocks 13 and 14
+are COMPLETE.**
+
+### Reflection worth keeping
+
+The review found a use-after-free, a leak on every run, a missing API that breaks the
+first line of any real script, and a parity guarantee that was not guaranteeing
+anything — in a tree where **every gate was green and had been green for days**. Four
+lenses cost four subagents. The cheapest of them, the one that just deletes things and
+re-runs, found three guards that could not fail.

@@ -858,10 +858,15 @@ fn emit_payloads(output: &mut String, standards: &[StandardInterface<'_>]) {
         output.push_str("}\n\n");
         let _ = writeln!(
             output,
-            "// SAFETY: `{}` stores WGPU handle values. Finalization only moves those values",
+            "// SAFETY: a JSC finalizer may move `{}`'s Box to an arbitrary thread.",
             standard.payload
         );
-        output.push_str("// into `ReleaseRequest`; native handles are dereferenced only by\n");
+        output.push_str(
+            "// Non-handle fields are owned or synchronized Send-safe Rust data. Finalization\n",
+        );
+        output.push_str(
+            "// only moves native handles into `ReleaseRequest`; they are dereferenced only by\n",
+        );
         output.push_str("// `ReleaseRequest::run()` during release-queue drain on the creating `tick()` thread.\n");
         let _ = writeln!(output, "unsafe impl Send for {} {{}}\n", standard.payload);
     }

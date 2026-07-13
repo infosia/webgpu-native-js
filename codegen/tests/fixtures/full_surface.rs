@@ -3793,8 +3793,9 @@ pub struct ShaderModulePayload {
     pub(super) label: Mutex<String>,
 }
 
-// SAFETY: `ShaderModulePayload` stores WGPU handle values. Finalization only moves those values
-// into `ReleaseRequest`; native handles are dereferenced only by
+// SAFETY: a JSC finalizer may move `ShaderModulePayload`'s Box to an arbitrary thread.
+// Non-handle fields are owned or synchronized Send-safe Rust data. Finalization
+// only moves native handles into `ReleaseRequest`; they are dereferenced only by
 // `ReleaseRequest::run()` during release-queue drain on the creating `tick()` thread.
 unsafe impl Send for ShaderModulePayload {}
 
@@ -3804,8 +3805,9 @@ pub struct SamplerPayload {
     pub(super) label: Mutex<String>,
 }
 
-// SAFETY: `SamplerPayload` stores WGPU handle values. Finalization only moves those values
-// into `ReleaseRequest`; native handles are dereferenced only by
+// SAFETY: a JSC finalizer may move `SamplerPayload`'s Box to an arbitrary thread.
+// Non-handle fields are owned or synchronized Send-safe Rust data. Finalization
+// only moves native handles into `ReleaseRequest`; they are dereferenced only by
 // `ReleaseRequest::run()` during release-queue drain on the creating `tick()` thread.
 unsafe impl Send for SamplerPayload {}
 
@@ -3818,8 +3820,9 @@ pub struct TexturePayload {
     pub(super) depth_or_array_layers: u32,
 }
 
-// SAFETY: `TexturePayload` stores WGPU handle values. Finalization only moves those values
-// into `ReleaseRequest`; native handles are dereferenced only by
+// SAFETY: a JSC finalizer may move `TexturePayload`'s Box to an arbitrary thread.
+// Non-handle fields are owned or synchronized Send-safe Rust data. Finalization
+// only moves native handles into `ReleaseRequest`; they are dereferenced only by
 // `ReleaseRequest::run()` during release-queue drain on the creating `tick()` thread.
 unsafe impl Send for TexturePayload {}
 
@@ -3832,8 +3835,9 @@ pub struct TextureViewPayload {
     pub(super) mip_depth: u32,
 }
 
-// SAFETY: `TextureViewPayload` stores WGPU handle values. Finalization only moves those values
-// into `ReleaseRequest`; native handles are dereferenced only by
+// SAFETY: a JSC finalizer may move `TextureViewPayload`'s Box to an arbitrary thread.
+// Non-handle fields are owned or synchronized Send-safe Rust data. Finalization
+// only moves native handles into `ReleaseRequest`; they are dereferenced only by
 // `ReleaseRequest::run()` during release-queue drain on the creating `tick()` thread.
 unsafe impl Send for TextureViewPayload {}
 
@@ -3844,8 +3848,9 @@ pub struct BindGroupLayoutPayload {
     pub(super) label: Mutex<String>,
 }
 
-// SAFETY: `BindGroupLayoutPayload` stores WGPU handle values. Finalization only moves those values
-// into `ReleaseRequest`; native handles are dereferenced only by
+// SAFETY: a JSC finalizer may move `BindGroupLayoutPayload`'s Box to an arbitrary thread.
+// Non-handle fields are owned or synchronized Send-safe Rust data. Finalization
+// only moves native handles into `ReleaseRequest`; they are dereferenced only by
 // `ReleaseRequest::run()` during release-queue drain on the creating `tick()` thread.
 unsafe impl Send for BindGroupLayoutPayload {}
 
@@ -3855,8 +3860,9 @@ pub struct PipelineLayoutPayload {
     pub(super) label: Mutex<String>,
 }
 
-// SAFETY: `PipelineLayoutPayload` stores WGPU handle values. Finalization only moves those values
-// into `ReleaseRequest`; native handles are dereferenced only by
+// SAFETY: a JSC finalizer may move `PipelineLayoutPayload`'s Box to an arbitrary thread.
+// Non-handle fields are owned or synchronized Send-safe Rust data. Finalization
+// only moves native handles into `ReleaseRequest`; they are dereferenced only by
 // `ReleaseRequest::run()` during release-queue drain on the creating `tick()` thread.
 unsafe impl Send for PipelineLayoutPayload {}
 
@@ -3871,8 +3877,9 @@ pub struct BindGroupPayload {
     pub(super) label: Mutex<String>,
 }
 
-// SAFETY: `BindGroupPayload` stores WGPU handle values. Finalization only moves those values
-// into `ReleaseRequest`; native handles are dereferenced only by
+// SAFETY: a JSC finalizer may move `BindGroupPayload`'s Box to an arbitrary thread.
+// Non-handle fields are owned or synchronized Send-safe Rust data. Finalization
+// only moves native handles into `ReleaseRequest`; they are dereferenced only by
 // `ReleaseRequest::run()` during release-queue drain on the creating `tick()` thread.
 unsafe impl Send for BindGroupPayload {}
 
@@ -3884,8 +3891,9 @@ pub struct ComputePipelinePayload {
     pub(super) label: Mutex<String>,
 }
 
-// SAFETY: `ComputePipelinePayload` stores WGPU handle values. Finalization only moves those values
-// into `ReleaseRequest`; native handles are dereferenced only by
+// SAFETY: a JSC finalizer may move `ComputePipelinePayload`'s Box to an arbitrary thread.
+// Non-handle fields are owned or synchronized Send-safe Rust data. Finalization
+// only moves native handles into `ReleaseRequest`; they are dereferenced only by
 // `ReleaseRequest::run()` during release-queue drain on the creating `tick()` thread.
 unsafe impl Send for ComputePipelinePayload {}
 
@@ -3898,8 +3906,9 @@ pub struct RenderPipelinePayload {
     pub(super) label: Mutex<String>,
 }
 
-// SAFETY: `RenderPipelinePayload` stores WGPU handle values. Finalization only moves those values
-// into `ReleaseRequest`; native handles are dereferenced only by
+// SAFETY: a JSC finalizer may move `RenderPipelinePayload`'s Box to an arbitrary thread.
+// Non-handle fields are owned or synchronized Send-safe Rust data. Finalization
+// only moves native handles into `ReleaseRequest`; they are dereferenced only by
 // `ReleaseRequest::run()` during release-queue drain on the creating `tick()` thread.
 unsafe impl Send for RenderPipelinePayload {}
 
@@ -3910,8 +3919,9 @@ pub struct QuerySetPayload {
     pub(super) label: Mutex<String>,
 }
 
-// SAFETY: `QuerySetPayload` stores WGPU handle values. Finalization only moves those values
-// into `ReleaseRequest`; native handles are dereferenced only by
+// SAFETY: a JSC finalizer may move `QuerySetPayload`'s Box to an arbitrary thread.
+// Non-handle fields are owned or synchronized Send-safe Rust data. Finalization
+// only moves native handles into `ReleaseRequest`; they are dereferenced only by
 // `ReleaseRequest::run()` during release-queue drain on the creating `tick()` thread.
 unsafe impl Send for QuerySetPayload {}
 
@@ -3921,8 +3931,9 @@ pub struct CommandEncoderPayload {
     pub(super) label: Mutex<String>,
 }
 
-// SAFETY: `CommandEncoderPayload` stores WGPU handle values. Finalization only moves those values
-// into `ReleaseRequest`; native handles are dereferenced only by
+// SAFETY: a JSC finalizer may move `CommandEncoderPayload`'s Box to an arbitrary thread.
+// Non-handle fields are owned or synchronized Send-safe Rust data. Finalization
+// only moves native handles into `ReleaseRequest`; they are dereferenced only by
 // `ReleaseRequest::run()` during release-queue drain on the creating `tick()` thread.
 unsafe impl Send for CommandEncoderPayload {}
 
@@ -3932,8 +3943,9 @@ pub struct RenderBundleEncoderPayload {
     pub(super) label: Mutex<String>,
 }
 
-// SAFETY: `RenderBundleEncoderPayload` stores WGPU handle values. Finalization only moves those values
-// into `ReleaseRequest`; native handles are dereferenced only by
+// SAFETY: a JSC finalizer may move `RenderBundleEncoderPayload`'s Box to an arbitrary thread.
+// Non-handle fields are owned or synchronized Send-safe Rust data. Finalization
+// only moves native handles into `ReleaseRequest`; they are dereferenced only by
 // `ReleaseRequest::run()` during release-queue drain on the creating `tick()` thread.
 unsafe impl Send for RenderBundleEncoderPayload {}
 
@@ -5642,5 +5654,84 @@ pub(super) fn register_generated_classes<E: JsEngine + 'static>(
     let _ = E::register_class(cx, render_bundle_encoder_class::<E>())?;
     let _ = E::register_class(cx, render_bundle_class::<E>())?;
     let _ = E::register_class(cx, command_buffer_class::<E>())?;
+    Ok(())
+}
+
+pub(super) fn register_generated_namespaces<E: JsEngine>(
+    cx: E::Context<'_>,
+) -> Result<(), E::Error> {
+    let global = E::global(cx);
+    {
+        let namespace = E::new_object(cx)?;
+        let value = E::number(cx, 1.0)?;
+        E::define_data_property(cx, namespace, "MAP_READ", value, false, true, false)?;
+        let value = E::number(cx, 2.0)?;
+        E::define_data_property(cx, namespace, "MAP_WRITE", value, false, true, false)?;
+        let value = E::number(cx, 4.0)?;
+        E::define_data_property(cx, namespace, "COPY_SRC", value, false, true, false)?;
+        let value = E::number(cx, 8.0)?;
+        E::define_data_property(cx, namespace, "COPY_DST", value, false, true, false)?;
+        let value = E::number(cx, 16.0)?;
+        E::define_data_property(cx, namespace, "INDEX", value, false, true, false)?;
+        let value = E::number(cx, 32.0)?;
+        E::define_data_property(cx, namespace, "VERTEX", value, false, true, false)?;
+        let value = E::number(cx, 64.0)?;
+        E::define_data_property(cx, namespace, "UNIFORM", value, false, true, false)?;
+        let value = E::number(cx, 128.0)?;
+        E::define_data_property(cx, namespace, "STORAGE", value, false, true, false)?;
+        let value = E::number(cx, 256.0)?;
+        E::define_data_property(cx, namespace, "INDIRECT", value, false, true, false)?;
+        let value = E::number(cx, 512.0)?;
+        E::define_data_property(cx, namespace, "QUERY_RESOLVE", value, false, true, false)?;
+        E::define_data_property(cx, global, "GPUBufferUsage", namespace, true, false, true)?;
+    }
+    {
+        let namespace = E::new_object(cx)?;
+        let value = E::number(cx, 1.0)?;
+        E::define_data_property(cx, namespace, "READ", value, false, true, false)?;
+        let value = E::number(cx, 2.0)?;
+        E::define_data_property(cx, namespace, "WRITE", value, false, true, false)?;
+        E::define_data_property(cx, global, "GPUMapMode", namespace, true, false, true)?;
+    }
+    {
+        let namespace = E::new_object(cx)?;
+        let value = E::number(cx, 1.0)?;
+        E::define_data_property(cx, namespace, "COPY_SRC", value, false, true, false)?;
+        let value = E::number(cx, 2.0)?;
+        E::define_data_property(cx, namespace, "COPY_DST", value, false, true, false)?;
+        let value = E::number(cx, 4.0)?;
+        E::define_data_property(cx, namespace, "TEXTURE_BINDING", value, false, true, false)?;
+        let value = E::number(cx, 8.0)?;
+        E::define_data_property(cx, namespace, "STORAGE_BINDING", value, false, true, false)?;
+        let value = E::number(cx, 16.0)?;
+        E::define_data_property(cx, namespace, "RENDER_ATTACHMENT", value, false, true, false)?;
+        let value = E::number(cx, 32.0)?;
+        E::define_data_property(cx, namespace, "TRANSIENT_ATTACHMENT", value, false, true, false)?;
+        E::define_data_property(cx, global, "GPUTextureUsage", namespace, true, false, true)?;
+    }
+    {
+        let namespace = E::new_object(cx)?;
+        let value = E::number(cx, 1.0)?;
+        E::define_data_property(cx, namespace, "VERTEX", value, false, true, false)?;
+        let value = E::number(cx, 2.0)?;
+        E::define_data_property(cx, namespace, "FRAGMENT", value, false, true, false)?;
+        let value = E::number(cx, 4.0)?;
+        E::define_data_property(cx, namespace, "COMPUTE", value, false, true, false)?;
+        E::define_data_property(cx, global, "GPUShaderStage", namespace, true, false, true)?;
+    }
+    {
+        let namespace = E::new_object(cx)?;
+        let value = E::number(cx, 1.0)?;
+        E::define_data_property(cx, namespace, "RED", value, false, true, false)?;
+        let value = E::number(cx, 2.0)?;
+        E::define_data_property(cx, namespace, "GREEN", value, false, true, false)?;
+        let value = E::number(cx, 4.0)?;
+        E::define_data_property(cx, namespace, "BLUE", value, false, true, false)?;
+        let value = E::number(cx, 8.0)?;
+        E::define_data_property(cx, namespace, "ALPHA", value, false, true, false)?;
+        let value = E::number(cx, 15.0)?;
+        E::define_data_property(cx, namespace, "ALL", value, false, true, false)?;
+        E::define_data_property(cx, global, "GPUColorWrite", namespace, true, false, true)?;
+    }
     Ok(())
 }
