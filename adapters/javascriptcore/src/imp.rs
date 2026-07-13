@@ -2770,7 +2770,9 @@ fn host_frame_error(cx: Context<'_>, error: FrameError<JSValueRef>) -> FrameErro
         FrameError::Engine(error) => FrameError::Engine(value_to_string(cx.ctx, error)),
         FrameError::AsyncCallback(name) => FrameError::AsyncCallback(name),
         FrameError::NotCallable(name) => FrameError::NotCallable(name),
-        _ => FrameError::Engine("unknown frame failure".to_owned()),
+        // `FrameError` is non-exhaustive. Future variants deliberately lose
+        // their typed identity here; Debug keeps the host diagnostic specific.
+        unmatched => FrameError::Engine(format!("unknown frame failure: {unmatched:?}")),
     }
 }
 
@@ -4195,6 +4197,13 @@ mod tests {
         }
     }
 
+    fn frame_error_variant_name(error: &Error) -> &'static str {
+        match error {
+            Error::Frame(error) => error.variant_name(),
+            error => panic!("expected frame error, got {error:?}"),
+        }
+    }
+
     fn exercise_frame_contract(runtime: &Runtime, instance: wgpu::WGPUInstance) {
         let releases = Arc::new(AtomicUsize::new(0));
         let queue = Arc::clone(runtime.state.finalizer.env.queue());
@@ -4214,48 +4223,36 @@ mod tests {
 
         let async_error = unsafe { runtime.frame(instance, "frameContractAsync", &[]) }
             .expect_err("parity async frame must fail");
-        assert!(matches!(
-            async_error,
-            Error::Frame(FrameError::AsyncCallback(ref name)) if name == "frameContractAsync"
-        ));
         runtime
             .call_global_function(
                 "frameContractRecordError",
                 &[
                     HostValue::String("async".to_owned()),
-                    HostValue::String("AsyncCallback".to_owned()),
+                    HostValue::String(frame_error_variant_name(&async_error).to_owned()),
                 ],
             )
             .expect("record parity async rejection");
 
         let thenable_error = unsafe { runtime.frame(instance, "frameContractThenable", &[]) }
             .expect_err("parity thenable frame must fail");
-        assert!(matches!(
-            thenable_error,
-            Error::Frame(FrameError::AsyncCallback(ref name)) if name == "frameContractThenable"
-        ));
         runtime
             .call_global_function(
                 "frameContractRecordError",
                 &[
                     HostValue::String("thenable".to_owned()),
-                    HostValue::String("AsyncCallback".to_owned()),
+                    HostValue::String(frame_error_variant_name(&thenable_error).to_owned()),
                 ],
             )
             .expect("record parity thenable rejection");
 
         let missing_error = unsafe { runtime.frame(instance, "frameContractMissing", &[]) }
             .expect_err("parity missing frame must fail");
-        assert!(matches!(
-            missing_error,
-            Error::Frame(FrameError::NotCallable(ref name)) if name == "frameContractMissing"
-        ));
         runtime
             .call_global_function(
                 "frameContractRecordError",
                 &[
                     HostValue::String("missing".to_owned()),
-                    HostValue::String("NotCallable".to_owned()),
+                    HostValue::String(frame_error_variant_name(&missing_error).to_owned()),
                 ],
             )
             .expect("record parity missing rejection");

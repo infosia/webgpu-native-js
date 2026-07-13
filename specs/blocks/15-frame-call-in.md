@@ -1,5 +1,20 @@
 # Block 15 — the per-frame call-in
 
+**Status: COMPLETE (2026-07-14). Phase Review clean of CRITICAL and MAJOR.**
+
+F12 held: zero methods were added to `trait JsEngine` (49 items before and after).
+The contract composes from `global`, `get_property`, `is_callable`, `is_object`,
+`call` and `drain_microtasks`.
+
+Phase Review findings, all closed: F18 (the plan's §1.3 and §2.7 were not updated —
+§1.3 is the paragraph `examples/triangle` read as "JS never runs during the frame
+loop"); the F14 parity artefacts had been committed into block 16's commit, leaving
+two commits on `main` whose parity test failed (history corrected); three golden
+lines were Rust-supplied literals and observed nothing (the variant is now derived
+from the returned `FrameError`); the pump-failure release drain was untested.
+
+F13's deferred decision is recorded as `specs/tracking/engine-boundary.md` → HV1.
+
 Rules are numbered **F1–F18**. Blocks 01 (R1–R27), 02 (A1–A32), 03 (B1–B22),
 08 (P1–P8), and 11 (X1–X10) still bind.
 

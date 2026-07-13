@@ -76,6 +76,15 @@ initialization, resource/pipeline definition, scripting logic, and similar
 non-hot-path work. This scoping decision is what makes the JS engine choice
 tractable — see §3.
 
+**This does not mean JS does not run per frame.** It means the number of JS↔native
+crossings does not scale with the draw count. One `update(dt)` call per frame is
+O(1); a `pass.draw()` per object is O(objects). The per-frame contract is §2.7's
+six-step `frame()`; `examples/bounce` is the executable statement of it (N bodies,
+one draw call, one crossing per frame, render bundle recorded once). Read this
+paragraph together with that example — read alone it has already been taken to mean
+"JS never runs during the frame loop", which is what `examples/triangle` implemented
+literally.
+
 **Corollary Rev 1 missed (§2.8):** if the host is a game engine, the host has
 already created the instance, adapter, and device before any script runs. JS
 adopting an existing `WGPUDevice` is the *primary* entry point; `requestAdapter`
@@ -350,6 +359,30 @@ and not step 2 produces `await`s that hang forever, and it will pass every unit
 test that does not involve `await`. Specify, expose, and test this pump before
 building anything on top of Promises. It belongs in the public API
 (`WebGpuJs::tick()`), not buried in an adapter.
+
+#### The frame contract (block 15)
+
+`tick()` pumps. A host that also wants JS *logic* per frame calls `frame()`, which
+runs six steps in this order:
+
+| # | Step | Why here |
+|---|---|---|
+| 1 | `wgpuInstanceProcessEvents` | Fires WebGPU callbacks; resolves Promises. |
+| 2 | Settlement drain | Hands those resolutions to the engine. |
+| 3 | Microtask drain | **Before** the callback. A `mapAsync` resolved in step 1 must have its `.then()` run before `update()` reads the result, or every readback is silently one frame stale. |
+| 4 | `globalThis[name](...args)` | The game logic. |
+| 5 | Microtask drain | **After** the callback. Without it, a `.then()` scheduled *inside* `update()` is deferred a full frame, silently. |
+| 6 | Release-queue drain | **After** the callback, so wrappers `update()` dropped are freed this frame, not next. |
+
+Steps 5 and 6 run even when the callback throws; otherwise a script bug stalls the
+release queue every frame and leaks GPU memory for as long as the game runs.
+
+`frame()` is built by factoring `tick()` into a pump (steps 1–3) plus the release
+drain (step 6); the sequence exists once. An `async` frame callback is a hard error
+(`FrameError::AsyncCallback`): it returns immediately with a pending Promise, so
+"the frame's logic ran" would be false with nothing in the system saying so.
+
+Rules and tests: `specs/blocks/15-frame-call-in.md` (F8–F15).
 
 ### 2.8 Handle import: the primary entry point
 

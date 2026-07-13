@@ -4128,6 +4128,26 @@ mod tests {
     }
 
     #[test]
+    fn frame_error_variant_name_reports_each_variant() {
+        assert_eq!(
+            crate::FrameError::<String>::Queue(QueueError::UnexpectedSettlementType).variant_name(),
+            "Queue"
+        );
+        assert_eq!(
+            crate::FrameError::<String>::Engine("engine".to_owned()).variant_name(),
+            "Engine"
+        );
+        assert_eq!(
+            crate::FrameError::<String>::AsyncCallback("update".to_owned()).variant_name(),
+            "AsyncCallback"
+        );
+        assert_eq!(
+            crate::FrameError::<String>::NotCallable("update".to_owned()).variant_name(),
+            "NotCallable"
+        );
+    }
+
+    #[test]
     fn core_frame_orders_callback_between_microtask_drains_and_drains_releases() {
         reset_gpu();
         let rt = runtime();
@@ -4209,6 +4229,35 @@ mod tests {
             error,
             crate::TickError::Queue(QueueError::UnexpectedSettlementType)
         ));
+    }
+
+    #[test]
+    fn core_frame_pump_failure_drains_queued_releases() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        rt.env
+            .settlements()
+            .requests
+            .lock()
+            .expect("settlement queue")
+            .push_back(Box::new(()));
+        rt.queue()
+            .enqueue(crate::ReleaseRequest::Device {
+                device: fake_device(),
+                gpu: dispatch(),
+            })
+            .expect("enqueue release");
+
+        let error = unsafe { crate::frame::<Engine>(cx, fake_handle(99), "update", &[]) }
+            .expect_err("frame pump must fail");
+
+        assert!(matches!(
+            error,
+            crate::FrameError::Queue(QueueError::UnexpectedSettlementType)
+        ));
+        let drained = GPU_STATE.with(|state| state.borrow().device_releases);
+        assert_eq!(drained, 1);
     }
 
     #[test]

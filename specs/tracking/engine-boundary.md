@@ -1709,3 +1709,18 @@ bundle:flat:tdz-erasure:source-lexical=ReferenceError,ReferenceError,ReferenceEr
 
 The README records the constraint for authors: do not rely on TDZ or on
 cyclic-initialisation errors; prefer acyclic module graphs.
+
+## HV1 — Non-primitive `HostValue` fallback (decision deferred; block 15 → F13)
+
+Both adapters' `host_value()` falls back to JavaScript `toString()` for any
+non-primitive, so an object returned from `Runtime::call_global_function` becomes
+`HostValue::String("[object Object]")`. F10 rejects thenables before this
+conversion, which covers the case that matters for `frame()`.
+
+Replacing the fallback with an error would also affect the **arguments** to every
+registered host function: `print({})` would throw instead of receiving
+`"[object Object]"`.
+
+Options: retain string coercion for non-primitives; reject all non-primitives; or
+split host-function argument conversion from call-in return conversion. No
+behaviour changes until that API-wide choice is made.

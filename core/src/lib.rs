@@ -1356,6 +1356,19 @@ pub enum FrameError<E> {
     NotCallable(String),
 }
 
+impl<E> FrameError<E> {
+    /// Returns the stable name of this frame-error variant.
+    #[must_use]
+    pub const fn variant_name(&self) -> &'static str {
+        match self {
+            Self::Queue(_) => "Queue",
+            Self::Engine(_) => "Engine",
+            Self::AsyncCallback(_) => "AsyncCallback",
+            Self::NotCallable(_) => "NotCallable",
+        }
+    }
+}
+
 impl<E: std::fmt::Display> std::fmt::Display for FrameError<E> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -1459,6 +1472,8 @@ pub unsafe fn frame<E: JsEngine + 'static>(
     args: &[E::Value],
 ) -> std::result::Result<usize, FrameError<E::Error>> {
     if let Err(error) = unsafe { pump::<E>(cx, instance) } {
+        // A drain QueueError cannot be combined with the pump error. Preserve
+        // the first failure so the host sees why the frame stopped.
         let releases = E::environment(cx).queue().drain();
         drop(releases);
         return Err(frame_error_from_tick(error));
