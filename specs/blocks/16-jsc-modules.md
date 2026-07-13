@@ -1,8 +1,26 @@
 # Block 16 — ES modules under JavaScriptCore
 
-**Status: REOPENED by planner review (2026-07-13). One MAJOR is open — see §10.**
-**Outcome (unchanged and accepted): candidate D — build-time bundling.**
+**Status: COMPLETE (2026-07-14). Phase Review clean of CRITICAL and MAJOR.**
+**Outcome: candidate D — build-time bundling.**
 **Trigger: D4 — the only path to JSC modules is non-public API.**
+
+§10's MAJOR is closed, and so is a further MAJOR the Phase Review (L23) found.
+Evidence: `specs/tracking/engine-boundary.md` → Q11 and its three addenda.
+
+**The block was wrong about a bundler three times, from one root**, and the record
+is kept because the pattern *is* the lesson: §10 caught a claim asserted from
+memory; the fix for §10 was a claim asserted from one insufficient probe; the Phase
+Review caught a claim asserted from no probe at all (nobody ran esbuild on a
+`const`). **When a claim is about what some other system does, run that system —
+and vary the input.**
+
+**The most valuable thing this block produced was not the decision.** It was Q11's
+addendum 3: **bundling erases top-level TDZ.** A game author develops against real
+ES modules (Boa's loader — real TDZ, cyclic reads throw) and ships a flat bundle
+where the same read silently yields `undefined`. That is a *development-vs-shipped*
+seam — **not** an engine divergence, which is the only class the two-engine strategy
+was built to catch — and candidate D introduces it by construction. It is now pinned
+by the parity golden and stated plainly in the README.
 
 Phase 1's evidence and the decision are in `specs/tracking/engine-boundary.md` →
 Q11. Block 12 → M4 is corrected. Phase 2D shipped: the parity suite runs a
