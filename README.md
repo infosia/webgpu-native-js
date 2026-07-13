@@ -107,6 +107,14 @@ development-tooling capability** used by the CTS runner; game code must not rely
 on them. JavaScriptCore's module API is not part of the public Apple SDK, and
 this project does not ship on private API.
 
+**Bundling erases top-level TDZ, so do not rely on it.** A bundler rewrites every
+top-level `let`, `const` and `class` to `var`. Under real ES modules — which is what
+you get while developing against the Boa module loader — reading a binding before
+its initializer throws `ReferenceError`. In the bundle you ship, the same read
+silently yields `undefined`. Prefer acyclic module graphs: a circular import that
+appears to work in the bundle may be reading `undefined` where the module goal would
+have stopped you.
+
 ## Backends
 
 | Tier | Backend | Notes |

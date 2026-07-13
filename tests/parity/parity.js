@@ -59,39 +59,36 @@
     }
 
     // Static ESM-only input makes esbuild hoist and concatenate the modules into
-    // one flat scope. It emits no registry or helper for this input shape.
+    // one flat scope. It emits no registry or helper for this input shape, and
+    // lowers every top-level let, const, and class to var. The source bindings
+    // have lexical TDZs, exercised in nested scopes because this fixture is a
+    // shipped script, but those top-level TDZs do not survive bundling.
     (function runFlatStaticEsmBundle() {
-        var flatOrder = [];
-        var flatSharedEvaluationCount = 0;
         var flatThrowCallCount = 0;
 
-        var flatLetTdzError = caught(readFlatLet);
-        var flatConstTdzError = caught(readFlatConst);
+        var sourceLetTdzError = caught(function () {
+            return sourceLet;
+            let sourceLet = "source-let-ready";
+        });
+        var sourceConstTdzError = caught(function () {
+            return sourceConst;
+            const sourceConst = "source-const-ready";
+        });
+        var sourceClassTdzError = caught(function () {
+            return SourceClass;
+            class SourceClass {}
+        });
+        var flatLetBeforeInitialization = flatLet;
+        var flatConstBeforeInitialization = flatConst;
+        var flatClassBeforeInitialization = FlatClass;
 
-        flatOrder.push("shared");
-        flatSharedEvaluationCount += 1;
-        var flatShared = "shared";
-
-        flatOrder.push("left");
-        var flatLeftShared = flatShared;
-
-        flatOrder.push("right");
-        var flatRightShared = flatShared;
-
-        flatOrder.push("b");
         var flatCircleB = "b-ready";
         log("bundle:flat:esm:b saw a = " + flatCircleA);
 
-        flatOrder.push("a");
         var flatCircleA = "a-ready";
         log("bundle:flat:esm:a saw b = " + flatCircleB);
 
-        flatOrder.push("entry");
         log("bundle:flat:esm:entry " + flatCircleA + " " + flatCircleB);
-        log("bundle:flat:order:" + flatOrder.join(","));
-        log("bundle:flat:evaluate-once:" +
-            (flatSharedEvaluationCount === 1) + ":" + flatSharedEvaluationCount + ":" +
-            flatLeftShared + "," + flatRightShared);
 
         var flatThrown = caught(flatThrow);
         if (!flatThrown) {
@@ -100,20 +97,17 @@
         log("bundle:flat:throw:hoisted-function:" + (flatThrowCallCount === 1) + ":" +
             flatThrowCallCount + ":" + flatThrown.name + ":" + flatThrown.message);
 
-        let flatLet = "let-ready";
-        const flatConst = "const-ready";
-        log("bundle:flat:tdz:" +
-            (flatLetTdzError ? flatLetTdzError.name : "none") + "," +
-            (flatConstTdzError ? flatConstTdzError.name : "none") + ":" +
-            readFlatLet() + "," + readFlatConst());
-
-        function readFlatLet() {
-            return flatLet;
-        }
-
-        function readFlatConst() {
-            return flatConst;
-        }
+        var flatLet = "let-ready";
+        var flatConst = "const-ready";
+        var FlatClass = class {};
+        log("bundle:flat:tdz-erasure:source-lexical=" +
+            (sourceLetTdzError ? sourceLetTdzError.name : "none") + "," +
+            (sourceConstTdzError ? sourceConstTdzError.name : "none") + "," +
+            (sourceClassTdzError ? sourceClassTdzError.name : "none") +
+            ":shipped-bundle=" +
+            flatLetBeforeInitialization + "," + flatConstBeforeInitialization + "," +
+            flatClassBeforeInitialization + ":initialized=" + flatLet + "," +
+            flatConst + "," + typeof FlatClass);
 
         function flatThrow() {
             flatThrowCallCount += 1;
@@ -194,35 +188,29 @@
                 exports.value = requireCjsThrows().value;
             }
         });
-        var requireCjsEntry = __commonJS({
-            "cjs/entry.js": function () {
-                cjsOrder.push("entry");
-                var left = requireCjsLeft();
-                var right = requireCjsRight();
-                log("bundle:cjs:memoised:" + (left.shared === right.shared) + ":" +
-                    cjsSharedEvaluationCount + ":" + left.shared.value + "," +
-                    right.shared.value);
+        // esbuild leaves the entry inline, after its static CommonJS imports.
+        var left = requireCjsLeft();
+        var right = requireCjsRight();
+        var circleA = requireCjsCircleA();
+        var circleB = requireCjsCircleB();
+        cjsOrder.push("entry");
+        log("bundle:cjs:memoised:" + (left.shared === right.shared) + ":" +
+            cjsSharedEvaluationCount + ":" + left.shared.value + "," +
+            right.shared.value);
+        log("bundle:cjs:circle:" + circleA.phase + "," + circleB.phase + "," +
+            circleA.sawB + "," + circleB.sawA);
 
-                var circleA = requireCjsCircleA();
-                var circleB = requireCjsCircleB();
-                log("bundle:cjs:circle:" + circleA.phase + "," + circleB.phase + "," +
-                    circleA.sawB + "," + circleB.sawA);
-
-                var firstThrown = caught(requireCjsThrowChain);
-                var secondThrown = caught(requireCjsThrows);
-                if (!firstThrown || !secondThrown) {
-                    throw new Error("CommonJS throwing module handed out partial exports");
-                }
-                log("bundle:cjs:throw:rerun:" + (cjsThrowEvaluationCount === 2) +
-                    ":new-error:" + (firstThrown !== secondThrown) + ":" +
-                    cjsThrowEvaluationCount + ":" + firstThrown.name + ":" +
-                    firstThrown.message + ":" + secondThrown.name + ":" +
-                    secondThrown.message);
-                log("bundle:cjs:order:" + cjsOrder.join(","));
-            }
-        });
-
-        requireCjsEntry();
+        var firstThrown = caught(requireCjsThrowChain);
+        var secondThrown = caught(requireCjsThrows);
+        if (!firstThrown || !secondThrown) {
+            throw new Error("CommonJS throwing module handed out partial exports");
+        }
+        log("bundle:cjs:throw:rerun:" + (cjsThrowEvaluationCount === 2) +
+            ":new-error:" + (firstThrown !== secondThrown) + ":" +
+            cjsThrowEvaluationCount + ":" + firstThrown.name + ":" +
+            firstThrown.message + ":" + secondThrown.name + ":" +
+            secondThrown.message);
+        log("bundle:cjs:order:" + cjsOrder.join(","));
     }());
 
     // A dynamic import() makes esbuild emit its lazy __esm helper. The helper
@@ -305,31 +293,26 @@
                 initEsmThrows();
             }
         });
-        var initEsmEntry = __esm({
-            "esm/entry.js": function () {
-                initEsmLeft();
-                initEsmRight();
-                initEsmCircleA();
-                initEsmCircleB();
-                esmOrder.push("entry");
-                log("bundle:esm:circle:entry:" + esmCircleA + "," + esmCircleB);
-                log("bundle:esm:memoised:" + (esmSharedEvaluationCount === 1) + ":" +
-                    esmSharedEvaluationCount + ":" + esmLeftShared + "," + esmRightShared);
+        // esbuild leaves the entry inline; only its lazy modules use __esm.
+        esmOrder.push("entry");
+        initEsmLeft();
+        initEsmRight();
+        initEsmCircleA();
+        initEsmCircleB();
+        log("bundle:esm:circle:entry:" + esmCircleA + "," + esmCircleB);
+        log("bundle:esm:memoised:" + (esmSharedEvaluationCount === 1) + ":" +
+            esmSharedEvaluationCount + ":" + esmLeftShared + "," + esmRightShared);
 
-                var firstThrown = caught(initEsmThrowChain);
-                var secondThrown = caught(initEsmThrows);
-                if (!firstThrown || !secondThrown) {
-                    throw new Error("__esm throwing initializer did not throw");
-                }
-                log("bundle:esm:throw:same-error:" + (firstThrown === secondThrown) +
-                    ":evaluate-once:" + (esmThrowEvaluationCount === 1) + ":" +
-                    esmThrowEvaluationCount + ":" + secondThrown.name + ":" +
-                    secondThrown.message);
-                log("bundle:esm:order:" + esmOrder.join(","));
-            }
-        });
-
-        initEsmEntry();
+        var firstThrown = caught(initEsmThrowChain);
+        var secondThrown = caught(initEsmThrows);
+        if (!firstThrown || !secondThrown) {
+            throw new Error("__esm throwing initializer did not throw");
+        }
+        log("bundle:esm:throw:same-error:" + (firstThrown === secondThrown) +
+            ":evaluate-once:" + (esmThrowEvaluationCount === 1) + ":" +
+            esmThrowEvaluationCount + ":" + secondThrown.name + ":" +
+            secondThrown.message);
+        log("bundle:esm:order:" + esmOrder.join(","));
     }());
 
     log("namespace:GPUBufferUsage:object:" +

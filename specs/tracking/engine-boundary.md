@@ -1699,9 +1699,14 @@ the most likely shape of the actual shipped bundle was entirely untested.
 **The fixture now models all three real shapes**, each faithful to what esbuild
 emits, each stressing something different:
 
-- **flat concatenation** — hoisting, `let`/`const` TDZ across the flat scope,
-  evaluation order, and a circular reference resolving to `undefined` through
-  hoisting. Reproduces the measured trace exactly (`b saw a = undefined`).
+- **flat concatenation** — hoisting, evaluation order, and a circular reference
+  resolving to `undefined` through hoisting. Reproduces the measured trace exactly
+  (`b saw a = undefined`).
+
+  *(Corrected 2026-07-14 by the block 16 Phase Review. This entry originally said
+  the flat section modelled "`let`/`const` TDZ across the flat scope". It does
+  not, and it cannot — see the next section. Third time this block asserted a
+  bundler's behaviour without running the bundler.)*
 - **`__commonJS`** — cache-before-evaluate, partially-initialised exports on a
   circular require (correct for CommonJS), and a throw that **re-runs** the factory
   (counter reaches 2, two distinct errors).
@@ -1712,3 +1717,53 @@ emits, each stressing something different:
 *once* is not the same as running it *enough*. The first probe answered the question
 that had been asked and hid the question that should have been. When the answer
 depends on an input, vary the input.
+
+### Q11 addendum 3 — bundling ERASES top-level TDZ, and that is a dev-vs-ship seam
+
+Found by block 16's Phase Review (2026-07-14), which caught the fixture asserting
+that a flat bundle preserves temporal-dead-zone semantics. **It does not**, and the
+wrong assertion was hiding a fact that matters to anyone shipping on this project.
+
+**Measured (esbuild 0.28.1, `--bundle`; identical for `--format=cjs`, `esm`, and
+`iife`):** esbuild lowers **every** top-level `let`, `const` and `class` in a
+bundled graph — in dependencies *and* in the entry — to `var`:
+
+```js
+// source:  export let letThing = 'let-ready';  export const constThing = 'const-ready';  export class C {}
+// emitted: var letThing = "let-ready";         var constThing = "const-ready";           var C = class {};
+```
+
+Running the emitted bundle, a pre-initializer read prints `undefined undefined
+undefined` and exits 0. Running the **same sources unbundled**, in the module goal,
+throws `ReferenceError: Cannot access 'letThing' before initialization` and exits 1.
+
+**So a flat bundle has no top-level TDZ at all.** And that is a real seam:
+
+> A game author develops multi-file code and runs it under **Boa's runtime module
+> loader** — the module goal, with real TDZ. A cyclic read of a `const` export
+> throws there. They then **bundle for ship**, and both engines execute a flat
+> script where the same read silently yields `undefined`. The behaviour changes
+> between the machine they developed on and the device they ship to, and nothing
+> in the toolchain says so.
+
+This is not a divergence *between the two engines* — Boa and JSC agree perfectly on
+the bundle. It is a divergence between the **development path and the shipped
+artifact**, which is a class the two-engine parity strategy was never designed to
+catch, and which candidate D introduces by construction.
+
+The parity fixture now pins **both halves** on one line, so neither can drift:
+
+```
+bundle:flat:tdz-erasure:source-lexical=ReferenceError,ReferenceError,ReferenceError:shipped-bundle=undefined,undefined,undefined:initialized=let-ready,const-ready,function
+```
+
+and the README states the consequence for authors: **do not rely on TDZ or on
+cyclic-initialisation errors — they exist while you develop and are gone in what
+you ship.** Prefer acyclic module graphs; a cycle that "works" under the bundle may
+be reading `undefined` where the module goal would have stopped you.
+
+**Third strike, same pitch.** §10 caught a bundler claim asserted from memory. The
+fix for §10 was itself a bundler claim asserted from one insufficient probe. This
+was a bundler claim asserted from *neither* — nobody ran esbuild on a `const` at
+all. The rule has now cost three findings in one block: **when a claim is about what
+some other system does, run that system, and vary the input.**

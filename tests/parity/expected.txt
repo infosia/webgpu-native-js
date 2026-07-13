@@ -1,20 +1,18 @@
 bundle:flat:esm:b saw a = undefined
 bundle:flat:esm:a saw b = b-ready
 bundle:flat:esm:entry a-ready b-ready
-bundle:flat:order:shared,left,right,b,a,entry
-bundle:flat:evaluate-once:true:1:shared,shared
 bundle:flat:throw:hoisted-function:true:1:Error:flat bundle failure
-bundle:flat:tdz:ReferenceError,ReferenceError:let-ready,const-ready
+bundle:flat:tdz-erasure:source-lexical=ReferenceError,ReferenceError,ReferenceError:shipped-bundle=undefined,undefined,undefined:initialized=let-ready,const-ready,function
 bundle:cjs:memoised:true:1:shared,shared
 bundle:cjs:circle:a-ready,b-ready,b-ready,a-initialising
 bundle:cjs:throw:rerun:true:new-error:true:2:Error:cjs module failure 1:Error:cjs module failure 2
-bundle:cjs:order:entry,left,shared,right,circle-a,circle-b,throw-chain,throws,throws
+bundle:cjs:order:left,shared,right,circle-a,circle-b,entry,throw-chain,throws,throws
 bundle:esm:circle:b-saw-a:undefined
 bundle:esm:circle:a-saw-b:b-ready
 bundle:esm:circle:entry:a-ready,b-ready
 bundle:esm:memoised:true:1:shared,shared
 bundle:esm:throw:same-error:true:evaluate-once:true:1:Error:esm module failure
-bundle:esm:order:shared,left,right,b,a,entry,throws
+bundle:esm:order:entry,shared,left,right,b,a,throws
 namespace:GPUBufferUsage:object:true
 namespace:GPUBufferUsage:VERTEX:32
 namespace:GPUBufferUsage:readonly:true
