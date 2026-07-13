@@ -36,6 +36,13 @@ QuickJS on this binding's module loader and shims.
 5. **Throughput**: ~102 cases/second on the unittests suite (interpreter,
    debug build). Sizing note for Phase B: a 10k-case validation suite ≈
    ~2 minutes at this rate — CI-viable; measure again on the real suite.
+   **Measured on the real suite (2026-07-13, Phase D):** 23,305 cases in
+   **~4 minutes** on yawgpu Noop, release build, ~95 cases/second — the Phase-A
+   estimate held. Six consecutive runs, identical counts, exit 0 each time. The
+   Dawn oracle run of the same suite is several times slower (real GPU); its
+   `--timeout-secs` must be raised well past the runner's 300 s default, and a
+   default-timeout kill reports as an ordinary failure, which is a trap worth
+   knowing about.
 
 ### Pins
 

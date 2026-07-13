@@ -74,6 +74,42 @@ A slice is the smallest unit of dispatchable work. Depending on the phase:
 | Engine-agnostic | `cargo test -p webgpu-native-js-core` with **no** backend feature and `WEBGPU_NATIVE_JS_BACKEND_LIB_DIR` **unset** | both |
 | JSC (Tier 1, Apple) | `cargo test -p javascriptcore-adapter` (no feature flag — `jsc` is default since the 2026-07-10 promotion; also runs inside the workspace gate on macOS) | both |
 | Dual-engine | the slice's `.js` conformance script under **both** engines, identical expected output — concretely, the parity suite (`tests/parity/`, block 08): byte-identical, both adapters, every run | Claude |
+| CTS (local, not CI) | `cts-runner --cts-path <built-cts> --suite tools/cts-runner/suites/validation-core.txt --expectations tools/cts-runner/expectations.txt --timeout-secs 1200` — **exit code 0**, on yawgpu | Claude, every slice that touches JS-visible behaviour |
+| CTS oracle (gated, real GPU) | the same suite built `--no-default-features --features backend-dawn`, against a local Dawn — see "The oracle protocol" in CLAUDE.md | Claude, before a slice that extends the API surface lands |
+
+**There is no hosted CI, by owner decision (2026-07-13).** The gates above are
+run locally and are no less binding for it. A hosted CI job would need two things
+the repository deliberately does not contain — a *built* WebGPU CTS checkout
+(`npm ci && npm run standalone`) and a backend dynamic library — so wiring one
+means solving a distribution problem that buys nothing the local gate does not
+already give. Revisit if that changes.
+
+**The CTS gate keys on the process exit code, never on grepping the summary.**
+A runner that dies by signal prints no summary at all (block 09's deletion lens:
+a crate that aborts contributes *no* `test result:` line, and a grep-based verdict
+calls the run cleaner than it is). The runner's own contract is the same: exit 0
+means every selected case passed or matched its recorded expectation.
+
+**Suite growth economy — add a line, run, triage.** Growing CTS coverage is
+deliberately cheap and deliberately not automatic:
+1. Add one query line to `tools/cts-runner/suites/validation-core.txt`.
+2. Run the suite. Read the failures.
+3. Triage each: a **binding** bug is fixed; a **backend** gap is catalogued in
+   `specs/tracking/backend-deltas.md` and recorded in `expectations.txt` *with its
+   reason*; an **engine** gap is catalogued in the engine's block.
+4. A line only lands green. Never add a query and an expectation in the same
+   breath without having established which of the three it is — that is how a
+   binding bug gets filed as a backend gap and disappears.
+
+An expectation's **reason is a claim with an expiry date**. Two of them went stale
+within a day of each other, and a tracking record turned out to be simply false.
+Re-read the reasons against the code before trusting them.
+
+**Anything you measure across more than one run, run from a COPIED binary.**
+`target/release/<bin>` is shared mutable state: a later `cargo build` — even a
+successful one, even for a different backend — will replace it underneath a
+running loop. This has produced confident, stable-looking numbers that measured
+nothing, three times. Copy the binary to a fixed path and run the copy.
 
 **The engine-agnostic gate is not optional.** `core/` depends on
 `webgpu-native-js-ffi` for its `bindgen` types (block 01 → R1a) but must compile
