@@ -1454,3 +1454,120 @@ the root transform-error message asserted, the origin map no longer
 accumulates, and the rejection-matching caveat documented. QuickJS-first is
 the recorded posture (JSC's C API has no module loader). Suites: quickjs 76,
 workspace 302, all exit 0. The TS CTS runner's first brick is in place.
+
+## Q11 — Can JavaScriptCore be given real ES modules? (block 16, Phase 1)
+
+**Answered 2026-07-13, against the Xcode SDK on macOS. Decision: NO — candidate D
+(build-time bundling). Trigger: D4 (the only path is non-public API).**
+
+Written down *before* the implementation, per L13.
+
+### L-Q1 — Does the public C API have any module entry point? **No. M4 confirmed.**
+
+The JavaScriptCore framework's public C headers are `JSBase.h`, `JSContextRef.h`,
+`JSObjectRef.h`, `JSStringRef.h`, `JSStringRefCF.h`, `JSTypedArray.h`,
+`JSValueRef.h`. Searched exhaustively: **zero** `JS_EXPORT` declarations matching
+`module` in any of them. `JSEvaluateScript` evaluates a *script*; nothing
+evaluates a *module*. Block 12 → M4 was right about the fact, and this is the
+citation it lacked.
+
+### L-Q2 — What does the Objective-C API expose? **The bridge, and nothing to bridge to.**
+
+This is the finding, and it is sharper than expected.
+
+| Symbol | Public header? | Note |
+|---|---|---|
+| `+[JSContext contextWithJSGlobalContextRef:]` | **YES** — `JSContext.h` | The C→ObjC bridge exists and is public. |
+| `@property (readonly) JSGlobalContextRef` | **YES** — `JSContext.h` | The reverse direction, also public. |
+| `-[JSContext evaluateScript:]` / `:withSourceURL:` | YES — `JSContext.h` | Evaluates a **script**. The only evaluation methods there are. |
+| `JSScript` (the module-capable script object) | **NO** | Appears in the SDK **only as a bare forward declaration** — `@class JSScript, JSVirtualMachine, JSValue, JSContext;` (`JSContext.h:34`). **No `JSScript.h` exists in either SDK.** Nothing anywhere declares its interface. |
+| `JSContext.moduleLoaderDelegate` | **NO** | Absent from every header in both SDKs. |
+| `-[JSContext evaluateJSScript:]` | **NO** | Absent from every header in both SDKs. |
+| `kJSScriptTypeModule` | **NO** | Absent from every header in both SDKs. |
+
+Verified against **both** `xcrun --sdk macosx` and `xcrun --sdk iphoneos` — iOS is
+the ship target, so a macOS-only answer would have been worthless.
+
+**And yet the symbol ships.** The SDK's `JavaScriptCore.tbd` advertises exactly
+five Objective-C classes — `JSContext`, `JSManagedValue`, `JSScript`, `JSValue`,
+`JSVirtualMachine`. `JSScript` **links**. Its interface is simply not published.
+
+That is the definition of **SPI**: the code is there, the API is not. Which means
+the module API is reachable *only* through non-public API — and L6 settles that
+without further argument: *"Private JavaScriptCore API is an App Store rejection
+risk and is not a supportable foundation for a shipping iOS product. If a module
+symbol is found that is not in a public SDK header, that is a finding to record,
+not a path to take."*
+
+### L-Q3 — The bridge spike: **not built, and the reason is the finding.**
+
+The block made this spike the decisive experiment, on the assumption that the ObjC
+module API was public and the open question was whether the bridge preserved our
+C-created custom global object (`JSGlobalContextCreate(global_object_class)` —
+`imp.rs`:890).
+
+**The bridge is public and would almost certainly work. There is nothing on the
+other side of it.** A spike would have to call SPI to reach a module at all — and
+whatever it returned, L6 forbids shipping it, so the experiment could not change
+the decision. Building it would be padding an investigation whose answer is
+already in the headers. L2 says the null result is a first-class outcome and *"do
+not strain to make the ObjC path work because 'implement' appeared in the
+assignment"*; L10 says the spike is throwaway, not an end in itself.
+
+**This is a deviation from the block's exit criterion 2**, which asked for the
+spike to exist and run. Recording it as a deviation rather than quietly skipping
+it: the criterion was written to force an unambiguous answer to "can a module see
+the custom global", and the SDK answered a *prior* question — "can we make a
+module at all, publicly" — with no. The prior question dominates.
+
+### L-Q4, L-Q5, L-Q6, L-Q8 — **moot, and stated so rather than guessed.**
+
+The delegate's async model (L-Q4), the cost of an Objective-C dependency (L-Q5),
+the OS floor it would impose (L-Q6), and its error channel (L-Q8) are all
+questions *about candidate A*. Candidate A is dead on L-Q2. Answering them would
+be fiction.
+
+Two consequences worth stating explicitly:
+
+- **No OS floor is imposed by this block.** L19 (record the deployment floor)
+  applies only if §6 ships. It did not. The project still has no recorded
+  deployment target, and this block did not force one to exist — contrary to what
+  §4's L-Q6 anticipated.
+- **The JSC adapter stays pure C FFI.** No Objective-C dependency, no `objc2`
+  crate, no new kind of dependency in the adapter (L3's last row), and no risk to
+  the `aarch64-apple-ios` cross-compile that block 06 just established.
+
+### L-Q7 — Dynamic `import()` and `import.meta`: **out of reach for game code, both engines.**
+
+Under candidate D the game's code is a single script on both engines. Runtime ES
+modules — including `import()` and `import.meta` — remain a **Boa-only,
+development-tooling** capability (the CTS runner uses them). Game code must not
+rely on them. That is now a documented parity fact, not an omission.
+
+### L-Q9 — Corroboration for candidate D.
+
+React Native's long-standing iOS architecture is the precedent: Metro bundles a
+multi-file JavaScript application into a **single script**, which is handed to
+JavaScriptCore. A shipping product at scale has run exactly this shape for years.
+
+Per L-Q9's own instruction, this is *corroboration only* — candidate D stands on
+its own cost (zero new code, zero new dependencies, zero new OS floor) and would
+have been viable regardless.
+
+### The decision (L11 / L12)
+
+**D4 fired: the only viable path to JSC modules is non-public API.** Candidate A
+is therefore disqualified by the decision rule, without any of D1–D3 needing to be
+tested. Candidate B was rejected in advance (L6). Candidate C is rejected
+regardless of evidence (L7) — hand-rolled module semantics would give the two
+engines *different* module behaviour and convert a visible gap into an invisible
+seam, which is strictly worse.
+
+**Candidate D — build-time bundling — is selected.** Both engines execute the
+identical single script; parity is exact **by construction** rather than by
+verification. Phase 2D (§7) implements it.
+
+**The gap block 15 §8 surfaced is now closed as a decision, not as code:** Boa has
+modules and JavaScriptCore has none, this is permanent for as long as the module
+API stays SPI, and the answer for game code is that game code does not use runtime
+modules on either engine.
