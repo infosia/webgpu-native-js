@@ -5085,6 +5085,7 @@ pub fn device_create_command_encoder<E: JsEngine + 'static>(
         state: Arc::new(Mutex::new(CommandEncoderState {
             encoder,
             ended: false,
+            locked: false,
             pending_validation_error: None,
             error_sink,
         })),

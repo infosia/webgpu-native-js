@@ -303,6 +303,30 @@
         });
     }
 
+    function runMappedRangeOverlap() {
+        var buffer = device.createBuffer({ size: 16, usage: 1 });
+        var overlap;
+        return buffer.mapAsync(1, 0, 16).then(function () {
+            buffer.getMappedRange(0, 8);
+            overlap = caught(function () {
+                buffer.getMappedRange(4, 4);
+            });
+            if (overlap === null || overlap.name !== "OperationError") {
+                throw new Error("overlapping mapped range did not throw OperationError");
+            }
+
+            buffer.getMappedRange(8, 0);
+            buffer.getMappedRange(8, 8);
+            buffer.unmap();
+            return buffer.mapAsync(1, 0, 16);
+        }).then(function () {
+            buffer.getMappedRange(0, 8);
+            buffer.unmap();
+            buffer.destroy();
+            log("mapping:overlap:" + overlap.name + ":reset");
+        });
+    }
+
     function runWriteBufferRoundTrip() {
         var source = device.createBuffer({ size: 12, usage: 12 });
         var destination = device.createBuffer({ size: 12, usage: 9 });
@@ -412,6 +436,32 @@
             log("depthSlice:3d-zero:" + (error === null ? "null" : error.constructor.name));
             texture2d.destroy();
             texture3d.destroy();
+        });
+    }
+
+    function runLockedEncoderValidation() {
+        var encoder = device.createCommandEncoder();
+        var firstPass = encoder.beginComputePass();
+        device.pushErrorScope("validation");
+        var secondPassError = caught(function () {
+            encoder.beginComputePass();
+        });
+        if (secondPassError !== null) {
+            throw new Error("second pass while locked threw: " + secondPassError);
+        }
+        firstPass.end();
+        var finishError = caught(function () {
+            encoder.finish();
+        });
+        if (finishError !== null) {
+            throw new Error("invalid locked encoder finish threw: " + finishError);
+        }
+        return device.popErrorScope().then(function (error) {
+            if (!(error instanceof GPUValidationError)) {
+                throw new Error("locked encoder finish did not emit validation");
+            }
+            log("encoder:second-pass-while-open:" +
+                error.constructor.name + ":returned");
         });
     }
 
@@ -1442,6 +1492,7 @@
             .then(runBindGroupRetention)
             .then(runRenderPipelineValidation)
             .then(runRenderPassAndCopyValidation)
+            .then(runLockedEncoderValidation)
             .then(runDepthSliceParity)
             .then(runRenderBundles)
             .then(runIndirectCommands)
@@ -1546,6 +1597,7 @@
                     delete adapterPrototype.then;
                     log("tick:" + order.join(","));
                     runMappingDetach()
+                        .then(runMappedRangeOverlap)
                         .then(runWriteBufferRoundTrip)
                         .then(finishConformance)
                         .catch(fail);

@@ -1140,6 +1140,7 @@ fn emit_create(output: &mut String, standard: &StandardInterface<'_>) -> Result<
         let _ = writeln!(output, "            {},", standard.handle_field);
         output.push_str("            ended: false,\n");
         if standard.interface.idl_name.as_deref() == Some("GPUCommandEncoder") {
+            output.push_str("            locked: false,\n");
             output.push_str("            pending_validation_error: None,\n");
         }
         output.push_str("            error_sink,\n        })),\n");

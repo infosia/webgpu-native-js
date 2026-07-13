@@ -7846,6 +7846,91 @@ mod tests {
     }
 
     #[test]
+    fn get_mapped_range_rejects_only_overlapping_tracked_ranges_and_resets_on_remap() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let cases = [
+            ((8.0, 0.0), (8.0, 8.0), true, "empty at same start"),
+            ((16.0, 0.0), (8.0, 8.0), true, "empty at end"),
+            ((8.0, 8.0), (8.0, 0.0), true, "empty at same start reversed"),
+            ((8.0, 8.0), (16.0, 0.0), true, "empty at end reversed"),
+            ((0.0, 8.0), (8.0, 8.0), true, "adjacent non-empty ranges"),
+            ((16.0, 20.0), (24.0, 0.0), false, "empty inside range"),
+            ((24.0, 0.0), (16.0, 20.0), false, "range around empty"),
+            ((16.0, 20.0), (8.0, 20.0), false, "partial overlap"),
+            ((0.0, 80.0), (16.0, 20.0), false, "contained range"),
+        ];
+
+        for (first, second, succeeds, label) in cases {
+            let desc = descriptor(&rt, &[("size", rt.number(80.0)), ("usage", rt.number(1.0))]);
+            let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("buffer");
+            let promise = buffer_map_async::<Engine>(cx, buffer, &[rt.number(1.0)])
+                .expect("mapAsync promise");
+            rt.env
+                .settlements()
+                .drain::<Engine>(cx)
+                .expect("map settlement");
+            assert!(matches!(rt.promise_result(promise), Some(Ok(_))), "{label}");
+
+            buffer_get_mapped_range::<Engine>(
+                cx,
+                buffer,
+                &[rt.number(first.0), rt.number(first.1)],
+            )
+            .expect("first range");
+            let calls_before_second =
+                GPU_STATE.with(|state| state.borrow().const_mapped_range_calls);
+            let second_result = buffer_get_mapped_range::<Engine>(
+                cx,
+                buffer,
+                &[rt.number(second.0), rt.number(second.1)],
+            );
+            if succeeds {
+                second_result.expect(label);
+                assert_eq!(
+                    GPU_STATE.with(|state| state.borrow().const_mapped_range_calls),
+                    calls_before_second + 1,
+                    "{label}: disjoint range must reach the permissive backend"
+                );
+            } else {
+                assert_eq!(
+                    second_result.expect_err(label),
+                    "OperationError: mapped range overlaps an existing mapped range"
+                );
+                assert_eq!(
+                    GPU_STATE.with(|state| state.borrow().const_mapped_range_calls),
+                    calls_before_second,
+                    "{label}: overlap must be rejected before the permissive backend"
+                );
+            }
+            buffer_unmap::<Engine>(cx, buffer, &[]).expect("unmap");
+        }
+
+        let desc = descriptor(&rt, &[("size", rt.number(80.0)), ("usage", rt.number(1.0))]);
+        let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("remap buffer");
+        for map_index in 0..2 {
+            let promise =
+                buffer_map_async::<Engine>(cx, buffer, &[rt.number(1.0)]).expect("remap promise");
+            rt.env
+                .settlements()
+                .drain::<Engine>(cx)
+                .expect("remap settlement");
+            assert!(matches!(rt.promise_result(promise), Some(Ok(_))));
+            buffer_get_mapped_range::<Engine>(cx, buffer, &[rt.number(16.0), rt.number(20.0)])
+                .expect("same range is reusable in a new mapping");
+            buffer_unmap::<Engine>(cx, buffer, &[]).expect("remap unmap");
+            let tracked = Engine::payload(cx, buffer, crate::GPU_BUFFER_CLASS)
+                .and_then(|payload| payload.downcast_ref::<BufferPayload<Engine>>())
+                .and_then(|payload| payload.state().lock().ok().map(|state| state.ranges.len()))
+                .expect("tracked range count");
+            assert_eq!(tracked, 0, "mapping {map_index} must clear tracked ranges");
+        }
+        release_device_held_values(&rt, cx, device);
+    }
+
+    #[test]
     fn a26_arraybuffer_len_returns_none_for_non_arraybuffer() {
         let rt = runtime();
         let cx = rt.context();
@@ -8006,6 +8091,86 @@ mod tests {
         queue_submit::<Engine>(cx, queue, &[rt.set_like(&[invalid_buffer])])
             .expect("invalid command buffer submit returns normally");
         assert_validation_scope_error(&rt, cx, device, "GPUCommandBuffer is invalid");
+        release_device_held_values(&rt, cx, device);
+    }
+
+    #[test]
+    fn second_pass_while_locked_invalidates_encoder_and_reports_at_finish() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+
+        for first_is_render in [false, true] {
+            for second_is_render in [false, true] {
+                let encoder =
+                    device_create_command_encoder::<Engine>(cx, device, &[]).expect("encoder");
+                let first = if first_is_render {
+                    let descriptor = descriptor(&rt, &[("colorAttachments", rt.set_like(&[]))]);
+                    crate::command_encoder_begin_render_pass::<Engine>(cx, encoder, &[descriptor])
+                        .expect("first render pass")
+                } else {
+                    crate::command_encoder_begin_compute_pass::<Engine>(cx, encoder, &[])
+                        .expect("first compute pass")
+                };
+
+                device_push_error_scope::<Engine>(cx, device, &[rt.string("validation")])
+                    .expect("begin scope");
+                let second = if second_is_render {
+                    let descriptor = descriptor(&rt, &[("colorAttachments", rt.set_like(&[]))]);
+                    crate::command_encoder_begin_render_pass::<Engine>(cx, encoder, &[descriptor])
+                        .expect("invalid second render pass")
+                } else {
+                    crate::command_encoder_begin_compute_pass::<Engine>(cx, encoder, &[])
+                        .expect("invalid second compute pass")
+                };
+                assert_null_scope(&rt, cx, device);
+
+                device_push_error_scope::<Engine>(cx, device, &[rt.string("validation")])
+                    .expect("invalid pass end scope");
+                if second_is_render {
+                    crate::render_pass_end::<Engine>(cx, second, &[])
+                        .expect("invalid render pass end returns normally");
+                    assert_validation_scope_error(
+                        &rt,
+                        cx,
+                        device,
+                        "GPURenderPassEncoder is invalid",
+                    );
+                } else {
+                    crate::compute_pass_end::<Engine>(cx, second, &[])
+                        .expect("invalid compute pass end returns normally");
+                    assert_validation_scope_error(
+                        &rt,
+                        cx,
+                        device,
+                        "GPUComputePassEncoder is invalid",
+                    );
+                }
+
+                if first_is_render {
+                    crate::render_pass_end::<Engine>(cx, first, &[]).expect("end first render");
+                } else {
+                    crate::compute_pass_end::<Engine>(cx, first, &[]).expect("end first compute");
+                }
+
+                device_push_error_scope::<Engine>(cx, device, &[rt.string("validation")])
+                    .expect("finish scope");
+                let command_buffer = command_encoder_finish::<Engine>(cx, encoder, &[])
+                    .expect("invalid finish returns a command buffer");
+                assert_validation_scope_error(
+                    &rt,
+                    cx,
+                    device,
+                    "GPUCommandEncoder was used while locked by an active pass",
+                );
+                let command_state = crate::command_buffer_state::<Engine>(cx, command_buffer)
+                    .expect("command buffer state");
+                let command_state = command_state.lock().expect("command buffer lock");
+                assert!(command_state.invalid);
+                assert!(command_state.command_buffer.is_null());
+            }
+        }
         release_device_held_values(&rt, cx, device);
     }
 

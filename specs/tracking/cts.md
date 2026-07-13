@@ -624,7 +624,25 @@ been hiding.*
   `wgpuBufferGetMappedRange`, which returns NULL on yawgpu (so we threw by
   accident) and succeeds on Dawn (so we did not).
 
-Both are open; they are the next slice.
+**Both are now fixed, and the fix was confirmed on Dawn** (it cannot be confirmed
+on yawgpu — neither bug is observable there):
+
+- `getMappedRange` now tracks the ranges it has handed out for the current mapping
+  and throws `OperationError` on overlap, per the IDL (this one *is* a synchronous
+  throw, not a device error — the distinction this project keeps getting wrong).
+  Non-overlap is `a.start >= b.end || b.start >= a.end`, so ranges that merely touch
+  are fine and an empty range inside a non-empty one is not. `unmap()` clears the
+  bookkeeping; a re-`mapAsync` starts clean.
+- Beginning a second pass while one is open now invalidates the command encoder and
+  surfaces a `GPUValidationError` at `finish()` (which returns an invalid command
+  buffer) — extending the encoder-state machinery from 45d18fc rather than inventing
+  a parallel one.
+
+**C1 re-run on Dawn: 23,305 pass / 0 fail.** The suite is now zero-fail on *both*
+backends. (The run still exits nonzero on Dawn, and correctly so: the 13
+unexpected-passes are the Noop-based expectations that Dawn passes. That is the
+arbitration signal, not a regression — the runner has no backend-conditional
+expectation syntax, and adding one would hide exactly the thing we want shouted.)
 
 ### C2 — the first `api,operation` families ever run, and what they cost us
 
@@ -672,6 +690,47 @@ dimension and per-mip depth.
 Recorded as a **codegen/ABI delta** (`codegen-deltas.md`): wherever a C "undefined"
 sentinel lies inside the range of its IDL type, the binding — not the backend —
 owns that validation. `depthSlice` is unlikely to be the only such member.
+
+### Does the Boa GC crash reach the curated suite? Measured: no, in 6/6 runs
+
+The coding agent reported one `exit 134` on the curated suite, which would have
+changed the crash's severity from "a CTS coverage problem" to "the gate is flaky".
+Measured with a **pinned binary copy** (see the trap below): **6 consecutive clean
+runs**, 23,305 / 0 every time.
+
+State it precisely, because the two claims are different:
+
+- The crash **is** confirmed in `state,device_lost,*` — 2 aborts in 3 runs of the
+  *unmodified HEAD* binary. That family stays out of the suite.
+- The curated suite is **not proven crash-free**; it is *unreproduced* in 6 clean
+  runs. The one contrary report came from an agent that rebuilds
+  `target/release/cts-runner` constantly, so it is exactly as vulnerable to the
+  binary-contamination trap below as the planner turned out to be. Treat it as
+  unexplained, not as refuted, and re-measure if it recurs.
+
+### A third instance of the same trap — and it is about tooling, not luck
+
+While measuring how often the Boa GC crash hits the curated suite, the planner
+launched a five-run loop against `target/release/cts-runner` and then, *while the
+loop was still running*, rebuilt that same path with `--features backend-dawn` to
+do an oracle run. Runs 2–5 therefore executed the **Dawn** binary against yawgpu's
+library directory and produced a confident, stable-looking "16 failures, 1
+unexpected-pass" — a number that measured nothing.
+
+This is the **third** appearance of the same trap in this project:
+
+1. A failing `cargo build` left the previous binary in place, and three B-4c
+   conclusions were drawn from it.
+2. A nondeterministic crash was attributed to the slice that had just landed,
+   before the baseline was re-run (it aborted 2-of-3 at HEAD).
+3. This one: a *successful* build silently replaced the binary a running
+   measurement depended on.
+
+The common shape is that **`target/release/<bin>` is shared mutable state**, and a
+measurement that spans time does not own it. The rule that follows is mechanical,
+not a matter of care: **copy the binary you are measuring to a fixed path and run
+that copy.** Every multi-run or backgrounded measurement in this file from here on
+does so.
 
 ### Acceptance
 

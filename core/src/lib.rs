@@ -2415,6 +2415,7 @@ unsafe impl Send for RenderBundlePayload {}
 struct CommandEncoderState {
     encoder: WGPUCommandEncoder,
     ended: bool,
+    locked: bool,
     pending_validation_error: Option<String>,
     error_sink: Arc<dyn DeviceErrorSink>,
 }
@@ -2704,7 +2705,7 @@ unsafe impl Send for RenderPassState {}
 #[derive(Clone, Copy)]
 struct MappedRange<E: JsEngine> {
     value: E::Value,
-    _offset: usize,
+    offset: usize,
     size: usize,
     /// The one native pointer requested for this JS range. BufferMapping.md
     /// guarantees that it remains valid until unmap; every detach/copy-back path
@@ -4581,6 +4582,16 @@ pub fn buffer_get_mapped_range<E: JsEngine + 'static>(
                 .filter(|len| *len <= u32::MAX as usize)
                 .ok_or_else(|| E::operation_error(cx, "mapped range size is unsupported"))?,
         };
+        if state
+            .ranges
+            .iter()
+            .any(|range| mapped_ranges_overlap(offset, size, range.offset, range.size))
+        {
+            return Err(E::operation_error(
+                cx,
+                "mapped range overlaps an existing mapped range",
+            ));
+        }
         let ptr = mapped_range_ptr::<E>(cx, state, offset, size);
         if ptr.is_null() {
             return Err(E::operation_error(
@@ -4595,7 +4606,7 @@ pub fn buffer_get_mapped_range<E: JsEngine + 'static>(
         let tracked = E::duplicate_value(cx, value);
         state.ranges.push(MappedRange {
             value: tracked,
-            _offset: offset,
+            offset,
             size,
             native_ptr: ptr,
             map_mode: state.map_mode,
@@ -6359,14 +6370,42 @@ pub fn command_encoder_begin_render_pass<E: JsEngine + 'static>(
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
     let parent = command_encoder_state::<E>(cx, this)?;
-    let (encoder, error_sink, finished) = {
+    let (encoder, error_sink, finished, locked) = {
         let state = parent
             .lock()
             .map_err(|_| E::operation_error(cx, "GPUCommandEncoder state is poisoned"))?;
-        (state.encoder, Arc::clone(&state.error_sink), state.ended)
+        (
+            state.encoder,
+            Arc::clone(&state.error_sink),
+            state.ended,
+            state.locked,
+        )
     };
     if finished {
         error_sink.generate_validation_error("GPUCommandEncoder is finished".to_owned());
+        let _ = E::register_class(cx, render_pass_encoder_class::<E>())?;
+        return E::new_instance(
+            cx,
+            GPU_RENDER_PASS_ENCODER_CLASS,
+            Box::new(RenderPassEncoderPayload {
+                state: Arc::new(Mutex::new(RenderPassState {
+                    pass: ptr::null_mut(),
+                    ended: false,
+                    parent,
+                    error_sink,
+                })),
+                label: Mutex::new(String::new()),
+            }),
+        );
+    }
+    if locked {
+        parent
+            .lock()
+            .map_err(|_| E::operation_error(cx, "GPUCommandEncoder state is poisoned"))?
+            .pending_validation_error
+            .get_or_insert_with(|| {
+                "GPUCommandEncoder was used while locked by an active pass".to_owned()
+            });
         let _ = E::register_class(cx, render_pass_encoder_class::<E>())?;
         return E::new_instance(
             cx,
@@ -6400,6 +6439,10 @@ pub fn command_encoder_begin_render_pass<E: JsEngine + 'static>(
                 "GPURenderPassColorAttachment.depthSlice must be provided only for 3d views and be less than the mip depth".to_owned()
             });
     }
+    parent
+        .lock()
+        .map_err(|_| E::operation_error(cx, "GPUCommandEncoder state is poisoned"))?
+        .locked = true;
     let pass = unsafe {
         (E::environment(cx).gpu().command_encoder_begin_render_pass)(
             encoder,
@@ -6407,6 +6450,10 @@ pub fn command_encoder_begin_render_pass<E: JsEngine + 'static>(
         )
     };
     if pass.is_null() {
+        parent
+            .lock()
+            .map_err(|_| E::operation_error(cx, "GPUCommandEncoder state is poisoned"))?
+            .locked = false;
         return Err(E::operation_error(
             cx,
             "wgpuCommandEncoderBeginRenderPass returned null",
@@ -6444,14 +6491,42 @@ pub fn command_encoder_begin_compute_pass<E: JsEngine + 'static>(
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
     let parent = command_encoder_state::<E>(cx, this)?;
-    let (encoder, error_sink, finished) = {
+    let (encoder, error_sink, finished, locked) = {
         let state = parent
             .lock()
             .map_err(|_| E::operation_error(cx, "GPUCommandEncoder state is poisoned"))?;
-        (state.encoder, Arc::clone(&state.error_sink), state.ended)
+        (
+            state.encoder,
+            Arc::clone(&state.error_sink),
+            state.ended,
+            state.locked,
+        )
     };
     if finished {
         error_sink.generate_validation_error("GPUCommandEncoder is finished".to_owned());
+        let _ = E::register_class(cx, compute_pass_encoder_class::<E>())?;
+        return E::new_instance(
+            cx,
+            GPU_COMPUTE_PASS_ENCODER_CLASS,
+            Box::new(ComputePassEncoderPayload {
+                state: Arc::new(Mutex::new(ComputePassState {
+                    pass: ptr::null_mut(),
+                    ended: false,
+                    parent,
+                    error_sink,
+                })),
+                label: Mutex::new(String::new()),
+            }),
+        );
+    }
+    if locked {
+        parent
+            .lock()
+            .map_err(|_| E::operation_error(cx, "GPUCommandEncoder state is poisoned"))?
+            .pending_validation_error
+            .get_or_insert_with(|| {
+                "GPUCommandEncoder was used while locked by an active pass".to_owned()
+            });
         let _ = E::register_class(cx, compute_pass_encoder_class::<E>())?;
         return E::new_instance(
             cx,
@@ -6477,6 +6552,10 @@ pub fn command_encoder_begin_compute_pass<E: JsEngine + 'static>(
     let label = native.as_ref().map_or_else(String::new, |native| unsafe {
         string_view_to_owned(native.label)
     });
+    parent
+        .lock()
+        .map_err(|_| E::operation_error(cx, "GPUCommandEncoder state is poisoned"))?
+        .locked = true;
     let pass = unsafe {
         (E::environment(cx).gpu().command_encoder_begin_compute_pass)(
             encoder,
@@ -6484,6 +6563,10 @@ pub fn command_encoder_begin_compute_pass<E: JsEngine + 'static>(
         )
     };
     if pass.is_null() {
+        parent
+            .lock()
+            .map_err(|_| E::operation_error(cx, "GPUCommandEncoder state is poisoned"))?
+            .locked = false;
         return Err(E::operation_error(
             cx,
             "wgpuCommandEncoderBeginComputePass returned null",
@@ -6531,24 +6614,33 @@ pub fn command_encoder_finish<E: JsEngine + 'static>(
     let label = native.as_ref().map_or_else(String::new, |native| unsafe {
         string_view_to_owned(native.label)
     });
-    let (encoder, error_sink, finished, pending_validation_error) = {
+    let (encoder, error_sink, finished, locked, pending_validation_error) = {
         let mut state = state
             .lock()
             .map_err(|_| E::operation_error(cx, "GPUCommandEncoder state is poisoned"))?;
         let finished = state.ended;
+        let locked = state.locked;
         state.ended = true;
+        state.locked = false;
         (
             state.encoder,
             Arc::clone(&state.error_sink),
             finished,
+            locked,
             state.pending_validation_error.take(),
         )
     };
+    let invalid = locked || pending_validation_error.is_some();
     if let Some(message) = pending_validation_error {
         error_sink.generate_validation_error(message);
+    } else if locked {
+        error_sink
+            .generate_validation_error("GPUCommandEncoder is locked by an active pass".to_owned());
     }
     if finished {
         error_sink.generate_validation_error("GPUCommandEncoder is finished".to_owned());
+    }
+    if finished || invalid {
         let _ = E::register_class(cx, command_buffer_class::<E>())?;
         return E::new_instance(
             cx,
@@ -6817,7 +6909,7 @@ pub fn compute_pass_end<E: JsEngine + 'static>(
             .generate_validation_error("GPUComputePassEncoder is ended".to_owned());
         return Ok(E::undefined(cx));
     }
-    let parent = state
+    let mut parent = state
         .parent
         .lock()
         .map_err(|_| E::operation_error(cx, "GPUCommandEncoder state is poisoned"))?;
@@ -6827,6 +6919,21 @@ pub fn compute_pass_end<E: JsEngine + 'static>(
             .generate_validation_error("GPUCommandEncoder is finished".to_owned());
         return Ok(E::undefined(cx));
     }
+    if state.pass.is_null() {
+        state
+            .error_sink
+            .generate_validation_error("GPUComputePassEncoder is invalid".to_owned());
+        drop(parent);
+        state.ended = true;
+        return Ok(E::undefined(cx));
+    }
+    if !parent.locked {
+        state.error_sink.generate_validation_error(
+            "GPUCommandEncoder is not locked by this compute pass".to_owned(),
+        );
+        return Ok(E::undefined(cx));
+    }
+    parent.locked = false;
     drop(parent);
     unsafe { (E::environment(cx).gpu().compute_pass_encoder_end)(state.pass) };
     state.ended = true;
@@ -7200,7 +7307,7 @@ pub fn render_pass_end<E: JsEngine + 'static>(
             .generate_validation_error("GPURenderPassEncoder is ended".to_owned());
         return Ok(E::undefined(cx));
     }
-    let parent = state
+    let mut parent = state
         .parent
         .lock()
         .map_err(|_| E::operation_error(cx, "GPUCommandEncoder state is poisoned"))?;
@@ -7210,6 +7317,21 @@ pub fn render_pass_end<E: JsEngine + 'static>(
             .generate_validation_error("GPUCommandEncoder is finished".to_owned());
         return Ok(E::undefined(cx));
     }
+    if state.pass.is_null() {
+        state
+            .error_sink
+            .generate_validation_error("GPURenderPassEncoder is invalid".to_owned());
+        drop(parent);
+        state.ended = true;
+        return Ok(E::undefined(cx));
+    }
+    if !parent.locked {
+        state.error_sink.generate_validation_error(
+            "GPUCommandEncoder is not locked by this render pass".to_owned(),
+        );
+        return Ok(E::undefined(cx));
+    }
+    parent.locked = false;
     drop(parent);
     unsafe { (E::environment(cx).gpu().render_pass_encoder_end)(state.pass) };
     state.ended = true;
@@ -8386,13 +8508,18 @@ fn live_command_encoder<E: JsEngine + 'static>(
     value: E::Value,
 ) -> Result<Option<WGPUCommandEncoder>, E::Error> {
     let state = command_encoder_state::<E>(cx, value)?;
-    let state = state
+    let mut state = state
         .lock()
         .map_err(|_| E::operation_error(cx, "GPUCommandEncoder state is poisoned"))?;
     if state.ended {
         state
             .error_sink
             .generate_validation_error("GPUCommandEncoder is finished".to_owned());
+        Ok(None)
+    } else if state.locked {
+        state.pending_validation_error.get_or_insert_with(|| {
+            "GPUCommandEncoder was used while locked by an active pass".to_owned()
+        });
         Ok(None)
     } else {
         Ok(Some(state.encoder))
@@ -8426,6 +8553,18 @@ fn live_compute_pass<E: JsEngine + 'static>(
             .generate_validation_error("GPUCommandEncoder is finished".to_owned());
         return Ok(None);
     }
+    if state.pass.is_null() {
+        state
+            .error_sink
+            .generate_validation_error("GPUComputePassEncoder is invalid".to_owned());
+        return Ok(None);
+    }
+    if !parent.locked {
+        state.error_sink.generate_validation_error(
+            "GPUCommandEncoder is not locked by this compute pass".to_owned(),
+        );
+        return Ok(None);
+    }
     Ok(Some(state.pass))
 }
 
@@ -8454,6 +8593,18 @@ fn live_render_pass<E: JsEngine + 'static>(
         state
             .error_sink
             .generate_validation_error("GPUCommandEncoder is finished".to_owned());
+        return Ok(None);
+    }
+    if state.pass.is_null() {
+        state
+            .error_sink
+            .generate_validation_error("GPURenderPassEncoder is invalid".to_owned());
+        return Ok(None);
+    }
+    if !parent.locked {
+        state.error_sink.generate_validation_error(
+            "GPUCommandEncoder is not locked by this render pass".to_owned(),
+        );
         return Ok(None);
     }
     Ok(Some(state.pass))
@@ -8681,6 +8832,24 @@ fn mapped_range_ptr<E: JsEngine>(
     } else {
         unsafe { (E::environment(cx).gpu().buffer_get_mapped_range)(state.buffer, offset, size) }
     }
+}
+
+fn mapped_ranges_overlap(
+    first_offset: usize,
+    first_size: usize,
+    second_offset: usize,
+    second_size: usize,
+) -> bool {
+    let Some(first_end) = first_offset.checked_add(first_size) else {
+        return true;
+    };
+    let Some(second_end) = second_offset.checked_add(second_size) else {
+        return true;
+    };
+    // WebGPU defines disjointness by either range starting at or after the
+    // other's end. Consequently, an empty range at a boundary is disjoint,
+    // while an empty range strictly inside a non-empty range overlaps it.
+    !(first_offset >= second_end || second_offset >= first_end)
 }
 
 fn class_spec_once<E, F>(id: ClassId, init: F) -> &'static ClassSpec<E>
