@@ -1597,24 +1597,16 @@ modules and JavaScriptCore has none, this is permanent for as long as the module
 API stays SPI, and the answer for game code is that game code does not use runtime
 modules on either engine.
 
-### Q11 addendum — L21, and the lesson it cost twice (2026-07-13)
+### Q11 addendum 1 — L21: the bundle fixture's error path (2026-07-13)
 
-The planner review reopened block 16 on a MAJOR: the Phase 2D bundle fixture cached
-a module *before* evaluating its factory and never removed the entry when that
-factory threw, so a second `__require` silently returned **partial exports**. The
-golden had frozen it (`bundle:throw:cached-partial:before-throw`), meaning the next
-person to *fix* the registry would have broken the parity gate and been told they
-were wrong.
+The Phase 2D fixture cached a module before evaluating its factory and did not
+remove the entry when the factory threw, so a second `__require` returned partial
+exports. The golden pinned it (`bundle:throw:cached-partial:before-throw`). The
+fixture's comment claimed the shape emitted by esbuild/Metro; that claim was not
+verified.
 
-The review's diagnosis was right, and its indictment was sharper than the bug:
-**the fixture's comment claimed it was "the shape emitted by bundlers such as
-esbuild and Metro", and that claim was asserted from memory.** Phase 1 had opened
-Apple's headers rather than trust M4 — and then Phase 2 asserted a bundler's
-behaviour from recollection in the very next commit. *The rule about not restating
-from memory does not stop at Apple's headers.*
-
-**So the fix ran a real esbuild.** `esbuild --bundle --format=cjs` over a two-module
-graph whose imported module throws emits:
+Measured. `esbuild --bundle --format=cjs` over a two-module graph whose imported
+module throws emits:
 
 ```js
 var __esm = (fn, res, err) => function __init() {
@@ -1627,41 +1619,28 @@ var __esm = (fn, res, err) => function __init() {
 };
 ```
 
-and running that bundle gives `FIRST → Error: bundled module failure`,
-`SECOND → Error: bundled module failure`. **Partial exports are never handed out.**
+Running that bundle: `FIRST → Error: bundled module failure`,
+`SECOND → Error: bundled module failure`. Partial exports are never handed out.
 
-**And the measurement corrected the review as well.** §10 prescribed *"delete the
-cache entry on throw and assert that a second require re-runs the factory and
-re-throws"*. Real esbuild does **not** re-run the factory — it memoises the error
-and re-throws **the same error object**. That is the ES-module "permanently
-errored" semantic, and the difference is observable: re-running a factory would
-execute its side effects twice.
+§10 prescribed deleting the cache entry and re-running the factory. `__esm` does
+not re-run: it memoises the error and re-throws the same object. Re-running would
+execute the factory's side effects twice.
 
-The fixture now matches the measurement, and pins **both** independent properties,
-because either can regress alone:
+The fixture pins both properties independently:
 
 ```
 bundle:throw:rethrown-same-error:true:Error:bundled module failure   ← same error, re-thrown
 bundle:throw:evaluate-once:true:1                                    ← factory ran exactly ONCE
 ```
 
-The second line is the assertion the review's own prescription would have missed.
+**Rule:** a claim about another system's behaviour requires running that system.
 
-**The lesson, stated once and plainly:** three parties in a row reasoned about a
-bundler's error path from memory — the implementer, the reviewer, and the planner
-who approved the trace and wrote *"real CommonJS behaviour"* into the commit
-message. All three were wrong, in three different ways. **The four-line experiment
-that settled it took under a minute.** When a claim is about what some other
-system *does*, run that system.
+### Q11 addendum 2 — esbuild emits three different artifacts (2026-07-13)
 
-### Q11 addendum 2 — and the fix for L21 was ALSO not right (2026-07-13)
+Addendum 1 probed one input shape. Probing all of them showed the fixture modelled
+a combination esbuild never emits.
 
-Running esbuild once fixed the throw path and left a bigger error standing. Running
-it *properly* — every input shape, not just the one that produced the helper I
-happened to look at — showed the fixture was modelling a bundler artifact that
-**esbuild never emits**.
-
-**Measured, `esbuild --bundle --format=cjs`, one probe per input shape:**
+Measured, `esbuild --bundle --format=cjs`, one probe per input shape:
 
 | Input | What esbuild actually emits |
 |---|---|
@@ -1684,20 +1663,16 @@ is a *different* object; `__esm` → same error re-thrown, factory ran once. (No
 `require()` matches `__commonJS`.) **Neither ever hands out partial exports** — the
 original fixture was wrong against *both*.
 
-**So both prior positions were half-right, and neither noticed.** §10 prescribed
-"delete the cache entry and re-run" — correct for **`__commonJS`**. The planner
-"corrected" it to "memoise the error, do not re-run" — correct for **`__esm`**. Each
-was describing a real bundler, and a *different* one, while arguing about a single
-fixture. The fixture that resulted was a **chimera**: `__commonJS`'s structure with
-`__esm`'s error semantics, a combination esbuild never produces.
+§10's prescription (delete and re-run) is correct for `__commonJS`; addendum 1's
+correction (memoise, do not re-run) is correct for `__esm`. The shipped fixture had
+`__commonJS`'s structure with `__esm`'s error semantics — a combination esbuild does
+not emit.
 
-**And the shape that matters most was not modelled at all.** Block 16's premise is
-*game code authored as ES modules and bundled*. For pure static ESM the real artifact
-is a **flat concatenation with no registry**, and the fixture had no such section —
-the most likely shape of the actual shipped bundle was entirely untested.
+Block 16's premise is game code authored as ES modules and bundled. For static ESM
+the artifact is a flat concatenation with no registry; the fixture had no such
+section.
 
-**The fixture now models all three real shapes**, each faithful to what esbuild
-emits, each stressing something different:
+The fixture now models all three shapes:
 
 - **flat concatenation** — hoisting, evaluation order, and a circular reference
   resolving to `undefined` through hoisting. Reproduces the measured trace exactly
@@ -1713,19 +1688,14 @@ emits, each stressing something different:
 - **`__esm`** — lazy init, memoised error, **same** error re-thrown, factory runs
   **exactly once**.
 
-**The compounded lesson, which is the one worth keeping:** running the experiment
-*once* is not the same as running it *enough*. The first probe answered the question
-that had been asked and hid the question that should have been. When the answer
-depends on an input, vary the input.
+**Rule:** when the answer depends on the input, vary the input.
 
-### Q11 addendum 3 — bundling ERASES top-level TDZ, and that is a dev-vs-ship seam
+### Q11 addendum 3 — bundling erases top-level TDZ (2026-07-14)
 
-Found by block 16's Phase Review (2026-07-14), which caught the fixture asserting
-that a flat bundle preserves temporal-dead-zone semantics. **It does not**, and the
-wrong assertion was hiding a fact that matters to anyone shipping on this project.
+Found by the Phase Review: the flat-ESM fixture section asserted that a flat bundle
+preserves temporal-dead-zone semantics. It does not.
 
-**Measured (esbuild 0.28.1, `--bundle`; identical for `--format=cjs`, `esm`, and
-`iife`):** esbuild lowers **every** top-level `let`, `const` and `class` in a
+Measured (esbuild 0.28.1, `--bundle`; identical for `--format=cjs`, `esm`, `iife`): esbuild lowers **every** top-level `let`, `const` and `class` in a
 bundled graph — in dependencies *and* in the entry — to `var`:
 
 ```js
@@ -1737,33 +1707,20 @@ Running the emitted bundle, a pre-initializer read prints `undefined undefined
 undefined` and exits 0. Running the **same sources unbundled**, in the module goal,
 throws `ReferenceError: Cannot access 'letThing' before initialization` and exits 1.
 
-**So a flat bundle has no top-level TDZ at all.** And that is a real seam:
+A flat bundle therefore has no top-level TDZ.
 
-> A game author develops multi-file code and runs it under **Boa's runtime module
-> loader** — the module goal, with real TDZ. A cyclic read of a `const` export
-> throws there. They then **bundle for ship**, and both engines execute a flat
-> script where the same read silently yields `undefined`. The behaviour changes
-> between the machine they developed on and the device they ship to, and nothing
-> in the toolchain says so.
+**Consequence.** Development against Boa's runtime module loader (module goal, real
+TDZ) and the shipped flat bundle disagree: a cyclic read of a `const` export throws
+in the former and yields `undefined` in the latter. This is not an engine divergence
+— Boa and JSC agree on the bundle — but a development-vs-shipped divergence, which
+candidate D introduces by construction and which the two-engine parity strategy does
+not cover.
 
-This is not a divergence *between the two engines* — Boa and JSC agree perfectly on
-the bundle. It is a divergence between the **development path and the shipped
-artifact**, which is a class the two-engine parity strategy was never designed to
-catch, and which candidate D introduces by construction.
-
-The parity fixture now pins **both halves** on one line, so neither can drift:
+The parity golden pins both halves on one line:
 
 ```
 bundle:flat:tdz-erasure:source-lexical=ReferenceError,ReferenceError,ReferenceError:shipped-bundle=undefined,undefined,undefined:initialized=let-ready,const-ready,function
 ```
 
-and the README states the consequence for authors: **do not rely on TDZ or on
-cyclic-initialisation errors — they exist while you develop and are gone in what
-you ship.** Prefer acyclic module graphs; a cycle that "works" under the bundle may
-be reading `undefined` where the module goal would have stopped you.
-
-**Third strike, same pitch.** §10 caught a bundler claim asserted from memory. The
-fix for §10 was itself a bundler claim asserted from one insufficient probe. This
-was a bundler claim asserted from *neither* — nobody ran esbuild on a `const` at
-all. The rule has now cost three findings in one block: **when a claim is about what
-some other system does, run that system, and vary the input.**
+The README records the constraint for authors: do not rely on TDZ or on
+cyclic-initialisation errors; prefer acyclic module graphs.

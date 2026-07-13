@@ -1,46 +1,16 @@
 # Block 16 — ES modules under JavaScriptCore
 
 **Status: COMPLETE (2026-07-14). Phase Review clean of CRITICAL and MAJOR.**
-**Outcome: candidate D — build-time bundling.**
-**Trigger: D4 — the only path to JSC modules is non-public API.**
+**Outcome: candidate D — build-time bundling. Trigger: D4 (the only path to JSC
+modules is non-public API).**
 
-§10's MAJOR is closed, and so is a further MAJOR the Phase Review (L23) found.
-Evidence: `specs/tracking/engine-boundary.md` → Q11 and its three addenda.
+Evidence and decision: `specs/tracking/engine-boundary.md` → Q11 and its addenda.
+Block 12 → M4 corrected. §10 (planner review) and the Phase Review findings are
+closed.
 
-**The block was wrong about a bundler three times, from one root**, and the record
-is kept because the pattern *is* the lesson: §10 caught a claim asserted from
-memory; the fix for §10 was a claim asserted from one insufficient probe; the Phase
-Review caught a claim asserted from no probe at all (nobody ran esbuild on a
-`const`). **When a claim is about what some other system does, run that system —
-and vary the input.**
-
-**The most valuable thing this block produced was not the decision.** It was Q11's
-addendum 3: **bundling erases top-level TDZ.** A game author develops against real
-ES modules (Boa's loader — real TDZ, cyclic reads throw) and ships a flat bundle
-where the same read silently yields `undefined`. That is a *development-vs-shipped*
-seam — **not** an engine divergence, which is the only class the two-engine strategy
-was built to catch — and candidate D introduces it by construction. It is now pinned
-by the parity golden and stated plainly in the README.
-
-Phase 1's evidence and the decision are in `specs/tracking/engine-boundary.md` →
-Q11. Block 12 → M4 is corrected. Phase 2D shipped: the parity suite runs a
-bundler-shaped script under both engines with byte-identical output, and the
-README states the shipping constraint.
-
-**The decision and its evidence stand. §10 is about the shipped test fixture, not
-the conclusion.** Per CLAUDE.md, a phase cannot be COMPLETE with an open MAJOR;
-close §10 and this block is done.
-
-**The one-line answer:** JavaScriptCore's module API is not missing — it is
-**unpublished**. `JSScript` links (it is in the SDK's `.tbd`) but has no public
-header in either the macOS or the iOS SDK, and `moduleLoaderDelegate` /
-`evaluateJSScript:` / `kJSScriptTypeModule` appear in no header of either. That
-is SPI, and L6 forbids building on it.
-
-**Deviation from exit criterion 2, recorded rather than skipped:** the L-Q3 bridge
-spike was not built. The C→ObjC bridge is public and would very likely work — but
-there is nothing on the other side of it to reach without SPI, so the experiment
-could not change the decision. See Q11 → L-Q3.
+Note for anyone shipping on this: **bundling erases top-level TDZ** (Q11 addendum
+3). Development against Boa's module loader has real TDZ; the shipped flat bundle
+does not. Stated in the README, pinned by the parity golden.
 
 Rules are numbered **L1–L20**. Blocks 04 (JSC adapter), 08 (P1–P8), and 12
 (M1–M6) bind.

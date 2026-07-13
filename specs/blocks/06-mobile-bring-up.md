@@ -12,16 +12,13 @@ performance claim are explicitly *out of scope for Phase 1*. A build that does
 not exist cannot be run; get the build, then decide whether running it is worth
 the next slice.
 
-**Owner decision (2026-07-13): no simulators, no emulators — ever, in this
-block.** Not in Phase 1, not in Phase 2, not as a convenience. The ship targets
-are **physical iOS and Android devices**, and a simulator is a different platform
-wearing the target's name: different ABI on the Apple side, different GPU stack
-on both. Verifying against one would produce exactly the kind of result that
-looks like evidence and is not. When execution comes, it comes on hardware.
+**Owner decision (2026-07-13): no simulators, no emulators.** Ship targets are
+physical iOS and Android devices. A simulator differs in ABI (Apple) and GPU stack
+(both), so it does not verify the ship target. Execution, when it happens, is on
+hardware.
 
-Consequence, applied immediately: `aarch64-apple-ios-sim` and
-`x86_64-linux-android` are **not supported targets**, and any code that exists
-only to serve them is dead code and gets deleted.
+Consequence: `aarch64-apple-ios-sim` and `x86_64-linux-android` are not supported
+targets; code serving only them is deleted.
 
 ## Why this is tractable now, and was not before
 
@@ -106,45 +103,35 @@ unset:
 | `boa-adapter` | 0 | 0 |
 | `javascriptcore-adapter` | 0 | 0 (empty crate) |
 
-**The fix was one root cause, as the diagnosis predicted:** `ffi/build.rs` now
-passes `--target=<triple>` to `bindgen` for *every* target including the host
-(M1), resolves the Android sysroot from `ANDROID_NDK_HOME` / `ANDROID_NDK_ROOT`
-(M2), and the Apple SDK from `xcrun` (M3). Nothing else in the workspace needed
-changing — **no dependency was a blocker, and Boa needed nothing.** The claim that
-a pure-Rust engine makes Android an ordinary `cargo build --target` held.
+One root cause. `ffi/build.rs` now passes `--target=<triple>` to `bindgen` for
+every target including the host (M1), resolves the Android sysroot from
+`ANDROID_NDK_HOME` / `ANDROID_NDK_ROOT` (M2), and the Apple SDK from `xcrun` (M3).
+No other workspace change was required; no dependency was a blocker.
 
-**M5 verified, not assumed.** The JSC adapter's Android rlib contains **zero**
-JSC symbols — it is genuinely empty, so the `jsc` default feature does cost
-nothing off Apple platforms.
+**M5 verified.** The JSC adapter's Android rlib contains zero JSC symbols — the
+`jsc` default feature costs nothing off Apple platforms.
 
-**The NDK sysroot is load-bearing, proven by breaking it.** A bogus
-`ANDROID_NDK_HOME` fails the build; an absent one fails with a message naming the
-variable. Neither silently falls back to the host's headers — which is what the
-old code did, and why the failure surfaced as an unreadable `math.h` diagnostic.
+**NDK sysroot verified by breaking it.** A bogus `ANDROID_NDK_HOME` fails the
+build; an absent one fails with a message naming the variable. Neither falls back
+to host headers (the previous behaviour, which surfaced as a `math.h` error).
 
-### One finding, worth keeping — even though the code that found it is now gone
+### Finding — Cargo and clang do not always spell a target the same way
 
-While Phase 1 was in flight the simulator target was briefly made to work, and
-doing so surfaced a real trap: **Rust's `aarch64-apple-ios-sim` is not a triple
-clang accepts.** Clang wants `aarch64-apple-ios-simulator`, so Cargo's `TARGET`
-had to be translated before it could reach `bindgen`.
+Rust's `aarch64-apple-ios-sim` is not a triple clang accepts; clang requires
+`aarch64-apple-ios-simulator`. Cargo's `TARGET` therefore cannot always be passed
+to `bindgen` verbatim.
 
-The simulator is now out of scope (owner, 2026-07-13). Before deleting the
-translation, it was checked rather than assumed: **for both supported targets
-clang accepts Cargo's spelling verbatim**, so the translation really was dead and
-is gone rather than left as a vestigial identity function.
+The simulator is out of scope (owner, 2026-07-13) and the translation was deleted.
+Before deleting it, both supported targets were checked: clang accepts Cargo's
+spelling verbatim for each, so the translation was dead.
 
 ```
 xcrun clang --target=aarch64-apple-ios     -fsyntax-only -x c /dev/null   # exit 0
 xcrun clang --target=aarch64-linux-android -fsyntax-only -x c /dev/null   # exit 0
 ```
 
-**The lesson is kept because it is about `TARGET`, not about simulators:** the two
-toolchains do not always spell the same platform the same way, and when they
-disagree the failure arrives as a confusing header error rather than an honest
-"unknown target". Anyone adding a target should check that clang accepts the
-triple Cargo hands them, instead of assuming — as this block did, briefly, and
-was wrong.
+**Rule:** when adding a target, verify clang accepts the triple Cargo supplies. A
+mismatch surfaces as a header error, not as an unknown-target error.
 
 ## Deferred, and recorded so it is not mistaken for done
 
