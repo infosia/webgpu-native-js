@@ -3337,6 +3337,60 @@ mod tests {
         assert_eq!(names, ["second", "first"]);
     }
 
+    #[test]
+    fn dynamic_import_from_evaluated_script_returns_rejected_promise() {
+        let runtime = Runtime::new().expect("JSC runtime");
+        let observations = Rc::new(RefCell::new(Vec::new()));
+        let captured = Rc::clone(&observations);
+        runtime
+            .register_host_function("observeDynamicImport", move |args| {
+                captured.borrow_mut().push(args.to_vec());
+                Ok(())
+            })
+            .expect("register dynamic import observer");
+        runtime
+            .eval(
+                r#"
+                    try {
+                        const promise = import("./x.js");
+                        observeDynamicImport("returned-promise", promise instanceof Promise);
+                        promise.then(
+                            function () {
+                                observeDynamicImport("fulfilled");
+                            },
+                            function (error) {
+                                observeDynamicImport(
+                                    "rejected",
+                                    error instanceof Error,
+                                    error.name,
+                                    error.message
+                                );
+                            }
+                        );
+                    } catch (error) {
+                        observeDynamicImport("synchronous", error.name, error.message);
+                    }
+                "#,
+                "dynamic-import.js",
+            )
+            .expect("evaluate dynamic import");
+        assert_eq!(
+            observations.borrow().as_slice(),
+            &[
+                vec![
+                    super::HostValue::String("returned-promise".to_owned()),
+                    super::HostValue::Bool(true),
+                ],
+                vec![
+                    super::HostValue::String("rejected".to_owned()),
+                    super::HostValue::Bool(true),
+                    super::HostValue::String("Error".to_owned()),
+                    super::HostValue::String("Could not import the module './x.js'.".to_owned()),
+                ],
+            ]
+        );
+    }
+
     struct SendPtr<T>(*mut T);
 
     // SAFETY: these tests move native pointers only as opaque keys for the

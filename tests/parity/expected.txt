@@ -13,9 +13,11 @@ bundle:factory:circle-b:end
 bundle:circle:a-saw-b:b-ready,a-initialising
 bundle:factory:circle-a:end
 bundle:circle:final:a-ready,b-ready,b-ready,a-initialising
-bundle:factory:throws:start
+bundle:factory:throw-chain:start
+bundle:factory:throws:1
 bundle:throw:caught:Error:bundled module failure
-bundle:throw:cached-partial:before-throw
+bundle:throw:rethrown-same-error:true:Error:bundled module failure
+bundle:throw:evaluate-once:true:1
 bundle:factory:entry:end
 namespace:GPUBufferUsage:object:true
 namespace:GPUBufferUsage:VERTEX:32

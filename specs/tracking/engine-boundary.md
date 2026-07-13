@@ -1537,12 +1537,37 @@ Two consequences worth stating explicitly:
   crate, no new kind of dependency in the adapter (L3's last row), and no risk to
   the `aarch64-apple-ios` cross-compile that block 06 just established.
 
-### L-Q7 — Dynamic `import()` and `import.meta`: **out of reach for game code, both engines.**
+### L-Q7 — Dynamic `import()`: **measured under JSC, 2026-07-13 (block 16 → L22).**
 
-Under candidate D the game's code is a single script on both engines. Runtime ES
-modules — including `import()` and `import.meta` — remain a **Boa-only,
-development-tooling** capability (the CTS runner uses them). Game code must not
-rely on them. That is now a documented parity fact, not an omission.
+*This entry originally asserted "out of reach" from recollection — the one line of
+Q11 that carried no citation, in a document whose whole value is that every other
+line does. The planner review (block 16 → §10, L22) caught it. It is now measured.*
+
+Unlike an `import` **declaration**, a dynamic `import()` **call** is syntactically
+legal in the Script goal, so what a bare `JSGlobalContextRef` does with one is an
+*empirical* question the headers cannot answer. Run under our adapter's context
+(a JSC-suite test now pins it):
+
+- It does **not** throw synchronously.
+- It returns a **genuine `Promise`**.
+- That promise **rejects**, and the rejection callback runs before
+  `JSEvaluateScript` returns — it does not hang.
+- The rejection value is an `Error` whose message is exactly:
+  `Could not import the module './x.js'.`
+
+So `import()` is *reachable and inert*: JSC accepts the syntax and fails the load,
+because there is no module loader to service it and no public way to install one.
+The practical conclusion is unchanged, but it now rests on an observation instead
+of a memory.
+
+`import.meta` is a **module-goal** construct and is not legal in a script at all,
+so it is unreachable by syntax rather than by loader absence. Not separately
+tested; the distinction is worth keeping straight.
+
+**Consequence for game code (unchanged):** under candidate D the game's code is a
+single script on both engines. Runtime ES modules — including `import()` — remain
+a **Boa-only, development-tooling** capability (the CTS runner uses them). Game
+code must not rely on them.
 
 ### L-Q9 — Corroboration for candidate D.
 
@@ -1571,3 +1596,60 @@ verification. Phase 2D (§7) implements it.
 modules and JavaScriptCore has none, this is permanent for as long as the module
 API stays SPI, and the answer for game code is that game code does not use runtime
 modules on either engine.
+
+### Q11 addendum — L21, and the lesson it cost twice (2026-07-13)
+
+The planner review reopened block 16 on a MAJOR: the Phase 2D bundle fixture cached
+a module *before* evaluating its factory and never removed the entry when that
+factory threw, so a second `__require` silently returned **partial exports**. The
+golden had frozen it (`bundle:throw:cached-partial:before-throw`), meaning the next
+person to *fix* the registry would have broken the parity gate and been told they
+were wrong.
+
+The review's diagnosis was right, and its indictment was sharper than the bug:
+**the fixture's comment claimed it was "the shape emitted by bundlers such as
+esbuild and Metro", and that claim was asserted from memory.** Phase 1 had opened
+Apple's headers rather than trust M4 — and then Phase 2 asserted a bundler's
+behaviour from recollection in the very next commit. *The rule about not restating
+from memory does not stop at Apple's headers.*
+
+**So the fix ran a real esbuild.** `esbuild --bundle --format=cjs` over a two-module
+graph whose imported module throws emits:
+
+```js
+var __esm = (fn, res, err) => function __init() {
+  if (err) throw err[0];                       // permanently errored: re-throw the SAME error
+  try {
+    return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;
+  } catch (e) {
+    throw err = [e], e;                        // memoise the ERROR
+  }
+};
+```
+
+and running that bundle gives `FIRST → Error: bundled module failure`,
+`SECOND → Error: bundled module failure`. **Partial exports are never handed out.**
+
+**And the measurement corrected the review as well.** §10 prescribed *"delete the
+cache entry on throw and assert that a second require re-runs the factory and
+re-throws"*. Real esbuild does **not** re-run the factory — it memoises the error
+and re-throws **the same error object**. That is the ES-module "permanently
+errored" semantic, and the difference is observable: re-running a factory would
+execute its side effects twice.
+
+The fixture now matches the measurement, and pins **both** independent properties,
+because either can regress alone:
+
+```
+bundle:throw:rethrown-same-error:true:Error:bundled module failure   ← same error, re-thrown
+bundle:throw:evaluate-once:true:1                                    ← factory ran exactly ONCE
+```
+
+The second line is the assertion the review's own prescription would have missed.
+
+**The lesson, stated once and plainly:** three parties in a row reasoned about a
+bundler's error path from memory — the implementer, the reviewer, and the planner
+who approved the trace and wrote *"real CommonJS behaviour"* into the commit
+message. All three were wrong, in three different ways. **The four-line experiment
+that settled it took under a minute.** When a claim is about what some other
+system *does*, run that system.

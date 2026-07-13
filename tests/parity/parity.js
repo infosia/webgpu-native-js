@@ -58,25 +58,36 @@
         }
     }
 
-    // Deliberately hand-written in the CommonJS-style shape emitted by bundlers
-    // such as esbuild and Metro: one factory registry, a memoised exports cache,
-    // and one entry invocation. This tests the shipped bundle artifact, not a
-    // runtime module loader in either engine.
+    // Deliberately hand-written as a pre-bundled registry. Its error record
+    // mirrors esbuild's __esm helper: a factory throw is memoised and later
+    // loads rethrow that same error without re-running evaluation. This tests
+    // the shipped bundle artifact, not a runtime module loader in either engine.
     (function runPreBundledScript(__modules) {
         var __cache = Object.create(null);
 
         function __require(id) {
             if (Object.prototype.hasOwnProperty.call(__cache, id)) {
-                return __cache[id].exports;
+                var cached = __cache[id];
+                if (cached.error) {
+                    throw cached.error[0];
+                }
+                return cached.module.exports;
             }
 
             var module = { exports: {} };
-            __cache[id] = module;
-            __modules[id](module, module.exports, __require);
+            var record = { module: module, error: null };
+            __cache[id] = record;
+            try {
+                __modules[id](module, module.exports, __require);
+            } catch (error) {
+                record.error = [error];
+                throw error;
+            }
             return module.exports;
         }
 
         __require.sharedEvaluationCount = 0;
+        __require.throwEvaluationCount = 0;
         __require("entry");
     }({
         "entry": function (module, exports, __require) {
@@ -99,7 +110,7 @@
 
             var thrown;
             try {
-                __require("throws");
+                __require("throw-chain");
             } catch (error) {
                 thrown = error;
             }
@@ -107,7 +118,24 @@
                 throw new Error("bundled throwing module did not throw");
             }
             log("bundle:throw:caught:" + thrown.name + ":" + thrown.message);
-            log("bundle:throw:cached-partial:" + __require("throws").phase);
+
+            var rethrown;
+            try {
+                __require("throws");
+            } catch (error) {
+                rethrown = error;
+            }
+            if (rethrown !== thrown) {
+                throw new Error("bundled throwing module did not rethrow the same error");
+            }
+            log("bundle:throw:rethrown-same-error:" + (rethrown === thrown) + ":" +
+                rethrown.name + ":" + rethrown.message);
+            if (__require.throwEvaluationCount !== 1) {
+                throw new Error("bundled throwing module evaluated more than once");
+            }
+            log("bundle:throw:evaluate-once:" +
+                (__require.throwEvaluationCount === 1) + ":" +
+                __require.throwEvaluationCount);
 
             exports.complete = true;
             log("bundle:factory:entry:end");
@@ -145,8 +173,13 @@
             exports.phase = "b-ready";
             log("bundle:factory:circle-b:end");
         },
-        "throws": function (module, exports) {
-            log("bundle:factory:throws:start");
+        "throw-chain": function (module, exports, __require) {
+            log("bundle:factory:throw-chain:start");
+            exports.value = __require("throws").value;
+        },
+        "throws": function (module, exports, __require) {
+            __require.throwEvaluationCount += 1;
+            log("bundle:factory:throws:" + __require.throwEvaluationCount);
             exports.phase = "before-throw";
             throw new Error("bundled module failure");
         }
