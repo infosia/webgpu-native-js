@@ -1,5 +1,24 @@
 # Block 16 — ES modules under JavaScriptCore
 
+**Status: COMPLETE (2026-07-13). Outcome: candidate D — build-time bundling.**
+**Trigger: D4 — the only path to JSC modules is non-public API.**
+
+Phase 1's evidence and the decision are in `specs/tracking/engine-boundary.md` →
+Q11. Block 12 → M4 is corrected. Phase 2D shipped: the parity suite runs a
+bundler-shaped script under both engines with byte-identical output, and the
+README states the shipping constraint.
+
+**The one-line answer:** JavaScriptCore's module API is not missing — it is
+**unpublished**. `JSScript` links (it is in the SDK's `.tbd`) but has no public
+header in either the macOS or the iOS SDK, and `moduleLoaderDelegate` /
+`evaluateJSScript:` / `kJSScriptTypeModule` appear in no header of either. That
+is SPI, and L6 forbids building on it.
+
+**Deviation from exit criterion 2, recorded rather than skipped:** the L-Q3 bridge
+spike was not built. The C→ObjC bridge is public and would very likely work — but
+there is nothing on the other side of it to reach without SPI, so the experiment
+could not change the decision. See Q11 → L-Q3.
+
 Rules are numbered **L1–L20**. Blocks 04 (JSC adapter), 08 (P1–P8), and 12
 (M1–M6) bind.
 

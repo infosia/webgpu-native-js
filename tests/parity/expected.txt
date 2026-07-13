@@ -1,3 +1,22 @@
+bundle:factory:entry:start
+bundle:factory:left:start
+bundle:factory:shared:1
+bundle:factory:left:end
+bundle:factory:right:start
+bundle:factory:right:end
+bundle:diamond:values:shared,shared
+bundle:diamond:evaluate-once:true:1
+bundle:factory:circle-a:start
+bundle:factory:circle-b:start
+bundle:circle:b-saw-a:a-initialising
+bundle:factory:circle-b:end
+bundle:circle:a-saw-b:b-ready,a-initialising
+bundle:factory:circle-a:end
+bundle:circle:final:a-ready,b-ready,b-ready,a-initialising
+bundle:factory:throws:start
+bundle:throw:caught:Error:bundled module failure
+bundle:throw:cached-partial:before-throw
+bundle:factory:entry:end
 namespace:GPUBufferUsage:object:true
 namespace:GPUBufferUsage:VERTEX:32
 namespace:GPUBufferUsage:readonly:true

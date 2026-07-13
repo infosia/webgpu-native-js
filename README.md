@@ -98,6 +98,15 @@ finalized only at context teardown — and no microtask pump; the binding
 compensates for the latter, but not the former (see the `destroy()` rule
 below).
 
+## JavaScript delivery
+
+**Game JavaScript is delivered to the runtime as a single script.** Multi-file
+sources must be bundled by the application's build using the ordinary JavaScript
+toolchain, such as esbuild, Rollup, or SWC. Runtime ES modules are a **Boa-only
+development-tooling capability** used by the CTS runner; game code must not rely
+on them. JavaScriptCore's module API is not part of the public Apple SDK, and
+this project does not ship on private API.
+
 ## Backends
 
 | Tier | Backend | Notes |

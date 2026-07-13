@@ -58,6 +58,100 @@
         }
     }
 
+    // Deliberately hand-written in the CommonJS-style shape emitted by bundlers
+    // such as esbuild and Metro: one factory registry, a memoised exports cache,
+    // and one entry invocation. This tests the shipped bundle artifact, not a
+    // runtime module loader in either engine.
+    (function runPreBundledScript(__modules) {
+        var __cache = Object.create(null);
+
+        function __require(id) {
+            if (Object.prototype.hasOwnProperty.call(__cache, id)) {
+                return __cache[id].exports;
+            }
+
+            var module = { exports: {} };
+            __cache[id] = module;
+            __modules[id](module, module.exports, __require);
+            return module.exports;
+        }
+
+        __require.sharedEvaluationCount = 0;
+        __require("entry");
+    }({
+        "entry": function (module, exports, __require) {
+            log("bundle:factory:entry:start");
+
+            var left = __require("left");
+            var right = __require("right");
+            log("bundle:diamond:values:" + left.shared + "," + right.shared);
+            log("bundle:diamond:evaluate-once:" +
+                (__require.sharedEvaluationCount === 1) + ":" +
+                __require.sharedEvaluationCount);
+            if (__require.sharedEvaluationCount !== 1) {
+                throw new Error("bundled shared module evaluated more than once");
+            }
+
+            var circleA = __require("circle-a");
+            var circleB = __require("circle-b");
+            log("bundle:circle:final:" + circleA.phase + "," +
+                circleB.phase + "," + circleA.sawB + "," + circleB.sawA);
+
+            var thrown;
+            try {
+                __require("throws");
+            } catch (error) {
+                thrown = error;
+            }
+            if (!thrown) {
+                throw new Error("bundled throwing module did not throw");
+            }
+            log("bundle:throw:caught:" + thrown.name + ":" + thrown.message);
+            log("bundle:throw:cached-partial:" + __require("throws").phase);
+
+            exports.complete = true;
+            log("bundle:factory:entry:end");
+        },
+        "left": function (module, exports, __require) {
+            log("bundle:factory:left:start");
+            exports.shared = __require("shared").value;
+            log("bundle:factory:left:end");
+        },
+        "right": function (module, exports, __require) {
+            log("bundle:factory:right:start");
+            exports.shared = __require("shared").value;
+            log("bundle:factory:right:end");
+        },
+        "shared": function (module, exports, __require) {
+            __require.sharedEvaluationCount += 1;
+            log("bundle:factory:shared:" + __require.sharedEvaluationCount);
+            exports.value = "shared";
+        },
+        "circle-a": function (module, exports, __require) {
+            log("bundle:factory:circle-a:start");
+            exports.phase = "a-initialising";
+            var circleB = __require("circle-b");
+            exports.sawB = circleB.phase;
+            log("bundle:circle:a-saw-b:" + circleB.phase + "," + circleB.sawA);
+            exports.phase = "a-ready";
+            log("bundle:factory:circle-a:end");
+        },
+        "circle-b": function (module, exports, __require) {
+            log("bundle:factory:circle-b:start");
+            exports.phase = "b-initialising";
+            var circleA = __require("circle-a");
+            exports.sawA = circleA.phase;
+            log("bundle:circle:b-saw-a:" + circleA.phase);
+            exports.phase = "b-ready";
+            log("bundle:factory:circle-b:end");
+        },
+        "throws": function (module, exports) {
+            log("bundle:factory:throws:start");
+            exports.phase = "before-throw";
+            throw new Error("bundled module failure");
+        }
+    }));
+
     log("namespace:GPUBufferUsage:object:" +
         (typeof GPUBufferUsage === "object"));
     log("namespace:GPUBufferUsage:VERTEX:" + GPUBufferUsage.VERTEX);
