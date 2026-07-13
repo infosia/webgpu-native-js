@@ -366,6 +366,55 @@
         });
     }
 
+    function runMapStateParity() {
+        var buffer = device.createBuffer({ size: 4, usage: 1 });
+        log("mapState:" + buffer.mapState);
+        var pending = buffer.mapAsync(1, 0, 4);
+        log("mapState:" + buffer.mapState);
+        return pending.then(function () {
+            log("mapState:" + buffer.mapState);
+            buffer.unmap();
+            log("mapState:" + buffer.mapState);
+            buffer.destroy();
+        });
+    }
+
+    function runDepthSliceParity() {
+        function record(texture, depthSlice) {
+            var attachment = {
+                view: texture.createView(),
+                loadOp: "clear",
+                storeOp: "store"
+            };
+            if (depthSlice !== undefined) {
+                attachment.depthSlice = depthSlice;
+            }
+            var encoder = device.createCommandEncoder();
+            var pass = encoder.beginRenderPass({ colorAttachments: [attachment] });
+            pass.end();
+            encoder.finish();
+        }
+
+        var texture2d = device.createTexture({
+            size: [1, 1, 1], dimension: "2d", format: "rgba8unorm", usage: 16
+        });
+        var texture3d = device.createTexture({
+            size: [1, 1, 1], dimension: "3d", format: "rgba8unorm", usage: 16
+        });
+        device.pushErrorScope("validation");
+        record(texture2d, 0xffffffff);
+        return device.popErrorScope().then(function (error) {
+            log("depthSlice:2d-max:" + (error === null ? "null" : error.constructor.name));
+            device.pushErrorScope("validation");
+            record(texture3d, 0);
+            return device.popErrorScope();
+        }).then(function (error) {
+            log("depthSlice:3d-zero:" + (error === null ? "null" : error.constructor.name));
+            texture2d.destroy();
+            texture3d.destroy();
+        });
+    }
+
     function runSubmitErrorRouting() {
         var encoder = device.createCommandEncoder();
         var command = encoder.finish();
@@ -1393,10 +1442,12 @@
             .then(runBindGroupRetention)
             .then(runRenderPipelineValidation)
             .then(runRenderPassAndCopyValidation)
+            .then(runDepthSliceParity)
             .then(runRenderBundles)
             .then(runIndirectCommands)
             .then(runErrorScopes)
             .then(runMapAsyncErrorRouting)
+            .then(runMapStateParity)
             .then(runOrdering)
             .then(runRequestedFeatureOrdering)
             .then(runSubmitErrorRouting)
@@ -1417,6 +1468,28 @@
         var nullLabel = labelBuffer.label;
         labelBuffer.label = "round-trip";
         log("buffer:" + nullLabel + "," + labelBuffer.label + ";method:" + stableMethod);
+        var embeddedNulLabel = "null\0in\0label";
+        var embeddedNulBuffer = device.createBuffer({
+            size: 4, usage: 8, label: embeddedNulLabel
+        });
+        var embeddedNulRoundTrip = embeddedNulBuffer.label === embeddedNulLabel;
+        embeddedNulBuffer.destroy();
+        log("label:nul-round-trip-destroy:" + embeddedNulRoundTrip + ":" +
+            (embeddedNulBuffer.label === embeddedNulLabel));
+        var labelDescriptor = Object.getOwnPropertyDescriptor(GPUBuffer.prototype, "label");
+        var methodDescriptor = Object.getOwnPropertyDescriptor(GPUBuffer.prototype, "mapAsync");
+        var constructorDescriptor = Object.getOwnPropertyDescriptor(
+            GPUBuffer.prototype,
+            "constructor"
+        );
+        var reflectedKeys = [];
+        for (var reflectedKey in labelBuffer) {
+            reflectedKeys.push(reflectedKey);
+        }
+        log("enumerable:label-method-constructor:" + labelDescriptor.enumerable + "," +
+            methodDescriptor.enumerable + "," + constructorDescriptor.enumerable + ":" +
+            (reflectedKeys.indexOf("label") !== -1) + "," +
+            (reflectedKeys.indexOf("size") !== -1));
         log("identity:queue:" + (device.queue === device.queue));
         log("identity:lost:" + (device.lost === device.lost));
         log("features:" + Array.from(device.features).join(","));

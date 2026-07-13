@@ -584,6 +584,7 @@ enum SettlementRequest<E: JsEngine + 'static> {
         deferred: Deferred<E>,
         native: PendingNative,
         events: Arc<DeviceEventState<E>>,
+        label: String,
     },
     ComputePipeline {
         deferred: Deferred<E>,
@@ -594,6 +595,7 @@ enum SettlementRequest<E: JsEngine + 'static> {
         lost_at_start: bool,
         module: WGPUShaderModule,
         layout: WGPUPipelineLayout,
+        label: String,
         queue: Arc<ReleaseQueue>,
         gpu: GpuDispatch,
     },
@@ -607,6 +609,7 @@ enum SettlementRequest<E: JsEngine + 'static> {
         vertex_module: WGPUShaderModule,
         fragment_module: WGPUShaderModule,
         layout: WGPUPipelineLayout,
+        label: String,
         queue: Arc<ReleaseQueue>,
         gpu: GpuDispatch,
     },
@@ -693,6 +696,7 @@ impl<E: JsEngine + 'static> SettlementRequest<E> {
                 deferred,
                 ref mut native,
                 events,
+                label,
             } => {
                 let device = native.take_device();
                 if let Err(error) = events.initialize(cx) {
@@ -709,7 +713,7 @@ impl<E: JsEngine + 'static> SettlementRequest<E> {
                 let value = E::new_instance(
                     cx,
                     GPU_DEVICE_CLASS,
-                    Box::new(DevicePayload::<E>::new(device, Arc::clone(&events))),
+                    Box::new(DevicePayload::<E>::new(device, Arc::clone(&events), label)),
                 );
                 SettlementOutcome::Deferred(match value {
                     Ok(value) => {
@@ -735,6 +739,7 @@ impl<E: JsEngine + 'static> SettlementRequest<E> {
                 lost_at_start,
                 module,
                 layout,
+                label,
                 queue,
                 gpu,
             } => {
@@ -748,6 +753,7 @@ impl<E: JsEngine + 'static> SettlementRequest<E> {
                         lost_at_start,
                         module,
                         layout,
+                        label,
                         queue,
                         gpu,
                     }));
@@ -782,6 +788,7 @@ impl<E: JsEngine + 'static> SettlementRequest<E> {
                         pipeline,
                         module,
                         layout,
+                        label: Mutex::new(label),
                     }),
                 );
                 SettlementOutcome::Deferred(match value {
@@ -802,6 +809,7 @@ impl<E: JsEngine + 'static> SettlementRequest<E> {
                 vertex_module,
                 fragment_module,
                 layout,
+                label,
                 queue,
                 gpu,
             } => {
@@ -816,6 +824,7 @@ impl<E: JsEngine + 'static> SettlementRequest<E> {
                         vertex_module,
                         fragment_module,
                         layout,
+                        label,
                         queue,
                         gpu,
                     }));
@@ -858,6 +867,7 @@ impl<E: JsEngine + 'static> SettlementRequest<E> {
                         vertex_module,
                         fragment_module,
                         layout,
+                        label: Mutex::new(label),
                     }),
                 );
                 SettlementOutcome::Deferred(match value {
@@ -1105,6 +1115,7 @@ impl SettlementQueue {
                         lost_at_start: _,
                         module,
                         layout,
+                        label: _,
                         queue,
                         gpu,
                     } => {
@@ -1121,6 +1132,7 @@ impl SettlementQueue {
                         vertex_module,
                         fragment_module,
                         layout,
+                        label: _,
                         queue,
                         gpu,
                     } => {
@@ -1334,6 +1346,7 @@ pub unsafe fn tick<E: JsEngine + 'static>(
 pub struct DevicePayload<E: JsEngine + 'static> {
     device: WGPUDevice,
     destroyed: AtomicBool,
+    label: Mutex<String>,
     queue: HeldValue<E>,
     features: HeldValue<E>,
     limits: HeldValue<E>,
@@ -1370,10 +1383,11 @@ fn promise_operation<E: JsEngine>(
 }
 
 impl<E: JsEngine + 'static> DevicePayload<E> {
-    fn new(device: WGPUDevice, events: Arc<DeviceEventState<E>>) -> Self {
+    fn new(device: WGPUDevice, events: Arc<DeviceEventState<E>>, label: String) -> Self {
         Self {
             device,
             destroyed: AtomicBool::new(false),
+            label: Mutex::new(label),
             queue: HeldValue::empty(),
             features: HeldValue::empty(),
             limits: HeldValue::empty(),
@@ -2304,6 +2318,7 @@ fn new_adapter_info<E: JsEngine + 'static>(
 /// Payload stored by a `GPUQueue` wrapper.
 pub struct QueuePayload {
     queue: WGPUQueue,
+    label: Mutex<String>,
 }
 
 // SAFETY: `QueuePayload` stores a `WGPUQueue`. Off-thread finalization only
@@ -2315,6 +2330,7 @@ unsafe impl Send for QueuePayload {}
 /// Payload stored by a `GPUCommandBuffer` wrapper.
 pub struct CommandBufferPayload {
     state: Arc<Mutex<CommandBufferState>>,
+    label: Mutex<String>,
 }
 
 // SAFETY: `CommandBufferPayload` stores a `WGPUCommandBuffer`. Queue submission
@@ -2342,6 +2358,7 @@ unsafe impl Send for CommandBufferState {}
 /// Payload stored by a `GPUComputePassEncoder` wrapper.
 pub struct ComputePassEncoderPayload {
     state: Arc<Mutex<ComputePassState>>,
+    label: Mutex<String>,
 }
 
 // SAFETY: `ComputePassEncoderPayload` stores a `WGPUComputePassEncoder` inside
@@ -2355,6 +2372,7 @@ unsafe impl Send for ComputePassEncoderPayload {}
 /// Payload stored by a `GPURenderPassEncoder` wrapper.
 pub struct RenderPassEncoderPayload {
     state: Arc<Mutex<RenderPassState>>,
+    label: Mutex<String>,
 }
 
 // SAFETY: the native render-pass handle is used only on the engine thread and
@@ -2365,6 +2383,7 @@ unsafe impl Send for RenderPassEncoderPayload {}
 pub struct RenderBundlePayload {
     render_bundle: WGPURenderBundle,
     invalid: bool,
+    label: Mutex<String>,
 }
 
 /// Returns the native handle stored by a `GPURenderBundle` wrapper.
@@ -2396,6 +2415,7 @@ unsafe impl Send for RenderBundlePayload {}
 struct CommandEncoderState {
     encoder: WGPUCommandEncoder,
     ended: bool,
+    pending_validation_error: Option<String>,
     error_sink: Arc<dyn DeviceErrorSink>,
 }
 
@@ -2818,7 +2838,11 @@ pub unsafe fn wrap_device<E: JsEngine + 'static>(
     let value = E::new_instance(
         cx,
         GPU_DEVICE_CLASS,
-        Box::new(DevicePayload::<E>::new(device, Arc::clone(&events))),
+        Box::new(DevicePayload::<E>::new(
+            device,
+            Arc::clone(&events),
+            String::new(),
+        )),
     );
     match value {
         Ok(value) => {
@@ -4199,6 +4223,13 @@ fn adapter_request_device_inner<E: JsEngine + 'static>(
         ));
     };
     let descriptor_value = args.first().copied().unwrap_or_else(|| E::undefined(cx));
+    let label_value = dictionary_member::<E>(cx, descriptor_value, "label")?;
+    let label_arena = Arena::new();
+    let label = if E::is_undefined(cx, label_value) {
+        String::new()
+    } else {
+        E::to_str(cx, label_value, &label_arena)?.to_owned()
+    };
     let required_features_value = dictionary_member::<E>(cx, descriptor_value, "requiredFeatures")?;
     let required_features = if E::is_undefined(cx, required_features_value) {
         Vec::new()
@@ -4249,6 +4280,7 @@ fn adapter_request_device_inner<E: JsEngine + 'static>(
         release_queue: Arc::clone(E::environment(cx).queue()),
         gpu: E::environment(cx).gpu(),
         events: Arc::clone(&events),
+        label: label.clone(),
         _registration: None,
     });
     request._registration = Some(E::register_deferred(
@@ -4270,7 +4302,7 @@ fn adapter_request_device_inner<E: JsEngine + 'static>(
         .cast::<c_void>();
     let descriptor = WGPUDeviceDescriptor {
         nextInChain: ptr::null_mut(),
-        label: WGPUStringView::from_bytes(b""),
+        label: WGPUStringView::from_bytes(label.as_bytes()),
         requiredFeatureCount: required_features.len(),
         requiredFeatures: required_features_ptr,
         requiredLimits: required_limits_ptr,
@@ -4313,6 +4345,7 @@ pub fn device_create_compute_pipeline_async<E: JsEngine + 'static>(
         let arena = Arena::new();
         let descriptor = required_argument::<E>(cx, args, 0, "GPUComputePipelineDescriptor")?;
         let converted = convert_compute_pipeline_descriptor::<E>(cx, descriptor, &arena)?;
+        let label = unsafe { string_view_to_owned(converted.native.label) };
         let gpu = E::environment(cx).gpu();
         let _ = E::register_class(cx, compute_pipeline_class::<E>())?;
         unsafe {
@@ -4330,6 +4363,7 @@ pub fn device_create_compute_pipeline_async<E: JsEngine + 'static>(
             lost_at_start: payload.events.is_lost(),
             module: converted.module,
             layout: converted.layout,
+            label,
             _registration: None,
         });
         request._registration = Some(E::register_deferred(
@@ -4365,6 +4399,7 @@ pub fn device_create_render_pipeline_async<E: JsEngine + 'static>(
         let arena = Arena::new();
         let descriptor = required_argument::<E>(cx, args, 0, "GPURenderPipelineDescriptor")?;
         let converted = convert_render_pipeline_descriptor::<E>(cx, descriptor, &arena)?;
+        let label = unsafe { string_view_to_owned(converted.native.label) };
         let gpu = E::environment(cx).gpu();
         let _ = E::register_class(cx, render_pipeline_class::<E>())?;
         unsafe {
@@ -4386,6 +4421,7 @@ pub fn device_create_render_pipeline_async<E: JsEngine + 'static>(
             vertex_module: converted.vertex_module,
             fragment_module: converted.fragment_module,
             layout: converted.layout,
+            label,
             _registration: None,
         });
         request._registration = Some(E::register_deferred(
@@ -4621,6 +4657,310 @@ pub fn buffer_label_set<E: JsEngine + 'static>(
     })
 }
 
+fn stored_label_get<E: JsEngine>(
+    cx: E::Context<'_>,
+    label: &Mutex<String>,
+    poisoned: &'static str,
+) -> Result<E::Value, E::Error> {
+    let label = label.lock().map_err(|_| E::operation_error(cx, poisoned))?;
+    E::string(cx, &label)
+}
+
+fn converted_label<E: JsEngine>(cx: E::Context<'_>, value: E::Value) -> Result<String, E::Error> {
+    let arena = Arena::new();
+    Ok(E::to_str(cx, value, &arena)?.to_owned())
+}
+
+fn store_label<E: JsEngine>(
+    cx: E::Context<'_>,
+    stored: &Mutex<String>,
+    label: String,
+    poisoned: &'static str,
+) -> Result<(), E::Error> {
+    *stored
+        .lock()
+        .map_err(|_| E::operation_error(cx, poisoned))? = label;
+    Ok(())
+}
+
+/// Implements the readonly `GPUBuffer.mapState` getter.
+pub fn buffer_map_state_get<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+) -> Result<E::Value, E::Error> {
+    with_buffer_state::<E, _, _>(cx, this, |state| {
+        let map_state = if state.mapped {
+            "mapped"
+        } else if state.pending_map.is_some() {
+            "pending"
+        } else {
+            "unmapped"
+        };
+        E::string(cx, map_state)
+    })
+}
+
+/// Implements the `GPUDevice.label` getter.
+pub fn device_label_get<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+) -> Result<E::Value, E::Error> {
+    let payload = E::payload(cx, this, GPU_DEVICE_CLASS)
+        .and_then(|payload| payload.downcast_ref::<DevicePayload<E>>())
+        .ok_or_else(|| E::type_error(cx, "GPUDevice.label called on an incompatible object"))?;
+    stored_label_get::<E>(cx, &payload.label, "GPUDevice label is poisoned")
+}
+
+/// Implements the `GPUDevice.label` setter.
+pub fn device_label_set<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    value: E::Value,
+) -> Result<(), E::Error> {
+    let label = converted_label::<E>(cx, value)?;
+    let payload = E::payload(cx, this, GPU_DEVICE_CLASS)
+        .and_then(|payload| payload.downcast_ref::<DevicePayload<E>>())
+        .ok_or_else(|| E::type_error(cx, "GPUDevice.label called on an incompatible object"))?;
+    unsafe {
+        (E::environment(cx).gpu().device_set_label)(
+            payload.device,
+            WGPUStringView::from_bytes(label.as_bytes()),
+        );
+    }
+    store_label::<E>(cx, &payload.label, label, "GPUDevice label is poisoned")
+}
+
+/// Implements the `GPUQueue.label` getter.
+pub fn queue_label_get<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+) -> Result<E::Value, E::Error> {
+    let payload = E::payload(cx, this, GPU_QUEUE_CLASS)
+        .and_then(|payload| payload.downcast_ref::<QueuePayload>())
+        .ok_or_else(|| E::type_error(cx, "GPUQueue.label called on an incompatible object"))?;
+    stored_label_get::<E>(cx, &payload.label, "GPUQueue label is poisoned")
+}
+
+/// Implements the `GPUQueue.label` setter.
+pub fn queue_label_set<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    value: E::Value,
+) -> Result<(), E::Error> {
+    let label = converted_label::<E>(cx, value)?;
+    let payload = E::payload(cx, this, GPU_QUEUE_CLASS)
+        .and_then(|payload| payload.downcast_ref::<QueuePayload>())
+        .ok_or_else(|| E::type_error(cx, "GPUQueue.label called on an incompatible object"))?;
+    unsafe {
+        (E::environment(cx).gpu().queue_set_label)(
+            payload.queue,
+            WGPUStringView::from_bytes(label.as_bytes()),
+        );
+    }
+    store_label::<E>(cx, &payload.label, label, "GPUQueue label is poisoned")
+}
+
+/// Implements the `GPUComputePassEncoder.label` getter.
+pub fn compute_pass_encoder_label_get<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+) -> Result<E::Value, E::Error> {
+    let payload = E::payload(cx, this, GPU_COMPUTE_PASS_ENCODER_CLASS)
+        .and_then(|payload| payload.downcast_ref::<ComputePassEncoderPayload>())
+        .ok_or_else(|| {
+            E::type_error(
+                cx,
+                "GPUComputePassEncoder.label called on an incompatible object",
+            )
+        })?;
+    stored_label_get::<E>(
+        cx,
+        &payload.label,
+        "GPUComputePassEncoder label is poisoned",
+    )
+}
+
+/// Implements the `GPUComputePassEncoder.label` setter.
+pub fn compute_pass_encoder_label_set<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    value: E::Value,
+) -> Result<(), E::Error> {
+    let label = converted_label::<E>(cx, value)?;
+    let payload = E::payload(cx, this, GPU_COMPUTE_PASS_ENCODER_CLASS)
+        .and_then(|payload| payload.downcast_ref::<ComputePassEncoderPayload>())
+        .ok_or_else(|| {
+            E::type_error(
+                cx,
+                "GPUComputePassEncoder.label called on an incompatible object",
+            )
+        })?;
+    let pass = payload
+        .state
+        .lock()
+        .map_err(|_| E::operation_error(cx, "GPUComputePassEncoder state is poisoned"))?
+        .pass;
+    if !pass.is_null() {
+        unsafe {
+            (E::environment(cx).gpu().compute_pass_encoder_set_label)(
+                pass,
+                WGPUStringView::from_bytes(label.as_bytes()),
+            );
+        }
+    }
+    store_label::<E>(
+        cx,
+        &payload.label,
+        label,
+        "GPUComputePassEncoder label is poisoned",
+    )
+}
+
+/// Implements the `GPURenderPassEncoder.label` getter.
+pub fn render_pass_encoder_label_get<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+) -> Result<E::Value, E::Error> {
+    let payload = E::payload(cx, this, GPU_RENDER_PASS_ENCODER_CLASS)
+        .and_then(|payload| payload.downcast_ref::<RenderPassEncoderPayload>())
+        .ok_or_else(|| {
+            E::type_error(
+                cx,
+                "GPURenderPassEncoder.label called on an incompatible object",
+            )
+        })?;
+    stored_label_get::<E>(cx, &payload.label, "GPURenderPassEncoder label is poisoned")
+}
+
+/// Implements the `GPURenderPassEncoder.label` setter.
+pub fn render_pass_encoder_label_set<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    value: E::Value,
+) -> Result<(), E::Error> {
+    let label = converted_label::<E>(cx, value)?;
+    let payload = E::payload(cx, this, GPU_RENDER_PASS_ENCODER_CLASS)
+        .and_then(|payload| payload.downcast_ref::<RenderPassEncoderPayload>())
+        .ok_or_else(|| {
+            E::type_error(
+                cx,
+                "GPURenderPassEncoder.label called on an incompatible object",
+            )
+        })?;
+    let pass = payload
+        .state
+        .lock()
+        .map_err(|_| E::operation_error(cx, "GPURenderPassEncoder state is poisoned"))?
+        .pass;
+    if !pass.is_null() {
+        unsafe {
+            (E::environment(cx).gpu().render_pass_encoder_set_label)(
+                pass,
+                WGPUStringView::from_bytes(label.as_bytes()),
+            );
+        }
+    }
+    store_label::<E>(
+        cx,
+        &payload.label,
+        label,
+        "GPURenderPassEncoder label is poisoned",
+    )
+}
+
+/// Implements the `GPUCommandBuffer.label` getter.
+pub fn command_buffer_label_get<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+) -> Result<E::Value, E::Error> {
+    let payload = E::payload(cx, this, GPU_COMMAND_BUFFER_CLASS)
+        .and_then(|payload| payload.downcast_ref::<CommandBufferPayload>())
+        .ok_or_else(|| {
+            E::type_error(
+                cx,
+                "GPUCommandBuffer.label called on an incompatible object",
+            )
+        })?;
+    stored_label_get::<E>(cx, &payload.label, "GPUCommandBuffer label is poisoned")
+}
+
+/// Implements the `GPUCommandBuffer.label` setter.
+pub fn command_buffer_label_set<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    value: E::Value,
+) -> Result<(), E::Error> {
+    let label = converted_label::<E>(cx, value)?;
+    let payload = E::payload(cx, this, GPU_COMMAND_BUFFER_CLASS)
+        .and_then(|payload| payload.downcast_ref::<CommandBufferPayload>())
+        .ok_or_else(|| {
+            E::type_error(
+                cx,
+                "GPUCommandBuffer.label called on an incompatible object",
+            )
+        })?;
+    let command_buffer = payload
+        .state
+        .lock()
+        .map_err(|_| E::operation_error(cx, "GPUCommandBuffer state is poisoned"))?
+        .command_buffer;
+    if !command_buffer.is_null() {
+        unsafe {
+            (E::environment(cx).gpu().command_buffer_set_label)(
+                command_buffer,
+                WGPUStringView::from_bytes(label.as_bytes()),
+            );
+        }
+    }
+    store_label::<E>(
+        cx,
+        &payload.label,
+        label,
+        "GPUCommandBuffer label is poisoned",
+    )
+}
+
+/// Implements the `GPURenderBundle.label` getter.
+pub fn render_bundle_label_get<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+) -> Result<E::Value, E::Error> {
+    let payload = E::payload(cx, this, GPU_RENDER_BUNDLE_CLASS)
+        .and_then(|payload| payload.downcast_ref::<RenderBundlePayload>())
+        .ok_or_else(|| {
+            E::type_error(cx, "GPURenderBundle.label called on an incompatible object")
+        })?;
+    stored_label_get::<E>(cx, &payload.label, "GPURenderBundle label is poisoned")
+}
+
+/// Implements the `GPURenderBundle.label` setter.
+pub fn render_bundle_label_set<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    value: E::Value,
+) -> Result<(), E::Error> {
+    let label = converted_label::<E>(cx, value)?;
+    let payload = E::payload(cx, this, GPU_RENDER_BUNDLE_CLASS)
+        .and_then(|payload| payload.downcast_ref::<RenderBundlePayload>())
+        .ok_or_else(|| {
+            E::type_error(cx, "GPURenderBundle.label called on an incompatible object")
+        })?;
+    if !payload.render_bundle.is_null() {
+        unsafe {
+            (E::environment(cx).gpu().render_bundle_set_label)(
+                payload.render_bundle,
+                WGPUStringView::from_bytes(label.as_bytes()),
+            );
+        }
+    }
+    store_label::<E>(
+        cx,
+        &payload.label,
+        label,
+        "GPURenderBundle label is poisoned",
+    )
+}
+
 /// Implements the `GPUBuffer.size` getter.
 pub fn buffer_size_get<E: JsEngine + 'static>(
     cx: E::Context<'_>,
@@ -4635,6 +4975,22 @@ pub fn buffer_usage_get<E: JsEngine + 'static>(
     this: E::Value,
 ) -> Result<E::Value, E::Error> {
     with_buffer_state::<E, _, _>(cx, this, |state| E::number(cx, state.usage as f64))
+}
+
+/// Implements `GPUTexture.textureBindingViewDimension` outside compatibility mode.
+pub fn texture_binding_view_dimension_get<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+) -> Result<E::Value, E::Error> {
+    E::payload(cx, this, GPU_TEXTURE_CLASS)
+        .and_then(|payload| payload.downcast_ref::<TexturePayload>())
+        .ok_or_else(|| {
+            E::type_error(
+                cx,
+                "GPUTexture.textureBindingViewDimension called on an incompatible object",
+            )
+        })?;
+    Ok(E::undefined(cx))
 }
 
 /// Implements the `GPUDevice.queue` getter.
@@ -4662,7 +5018,14 @@ pub fn device_queue_get<E: JsEngine + 'static>(
         unsafe { (env.gpu().queue_release)(queue) };
         return Err(error);
     }
-    match E::new_instance(cx, GPU_QUEUE_CLASS, Box::new(QueuePayload { queue })) {
+    match E::new_instance(
+        cx,
+        GPU_QUEUE_CLASS,
+        Box::new(QueuePayload {
+            queue,
+            label: Mutex::new(String::new()),
+        }),
+    ) {
         Ok(value) => {
             device_payload.cache_queue(E::duplicate_value(cx, value));
             Ok(value)
@@ -4871,6 +5234,7 @@ fn new_derived_bind_group_layout<E: JsEngine + 'static>(
         Box::new(BindGroupLayoutPayload {
             layout,
             parent_pipeline: Some(parent),
+            label: Mutex::new(String::new()),
         }),
     ) {
         Ok(value) => Ok(value),
@@ -6014,6 +6378,7 @@ pub fn command_encoder_begin_render_pass<E: JsEngine + 'static>(
                     parent,
                     error_sink,
                 })),
+                label: Mutex::new(String::new()),
             }),
         );
     }
@@ -6025,6 +6390,16 @@ pub fn command_encoder_begin_render_pass<E: JsEngine + 'static>(
         &arena,
         &mut created_texture_views,
     )?;
+    let label = unsafe { string_view_to_owned(descriptor.label) };
+    if created_texture_views.has_depth_slice_error() {
+        parent
+            .lock()
+            .map_err(|_| E::operation_error(cx, "GPUCommandEncoder state is poisoned"))?
+            .pending_validation_error
+            .get_or_insert_with(|| {
+                "GPURenderPassColorAttachment.depthSlice must be provided only for 3d views and be less than the mip depth".to_owned()
+            });
+    }
     let pass = unsafe {
         (E::environment(cx).gpu().command_encoder_begin_render_pass)(
             encoder,
@@ -6051,6 +6426,7 @@ pub fn command_encoder_begin_render_pass<E: JsEngine + 'static>(
                 parent,
                 error_sink,
             })),
+            label: Mutex::new(label),
         }),
     ) {
         Ok(value) => Ok(value),
@@ -6087,6 +6463,7 @@ pub fn command_encoder_begin_compute_pass<E: JsEngine + 'static>(
                     parent,
                     error_sink,
                 })),
+                label: Mutex::new(String::new()),
             }),
         );
     }
@@ -6097,6 +6474,9 @@ pub fn command_encoder_begin_compute_pass<E: JsEngine + 'static>(
         }
         _ => None,
     };
+    let label = native.as_ref().map_or_else(String::new, |native| unsafe {
+        string_view_to_owned(native.label)
+    });
     let pass = unsafe {
         (E::environment(cx).gpu().command_encoder_begin_compute_pass)(
             encoder,
@@ -6123,6 +6503,7 @@ pub fn command_encoder_begin_compute_pass<E: JsEngine + 'static>(
                 parent,
                 error_sink,
             })),
+            label: Mutex::new(label),
         }),
     ) {
         Ok(value) => Ok(value),
@@ -6147,14 +6528,25 @@ pub fn command_encoder_finish<E: JsEngine + 'static>(
         }
         _ => None,
     };
-    let (encoder, error_sink, finished) = {
+    let label = native.as_ref().map_or_else(String::new, |native| unsafe {
+        string_view_to_owned(native.label)
+    });
+    let (encoder, error_sink, finished, pending_validation_error) = {
         let mut state = state
             .lock()
             .map_err(|_| E::operation_error(cx, "GPUCommandEncoder state is poisoned"))?;
         let finished = state.ended;
         state.ended = true;
-        (state.encoder, Arc::clone(&state.error_sink), finished)
+        (
+            state.encoder,
+            Arc::clone(&state.error_sink),
+            finished,
+            state.pending_validation_error.take(),
+        )
     };
+    if let Some(message) = pending_validation_error {
+        error_sink.generate_validation_error(message);
+    }
     if finished {
         error_sink.generate_validation_error("GPUCommandEncoder is finished".to_owned());
         let _ = E::register_class(cx, command_buffer_class::<E>())?;
@@ -6168,6 +6560,7 @@ pub fn command_encoder_finish<E: JsEngine + 'static>(
                     invalid: true,
                     error_sink,
                 })),
+                label: Mutex::new(label),
             }),
         );
     }
@@ -6197,6 +6590,7 @@ pub fn command_encoder_finish<E: JsEngine + 'static>(
                 invalid: false,
                 error_sink,
             })),
+            label: Mutex::new(label),
         }),
     ) {
         Ok(value) => Ok(value),
@@ -6223,6 +6617,9 @@ pub fn render_bundle_encoder_finish<E: JsEngine + 'static>(
         }
         _ => None,
     };
+    let label = native.as_ref().map_or_else(String::new, |native| unsafe {
+        string_view_to_owned(native.label)
+    });
     let (encoder, error_sink, finished) = {
         let mut state = payload
             .state
@@ -6245,6 +6642,7 @@ pub fn render_bundle_encoder_finish<E: JsEngine + 'static>(
             Box::new(RenderBundlePayload {
                 render_bundle: ptr::null_mut(),
                 invalid: true,
+                label: Mutex::new(label),
             }),
         );
     }
@@ -6270,6 +6668,7 @@ pub fn render_bundle_encoder_finish<E: JsEngine + 'static>(
         Box::new(RenderBundlePayload {
             render_bundle,
             invalid: false,
+            label: Mutex::new(label),
         }),
     ) {
         Ok(value) => Ok(value),
@@ -6945,6 +7344,7 @@ struct DeviceRequest<E: JsEngine + 'static> {
     release_queue: Arc<ReleaseQueue>,
     gpu: GpuDispatch,
     events: Arc<DeviceEventState<E>>,
+    label: String,
     _registration: Option<E::DeferredRegistration>,
 }
 
@@ -6998,6 +7398,7 @@ struct ComputePipelineRequest<E: JsEngine + 'static> {
     lost_at_start: bool,
     module: WGPUShaderModule,
     layout: WGPUPipelineLayout,
+    label: String,
     _registration: Option<E::DeferredRegistration>,
 }
 
@@ -7011,6 +7412,7 @@ struct RenderPipelineRequest<E: JsEngine + 'static> {
     vertex_module: WGPUShaderModule,
     fragment_module: WGPUShaderModule,
     layout: WGPUPipelineLayout,
+    label: String,
     _registration: Option<E::DeferredRegistration>,
 }
 
@@ -7186,6 +7588,7 @@ unsafe extern "C" fn request_device_callback<E: JsEngine + 'static>(
                     gpu: request.gpu,
                 },
                 events: Arc::clone(&request.events),
+                label: request.label,
             }
         } else {
             if !device.is_null() {
@@ -7235,6 +7638,7 @@ unsafe extern "C" fn create_compute_pipeline_callback<E: JsEngine + 'static>(
             lost_at_start: request.lost_at_start,
             module: request.module,
             layout: request.layout,
+            label: request.label,
             queue: Arc::clone(&request.release_queue),
             gpu: request.gpu,
         };
@@ -7275,6 +7679,7 @@ unsafe extern "C" fn create_render_pipeline_callback<E: JsEngine + 'static>(
             vertex_module: request.vertex_module,
             fragment_module: request.fragment_module,
             layout: request.layout,
+            label: request.label,
             queue: Arc::clone(&request.release_queue),
             gpu: request.gpu,
         };
@@ -7460,6 +7865,7 @@ struct ConvertedBindGroupDescriptor {
 
 struct CreatedTextureViewCapture {
     views: Vec<WGPUTextureView>,
+    depth_slice_error: bool,
     queue: Arc<ReleaseQueue>,
     gpu: GpuDispatch,
 }
@@ -7468,6 +7874,7 @@ impl CreatedTextureViewCapture {
     fn new<E: JsEngine>(cx: E::Context<'_>) -> Self {
         Self {
             views: Vec::new(),
+            depth_slice_error: false,
             queue: Arc::clone(E::environment(cx).queue()),
             gpu: E::environment(cx).gpu(),
         }
@@ -7479,6 +7886,46 @@ impl CreatedTextureViewCapture {
 
     fn take(&mut self) -> Vec<WGPUTextureView> {
         std::mem::take(&mut self.views)
+    }
+
+    fn check_depth_slice<E: JsEngine + 'static>(
+        &mut self,
+        cx: E::Context<'_>,
+        view: E::Value,
+        depth_slice: Option<u32>,
+    ) -> Result<(), E::Error> {
+        let (dimension, mip_depth) = if let Some(payload) =
+            E::payload(cx, view, GPU_TEXTURE_VIEW_CLASS)
+                .and_then(|payload| payload.downcast_ref::<TextureViewPayload>())
+        {
+            (payload.dimension, payload.mip_depth)
+        } else if let Some(payload) = E::payload(cx, view, GPU_TEXTURE_CLASS)
+            .and_then(|payload| payload.downcast_ref::<TexturePayload>())
+        {
+            (
+                default_texture_view_dimension(payload.dimension, payload.depth_or_array_layers),
+                payload.depth_or_array_layers,
+            )
+        } else {
+            return Err(E::type_error(
+                cx,
+                "GPUTexture or GPUTextureView is required",
+            ));
+        };
+        let is_3d = dimension == WGPUTextureViewDimension_WGPUTextureViewDimension_3D;
+        let invalid = if is_3d {
+            depth_slice.is_none_or(|slice| slice >= mip_depth)
+        } else {
+            depth_slice.is_some()
+        };
+        if invalid {
+            self.depth_slice_error = true;
+        }
+        Ok(())
+    }
+
+    fn has_depth_slice_error(&self) -> bool {
+        self.depth_slice_error
     }
 }
 
@@ -7800,6 +8247,38 @@ fn texture_handle<E: JsEngine + 'static>(
         .and_then(|payload| payload.downcast_ref::<TexturePayload>())
         .map(|payload| payload.texture)
         .ok_or_else(|| E::type_error(cx, "GPUTexture is required"))
+}
+
+fn texture_wrapper_payload<'a, E: JsEngine + 'static>(
+    cx: E::Context<'a>,
+    value: E::Value,
+) -> Result<&'a TexturePayload, E::Error> {
+    E::payload(cx, value, GPU_TEXTURE_CLASS)
+        .and_then(|payload| payload.downcast_ref::<TexturePayload>())
+        .ok_or_else(|| E::type_error(cx, "GPUTexture method called on an incompatible object"))
+}
+
+fn default_texture_view_dimension(
+    dimension: WGPUTextureDimension,
+    depth_or_array_layers: u32,
+) -> WGPUTextureViewDimension {
+    match dimension {
+        value if value == WGPUTextureDimension_WGPUTextureDimension_1D => {
+            WGPUTextureViewDimension_WGPUTextureViewDimension_1D
+        }
+        value if value == WGPUTextureDimension_WGPUTextureDimension_3D => {
+            WGPUTextureViewDimension_WGPUTextureViewDimension_3D
+        }
+        _ if depth_or_array_layers > 1 => WGPUTextureViewDimension_WGPUTextureViewDimension_2DArray,
+        _ => WGPUTextureViewDimension_WGPUTextureViewDimension_2D,
+    }
+}
+
+fn texture_mip_level_depth(depth_or_array_layers: u32, base_mip_level: u32) -> u32 {
+    depth_or_array_layers
+        .checked_shr(base_mip_level)
+        .unwrap_or(0)
+        .max(1)
 }
 
 fn texture_view_handle<E: JsEngine + 'static>(

@@ -1235,17 +1235,25 @@ impl core::JsEngine for Engine {
                 JsString::from(property.name),
                 getter,
                 setter,
-                Attribute::CONFIGURABLE,
+                Attribute::ENUMERABLE | Attribute::CONFIGURABLE,
             );
         }
         for method in spec.methods {
-            initializer.function(
+            let function = FunctionObjectBuilder::new(
+                initializer.context().realm(),
                 NativeFunction::from_copy_closure_with_captures(
                     method_callback,
                     MethodCapture(method.call),
                 ),
+            )
+            .name(method.name)
+            .length(usize::from(method.length))
+            .constructor(false)
+            .build();
+            initializer.property(
                 JsString::from(method.name),
-                usize::from(method.length),
+                function,
+                Attribute::WRITABLE | Attribute::ENUMERABLE | Attribute::CONFIGURABLE,
             );
         }
         let prototype = initializer.build();
@@ -2177,6 +2185,11 @@ mod tests {
                     GPUSupportedLimits.prototype,
                     GPUSupportedLimits
                 );
+                const labelDescriptor = Object.getOwnPropertyDescriptor(GPUBuffer.prototype, "label");
+                const methodDescriptor = Object.getOwnPropertyDescriptor(GPUBuffer.prototype, "mapAsync");
+                const enumerableMembers = labelDescriptor.enumerable === true &&
+                    labelDescriptor.configurable === true && methodDescriptor.writable === true &&
+                    methodDescriptor.enumerable === true && methodDescriptor.configurable === true;
                 let callError;
                 let constructError;
                 try { GPUSupportedLimits(); } catch (error) { callError = error; }
@@ -2186,7 +2199,7 @@ mod tests {
                 const instanceReady = pass instanceof GPUComputePassEncoder;
                 pass.end();
                 encoder.finish();
-                passTypeReady && passMethodReady && constructibleConstructorDescriptor &&
+                passTypeReady && passMethodReady && enumerableMembers && constructibleConstructorDescriptor &&
                     nonConstructibleConstructorDescriptor && instanceReady &&
                     callError instanceof TypeError && callError.message.includes("Illegal constructor") &&
                     constructError instanceof TypeError && constructError.message.includes("Illegal constructor")

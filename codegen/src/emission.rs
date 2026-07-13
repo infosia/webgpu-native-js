@@ -1743,6 +1743,17 @@ fn emit_descriptor(
         }
     }
 
+    if dictionary == "GPURenderPassColorAttachment" {
+        output.push_str("    let depth_slice = if E::is_undefined(cx, depth_slice_value) {\n");
+        output.push_str("        None\n");
+        output.push_str("    } else {\n");
+        output.push_str("        Some(enforce_u32::<E>(cx, depth_slice_value, \"depthSlice\")?)\n");
+        output.push_str("    };\n");
+        output.push_str(
+            "    created_texture_views.check_depth_slice::<E>(cx, view_value, depth_slice)?;\n",
+        );
+    }
+
     if let Some(wrapper) = &descriptor.wrapper {
         for capture in &wrapper.captures {
             if capture.take {
@@ -2834,6 +2845,13 @@ fn emit_field(
     let field = rust_field_name(&c.name, raw_c);
     let local = rust_field_name(name, false);
     let value = format!("{}_value", snake_case(name));
+    if dictionary == "GPURenderPassColorAttachment" && name == "depthSlice" {
+        let _ = writeln!(
+            output,
+            "        {field}: depth_slice.unwrap_or(WGPU_DEPTH_SLICE_UNDEFINED),"
+        );
+        return Ok(());
+    }
     if unsupported.contains(name.as_str()) {
         output.push_str(
             "        // SAFETY: policy permits only a joined `default: zero` C member here.\n",

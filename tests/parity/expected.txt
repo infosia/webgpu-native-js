@@ -3,6 +3,8 @@ interface:GPURenderPassEncoder:setBindGroup:true
 interface:GPUSupportedLimits:illegal-constructor:true:Illegal constructor
 interface:GPUComputePassEncoder:instanceof:true
 buffer:null,round-trip;method:true
+label:nul-round-trip-destroy:true:true
+enumerable:label-method-constructor:true,true,false:true,true
 identity:queue:true
 identity:lost:true
 features:core-features-and-limits
@@ -137,6 +139,8 @@ copy:missing-texture:TypeError
 renderPass:chain-ok
 renderPass:clearValue-dict-sequence:no-validation-error
 copy:texture-validation:no-validation-error
+depthSlice:2d-max:GPUValidationError
+depthSlice:3d-zero:null
 renderBundle:format-rejection:TypeError:GPUTextureFormat
 renderBundle:use-after-finish:GPUValidationError:returned
 renderBundle:type-confusion:TypeError:GPURenderBundle is required
@@ -161,6 +165,10 @@ scope:nested:null,GPUValidationError
 reject:popErrorScope:OperationError:popErrorScope failed:[backend-detail]
 mapAsync:mapped:OperationError:GPUValidationError
 mapAsync:cancel:AbortError
+mapState:unmapped
+mapState:pending
+mapState:mapped
+mapState:unmapped
 order:same-tick:mapAsync,workDone
 order:promise-all:resolved
 order:then-chain:first,second

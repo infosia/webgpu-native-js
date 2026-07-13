@@ -151,6 +151,8 @@ unsafe extern "C" {
     ) -> JSStringRef;
     /// Creates a JavaScript string by copying a nul-terminated UTF-8 string.
     fn JSStringCreateWithUTF8CString(string: *const c_char) -> JSStringRef;
+    /// Creates a JavaScript string from an explicit-length UTF-16 slice.
+    fn JSStringCreateWithCharacters(chars: *const JSChar, num_chars: usize) -> JSStringRef;
     /// Returns the number of UTF-16 code units in a JavaScript string.
     fn JSStringGetLength(string: JSStringRef) -> usize;
     /// Returns the UTF-16 backing store, live while the string is live.
@@ -403,6 +405,16 @@ impl JsString {
         self.0.as_ptr()
     }
 
+    fn from_rust(value: &str) -> Result<Self> {
+        let utf16 = value.encode_utf16().collect::<Vec<_>>();
+        // SAFETY: `utf16` provides exactly `len` live UTF-16 code units, and
+        // JavaScriptCore copies them, including embedded NUL code units.
+        let raw = unsafe { JSStringCreateWithCharacters(utf16.as_ptr(), utf16.len()) };
+        NonNull::new(raw)
+            .map(Self)
+            .ok_or(Error::Null("JSStringCreateWithCharacters"))
+    }
+
     fn to_string_lossy(&self) -> String {
         // The SDK defines JSChar as a UTF-16 code unit and keeps this backing
         // store live until the JSString is released. Reading UTF-16 directly
@@ -599,6 +611,8 @@ struct ObjectPayload {
 
 enum MethodTarget {
     Method(core::MethodFn<Engine>),
+    Getter(core::GetterFn<Engine>),
+    Setter(core::SetterFn<Engine>),
     Host(Box<HostFunction>),
 }
 
@@ -1560,13 +1574,16 @@ impl core::JsEngine for Engine {
                     child_prototype,
                     name.as_raw(),
                     method.value.0,
-                    PROPERTY_DONT_ENUM,
+                    PROPERTY_NONE,
                     &mut exception,
                 )
             };
             if !exception.is_null() {
                 return Err(exception);
             }
+        }
+        for property in spec.properties {
+            define_prototype_accessor(cx, child_prototype, property)?;
         }
         let constructor_name = JsString::new("constructor")
             .map_err(|_| Self::operation_error(cx, "constructor string failed"))?;
@@ -1876,8 +1893,8 @@ impl core::JsEngine for Engine {
     }
 
     fn string(cx: Self::Context<'_>, value: &str) -> core::Result<Self::Value, Self::Error> {
-        let value =
-            JsString::new(value).map_err(|_| Self::type_error(cx, "string contains a nul byte"))?;
+        let value = JsString::from_rust(value)
+            .map_err(|_| Self::operation_error(cx, "string allocation failed"))?;
         // SAFETY: cx and value are live; JSC retains the JSString for the value.
         let value = unsafe { JSValueMakeString(cx.ctx, value.as_raw()) };
         cx.scope.track(value);
@@ -2509,6 +2526,15 @@ unsafe extern "C" fn method_call(
         };
         match target {
             MethodTarget::Method(call) => call(cx, this_object.cast_const(), args),
+            MethodTarget::Getter(get) => get(cx, this_object.cast_const()),
+            MethodTarget::Setter(set) => {
+                let value = args
+                    .first()
+                    .copied()
+                    .unwrap_or_else(|| Engine::undefined(cx));
+                set(cx, this_object.cast_const(), value)?;
+                Ok(Engine::undefined(cx))
+            }
             MethodTarget::Host(call) => {
                 let args = args
                     .iter()
@@ -2708,6 +2734,134 @@ fn make_method(
         let value = object.cast_const();
         cx.scope.track(value);
         Ok(value)
+    }
+}
+
+fn make_accessor(cx: Context<'_>, target: MethodTarget) -> core::Result<JSValueRef, JSValueRef> {
+    let raw = Box::into_raw(Box::new(target)).cast();
+    let state = state_from_context(cx.ctx);
+    // SAFETY: method_class is live and adopts raw as private dispatch data.
+    let object = unsafe { JSObjectMake(cx.ctx, state.method_class, raw) };
+    if object.is_null() {
+        // SAFETY: JSObjectMake did not adopt private data on failure.
+        unsafe { drop(Box::from_raw(raw.cast::<MethodTarget>())) };
+        Err(Engine::operation_error(cx, "JSObjectMake(accessor) failed"))
+    } else {
+        let value = object.cast_const();
+        cx.scope.track(value);
+        Ok(value)
+    }
+}
+
+fn define_prototype_accessor(
+    cx: Context<'_>,
+    prototype: JSObjectRef,
+    property: &core::PropertySpec<Engine>,
+) -> core::Result<(), JSValueRef> {
+    let descriptor = unsafe { JSObjectMake(cx.ctx, ptr::null_mut(), ptr::null_mut()) };
+    if descriptor.is_null() {
+        return Err(Engine::operation_error(
+            cx,
+            "accessor descriptor allocation failed",
+        ));
+    }
+    let mut exception = ptr::null();
+    for (name, value) in [
+        ("enumerable", unsafe { JSValueMakeBoolean(cx.ctx, true) }),
+        ("configurable", unsafe { JSValueMakeBoolean(cx.ctx, true) }),
+    ] {
+        let name = JsString::new(name)
+            .map_err(|_| Engine::operation_error(cx, "accessor descriptor name failed"))?;
+        unsafe {
+            JSObjectSetProperty(
+                cx.ctx,
+                descriptor,
+                name.as_raw(),
+                value,
+                PROPERTY_NONE,
+                &mut exception,
+            )
+        };
+        if !exception.is_null() {
+            return Err(exception);
+        }
+    }
+    for (name, target) in [
+        ("get", property.get.map(MethodTarget::Getter)),
+        ("set", property.set.map(MethodTarget::Setter)),
+    ] {
+        let Some(target) = target else { continue };
+        let callback = make_accessor(cx, target)?;
+        let name = JsString::new(name)
+            .map_err(|_| Engine::operation_error(cx, "accessor callback name failed"))?;
+        unsafe {
+            JSObjectSetProperty(
+                cx.ctx,
+                descriptor,
+                name.as_raw(),
+                callback,
+                PROPERTY_NONE,
+                &mut exception,
+            )
+        };
+        if !exception.is_null() {
+            return Err(exception);
+        }
+    }
+
+    let global = unsafe { JSContextGetGlobalObject(cx.ctx) };
+    let object_name =
+        JsString::new("Object").map_err(|_| Engine::operation_error(cx, "Object string failed"))?;
+    let object =
+        unsafe { JSObjectGetProperty(cx.ctx, global, object_name.as_raw(), &mut exception) };
+    if !exception.is_null() {
+        return Err(exception);
+    }
+    let object = unsafe { JSValueToObject(cx.ctx, object, &mut exception) };
+    if !exception.is_null() || object.is_null() {
+        return Err(if exception.is_null() {
+            Engine::operation_error(cx, "Object is not an object")
+        } else {
+            exception
+        });
+    }
+    let define_name = JsString::new("defineProperty")
+        .map_err(|_| Engine::operation_error(cx, "defineProperty string failed"))?;
+    let define =
+        unsafe { JSObjectGetProperty(cx.ctx, object, define_name.as_raw(), &mut exception) };
+    if !exception.is_null() {
+        return Err(exception);
+    }
+    let define = unsafe { JSValueToObject(cx.ctx, define, &mut exception) };
+    if !exception.is_null() || define.is_null() {
+        return Err(if exception.is_null() {
+            Engine::operation_error(cx, "Object.defineProperty is not callable")
+        } else {
+            exception
+        });
+    }
+    let property_name = JsString::new(property.name)
+        .map_err(|_| Engine::type_error(cx, "property name contains a nul byte"))?;
+    let property_name = unsafe { JSValueMakeString(cx.ctx, property_name.as_raw()) };
+    let arguments = [
+        prototype.cast_const(),
+        property_name,
+        descriptor.cast_const(),
+    ];
+    unsafe {
+        JSObjectCallAsFunction(
+            cx.ctx,
+            define,
+            object,
+            arguments.len(),
+            arguments.as_ptr(),
+            &mut exception,
+        )
+    };
+    if exception.is_null() {
+        Ok(())
+    } else {
+        Err(exception)
     }
 }
 
@@ -3155,6 +3309,11 @@ mod tests {
                     GPUSupportedLimits.prototype,
                     "constructor"
                 );
+                const labelDescriptor = Object.getOwnPropertyDescriptor(GPUBuffer.prototype, "label");
+                const methodDescriptor = Object.getOwnPropertyDescriptor(GPUBuffer.prototype, "mapAsync");
+                const enumerableMembers = labelDescriptor.enumerable === true &&
+                    labelDescriptor.configurable === true && methodDescriptor.writable === true &&
+                    methodDescriptor.enumerable === true && methodDescriptor.configurable === true;
                 const descriptorIsWebIdl = (descriptor, interfaceObject) =>
                     descriptor.value === interfaceObject && descriptor.writable === true &&
                     descriptor.enumerable === false && descriptor.configurable === true;
@@ -3175,13 +3334,14 @@ mod tests {
                 const instanceReady = pass instanceof GPUComputePassEncoder;
                 pass.end();
                 encoder.finish();
-                if (!(passTypeReady && passMethodReady && constructibleConstructorDescriptor &&
+                if (!(passTypeReady && passMethodReady && enumerableMembers && constructibleConstructorDescriptor &&
                     nonConstructibleConstructorDescriptor && instanceReady &&
                     callError instanceof TypeError && callError.message.includes("Illegal constructor") &&
                     constructError instanceof TypeError && constructError.message.includes("Illegal constructor"))) {
                     throw new Error("eager interface-object invariants failed: " + [
                         passTypeReady,
                         passMethodReady,
+                        enumerableMembers,
                         JSON.stringify(constructibleDescriptor),
                         JSON.stringify(nonConstructibleDescriptor),
                         instanceReady,
@@ -3369,6 +3529,11 @@ mod tests {
                 buffer.label = 'round-trip';
                 if (buffer.label !== 'round-trip') throw new Error('label round-trip mismatch');
                 buffer.destroy();
+                const nul = 'null\0in\0label';
+                const nulBuffer = device.createBuffer({ size: 4, usage: 8, label: nul });
+                if (nulBuffer.label !== nul) throw new Error('embedded NUL label mismatch');
+                nulBuffer.destroy();
+                if (nulBuffer.label !== nul) throw new Error('destroy changed embedded NUL label');
             "#,
             "buffer-vertical-slice.js",
         );

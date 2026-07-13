@@ -67,8 +67,8 @@ pub fn sampler_label_set<E: JsEngine + 'static>(cx: E::Context<'_>, this: E::Val
     let arena = Arena::new();
     let new_label = E::to_str(cx, value, &arena)?;
     let payload = E::payload(cx, this, GPU_SAMPLER_CLASS).and_then(|payload| payload.downcast_ref::<SamplerPayload>()).ok_or_else(|| E::type_error(cx, "GPUSampler.label called on an incompatible object"))?;
-    let mut label = payload.label.lock().map_err(|_| E::operation_error(cx, "GPUSampler label is poisoned"))?;
     unsafe { (E::environment(cx).gpu().sampler_set_label)(payload.sampler, WGPUStringView::from_bytes(new_label.as_bytes())); }
+    let mut label = payload.label.lock().map_err(|_| E::operation_error(cx, "GPUSampler label is poisoned"))?;
     new_label.clone_into(&mut label);
     Ok(())
 }

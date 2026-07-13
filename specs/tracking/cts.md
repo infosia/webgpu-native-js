@@ -579,3 +579,106 @@ created with `usage: RENDER_ATTACHMENT | TRANSIENT_ATTACHMENT` and `dimension:
 binding forwards the bit; the backend creates the texture without complaint.
 **Backend validation gap**, parked for Dawn arbitration — same class as the
 recorded `createView` view-usage gap. Never worked around in the binding.
+
+## Phase C (2026-07-13) — the Dawn oracle runs
+
+Backend: Dawn, built locally, real GPU (Metal), gated and unsandboxed — never CI.
+The oracle's precondition holds: our `third_party/webgpu-headers` pin is
+`a11ef44…`, byte-identical to Dawn's `DEPS` pin, so both sides speak the same ABI.
+
+### C1 — the curated validation suite on Dawn
+
+**23,247 pass / 6 fail / 13 unexpected-pass**, against a suite that is 23,253 / 0
+on yawgpu Noop. Every number in that line is a finding.
+
+*(One methodology note: the first C1 attempt died at the runner's default 300 s
+timeout, which reports as a plain failure. Dawn is a real GPU and the suite is
+23 k cases; `--timeout-secs` is not optional at this size.)*
+
+**The 13 unexpected-passes are the arbitration.** Each is an expectation we had
+recorded against yawgpu's Noop backend, and Dawn passes all of them — confirming
+every one as a **backend** limitation, not a binding bug:
+
+- `error_scope:*` — 12 cases. Dawn is **49/0** where yawgpu Noop is 37/12. Dawn
+  can actually run out of memory (the CTS provokes it with a 256 GiB texture);
+  Noop allocates it without complaint. The binding's OOM path was right all along.
+- `createView:texture_view_usage_of_multiple_usages` — Dawn is **1192/0** where
+  yawgpu is 1191/1. Dawn validates the view-usage subset; yawgpu does not.
+
+Two further catalogued gaps arbitrate the same way, outside the curated suite:
+
+- **D14 (transient attachments) — CONFIRMED a yawgpu gap.** `createTexture:*` is
+  **3143/0** on Dawn vs 3097/46 on yawgpu; `render_pass,*` is **262/1** vs
+  212/51. Dawn enforces every transient-attachment rule.
+
+**The 6 Dawn-only failures are presumed binding bugs** (oracle protocol), and both
+families are the same shape: *a binding gap that yawgpu's stricter behaviour had
+been hiding.*
+
+- `encoding,encoder_state:pass_end_invalid_order` (4) — "Validation succeeded
+  unexpectedly". This family is 16/0 on yawgpu, so the error we were relying on
+  was **yawgpu's, not ours**. Dawn does not raise it, and neither do we.
+- `buffer,mapping:getMappedRange,disjointRanges{,_many}` (2) — "unexpectedly did
+  not throw". Overlapping mapped ranges must be rejected on the content timeline
+  by the binding, which tracks them. We delegate to
+  `wgpuBufferGetMappedRange`, which returns NULL on yawgpu (so we threw by
+  accident) and succeeds on Dawn (so we did not).
+
+Both are open; they are the next slice.
+
+### C2 — the first `api,operation` families ever run, and what they cost us
+
+`api,operation` had never been run against anything. Four families are green on
+both backends on first contact (`queue`, `onSubmittedWorkDone`, `device`, and —
+after the fixes below — `reflection` and `labels`). Getting there exposed **four
+WebIDL conformance bugs that no validation family reaches**, three of which fail
+identically on yawgpu *and* Dawn — so they were never Dawn-specific, only
+never-tested.
+
+1. **Prototype properties were non-enumerable; WebIDL requires them enumerable.**
+   `reflection:*` was 2/4. The CTS reflects with a plain **`for...in`**
+   (`extractValuePropertyKeys`), which sees only enumerable properties — and our
+   accessors were installed CONFIGURABLE-only (Boa) and our methods with
+   `DontEnum` (JSC). WebIDL puts operations at
+   `{writable, enumerable, configurable}` and attributes at
+   `{enumerable, configurable}`; only `constructor` is non-enumerable. **We had
+   it exactly backwards**, in both adapters. Now **6/0**.
+2. **`label` existed on 3 of 19 interfaces.** `labels:*` was 4/16. The IDL puts
+   `label` on `GPUObjectBase` — every WebGPU object — as a *writable* attribute;
+   policy listed it only for `GPUBuffer`, `GPUSampler`, `GPUQuerySet`. It must
+   round-trip the descriptor's label, survive `destroy()`, and carry embedded NULs
+   and non-BMP text (`WGPUStringView` has an explicit length, so it can). Now
+   **20/0**.
+3. **`GPUBuffer.mapState` did not exist.** In the IDL, absent from the subset.
+   Added; the state machine was already there.
+4. **`depthSlice`: a C sentinel collided with a legal script value.** See below —
+   it is the most interesting bug of the phase.
+
+### The depthSlice sentinel collision — a hazard class, not a one-off
+
+`WGPU_DEPTH_SLICE_UNDEFINED` is **0xFFFFFFFF**. `depthSlice` is a
+`GPUIntegerCoordinate` — an unsigned long — so **0xFFFFFFFF is a value a script
+may legally pass**. At the C ABI, "the script passed 0xFFFFFFFF" and "the script
+omitted it" are the same 32 bits. The CTS knows this and says so in its own test
+description: *"The special value '0xFFFFFFFF' is not treated as 'undefined'."*
+
+The binding was forwarding the value faithfully — that was never the bug. The bug
+is that **no backend can enforce a distinction the ABI cannot express**, so the
+binding must decide presence on the JS side (`is_undefined`) and raise the
+validation error itself. It now does, for all six definedness rows and the mip-
+level bound check, which required view wrappers to retain their effective
+dimension and per-mip depth.
+
+Recorded as a **codegen/ABI delta** (`codegen-deltas.md`): wherever a C "undefined"
+sentinel lies inside the range of its IDL type, the binding — not the backend —
+owns that validation. `depthSlice` is unlikely to be the only such member.
+
+### Acceptance
+
+Block 13's Phase C acceptance asked for *"at least one binding bug found-and-fixed
+via the oracle, to prove the loop works (if literally none surface, say so — do not
+manufacture)."* Four surfaced and were fixed; two more are open with the oracle
+pointing straight at them. The loop works.
+
+Suite grows **23,253 → 23,305 cases** (the green `api,operation` families join),
+exit 0, 0 fail on yawgpu.

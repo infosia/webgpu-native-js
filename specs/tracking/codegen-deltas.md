@@ -153,3 +153,39 @@ enum sentinels `Undefined` / `BindingNotUsed` (emitted only for absent optionals
   semantics (so an inherited `constructor` defeats the attribute). The JSC
   adapter detaches the prototype chain, defines with `DontEnum`, and restores.
   Contained in the adapter; `core/` is untouched by it.
+
+## Phase C additions (2026-07-13) — found by the Dawn oracle
+
+- **A C "undefined" sentinel that lies inside its IDL type's range is a binding
+  obligation, not a backend one.** `WGPU_DEPTH_SLICE_UNDEFINED` is `0xFFFFFFFF`,
+  and `GPURenderPassColorAttachment.depthSlice` is a `GPUIntegerCoordinate`
+  (unsigned long) — so `0xFFFFFFFF` is a value a script may legally pass, and at
+  the C ABI it is indistinguishable from omission. The CTS tests this on purpose
+  (*"The special value '0xFFFFFFFF' is not treated as 'undefined'"*). The binding
+  forwards the value correctly; that was never the bug. **No backend can enforce a
+  distinction the ABI cannot express**, so the binding decides presence on the JS
+  side (`is_undefined`) and raises the validation error itself — all six
+  definedness rows plus the mip-level bound check, which required view wrappers to
+  retain their effective dimension and per-mip depth.
+
+  Generalize: **wherever a header sentinel falls inside the value range of the IDL
+  type it stands for, presence must be decided in the binding.** `depthSlice` is
+  unlikely to be the only instance; audit the other `*_UNDEFINED` constants when a
+  family blocks on one.
+
+- **WebIDL property attributes are part of conformance.** On the interface
+  prototype object, operations are `{writable, enumerable, configurable}` and
+  attributes are `{enumerable, configurable}`; only `constructor` is
+  non-enumerable. We had shipped the inverse (accessors CONFIGURABLE-only in Boa,
+  methods `DontEnum` in JSC), which is invisible to every validation test and
+  fatal to any reflection that uses `for...in` — as the CTS's
+  `api,operation,reflection` does. Fixed in both adapters and the mock.
+
+- **`label` is on `GPUObjectBase`, i.e. on every object.** The policy subset had it
+  on three interfaces. It is a *writable* attribute, must round-trip the
+  descriptor's label, must survive `destroy()`, and must carry embedded NULs and
+  non-BMP text (`WGPUStringView` carries an explicit length, so no truncation is
+  needed or acceptable).
+
+- **`GPUBuffer.mapState`** was absent from the subset; the state machine already
+  existed internally. Added.

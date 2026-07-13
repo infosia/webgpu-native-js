@@ -24,7 +24,11 @@ const REQUIRED_EXTRA_SYMBOLS: [&str; 13] = [
     "wgpuSupportedFeaturesFreeMembers",
 ];
 
-const REQUIRED_SKIPPED_MEMBERS: [(&str, &str); 2] = [("GPUBuffer", "size"), ("GPUBuffer", "usage")];
+const REQUIRED_SKIPPED_MEMBERS: [(&str, &str); 3] = [
+    ("GPUBuffer", "size"),
+    ("GPUBuffer", "usage"),
+    ("GPUBuffer", "mapState"),
+];
 
 #[derive(Clone)]
 struct DispatchEntry {

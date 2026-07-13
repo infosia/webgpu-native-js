@@ -843,9 +843,17 @@ fn emit_payloads(output: &mut String, standards: &[StandardInterface<'_>]) {
             if standard.destroyable {
                 output.push_str("    pub(super) destroyed: AtomicBool,\n");
             }
-            if standard.label {
-                output.push_str("    pub(super) label: Mutex<String>,\n");
-            }
+        }
+        if standard.label {
+            output.push_str("    pub(super) label: Mutex<String>,\n");
+        }
+        if interface == "GPUTexture" {
+            output.push_str("    pub(super) dimension: WGPUTextureDimension,\n");
+            output.push_str("    pub(super) depth_or_array_layers: u32,\n");
+        }
+        if interface == "GPUTextureView" {
+            output.push_str("    pub(super) dimension: WGPUTextureViewDimension,\n");
+            output.push_str("    pub(super) mip_depth: u32,\n");
         }
         output.push_str("}\n\n");
         let _ = writeln!(
@@ -990,6 +998,9 @@ fn emit_create(output: &mut String, standard: &StandardInterface<'_>) -> Result<
             standard.creator_handle_field
         );
         output.push_str("    let error_sink: Arc<dyn DeviceErrorSink> = Arc::clone(&device_payload.events) as Arc<dyn DeviceErrorSink>;\n");
+    } else if standard.interface.idl_name.as_deref() == Some("GPUTextureView") {
+        output.push_str("    let texture_payload = texture_wrapper_payload::<E>(cx, this)?;\n");
+        output.push_str("    let texture = texture_payload.texture;\n");
     } else {
         let _ = writeln!(
             output,
@@ -1016,11 +1027,25 @@ fn emit_create(output: &mut String, standard: &StandardInterface<'_>) -> Result<
             "    let {variable} = {convert}::<E>(cx, descriptor, &arena)?;"
         );
     }
-    if standard.label && !standard.stateful_encoder {
-        let _ = writeln!(
-            output,
-            "    let label = unsafe {{ string_view_to_owned({native_expr}.label) }};"
-        );
+    if standard.label {
+        if standard.stateful_encoder && optional {
+            output.push_str("    let label = native.as_ref().map_or_else(String::new, |native| unsafe { string_view_to_owned(native.label) });\n");
+        } else {
+            let _ = writeln!(
+                output,
+                "    let label = unsafe {{ string_view_to_owned({native_expr}.label) }};"
+            );
+        }
+    }
+    if standard.interface.idl_name.as_deref() == Some("GPUTexture") {
+        output.push_str("    let dimension = native.dimension;\n");
+        output.push_str("    let depth_or_array_layers = native.size.depthOrArrayLayers;\n");
+    }
+    if standard.interface.idl_name.as_deref() == Some("GPUTextureView") {
+        output.push_str("    let dimension = if native.dimension == WGPUTextureViewDimension_WGPUTextureViewDimension_Undefined {\n");
+        output.push_str("        default_texture_view_dimension(texture_payload.dimension, texture_payload.depth_or_array_layers)\n");
+        output.push_str("    } else { native.dimension };\n");
+        output.push_str("    let mip_depth = texture_mip_level_depth(texture_payload.depth_or_array_layers, native.baseMipLevel);\n");
     }
     let descriptor_pointer = if optional && null_optional {
         "native.as_ref().map_or(ptr::null(), ptr::from_ref)".to_owned()
@@ -1113,7 +1138,11 @@ fn emit_create(output: &mut String, standard: &StandardInterface<'_>) -> Result<
         );
         let _ = writeln!(output, "        state: Arc::new(Mutex::new({state} {{");
         let _ = writeln!(output, "            {},", standard.handle_field);
-        output.push_str("            ended: false,\n            error_sink,\n        })),\n");
+        output.push_str("            ended: false,\n");
+        if standard.interface.idl_name.as_deref() == Some("GPUCommandEncoder") {
+            output.push_str("            pending_validation_error: None,\n");
+        }
+        output.push_str("            error_sink,\n        })),\n");
     } else {
         let _ = writeln!(output, "        {},", standard.handle_field);
         for retained in &standard.retained {
@@ -1137,9 +1166,17 @@ fn emit_create(output: &mut String, standard: &StandardInterface<'_>) -> Result<
         if standard.destroyable {
             output.push_str("        destroyed: AtomicBool::new(false),\n");
         }
-        if standard.label {
-            output.push_str("        label: Mutex::new(label),\n");
-        }
+    }
+    if standard.label {
+        output.push_str("        label: Mutex::new(label),\n");
+    }
+    if standard.interface.idl_name.as_deref() == Some("GPUTexture") {
+        output.push_str("        dimension,\n");
+        output.push_str("        depth_or_array_layers,\n");
+    }
+    if standard.interface.idl_name.as_deref() == Some("GPUTextureView") {
+        output.push_str("        dimension,\n");
+        output.push_str("        mip_depth,\n");
     }
     output.push_str("    })) {\n        Ok(value) => Ok(value),\n        Err(error) => {\n");
     emit_cleanup(output, standard, "            ", true);
@@ -1210,8 +1247,13 @@ fn emit_label_accessors(output: &mut String, standard: &StandardInterface<'_>) {
         "    let arena = Arena::new();\n    let new_label = E::to_str(cx, value, &arena)?;\n",
     );
     let _ = writeln!(output, "    let payload = E::payload(cx, this, {}).and_then(|payload| payload.downcast_ref::<{}>()).ok_or_else(|| E::type_error(cx, \"{interface}.label called on an incompatible object\"))?;", standard.class_id, standard.payload);
+    if standard.stateful_encoder {
+        let _ = writeln!(output, "    let handle = payload.state.lock().map_err(|_| E::operation_error(cx, \"{interface} state is poisoned\"))?.{};", standard.handle_field);
+        let _ = writeln!(output, "    unsafe {{ (E::environment(cx).gpu().{}_set_label)(handle, WGPUStringView::from_bytes(new_label.as_bytes())); }}", snake_case(object));
+    } else {
+        let _ = writeln!(output, "    unsafe {{ (E::environment(cx).gpu().{}_set_label)(payload.{}, WGPUStringView::from_bytes(new_label.as_bytes())); }}", snake_case(object), standard.handle_field);
+    }
     let _ = writeln!(output, "    let mut label = payload.label.lock().map_err(|_| E::operation_error(cx, \"{interface} label is poisoned\"))?;");
-    let _ = writeln!(output, "    unsafe {{ (E::environment(cx).gpu().{}_set_label)(payload.{}, WGPUStringView::from_bytes(new_label.as_bytes())); }}", snake_case(object), standard.handle_field);
     output.push_str("    new_label.clone_into(&mut label);\n    Ok(())\n}\n\n");
 }
 

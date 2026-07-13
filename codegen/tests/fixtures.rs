@@ -200,7 +200,7 @@ fn generated_dispatch_macro_matches_focused_shape_fixture() {
     let expected =
         fs::read_to_string(fixtures().join("dispatch_surface.rs")).expect("dispatch snapshot");
     assert_eq!(dispatch_macro_surface(&emitted), expected);
-    assert_eq!(expected.matches(", unsafe fn(").count(), 140);
+    assert_eq!(expected.matches(", unsafe fn(").count(), 156);
 }
 
 #[test]
@@ -346,16 +346,19 @@ fn generated_lifecycle_covers_every_selected_class_and_retention_set() {
     }
 
     assert!(emitted.contains(
-        "pub struct BindGroupPayload {\n    pub(super) bind_group: WGPUBindGroup,\n    pub(super) layout: WGPUBindGroupLayout,\n    pub(super) buffers: Vec<WGPUBuffer>,\n    pub(super) samplers: Vec<WGPUSampler>,\n    pub(super) texture_views: Vec<WGPUTextureView>,\n    pub(super) created_texture_views: Vec<WGPUTextureView>,\n}"
+        "pub struct BindGroupPayload {\n    pub(super) bind_group: WGPUBindGroup,\n    pub(super) layout: WGPUBindGroupLayout,\n    pub(super) buffers: Vec<WGPUBuffer>,\n    pub(super) samplers: Vec<WGPUSampler>,\n    pub(super) texture_views: Vec<WGPUTextureView>,\n    pub(super) created_texture_views: Vec<WGPUTextureView>,\n    pub(super) label: Mutex<String>,\n}"
     ));
     assert!(emitted.contains(
-        "pub struct ComputePipelinePayload {\n    pub(super) pipeline: WGPUComputePipeline,\n    pub(super) module: WGPUShaderModule,\n    pub(super) layout: WGPUPipelineLayout,\n}"
+        "pub struct ComputePipelinePayload {\n    pub(super) pipeline: WGPUComputePipeline,\n    pub(super) module: WGPUShaderModule,\n    pub(super) layout: WGPUPipelineLayout,\n    pub(super) label: Mutex<String>,\n}"
     ));
     assert!(emitted.contains(
-        "pub struct RenderPipelinePayload {\n    pub(super) render_pipeline: WGPURenderPipeline,\n    pub(super) vertex_module: WGPUShaderModule,\n    pub(super) fragment_module: WGPUShaderModule,\n    pub(super) layout: WGPUPipelineLayout,\n}"
+        "pub struct RenderPipelinePayload {\n    pub(super) render_pipeline: WGPURenderPipeline,\n    pub(super) vertex_module: WGPUShaderModule,\n    pub(super) fragment_module: WGPUShaderModule,\n    pub(super) layout: WGPUPipelineLayout,\n    pub(super) label: Mutex<String>,\n}"
     ));
     assert!(emitted.contains(
-        "pub struct TextureViewPayload {\n    pub(super) texture_view: WGPUTextureView,\n    pub(super) texture: WGPUTexture,\n}"
+        "pub struct TexturePayload {\n    pub(super) texture: WGPUTexture,\n    pub(super) destroyed: AtomicBool,\n    pub(super) label: Mutex<String>,\n    pub(super) dimension: WGPUTextureDimension,\n    pub(super) depth_or_array_layers: u32,\n}"
+    ));
+    assert!(emitted.contains(
+        "pub struct TextureViewPayload {\n    pub(super) texture_view: WGPUTextureView,\n    pub(super) texture: WGPUTexture,\n    pub(super) label: Mutex<String>,\n    pub(super) dimension: WGPUTextureViewDimension,\n    pub(super) mip_depth: u32,\n}"
     ));
 }
 

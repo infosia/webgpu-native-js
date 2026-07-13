@@ -37,6 +37,7 @@ reverse_enum = ["GPUFeatureName"]
 skip_members = [
   { interface = "GPUBuffer", member = "size", reason = "the immutable size is cached from GPUBufferDescriptor" },
   { interface = "GPUBuffer", member = "usage", reason = "the immutable usage is cached from GPUBufferDescriptor" },
+  { interface = "GPUBuffer", member = "mapState", reason = "the WebIDL mapping state is tracked by the core mapAsync/unmap state machine" },
 ]
 add_ref = [
   { interface = "GPUDevice", reason = "adopted devices and child payloads retain the native device" },
@@ -90,6 +91,7 @@ reason = "WebIDL names the reusable programmable stage while the C ABI names its
 [[subset]]
 interface = "GPUDevice"
 members = [
+  "label",
   "features",
   "limits",
   "adapterInfo",
@@ -115,11 +117,12 @@ members = [
 
 [[subset]]
 interface = "GPUBuffer"
-members = ["mapAsync", "getMappedRange", "unmap", "destroy", "size", "usage", "label"]
+members = ["mapAsync", "getMappedRange", "unmap", "destroy", "size", "usage", "mapState", "label"]
 
 [[subset]]
 interface = "GPUTexture"
 members = [
+  "label",
   "createView",
   "destroy",
   "width",
@@ -134,15 +137,15 @@ members = [
 
 [[subset]]
 interface = "GPUTextureView"
-members = []
+members = ["label"]
 
 [[subset]]
 interface = "GPUQueue"
-members = ["writeBuffer", "writeTexture", "submit", "onSubmittedWorkDone"]
+members = ["label", "writeBuffer", "writeTexture", "submit", "onSubmittedWorkDone"]
 
 [[subset]]
 interface = "GPUShaderModule"
-members = []
+members = ["label"]
 
 [[subset]]
 interface = "GPUSampler"
@@ -150,23 +153,23 @@ members = ["label"]
 
 [[subset]]
 interface = "GPUBindGroupLayout"
-members = []
+members = ["label"]
 
 [[subset]]
 interface = "GPUPipelineLayout"
-members = []
+members = ["label"]
 
 [[subset]]
 interface = "GPUBindGroup"
-members = []
+members = ["label"]
 
 [[subset]]
 interface = "GPUComputePipeline"
-members = ["getBindGroupLayout"]
+members = ["label", "getBindGroupLayout"]
 
 [[subset]]
 interface = "GPURenderPipeline"
-members = ["getBindGroupLayout"]
+members = ["label", "getBindGroupLayout"]
 
 [[subset]]
 interface = "GPUQuerySet"
@@ -175,6 +178,7 @@ members = ["destroy", "type", "count", "label"]
 [[subset]]
 interface = "GPUCommandEncoder"
 members = [
+  "label",
   "beginComputePass",
   "beginRenderPass",
   "clearBuffer",
@@ -192,6 +196,7 @@ members = [
 [[subset]]
 interface = "GPUComputePassEncoder"
 members = [
+  "label",
   "setPipeline",
   "setBindGroup",
   "dispatchWorkgroups",
@@ -205,6 +210,7 @@ members = [
 [[subset]]
 interface = "GPURenderPassEncoder"
 members = [
+  "label",
   "setPipeline",
   "setVertexBuffer",
   "setIndexBuffer",
@@ -229,6 +235,7 @@ members = [
 [[subset]]
 interface = "GPURenderBundleEncoder"
 members = [
+  "label",
   "setPipeline",
   "setVertexBuffer",
   "setIndexBuffer",
@@ -245,11 +252,11 @@ members = [
 
 [[subset]]
 interface = "GPURenderBundle"
-members = []
+members = ["label"]
 
 [[subset]]
 interface = "GPUCommandBuffer"
-members = []
+members = ["label"]
 
 # G14/G15: standard create-pattern lifecycles are emitted from the joined
 # creator/descriptor model. All remaining method/property bodies are existing
@@ -729,6 +736,12 @@ get = "adapter_info_get"
 
 [[lifecycle.properties]]
 interface = "GPUDevice"
+member = "label"
+get = "device_label_get"
+set = "device_label_set"
+
+[[lifecycle.properties]]
+interface = "GPUDevice"
 member = "features"
 get = "device_features_get"
 
@@ -766,6 +779,41 @@ set = "buffer_label_set"
 
 [[lifecycle.properties]]
 interface = "GPUBuffer"
+member = "mapState"
+get = "buffer_map_state_get"
+
+[[lifecycle.properties]]
+interface = "GPUQueue"
+member = "label"
+get = "queue_label_get"
+set = "queue_label_set"
+
+[[lifecycle.properties]]
+interface = "GPUComputePassEncoder"
+member = "label"
+get = "compute_pass_encoder_label_get"
+set = "compute_pass_encoder_label_set"
+
+[[lifecycle.properties]]
+interface = "GPURenderPassEncoder"
+member = "label"
+get = "render_pass_encoder_label_get"
+set = "render_pass_encoder_label_set"
+
+[[lifecycle.properties]]
+interface = "GPURenderBundle"
+member = "label"
+get = "render_bundle_label_get"
+set = "render_bundle_label_set"
+
+[[lifecycle.properties]]
+interface = "GPUCommandBuffer"
+member = "label"
+get = "command_buffer_label_get"
+set = "command_buffer_label_set"
+
+[[lifecycle.properties]]
+interface = "GPUBuffer"
 member = "size"
 get = "buffer_size_get"
 
@@ -773,6 +821,11 @@ get = "buffer_size_get"
 interface = "GPUBuffer"
 member = "usage"
 get = "buffer_usage_get"
+
+[[lifecycle.properties]]
+interface = "GPUTexture"
+member = "textureBindingViewDimension"
+get = "texture_binding_view_dimension_get"
 
 [[lifecycle.quirks]]
 interface = "GPUCommandEncoder"
@@ -981,7 +1034,7 @@ nullable = false
 [[descriptor.skips]]
 member = "textureBindingViewDimension"
 reason = "the pinned C ABI exposes this optional feature through texture creation inference, not the base descriptor"
-reject_if_present = true
+reject_if_present = false
 
 [[descriptor]]
 dictionary = "GPUTextureViewDescriptor"

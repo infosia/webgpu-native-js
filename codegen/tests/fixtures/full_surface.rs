@@ -31,6 +31,8 @@ pub struct GpuDispatch {
     pub device_add_ref: unsafe fn(WGPUDevice),
     /// `wgpuDeviceRelease`.
     pub device_release: unsafe fn(WGPUDevice),
+    /// `wgpuDeviceSetLabel`.
+    pub device_set_label: unsafe fn(WGPUDevice, WGPUStringView),
     /// `wgpuDeviceCreateBuffer`.
     pub device_create_buffer: unsafe fn(WGPUDevice, *const WGPUBufferDescriptor) -> WGPUBuffer,
     /// `wgpuDeviceCreateTexture`.
@@ -85,6 +87,8 @@ pub struct GpuDispatch {
     pub texture_add_ref: unsafe fn(WGPUTexture),
     /// `wgpuTextureRelease`.
     pub texture_release: unsafe fn(WGPUTexture),
+    /// `wgpuTextureSetLabel`.
+    pub texture_set_label: unsafe fn(WGPUTexture, WGPUStringView),
     /// `wgpuTextureCreateView`.
     pub texture_create_view: unsafe fn(WGPUTexture, *const WGPUTextureViewDescriptor) -> WGPUTextureView,
     /// `wgpuTextureDestroy`.
@@ -109,10 +113,14 @@ pub struct GpuDispatch {
     pub texture_view_add_ref: unsafe fn(WGPUTextureView),
     /// `wgpuTextureViewRelease`.
     pub texture_view_release: unsafe fn(WGPUTextureView),
+    /// `wgpuTextureViewSetLabel`.
+    pub texture_view_set_label: unsafe fn(WGPUTextureView, WGPUStringView),
     /// `wgpuQueueAddRef`.
     pub queue_add_ref: unsafe fn(WGPUQueue),
     /// `wgpuQueueRelease`.
     pub queue_release: unsafe fn(WGPUQueue),
+    /// `wgpuQueueSetLabel`.
+    pub queue_set_label: unsafe fn(WGPUQueue, WGPUStringView),
     /// `wgpuQueueWriteBuffer`.
     pub queue_write_buffer: unsafe fn(WGPUQueue, WGPUBuffer, u64, *const ::std::ffi::c_void, usize),
     /// `wgpuQueueWriteTexture`.
@@ -125,6 +133,8 @@ pub struct GpuDispatch {
     pub shader_module_add_ref: unsafe fn(WGPUShaderModule),
     /// `wgpuShaderModuleRelease`.
     pub shader_module_release: unsafe fn(WGPUShaderModule),
+    /// `wgpuShaderModuleSetLabel`.
+    pub shader_module_set_label: unsafe fn(WGPUShaderModule, WGPUStringView),
     /// `wgpuSamplerAddRef`.
     pub sampler_add_ref: unsafe fn(WGPUSampler),
     /// `wgpuSamplerRelease`.
@@ -135,24 +145,34 @@ pub struct GpuDispatch {
     pub bind_group_layout_add_ref: unsafe fn(WGPUBindGroupLayout),
     /// `wgpuBindGroupLayoutRelease`.
     pub bind_group_layout_release: unsafe fn(WGPUBindGroupLayout),
+    /// `wgpuBindGroupLayoutSetLabel`.
+    pub bind_group_layout_set_label: unsafe fn(WGPUBindGroupLayout, WGPUStringView),
     /// `wgpuPipelineLayoutAddRef`.
     pub pipeline_layout_add_ref: unsafe fn(WGPUPipelineLayout),
     /// `wgpuPipelineLayoutRelease`.
     pub pipeline_layout_release: unsafe fn(WGPUPipelineLayout),
+    /// `wgpuPipelineLayoutSetLabel`.
+    pub pipeline_layout_set_label: unsafe fn(WGPUPipelineLayout, WGPUStringView),
     /// `wgpuBindGroupAddRef`.
     pub bind_group_add_ref: unsafe fn(WGPUBindGroup),
     /// `wgpuBindGroupRelease`.
     pub bind_group_release: unsafe fn(WGPUBindGroup),
+    /// `wgpuBindGroupSetLabel`.
+    pub bind_group_set_label: unsafe fn(WGPUBindGroup, WGPUStringView),
     /// `wgpuComputePipelineAddRef`.
     pub compute_pipeline_add_ref: unsafe fn(WGPUComputePipeline),
     /// `wgpuComputePipelineRelease`.
     pub compute_pipeline_release: unsafe fn(WGPUComputePipeline),
+    /// `wgpuComputePipelineSetLabel`.
+    pub compute_pipeline_set_label: unsafe fn(WGPUComputePipeline, WGPUStringView),
     /// `wgpuComputePipelineGetBindGroupLayout`.
     pub compute_pipeline_get_bind_group_layout: unsafe fn(WGPUComputePipeline, u32) -> WGPUBindGroupLayout,
     /// `wgpuRenderPipelineAddRef`.
     pub render_pipeline_add_ref: unsafe fn(WGPURenderPipeline),
     /// `wgpuRenderPipelineRelease`.
     pub render_pipeline_release: unsafe fn(WGPURenderPipeline),
+    /// `wgpuRenderPipelineSetLabel`.
+    pub render_pipeline_set_label: unsafe fn(WGPURenderPipeline, WGPUStringView),
     /// `wgpuRenderPipelineGetBindGroupLayout`.
     pub render_pipeline_get_bind_group_layout: unsafe fn(WGPURenderPipeline, u32) -> WGPUBindGroupLayout,
     /// `wgpuQuerySetAddRef`.
@@ -169,6 +189,8 @@ pub struct GpuDispatch {
     pub query_set_set_label: unsafe fn(WGPUQuerySet, WGPUStringView),
     /// `wgpuCommandEncoderRelease`.
     pub command_encoder_release: unsafe fn(WGPUCommandEncoder),
+    /// `wgpuCommandEncoderSetLabel`.
+    pub command_encoder_set_label: unsafe fn(WGPUCommandEncoder, WGPUStringView),
     /// `wgpuCommandEncoderBeginComputePass`.
     pub command_encoder_begin_compute_pass: unsafe fn(WGPUCommandEncoder, *const WGPUComputePassDescriptor) -> WGPUComputePassEncoder,
     /// `wgpuCommandEncoderBeginRenderPass`.
@@ -195,6 +217,8 @@ pub struct GpuDispatch {
     pub command_encoder_finish: unsafe fn(WGPUCommandEncoder, *const WGPUCommandBufferDescriptor) -> WGPUCommandBuffer,
     /// `wgpuComputePassEncoderRelease`.
     pub compute_pass_encoder_release: unsafe fn(WGPUComputePassEncoder),
+    /// `wgpuComputePassEncoderSetLabel`.
+    pub compute_pass_encoder_set_label: unsafe fn(WGPUComputePassEncoder, WGPUStringView),
     /// `wgpuComputePassEncoderSetPipeline`.
     pub compute_pass_encoder_set_pipeline: unsafe fn(WGPUComputePassEncoder, WGPUComputePipeline),
     /// `wgpuComputePassEncoderSetBindGroup`.
@@ -213,6 +237,8 @@ pub struct GpuDispatch {
     pub compute_pass_encoder_end: unsafe fn(WGPUComputePassEncoder),
     /// `wgpuRenderPassEncoderRelease`.
     pub render_pass_encoder_release: unsafe fn(WGPURenderPassEncoder),
+    /// `wgpuRenderPassEncoderSetLabel`.
+    pub render_pass_encoder_set_label: unsafe fn(WGPURenderPassEncoder, WGPUStringView),
     /// `wgpuRenderPassEncoderSetPipeline`.
     pub render_pass_encoder_set_pipeline: unsafe fn(WGPURenderPassEncoder, WGPURenderPipeline),
     /// `wgpuRenderPassEncoderSetVertexBuffer`.
@@ -253,6 +279,8 @@ pub struct GpuDispatch {
     pub render_pass_encoder_end: unsafe fn(WGPURenderPassEncoder),
     /// `wgpuRenderBundleEncoderRelease`.
     pub render_bundle_encoder_release: unsafe fn(WGPURenderBundleEncoder),
+    /// `wgpuRenderBundleEncoderSetLabel`.
+    pub render_bundle_encoder_set_label: unsafe fn(WGPURenderBundleEncoder, WGPUStringView),
     /// `wgpuRenderBundleEncoderSetPipeline`.
     pub render_bundle_encoder_set_pipeline: unsafe fn(WGPURenderBundleEncoder, WGPURenderPipeline),
     /// `wgpuRenderBundleEncoderSetVertexBuffer`.
@@ -279,8 +307,12 @@ pub struct GpuDispatch {
     pub render_bundle_encoder_finish: unsafe fn(WGPURenderBundleEncoder, *const WGPURenderBundleDescriptor) -> WGPURenderBundle,
     /// `wgpuRenderBundleRelease`.
     pub render_bundle_release: unsafe fn(WGPURenderBundle),
+    /// `wgpuRenderBundleSetLabel`.
+    pub render_bundle_set_label: unsafe fn(WGPURenderBundle, WGPUStringView),
     /// `wgpuCommandBufferRelease`.
     pub command_buffer_release: unsafe fn(WGPUCommandBuffer),
+    /// `wgpuCommandBufferSetLabel`.
+    pub command_buffer_set_label: unsafe fn(WGPUCommandBuffer, WGPUStringView),
 }
 
 /// Invokes a caller-supplied macro with every dispatch `(field, symbol, signature)` triple.
@@ -304,6 +336,7 @@ macro_rules! for_each_gpu_dispatch_entry {
             (supported_features_free_members, wgpuSupportedFeaturesFreeMembers, unsafe fn(supported_features: $crate::WGPUSupportedFeatures)),
             (device_add_ref, wgpuDeviceAddRef, unsafe fn(device: $crate::WGPUDevice)),
             (device_release, wgpuDeviceRelease, unsafe fn(device: $crate::WGPUDevice)),
+            (device_set_label, wgpuDeviceSetLabel, unsafe fn(device: $crate::WGPUDevice, label: $crate::WGPUStringView)),
             (device_create_buffer, wgpuDeviceCreateBuffer, unsafe fn(device: $crate::WGPUDevice, descriptor: *const $crate::WGPUBufferDescriptor) -> $crate::WGPUBuffer),
             (device_create_texture, wgpuDeviceCreateTexture, unsafe fn(device: $crate::WGPUDevice, descriptor: *const $crate::WGPUTextureDescriptor) -> $crate::WGPUTexture),
             (device_create_sampler, wgpuDeviceCreateSampler, unsafe fn(device: $crate::WGPUDevice, descriptor: *const $crate::WGPUSamplerDescriptor) -> $crate::WGPUSampler),
@@ -331,6 +364,7 @@ macro_rules! for_each_gpu_dispatch_entry {
             (buffer_set_label, wgpuBufferSetLabel, unsafe fn(buffer: $crate::WGPUBuffer, label: $crate::WGPUStringView)),
             (texture_add_ref, wgpuTextureAddRef, unsafe fn(texture: $crate::WGPUTexture)),
             (texture_release, wgpuTextureRelease, unsafe fn(texture: $crate::WGPUTexture)),
+            (texture_set_label, wgpuTextureSetLabel, unsafe fn(texture: $crate::WGPUTexture, label: $crate::WGPUStringView)),
             (texture_create_view, wgpuTextureCreateView, unsafe fn(texture: $crate::WGPUTexture, descriptor: *const $crate::WGPUTextureViewDescriptor) -> $crate::WGPUTextureView),
             (texture_destroy, wgpuTextureDestroy, unsafe fn(texture: $crate::WGPUTexture)),
             (texture_get_width, wgpuTextureGetWidth, unsafe fn(texture: $crate::WGPUTexture) -> u32),
@@ -343,28 +377,36 @@ macro_rules! for_each_gpu_dispatch_entry {
             (texture_get_usage, wgpuTextureGetUsage, unsafe fn(texture: $crate::WGPUTexture) -> $crate::WGPUTextureUsage),
             (texture_view_add_ref, wgpuTextureViewAddRef, unsafe fn(texture_view: $crate::WGPUTextureView)),
             (texture_view_release, wgpuTextureViewRelease, unsafe fn(texture_view: $crate::WGPUTextureView)),
+            (texture_view_set_label, wgpuTextureViewSetLabel, unsafe fn(texture_view: $crate::WGPUTextureView, label: $crate::WGPUStringView)),
             (queue_add_ref, wgpuQueueAddRef, unsafe fn(queue: $crate::WGPUQueue)),
             (queue_release, wgpuQueueRelease, unsafe fn(queue: $crate::WGPUQueue)),
+            (queue_set_label, wgpuQueueSetLabel, unsafe fn(queue: $crate::WGPUQueue, label: $crate::WGPUStringView)),
             (queue_write_buffer, wgpuQueueWriteBuffer, unsafe fn(queue: $crate::WGPUQueue, buffer: $crate::WGPUBuffer, buffer_offset: u64, data: *const ::std::ffi::c_void, size: usize)),
             (queue_write_texture, wgpuQueueWriteTexture, unsafe fn(queue: $crate::WGPUQueue, destination: *const $crate::WGPUTexelCopyTextureInfo, data: *const ::std::ffi::c_void, data_size: usize, data_layout: *const $crate::WGPUTexelCopyBufferLayout, write_size: *const $crate::WGPUExtent3D)),
             (queue_submit, wgpuQueueSubmit, unsafe fn(queue: $crate::WGPUQueue, commands_count: usize, commands: *const $crate::WGPUCommandBuffer)),
             (queue_on_submitted_work_done, wgpuQueueOnSubmittedWorkDone, unsafe fn(queue: $crate::WGPUQueue, callback_info: $crate::WGPUQueueWorkDoneCallbackInfo) -> $crate::WGPUFuture),
             (shader_module_add_ref, wgpuShaderModuleAddRef, unsafe fn(shader_module: $crate::WGPUShaderModule)),
             (shader_module_release, wgpuShaderModuleRelease, unsafe fn(shader_module: $crate::WGPUShaderModule)),
+            (shader_module_set_label, wgpuShaderModuleSetLabel, unsafe fn(shader_module: $crate::WGPUShaderModule, label: $crate::WGPUStringView)),
             (sampler_add_ref, wgpuSamplerAddRef, unsafe fn(sampler: $crate::WGPUSampler)),
             (sampler_release, wgpuSamplerRelease, unsafe fn(sampler: $crate::WGPUSampler)),
             (sampler_set_label, wgpuSamplerSetLabel, unsafe fn(sampler: $crate::WGPUSampler, label: $crate::WGPUStringView)),
             (bind_group_layout_add_ref, wgpuBindGroupLayoutAddRef, unsafe fn(bind_group_layout: $crate::WGPUBindGroupLayout)),
             (bind_group_layout_release, wgpuBindGroupLayoutRelease, unsafe fn(bind_group_layout: $crate::WGPUBindGroupLayout)),
+            (bind_group_layout_set_label, wgpuBindGroupLayoutSetLabel, unsafe fn(bind_group_layout: $crate::WGPUBindGroupLayout, label: $crate::WGPUStringView)),
             (pipeline_layout_add_ref, wgpuPipelineLayoutAddRef, unsafe fn(pipeline_layout: $crate::WGPUPipelineLayout)),
             (pipeline_layout_release, wgpuPipelineLayoutRelease, unsafe fn(pipeline_layout: $crate::WGPUPipelineLayout)),
+            (pipeline_layout_set_label, wgpuPipelineLayoutSetLabel, unsafe fn(pipeline_layout: $crate::WGPUPipelineLayout, label: $crate::WGPUStringView)),
             (bind_group_add_ref, wgpuBindGroupAddRef, unsafe fn(bind_group: $crate::WGPUBindGroup)),
             (bind_group_release, wgpuBindGroupRelease, unsafe fn(bind_group: $crate::WGPUBindGroup)),
+            (bind_group_set_label, wgpuBindGroupSetLabel, unsafe fn(bind_group: $crate::WGPUBindGroup, label: $crate::WGPUStringView)),
             (compute_pipeline_add_ref, wgpuComputePipelineAddRef, unsafe fn(compute_pipeline: $crate::WGPUComputePipeline)),
             (compute_pipeline_release, wgpuComputePipelineRelease, unsafe fn(compute_pipeline: $crate::WGPUComputePipeline)),
+            (compute_pipeline_set_label, wgpuComputePipelineSetLabel, unsafe fn(compute_pipeline: $crate::WGPUComputePipeline, label: $crate::WGPUStringView)),
             (compute_pipeline_get_bind_group_layout, wgpuComputePipelineGetBindGroupLayout, unsafe fn(compute_pipeline: $crate::WGPUComputePipeline, group_index: u32) -> $crate::WGPUBindGroupLayout),
             (render_pipeline_add_ref, wgpuRenderPipelineAddRef, unsafe fn(render_pipeline: $crate::WGPURenderPipeline)),
             (render_pipeline_release, wgpuRenderPipelineRelease, unsafe fn(render_pipeline: $crate::WGPURenderPipeline)),
+            (render_pipeline_set_label, wgpuRenderPipelineSetLabel, unsafe fn(render_pipeline: $crate::WGPURenderPipeline, label: $crate::WGPUStringView)),
             (render_pipeline_get_bind_group_layout, wgpuRenderPipelineGetBindGroupLayout, unsafe fn(render_pipeline: $crate::WGPURenderPipeline, group_index: u32) -> $crate::WGPUBindGroupLayout),
             (query_set_add_ref, wgpuQuerySetAddRef, unsafe fn(query_set: $crate::WGPUQuerySet)),
             (query_set_release, wgpuQuerySetRelease, unsafe fn(query_set: $crate::WGPUQuerySet)),
@@ -373,6 +415,7 @@ macro_rules! for_each_gpu_dispatch_entry {
             (query_set_get_count, wgpuQuerySetGetCount, unsafe fn(query_set: $crate::WGPUQuerySet) -> u32),
             (query_set_set_label, wgpuQuerySetSetLabel, unsafe fn(query_set: $crate::WGPUQuerySet, label: $crate::WGPUStringView)),
             (command_encoder_release, wgpuCommandEncoderRelease, unsafe fn(command_encoder: $crate::WGPUCommandEncoder)),
+            (command_encoder_set_label, wgpuCommandEncoderSetLabel, unsafe fn(command_encoder: $crate::WGPUCommandEncoder, label: $crate::WGPUStringView)),
             (command_encoder_begin_compute_pass, wgpuCommandEncoderBeginComputePass, unsafe fn(command_encoder: $crate::WGPUCommandEncoder, descriptor: *const $crate::WGPUComputePassDescriptor) -> $crate::WGPUComputePassEncoder),
             (command_encoder_begin_render_pass, wgpuCommandEncoderBeginRenderPass, unsafe fn(command_encoder: $crate::WGPUCommandEncoder, descriptor: *const $crate::WGPURenderPassDescriptor) -> $crate::WGPURenderPassEncoder),
             (command_encoder_clear_buffer, wgpuCommandEncoderClearBuffer, unsafe fn(command_encoder: $crate::WGPUCommandEncoder, buffer: $crate::WGPUBuffer, offset: u64, size: u64)),
@@ -386,6 +429,7 @@ macro_rules! for_each_gpu_dispatch_entry {
             (command_encoder_insert_debug_marker, wgpuCommandEncoderInsertDebugMarker, unsafe fn(command_encoder: $crate::WGPUCommandEncoder, marker_label: $crate::WGPUStringView)),
             (command_encoder_finish, wgpuCommandEncoderFinish, unsafe fn(command_encoder: $crate::WGPUCommandEncoder, descriptor: *const $crate::WGPUCommandBufferDescriptor) -> $crate::WGPUCommandBuffer),
             (compute_pass_encoder_release, wgpuComputePassEncoderRelease, unsafe fn(compute_pass_encoder: $crate::WGPUComputePassEncoder)),
+            (compute_pass_encoder_set_label, wgpuComputePassEncoderSetLabel, unsafe fn(compute_pass_encoder: $crate::WGPUComputePassEncoder, label: $crate::WGPUStringView)),
             (compute_pass_encoder_set_pipeline, wgpuComputePassEncoderSetPipeline, unsafe fn(compute_pass_encoder: $crate::WGPUComputePassEncoder, pipeline: $crate::WGPUComputePipeline)),
             (compute_pass_encoder_set_bind_group, wgpuComputePassEncoderSetBindGroup, unsafe fn(compute_pass_encoder: $crate::WGPUComputePassEncoder, group_index: u32, group: $crate::WGPUBindGroup, dynamic_offsets_count: usize, dynamic_offsets: *const u32)),
             (compute_pass_encoder_dispatch_workgroups, wgpuComputePassEncoderDispatchWorkgroups, unsafe fn(compute_pass_encoder: $crate::WGPUComputePassEncoder, workgroup_count_x: u32, workgroup_count_y: u32, workgroup_count_z: u32)),
@@ -395,6 +439,7 @@ macro_rules! for_each_gpu_dispatch_entry {
             (compute_pass_encoder_insert_debug_marker, wgpuComputePassEncoderInsertDebugMarker, unsafe fn(compute_pass_encoder: $crate::WGPUComputePassEncoder, marker_label: $crate::WGPUStringView)),
             (compute_pass_encoder_end, wgpuComputePassEncoderEnd, unsafe fn(compute_pass_encoder: $crate::WGPUComputePassEncoder)),
             (render_pass_encoder_release, wgpuRenderPassEncoderRelease, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder)),
+            (render_pass_encoder_set_label, wgpuRenderPassEncoderSetLabel, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder, label: $crate::WGPUStringView)),
             (render_pass_encoder_set_pipeline, wgpuRenderPassEncoderSetPipeline, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder, pipeline: $crate::WGPURenderPipeline)),
             (render_pass_encoder_set_vertex_buffer, wgpuRenderPassEncoderSetVertexBuffer, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder, slot: u32, buffer: $crate::WGPUBuffer, offset: u64, size: u64)),
             (render_pass_encoder_set_index_buffer, wgpuRenderPassEncoderSetIndexBuffer, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder, buffer: $crate::WGPUBuffer, format: $crate::WGPUIndexFormat, offset: u64, size: u64)),
@@ -415,6 +460,7 @@ macro_rules! for_each_gpu_dispatch_entry {
             (render_pass_encoder_insert_debug_marker, wgpuRenderPassEncoderInsertDebugMarker, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder, marker_label: $crate::WGPUStringView)),
             (render_pass_encoder_end, wgpuRenderPassEncoderEnd, unsafe fn(render_pass_encoder: $crate::WGPURenderPassEncoder)),
             (render_bundle_encoder_release, wgpuRenderBundleEncoderRelease, unsafe fn(render_bundle_encoder: $crate::WGPURenderBundleEncoder)),
+            (render_bundle_encoder_set_label, wgpuRenderBundleEncoderSetLabel, unsafe fn(render_bundle_encoder: $crate::WGPURenderBundleEncoder, label: $crate::WGPUStringView)),
             (render_bundle_encoder_set_pipeline, wgpuRenderBundleEncoderSetPipeline, unsafe fn(render_bundle_encoder: $crate::WGPURenderBundleEncoder, pipeline: $crate::WGPURenderPipeline)),
             (render_bundle_encoder_set_vertex_buffer, wgpuRenderBundleEncoderSetVertexBuffer, unsafe fn(render_bundle_encoder: $crate::WGPURenderBundleEncoder, slot: u32, buffer: $crate::WGPUBuffer, offset: u64, size: u64)),
             (render_bundle_encoder_set_index_buffer, wgpuRenderBundleEncoderSetIndexBuffer, unsafe fn(render_bundle_encoder: $crate::WGPURenderBundleEncoder, buffer: $crate::WGPUBuffer, format: $crate::WGPUIndexFormat, offset: u64, size: u64)),
@@ -428,7 +474,9 @@ macro_rules! for_each_gpu_dispatch_entry {
             (render_bundle_encoder_insert_debug_marker, wgpuRenderBundleEncoderInsertDebugMarker, unsafe fn(render_bundle_encoder: $crate::WGPURenderBundleEncoder, marker_label: $crate::WGPUStringView)),
             (render_bundle_encoder_finish, wgpuRenderBundleEncoderFinish, unsafe fn(render_bundle_encoder: $crate::WGPURenderBundleEncoder, descriptor: *const $crate::WGPURenderBundleDescriptor) -> $crate::WGPURenderBundle),
             (render_bundle_release, wgpuRenderBundleRelease, unsafe fn(render_bundle: $crate::WGPURenderBundle)),
+            (render_bundle_set_label, wgpuRenderBundleSetLabel, unsafe fn(render_bundle: $crate::WGPURenderBundle, label: $crate::WGPUStringView)),
             (command_buffer_release, wgpuCommandBufferRelease, unsafe fn(command_buffer: $crate::WGPUCommandBuffer)),
+            (command_buffer_set_label, wgpuCommandBufferSetLabel, unsafe fn(command_buffer: $crate::WGPUCommandBuffer, label: $crate::WGPUStringView)),
         }
     };
 }
@@ -943,15 +991,16 @@ pub(super) fn convert_render_pass_color_attachment<E: JsEngine + 'static>(
             _ => return Err(E::type_error(cx, "GPUStoreOp")),
         }
     };
+    let depth_slice = if E::is_undefined(cx, depth_slice_value) {
+        None
+    } else {
+        Some(enforce_u32::<E>(cx, depth_slice_value, "depthSlice")?)
+    };
+    created_texture_views.check_depth_slice::<E>(cx, view_value, depth_slice)?;
     Ok(WGPURenderPassColorAttachment {
         nextInChain: ptr::null_mut(),
         view,
-        // R8: `[EnforceRange]` GPUIntegerCoordinate is checked at the 32-bit boundary.
-        depthSlice: if E::is_undefined(cx, depth_slice_value) {
-            WGPU_DEPTH_SLICE_UNDEFINED
-        } else {
-            enforce_u32::<E>(cx, depth_slice_value, "depthSlice")?
-        },
+        depthSlice: depth_slice.unwrap_or(WGPU_DEPTH_SLICE_UNDEFINED),
         resolveTarget: resolve_target,
         clearValue: clear_value,
         loadOp: load_op,
@@ -1282,11 +1331,6 @@ pub(super) fn convert_texture_descriptor<E: JsEngine>(
     let format_value = required_member::<E>(cx, value, "format")?;
     let usage_value = required_member::<E>(cx, value, "usage")?;
     let view_formats_value = dictionary_member::<E>(cx, value, "viewFormats")?;
-    let texture_binding_view_dimension_value = dictionary_member::<E>(cx, value, "textureBindingViewDimension")?;
-    // Policy skip: reject present unsupported API instead of ignoring it.
-    if !E::is_undefined(cx, texture_binding_view_dimension_value) {
-        return Err(E::type_error(cx, "textureBindingViewDimension are not supported yet"));
-    }
     // B4: non-nullable strings default only for undefined; null is stringified.
     let label = if E::is_undefined(cx, label_value) {
         ""
@@ -3746,6 +3790,7 @@ pub(super) fn feature_name_to_str(value: WGPUFeatureName) -> Option<&'static str
 /// Payload stored by a `GPUShaderModule` wrapper.
 pub struct ShaderModulePayload {
     pub(super) module: WGPUShaderModule,
+    pub(super) label: Mutex<String>,
 }
 
 // SAFETY: `ShaderModulePayload` stores WGPU handle values. Finalization only moves those values
@@ -3768,6 +3813,9 @@ unsafe impl Send for SamplerPayload {}
 pub struct TexturePayload {
     pub(super) texture: WGPUTexture,
     pub(super) destroyed: AtomicBool,
+    pub(super) label: Mutex<String>,
+    pub(super) dimension: WGPUTextureDimension,
+    pub(super) depth_or_array_layers: u32,
 }
 
 // SAFETY: `TexturePayload` stores WGPU handle values. Finalization only moves those values
@@ -3779,6 +3827,9 @@ unsafe impl Send for TexturePayload {}
 pub struct TextureViewPayload {
     pub(super) texture_view: WGPUTextureView,
     pub(super) texture: WGPUTexture,
+    pub(super) label: Mutex<String>,
+    pub(super) dimension: WGPUTextureViewDimension,
+    pub(super) mip_depth: u32,
 }
 
 // SAFETY: `TextureViewPayload` stores WGPU handle values. Finalization only moves those values
@@ -3790,6 +3841,7 @@ unsafe impl Send for TextureViewPayload {}
 pub struct BindGroupLayoutPayload {
     pub(super) layout: WGPUBindGroupLayout,
     pub(super) parent_pipeline: Option<PipelineParent>,
+    pub(super) label: Mutex<String>,
 }
 
 // SAFETY: `BindGroupLayoutPayload` stores WGPU handle values. Finalization only moves those values
@@ -3800,6 +3852,7 @@ unsafe impl Send for BindGroupLayoutPayload {}
 /// Payload stored by a `GPUPipelineLayout` wrapper.
 pub struct PipelineLayoutPayload {
     pub(super) layout: WGPUPipelineLayout,
+    pub(super) label: Mutex<String>,
 }
 
 // SAFETY: `PipelineLayoutPayload` stores WGPU handle values. Finalization only moves those values
@@ -3815,6 +3868,7 @@ pub struct BindGroupPayload {
     pub(super) samplers: Vec<WGPUSampler>,
     pub(super) texture_views: Vec<WGPUTextureView>,
     pub(super) created_texture_views: Vec<WGPUTextureView>,
+    pub(super) label: Mutex<String>,
 }
 
 // SAFETY: `BindGroupPayload` stores WGPU handle values. Finalization only moves those values
@@ -3827,6 +3881,7 @@ pub struct ComputePipelinePayload {
     pub(super) pipeline: WGPUComputePipeline,
     pub(super) module: WGPUShaderModule,
     pub(super) layout: WGPUPipelineLayout,
+    pub(super) label: Mutex<String>,
 }
 
 // SAFETY: `ComputePipelinePayload` stores WGPU handle values. Finalization only moves those values
@@ -3840,6 +3895,7 @@ pub struct RenderPipelinePayload {
     pub(super) vertex_module: WGPUShaderModule,
     pub(super) fragment_module: WGPUShaderModule,
     pub(super) layout: WGPUPipelineLayout,
+    pub(super) label: Mutex<String>,
 }
 
 // SAFETY: `RenderPipelinePayload` stores WGPU handle values. Finalization only moves those values
@@ -3862,6 +3918,7 @@ unsafe impl Send for QuerySetPayload {}
 /// Payload stored by a `GPUCommandEncoder` wrapper.
 pub struct CommandEncoderPayload {
     pub(super) state: Arc<Mutex<CommandEncoderState>>,
+    pub(super) label: Mutex<String>,
 }
 
 // SAFETY: `CommandEncoderPayload` stores WGPU handle values. Finalization only moves those values
@@ -3872,6 +3929,7 @@ unsafe impl Send for CommandEncoderPayload {}
 /// Payload stored by a `GPURenderBundleEncoder` wrapper.
 pub struct RenderBundleEncoderPayload {
     pub(super) state: Arc<Mutex<RenderBundleEncoderState>>,
+    pub(super) label: Mutex<String>,
 }
 
 // SAFETY: `RenderBundleEncoderPayload` stores WGPU handle values. Finalization only moves those values
@@ -4114,6 +4172,7 @@ pub fn device_create_shader_module<E: JsEngine + 'static>(
     let arena = Arena::new();
     let descriptor = args.first().copied().ok_or_else(|| E::type_error(cx, "GPUShaderModuleDescriptor"))?;
     let native = convert_shader_module_descriptor::<E>(cx, descriptor, &arena)?;
+    let label = unsafe { string_view_to_owned(native.label) };
     let module = unsafe { (E::environment(cx).gpu().device_create_shader_module)(device, ptr::from_ref(&native)) };
     if module.is_null() {
         return Err(E::operation_error(cx, "wgpuDeviceCreateShaderModule returned null"));
@@ -4126,6 +4185,7 @@ pub fn device_create_shader_module<E: JsEngine + 'static>(
     }
     match E::new_instance(cx, GPU_SHADER_MODULE_CLASS, Box::new(ShaderModulePayload {
         module,
+        label: Mutex::new(label),
     })) {
         Ok(value) => Ok(value),
         Err(error) => {
@@ -4135,6 +4195,24 @@ pub fn device_create_shader_module<E: JsEngine + 'static>(
             Err(error)
         }
     }
+}
+
+/// Implements the `GPUShaderModule.label` getter.
+pub fn shader_module_label_get<E: JsEngine + 'static>(cx: E::Context<'_>, this: E::Value) -> Result<E::Value, E::Error> {
+    let payload = E::payload(cx, this, GPU_SHADER_MODULE_CLASS).and_then(|payload| payload.downcast_ref::<ShaderModulePayload>()).ok_or_else(|| E::type_error(cx, "GPUShaderModule.label called on an incompatible object"))?;
+    let label = payload.label.lock().map_err(|_| E::operation_error(cx, "GPUShaderModule label is poisoned"))?;
+    E::string(cx, &label)
+}
+
+/// Implements the `GPUShaderModule.label` setter.
+pub fn shader_module_label_set<E: JsEngine + 'static>(cx: E::Context<'_>, this: E::Value, value: E::Value) -> Result<(), E::Error> {
+    let arena = Arena::new();
+    let new_label = E::to_str(cx, value, &arena)?;
+    let payload = E::payload(cx, this, GPU_SHADER_MODULE_CLASS).and_then(|payload| payload.downcast_ref::<ShaderModulePayload>()).ok_or_else(|| E::type_error(cx, "GPUShaderModule.label called on an incompatible object"))?;
+    unsafe { (E::environment(cx).gpu().shader_module_set_label)(payload.module, WGPUStringView::from_bytes(new_label.as_bytes())); }
+    let mut label = payload.label.lock().map_err(|_| E::operation_error(cx, "GPUShaderModule label is poisoned"))?;
+    new_label.clone_into(&mut label);
+    Ok(())
 }
 
 /// Finalizes a `GPUShaderModule` payload by enqueuing its release.
@@ -4193,8 +4271,8 @@ pub fn sampler_label_set<E: JsEngine + 'static>(cx: E::Context<'_>, this: E::Val
     let arena = Arena::new();
     let new_label = E::to_str(cx, value, &arena)?;
     let payload = E::payload(cx, this, GPU_SAMPLER_CLASS).and_then(|payload| payload.downcast_ref::<SamplerPayload>()).ok_or_else(|| E::type_error(cx, "GPUSampler.label called on an incompatible object"))?;
-    let mut label = payload.label.lock().map_err(|_| E::operation_error(cx, "GPUSampler label is poisoned"))?;
     unsafe { (E::environment(cx).gpu().sampler_set_label)(payload.sampler, WGPUStringView::from_bytes(new_label.as_bytes())); }
+    let mut label = payload.label.lock().map_err(|_| E::operation_error(cx, "GPUSampler label is poisoned"))?;
     new_label.clone_into(&mut label);
     Ok(())
 }
@@ -4218,6 +4296,9 @@ pub fn device_create_texture<E: JsEngine + 'static>(
     let arena = Arena::new();
     let descriptor = args.first().copied().ok_or_else(|| E::type_error(cx, "GPUTextureDescriptor"))?;
     let native = convert_texture_descriptor::<E>(cx, descriptor, &arena)?;
+    let label = unsafe { string_view_to_owned(native.label) };
+    let dimension = native.dimension;
+    let depth_or_array_layers = native.size.depthOrArrayLayers;
     let texture = unsafe { (E::environment(cx).gpu().device_create_texture)(device, ptr::from_ref(&native)) };
     if texture.is_null() {
         return Err(E::operation_error(cx, "wgpuDeviceCreateTexture returned null"));
@@ -4231,6 +4312,9 @@ pub fn device_create_texture<E: JsEngine + 'static>(
     match E::new_instance(cx, GPU_TEXTURE_CLASS, Box::new(TexturePayload {
         texture,
         destroyed: AtomicBool::new(false),
+        label: Mutex::new(label),
+        dimension,
+        depth_or_array_layers,
     })) {
         Ok(value) => Ok(value),
         Err(error) => {
@@ -4240,6 +4324,24 @@ pub fn device_create_texture<E: JsEngine + 'static>(
             Err(error)
         }
     }
+}
+
+/// Implements the `GPUTexture.label` getter.
+pub fn texture_label_get<E: JsEngine + 'static>(cx: E::Context<'_>, this: E::Value) -> Result<E::Value, E::Error> {
+    let payload = E::payload(cx, this, GPU_TEXTURE_CLASS).and_then(|payload| payload.downcast_ref::<TexturePayload>()).ok_or_else(|| E::type_error(cx, "GPUTexture.label called on an incompatible object"))?;
+    let label = payload.label.lock().map_err(|_| E::operation_error(cx, "GPUTexture label is poisoned"))?;
+    E::string(cx, &label)
+}
+
+/// Implements the `GPUTexture.label` setter.
+pub fn texture_label_set<E: JsEngine + 'static>(cx: E::Context<'_>, this: E::Value, value: E::Value) -> Result<(), E::Error> {
+    let arena = Arena::new();
+    let new_label = E::to_str(cx, value, &arena)?;
+    let payload = E::payload(cx, this, GPU_TEXTURE_CLASS).and_then(|payload| payload.downcast_ref::<TexturePayload>()).ok_or_else(|| E::type_error(cx, "GPUTexture.label called on an incompatible object"))?;
+    unsafe { (E::environment(cx).gpu().texture_set_label)(payload.texture, WGPUStringView::from_bytes(new_label.as_bytes())); }
+    let mut label = payload.label.lock().map_err(|_| E::operation_error(cx, "GPUTexture label is poisoned"))?;
+    new_label.clone_into(&mut label);
+    Ok(())
 }
 
 /// Implements the readonly `GPUTexture.depthOrArrayLayers` getter through `wgpuTextureGetDepthOrArrayLayers`.
@@ -4421,10 +4523,16 @@ pub fn texture_create_view<E: JsEngine + 'static>(
     this: E::Value,
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
-    let texture = texture_handle::<E>(cx, this)?;
+    let texture_payload = texture_wrapper_payload::<E>(cx, this)?;
+    let texture = texture_payload.texture;
     let arena = Arena::new();
     let descriptor = args.first().copied().unwrap_or_else(|| E::undefined(cx));
     let native = convert_texture_view_descriptor::<E>(cx, descriptor, &arena)?;
+    let label = unsafe { string_view_to_owned(native.label) };
+    let dimension = if native.dimension == WGPUTextureViewDimension_WGPUTextureViewDimension_Undefined {
+        default_texture_view_dimension(texture_payload.dimension, texture_payload.depth_or_array_layers)
+    } else { native.dimension };
+    let mip_depth = texture_mip_level_depth(texture_payload.depth_or_array_layers, native.baseMipLevel);
     let texture_view = unsafe { (E::environment(cx).gpu().texture_create_view)(texture, ptr::from_ref(&native)) };
     if texture_view.is_null() {
         return Err(E::operation_error(cx, "wgpuTextureCreateView returned null"));
@@ -4444,6 +4552,9 @@ pub fn texture_create_view<E: JsEngine + 'static>(
     match E::new_instance(cx, GPU_TEXTURE_VIEW_CLASS, Box::new(TextureViewPayload {
         texture_view,
         texture,
+        label: Mutex::new(label),
+        dimension,
+        mip_depth,
     })) {
         Ok(value) => Ok(value),
         Err(error) => {
@@ -4454,6 +4565,24 @@ pub fn texture_create_view<E: JsEngine + 'static>(
             Err(error)
         }
     }
+}
+
+/// Implements the `GPUTextureView.label` getter.
+pub fn texture_view_label_get<E: JsEngine + 'static>(cx: E::Context<'_>, this: E::Value) -> Result<E::Value, E::Error> {
+    let payload = E::payload(cx, this, GPU_TEXTURE_VIEW_CLASS).and_then(|payload| payload.downcast_ref::<TextureViewPayload>()).ok_or_else(|| E::type_error(cx, "GPUTextureView.label called on an incompatible object"))?;
+    let label = payload.label.lock().map_err(|_| E::operation_error(cx, "GPUTextureView label is poisoned"))?;
+    E::string(cx, &label)
+}
+
+/// Implements the `GPUTextureView.label` setter.
+pub fn texture_view_label_set<E: JsEngine + 'static>(cx: E::Context<'_>, this: E::Value, value: E::Value) -> Result<(), E::Error> {
+    let arena = Arena::new();
+    let new_label = E::to_str(cx, value, &arena)?;
+    let payload = E::payload(cx, this, GPU_TEXTURE_VIEW_CLASS).and_then(|payload| payload.downcast_ref::<TextureViewPayload>()).ok_or_else(|| E::type_error(cx, "GPUTextureView.label called on an incompatible object"))?;
+    unsafe { (E::environment(cx).gpu().texture_view_set_label)(payload.texture_view, WGPUStringView::from_bytes(new_label.as_bytes())); }
+    let mut label = payload.label.lock().map_err(|_| E::operation_error(cx, "GPUTextureView label is poisoned"))?;
+    new_label.clone_into(&mut label);
+    Ok(())
 }
 
 /// Finalizes a `GPUTextureView` payload by enqueuing its release.
@@ -4476,6 +4605,7 @@ pub fn device_create_bind_group_layout<E: JsEngine + 'static>(
     let arena = Arena::new();
     let descriptor = args.first().copied().ok_or_else(|| E::type_error(cx, "GPUBindGroupLayoutDescriptor"))?;
     let native = convert_bind_group_layout_descriptor::<E>(cx, descriptor, &arena)?;
+    let label = unsafe { string_view_to_owned(native.label) };
     let layout = unsafe { (E::environment(cx).gpu().device_create_bind_group_layout)(device, ptr::from_ref(&native)) };
     if layout.is_null() {
         return Err(E::operation_error(cx, "wgpuDeviceCreateBindGroupLayout returned null"));
@@ -4489,6 +4619,7 @@ pub fn device_create_bind_group_layout<E: JsEngine + 'static>(
     match E::new_instance(cx, GPU_BIND_GROUP_LAYOUT_CLASS, Box::new(BindGroupLayoutPayload {
         layout,
         parent_pipeline: None,
+        label: Mutex::new(label),
     })) {
         Ok(value) => Ok(value),
         Err(error) => {
@@ -4498,6 +4629,24 @@ pub fn device_create_bind_group_layout<E: JsEngine + 'static>(
             Err(error)
         }
     }
+}
+
+/// Implements the `GPUBindGroupLayout.label` getter.
+pub fn bind_group_layout_label_get<E: JsEngine + 'static>(cx: E::Context<'_>, this: E::Value) -> Result<E::Value, E::Error> {
+    let payload = E::payload(cx, this, GPU_BIND_GROUP_LAYOUT_CLASS).and_then(|payload| payload.downcast_ref::<BindGroupLayoutPayload>()).ok_or_else(|| E::type_error(cx, "GPUBindGroupLayout.label called on an incompatible object"))?;
+    let label = payload.label.lock().map_err(|_| E::operation_error(cx, "GPUBindGroupLayout label is poisoned"))?;
+    E::string(cx, &label)
+}
+
+/// Implements the `GPUBindGroupLayout.label` setter.
+pub fn bind_group_layout_label_set<E: JsEngine + 'static>(cx: E::Context<'_>, this: E::Value, value: E::Value) -> Result<(), E::Error> {
+    let arena = Arena::new();
+    let new_label = E::to_str(cx, value, &arena)?;
+    let payload = E::payload(cx, this, GPU_BIND_GROUP_LAYOUT_CLASS).and_then(|payload| payload.downcast_ref::<BindGroupLayoutPayload>()).ok_or_else(|| E::type_error(cx, "GPUBindGroupLayout.label called on an incompatible object"))?;
+    unsafe { (E::environment(cx).gpu().bind_group_layout_set_label)(payload.layout, WGPUStringView::from_bytes(new_label.as_bytes())); }
+    let mut label = payload.label.lock().map_err(|_| E::operation_error(cx, "GPUBindGroupLayout label is poisoned"))?;
+    new_label.clone_into(&mut label);
+    Ok(())
 }
 
 /// Finalizes a `GPUBindGroupLayout` payload by enqueuing its release.
@@ -4520,6 +4669,7 @@ pub fn device_create_pipeline_layout<E: JsEngine + 'static>(
     let arena = Arena::new();
     let descriptor = args.first().copied().ok_or_else(|| E::type_error(cx, "GPUPipelineLayoutDescriptor"))?;
     let native = convert_pipeline_layout_descriptor::<E>(cx, descriptor, &arena)?;
+    let label = unsafe { string_view_to_owned(native.label) };
     let layout = unsafe { (E::environment(cx).gpu().device_create_pipeline_layout)(device, ptr::from_ref(&native)) };
     if layout.is_null() {
         return Err(E::operation_error(cx, "wgpuDeviceCreatePipelineLayout returned null"));
@@ -4532,6 +4682,7 @@ pub fn device_create_pipeline_layout<E: JsEngine + 'static>(
     }
     match E::new_instance(cx, GPU_PIPELINE_LAYOUT_CLASS, Box::new(PipelineLayoutPayload {
         layout,
+        label: Mutex::new(label),
     })) {
         Ok(value) => Ok(value),
         Err(error) => {
@@ -4541,6 +4692,24 @@ pub fn device_create_pipeline_layout<E: JsEngine + 'static>(
             Err(error)
         }
     }
+}
+
+/// Implements the `GPUPipelineLayout.label` getter.
+pub fn pipeline_layout_label_get<E: JsEngine + 'static>(cx: E::Context<'_>, this: E::Value) -> Result<E::Value, E::Error> {
+    let payload = E::payload(cx, this, GPU_PIPELINE_LAYOUT_CLASS).and_then(|payload| payload.downcast_ref::<PipelineLayoutPayload>()).ok_or_else(|| E::type_error(cx, "GPUPipelineLayout.label called on an incompatible object"))?;
+    let label = payload.label.lock().map_err(|_| E::operation_error(cx, "GPUPipelineLayout label is poisoned"))?;
+    E::string(cx, &label)
+}
+
+/// Implements the `GPUPipelineLayout.label` setter.
+pub fn pipeline_layout_label_set<E: JsEngine + 'static>(cx: E::Context<'_>, this: E::Value, value: E::Value) -> Result<(), E::Error> {
+    let arena = Arena::new();
+    let new_label = E::to_str(cx, value, &arena)?;
+    let payload = E::payload(cx, this, GPU_PIPELINE_LAYOUT_CLASS).and_then(|payload| payload.downcast_ref::<PipelineLayoutPayload>()).ok_or_else(|| E::type_error(cx, "GPUPipelineLayout.label called on an incompatible object"))?;
+    unsafe { (E::environment(cx).gpu().pipeline_layout_set_label)(payload.layout, WGPUStringView::from_bytes(new_label.as_bytes())); }
+    let mut label = payload.label.lock().map_err(|_| E::operation_error(cx, "GPUPipelineLayout label is poisoned"))?;
+    new_label.clone_into(&mut label);
+    Ok(())
 }
 
 /// Finalizes a `GPUPipelineLayout` payload by enqueuing its release.
@@ -4562,6 +4731,7 @@ pub fn device_create_bind_group<E: JsEngine + 'static>(
     let arena = Arena::new();
     let descriptor = args.first().copied().ok_or_else(|| E::type_error(cx, "GPUBindGroupDescriptor"))?;
     let converted = convert_bind_group_descriptor::<E>(cx, descriptor, &arena)?;
+    let label = unsafe { string_view_to_owned(converted.native.label) };
     let bind_group = unsafe { (E::environment(cx).gpu().device_create_bind_group)(device, ptr::from_ref(&converted.native)) };
     if bind_group.is_null() {
         return Err(E::operation_error(cx, "wgpuDeviceCreateBindGroup returned null"));
@@ -4596,6 +4766,7 @@ pub fn device_create_bind_group<E: JsEngine + 'static>(
         samplers: converted.samplers,
         texture_views: converted.texture_views,
         created_texture_views: converted.created_texture_views,
+        label: Mutex::new(label),
     })) {
         Ok(value) => Ok(value),
         Err(error) => {
@@ -4610,6 +4781,24 @@ pub fn device_create_bind_group<E: JsEngine + 'static>(
             Err(error)
         }
     }
+}
+
+/// Implements the `GPUBindGroup.label` getter.
+pub fn bind_group_label_get<E: JsEngine + 'static>(cx: E::Context<'_>, this: E::Value) -> Result<E::Value, E::Error> {
+    let payload = E::payload(cx, this, GPU_BIND_GROUP_CLASS).and_then(|payload| payload.downcast_ref::<BindGroupPayload>()).ok_or_else(|| E::type_error(cx, "GPUBindGroup.label called on an incompatible object"))?;
+    let label = payload.label.lock().map_err(|_| E::operation_error(cx, "GPUBindGroup label is poisoned"))?;
+    E::string(cx, &label)
+}
+
+/// Implements the `GPUBindGroup.label` setter.
+pub fn bind_group_label_set<E: JsEngine + 'static>(cx: E::Context<'_>, this: E::Value, value: E::Value) -> Result<(), E::Error> {
+    let arena = Arena::new();
+    let new_label = E::to_str(cx, value, &arena)?;
+    let payload = E::payload(cx, this, GPU_BIND_GROUP_CLASS).and_then(|payload| payload.downcast_ref::<BindGroupPayload>()).ok_or_else(|| E::type_error(cx, "GPUBindGroup.label called on an incompatible object"))?;
+    unsafe { (E::environment(cx).gpu().bind_group_set_label)(payload.bind_group, WGPUStringView::from_bytes(new_label.as_bytes())); }
+    let mut label = payload.label.lock().map_err(|_| E::operation_error(cx, "GPUBindGroup label is poisoned"))?;
+    new_label.clone_into(&mut label);
+    Ok(())
 }
 
 /// Finalizes a `GPUBindGroup` payload by enqueuing its release.
@@ -4636,6 +4825,7 @@ pub fn device_create_compute_pipeline<E: JsEngine + 'static>(
     let arena = Arena::new();
     let descriptor = args.first().copied().ok_or_else(|| E::type_error(cx, "GPUComputePipelineDescriptor"))?;
     let converted = convert_compute_pipeline_descriptor::<E>(cx, descriptor, &arena)?;
+    let label = unsafe { string_view_to_owned(converted.native.label) };
     let pipeline = unsafe { (E::environment(cx).gpu().device_create_compute_pipeline)(device, ptr::from_ref(&converted.native)) };
     if pipeline.is_null() {
         return Err(E::operation_error(cx, "wgpuDeviceCreateComputePipeline returned null"));
@@ -4659,6 +4849,7 @@ pub fn device_create_compute_pipeline<E: JsEngine + 'static>(
         pipeline,
         module: converted.module,
         layout: converted.layout,
+        label: Mutex::new(label),
     })) {
         Ok(value) => Ok(value),
         Err(error) => {
@@ -4670,6 +4861,24 @@ pub fn device_create_compute_pipeline<E: JsEngine + 'static>(
             Err(error)
         }
     }
+}
+
+/// Implements the `GPUComputePipeline.label` getter.
+pub fn compute_pipeline_label_get<E: JsEngine + 'static>(cx: E::Context<'_>, this: E::Value) -> Result<E::Value, E::Error> {
+    let payload = E::payload(cx, this, GPU_COMPUTE_PIPELINE_CLASS).and_then(|payload| payload.downcast_ref::<ComputePipelinePayload>()).ok_or_else(|| E::type_error(cx, "GPUComputePipeline.label called on an incompatible object"))?;
+    let label = payload.label.lock().map_err(|_| E::operation_error(cx, "GPUComputePipeline label is poisoned"))?;
+    E::string(cx, &label)
+}
+
+/// Implements the `GPUComputePipeline.label` setter.
+pub fn compute_pipeline_label_set<E: JsEngine + 'static>(cx: E::Context<'_>, this: E::Value, value: E::Value) -> Result<(), E::Error> {
+    let arena = Arena::new();
+    let new_label = E::to_str(cx, value, &arena)?;
+    let payload = E::payload(cx, this, GPU_COMPUTE_PIPELINE_CLASS).and_then(|payload| payload.downcast_ref::<ComputePipelinePayload>()).ok_or_else(|| E::type_error(cx, "GPUComputePipeline.label called on an incompatible object"))?;
+    unsafe { (E::environment(cx).gpu().compute_pipeline_set_label)(payload.pipeline, WGPUStringView::from_bytes(new_label.as_bytes())); }
+    let mut label = payload.label.lock().map_err(|_| E::operation_error(cx, "GPUComputePipeline label is poisoned"))?;
+    new_label.clone_into(&mut label);
+    Ok(())
 }
 
 /// Finalizes a `GPUComputePipeline` payload by enqueuing its release.
@@ -4693,6 +4902,7 @@ pub fn device_create_render_pipeline<E: JsEngine + 'static>(
     let arena = Arena::new();
     let descriptor = args.first().copied().ok_or_else(|| E::type_error(cx, "GPURenderPipelineDescriptor"))?;
     let converted = convert_render_pipeline_descriptor::<E>(cx, descriptor, &arena)?;
+    let label = unsafe { string_view_to_owned(converted.native.label) };
     let render_pipeline = unsafe { (E::environment(cx).gpu().device_create_render_pipeline)(device, ptr::from_ref(&converted.native)) };
     if render_pipeline.is_null() {
         return Err(E::operation_error(cx, "wgpuDeviceCreateRenderPipeline returned null"));
@@ -4720,6 +4930,7 @@ pub fn device_create_render_pipeline<E: JsEngine + 'static>(
         vertex_module: converted.vertex_module,
         fragment_module: converted.fragment_module,
         layout: converted.layout,
+        label: Mutex::new(label),
     })) {
         Ok(value) => Ok(value),
         Err(error) => {
@@ -4732,6 +4943,24 @@ pub fn device_create_render_pipeline<E: JsEngine + 'static>(
             Err(error)
         }
     }
+}
+
+/// Implements the `GPURenderPipeline.label` getter.
+pub fn render_pipeline_label_get<E: JsEngine + 'static>(cx: E::Context<'_>, this: E::Value) -> Result<E::Value, E::Error> {
+    let payload = E::payload(cx, this, GPU_RENDER_PIPELINE_CLASS).and_then(|payload| payload.downcast_ref::<RenderPipelinePayload>()).ok_or_else(|| E::type_error(cx, "GPURenderPipeline.label called on an incompatible object"))?;
+    let label = payload.label.lock().map_err(|_| E::operation_error(cx, "GPURenderPipeline label is poisoned"))?;
+    E::string(cx, &label)
+}
+
+/// Implements the `GPURenderPipeline.label` setter.
+pub fn render_pipeline_label_set<E: JsEngine + 'static>(cx: E::Context<'_>, this: E::Value, value: E::Value) -> Result<(), E::Error> {
+    let arena = Arena::new();
+    let new_label = E::to_str(cx, value, &arena)?;
+    let payload = E::payload(cx, this, GPU_RENDER_PIPELINE_CLASS).and_then(|payload| payload.downcast_ref::<RenderPipelinePayload>()).ok_or_else(|| E::type_error(cx, "GPURenderPipeline.label called on an incompatible object"))?;
+    unsafe { (E::environment(cx).gpu().render_pipeline_set_label)(payload.render_pipeline, WGPUStringView::from_bytes(new_label.as_bytes())); }
+    let mut label = payload.label.lock().map_err(|_| E::operation_error(cx, "GPURenderPipeline label is poisoned"))?;
+    new_label.clone_into(&mut label);
+    Ok(())
 }
 
 /// Finalizes a `GPURenderPipeline` payload by enqueuing its release.
@@ -4794,8 +5023,8 @@ pub fn query_set_label_set<E: JsEngine + 'static>(cx: E::Context<'_>, this: E::V
     let arena = Arena::new();
     let new_label = E::to_str(cx, value, &arena)?;
     let payload = E::payload(cx, this, GPU_QUERY_SET_CLASS).and_then(|payload| payload.downcast_ref::<QuerySetPayload>()).ok_or_else(|| E::type_error(cx, "GPUQuerySet.label called on an incompatible object"))?;
-    let mut label = payload.label.lock().map_err(|_| E::operation_error(cx, "GPUQuerySet label is poisoned"))?;
     unsafe { (E::environment(cx).gpu().query_set_set_label)(payload.query_set, WGPUStringView::from_bytes(new_label.as_bytes())); }
+    let mut label = payload.label.lock().map_err(|_| E::operation_error(cx, "GPUQuerySet label is poisoned"))?;
     new_label.clone_into(&mut label);
     Ok(())
 }
@@ -4841,6 +5070,7 @@ pub fn device_create_command_encoder<E: JsEngine + 'static>(
         Some(value) if !E::is_undefined(cx, value) => Some(convert_command_encoder_descriptor::<E>(cx, value, &arena)?),
         _ => None,
     };
+    let label = native.as_ref().map_or_else(String::new, |native| unsafe { string_view_to_owned(native.label) });
     let encoder = unsafe { (E::environment(cx).gpu().device_create_command_encoder)(device, native.as_ref().map_or(ptr::null(), ptr::from_ref)) };
     if encoder.is_null() {
         return Err(E::operation_error(cx, "wgpuDeviceCreateCommandEncoder returned null"));
@@ -4855,8 +5085,10 @@ pub fn device_create_command_encoder<E: JsEngine + 'static>(
         state: Arc::new(Mutex::new(CommandEncoderState {
             encoder,
             ended: false,
+            pending_validation_error: None,
             error_sink,
         })),
+        label: Mutex::new(label),
     })) {
         Ok(value) => Ok(value),
         Err(error) => {
@@ -4866,6 +5098,25 @@ pub fn device_create_command_encoder<E: JsEngine + 'static>(
             Err(error)
         }
     }
+}
+
+/// Implements the `GPUCommandEncoder.label` getter.
+pub fn command_encoder_label_get<E: JsEngine + 'static>(cx: E::Context<'_>, this: E::Value) -> Result<E::Value, E::Error> {
+    let payload = E::payload(cx, this, GPU_COMMAND_ENCODER_CLASS).and_then(|payload| payload.downcast_ref::<CommandEncoderPayload>()).ok_or_else(|| E::type_error(cx, "GPUCommandEncoder.label called on an incompatible object"))?;
+    let label = payload.label.lock().map_err(|_| E::operation_error(cx, "GPUCommandEncoder label is poisoned"))?;
+    E::string(cx, &label)
+}
+
+/// Implements the `GPUCommandEncoder.label` setter.
+pub fn command_encoder_label_set<E: JsEngine + 'static>(cx: E::Context<'_>, this: E::Value, value: E::Value) -> Result<(), E::Error> {
+    let arena = Arena::new();
+    let new_label = E::to_str(cx, value, &arena)?;
+    let payload = E::payload(cx, this, GPU_COMMAND_ENCODER_CLASS).and_then(|payload| payload.downcast_ref::<CommandEncoderPayload>()).ok_or_else(|| E::type_error(cx, "GPUCommandEncoder.label called on an incompatible object"))?;
+    let handle = payload.state.lock().map_err(|_| E::operation_error(cx, "GPUCommandEncoder state is poisoned"))?.encoder;
+    unsafe { (E::environment(cx).gpu().command_encoder_set_label)(handle, WGPUStringView::from_bytes(new_label.as_bytes())); }
+    let mut label = payload.label.lock().map_err(|_| E::operation_error(cx, "GPUCommandEncoder label is poisoned"))?;
+    new_label.clone_into(&mut label);
+    Ok(())
 }
 
 /// Finalizes a `GPUCommandEncoder` payload by enqueuing its release.
@@ -4887,6 +5138,7 @@ pub fn device_create_render_bundle_encoder<E: JsEngine + 'static>(
     let arena = Arena::new();
     let descriptor = args.first().copied().ok_or_else(|| E::type_error(cx, "GPURenderBundleEncoderDescriptor"))?;
     let native = convert_render_bundle_encoder_descriptor::<E>(cx, descriptor, &arena)?;
+    let label = unsafe { string_view_to_owned(native.label) };
     let render_bundle_encoder = unsafe { (E::environment(cx).gpu().device_create_render_bundle_encoder)(device, ptr::from_ref(&native)) };
     if render_bundle_encoder.is_null() {
         return Err(E::operation_error(cx, "wgpuDeviceCreateRenderBundleEncoder returned null"));
@@ -4903,6 +5155,7 @@ pub fn device_create_render_bundle_encoder<E: JsEngine + 'static>(
             ended: false,
             error_sink,
         })),
+        label: Mutex::new(label),
     })) {
         Ok(value) => Ok(value),
         Err(error) => {
@@ -4912,6 +5165,25 @@ pub fn device_create_render_bundle_encoder<E: JsEngine + 'static>(
             Err(error)
         }
     }
+}
+
+/// Implements the `GPURenderBundleEncoder.label` getter.
+pub fn render_bundle_encoder_label_get<E: JsEngine + 'static>(cx: E::Context<'_>, this: E::Value) -> Result<E::Value, E::Error> {
+    let payload = E::payload(cx, this, GPU_RENDER_BUNDLE_ENCODER_CLASS).and_then(|payload| payload.downcast_ref::<RenderBundleEncoderPayload>()).ok_or_else(|| E::type_error(cx, "GPURenderBundleEncoder.label called on an incompatible object"))?;
+    let label = payload.label.lock().map_err(|_| E::operation_error(cx, "GPURenderBundleEncoder label is poisoned"))?;
+    E::string(cx, &label)
+}
+
+/// Implements the `GPURenderBundleEncoder.label` setter.
+pub fn render_bundle_encoder_label_set<E: JsEngine + 'static>(cx: E::Context<'_>, this: E::Value, value: E::Value) -> Result<(), E::Error> {
+    let arena = Arena::new();
+    let new_label = E::to_str(cx, value, &arena)?;
+    let payload = E::payload(cx, this, GPU_RENDER_BUNDLE_ENCODER_CLASS).and_then(|payload| payload.downcast_ref::<RenderBundleEncoderPayload>()).ok_or_else(|| E::type_error(cx, "GPURenderBundleEncoder.label called on an incompatible object"))?;
+    let handle = payload.state.lock().map_err(|_| E::operation_error(cx, "GPURenderBundleEncoder state is poisoned"))?.render_bundle_encoder;
+    unsafe { (E::environment(cx).gpu().render_bundle_encoder_set_label)(handle, WGPUStringView::from_bytes(new_label.as_bytes())); }
+    let mut label = payload.label.lock().map_err(|_| E::operation_error(cx, "GPURenderBundleEncoder label is poisoned"))?;
+    new_label.clone_into(&mut label);
+    Ok(())
 }
 
 /// Finalizes a `GPURenderBundleEncoder` payload by enqueuing its release.
@@ -4990,6 +5262,7 @@ pub(super) fn device_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
         id: GPU_DEVICE_CLASS,
         constructor: Some(ConstructorSpec { length: 0, parent: Some(ClassParent::Class(EVENT_TARGET_CLASS)), call: device_illegal_constructor::<E> }),
         properties: Box::leak(Box::new([
+            PropertySpec { name: "label", get: Some(device_label_get::<E>), set: Some(device_label_set::<E>) },
             PropertySpec { name: "features", get: Some(device_features_get::<E>), set: None },
             PropertySpec { name: "limits", get: Some(device_limits_get::<E>), set: None },
             PropertySpec { name: "adapterInfo", get: Some(device_adapter_info_get::<E>), set: None },
@@ -5027,6 +5300,7 @@ pub(super) fn buffer_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
         constructor: None,
         properties: Box::leak(Box::new([
             PropertySpec { name: "label", get: Some(buffer_label_get::<E>), set: Some(buffer_label_set::<E>) },
+            PropertySpec { name: "mapState", get: Some(buffer_map_state_get::<E>), set: None },
             PropertySpec { name: "size", get: Some(buffer_size_get::<E>), set: None },
             PropertySpec { name: "usage", get: Some(buffer_usage_get::<E>), set: None },
         ])),
@@ -5046,6 +5320,7 @@ pub(super) fn texture_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
         id: GPU_TEXTURE_CLASS,
         constructor: None,
         properties: Box::leak(Box::new([
+            PropertySpec { name: "label", get: Some(texture_label_get::<E>), set: Some(texture_label_set::<E>) },
             PropertySpec { name: "width", get: Some(texture_width_get::<E>), set: None },
             PropertySpec { name: "height", get: Some(texture_height_get::<E>), set: None },
             PropertySpec { name: "depthOrArrayLayers", get: Some(texture_depth_or_array_layers_get::<E>), set: None },
@@ -5054,6 +5329,7 @@ pub(super) fn texture_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
             PropertySpec { name: "dimension", get: Some(texture_dimension_get::<E>), set: None },
             PropertySpec { name: "format", get: Some(texture_format_get::<E>), set: None },
             PropertySpec { name: "usage", get: Some(texture_usage_get::<E>), set: None },
+            PropertySpec { name: "textureBindingViewDimension", get: Some(texture_binding_view_dimension_get::<E>), set: None },
         ])),
         methods: Box::leak(Box::new([
             MethodSpec { name: "destroy", length: 0, call: texture_destroy::<E> },
@@ -5068,7 +5344,9 @@ pub(super) fn texture_view_class<E: JsEngine + 'static>() -> &'static ClassSpec<
         name: "GPUTextureView",
         id: GPU_TEXTURE_VIEW_CLASS,
         constructor: None,
-        properties: &[],
+        properties: Box::leak(Box::new([
+            PropertySpec { name: "label", get: Some(texture_view_label_get::<E>), set: Some(texture_view_label_set::<E>) },
+        ])),
         methods: &[],
         finalizer: finalize_texture_view,
     })
@@ -5079,7 +5357,9 @@ pub(super) fn queue_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
         name: "GPUQueue",
         id: GPU_QUEUE_CLASS,
         constructor: None,
-        properties: &[],
+        properties: Box::leak(Box::new([
+            PropertySpec { name: "label", get: Some(queue_label_get::<E>), set: Some(queue_label_set::<E>) },
+        ])),
         methods: Box::leak(Box::new([
             MethodSpec { name: "writeBuffer", length: 3, call: queue_write_buffer::<E> },
             MethodSpec { name: "writeTexture", length: 4, call: queue_write_texture::<E> },
@@ -5095,7 +5375,9 @@ pub(super) fn shader_module_class<E: JsEngine + 'static>() -> &'static ClassSpec
         name: "GPUShaderModule",
         id: GPU_SHADER_MODULE_CLASS,
         constructor: None,
-        properties: &[],
+        properties: Box::leak(Box::new([
+            PropertySpec { name: "label", get: Some(shader_module_label_get::<E>), set: Some(shader_module_label_set::<E>) },
+        ])),
         methods: &[],
         finalizer: finalize_shader_module,
     })
@@ -5119,7 +5401,9 @@ pub(super) fn bind_group_layout_class<E: JsEngine + 'static>() -> &'static Class
         name: "GPUBindGroupLayout",
         id: GPU_BIND_GROUP_LAYOUT_CLASS,
         constructor: None,
-        properties: &[],
+        properties: Box::leak(Box::new([
+            PropertySpec { name: "label", get: Some(bind_group_layout_label_get::<E>), set: Some(bind_group_layout_label_set::<E>) },
+        ])),
         methods: &[],
         finalizer: finalize_bind_group_layout,
     })
@@ -5130,7 +5414,9 @@ pub(super) fn pipeline_layout_class<E: JsEngine + 'static>() -> &'static ClassSp
         name: "GPUPipelineLayout",
         id: GPU_PIPELINE_LAYOUT_CLASS,
         constructor: None,
-        properties: &[],
+        properties: Box::leak(Box::new([
+            PropertySpec { name: "label", get: Some(pipeline_layout_label_get::<E>), set: Some(pipeline_layout_label_set::<E>) },
+        ])),
         methods: &[],
         finalizer: finalize_pipeline_layout,
     })
@@ -5141,7 +5427,9 @@ pub(super) fn bind_group_class<E: JsEngine + 'static>() -> &'static ClassSpec<E>
         name: "GPUBindGroup",
         id: GPU_BIND_GROUP_CLASS,
         constructor: None,
-        properties: &[],
+        properties: Box::leak(Box::new([
+            PropertySpec { name: "label", get: Some(bind_group_label_get::<E>), set: Some(bind_group_label_set::<E>) },
+        ])),
         methods: &[],
         finalizer: finalize_bind_group,
     })
@@ -5152,7 +5440,9 @@ pub(super) fn compute_pipeline_class<E: JsEngine + 'static>() -> &'static ClassS
         name: "GPUComputePipeline",
         id: GPU_COMPUTE_PIPELINE_CLASS,
         constructor: None,
-        properties: &[],
+        properties: Box::leak(Box::new([
+            PropertySpec { name: "label", get: Some(compute_pipeline_label_get::<E>), set: Some(compute_pipeline_label_set::<E>) },
+        ])),
         methods: Box::leak(Box::new([
             MethodSpec { name: "getBindGroupLayout", length: 1, call: compute_pipeline_get_bind_group_layout::<E> },
         ])),
@@ -5165,7 +5455,9 @@ pub(super) fn render_pipeline_class<E: JsEngine + 'static>() -> &'static ClassSp
         name: "GPURenderPipeline",
         id: GPU_RENDER_PIPELINE_CLASS,
         constructor: None,
-        properties: &[],
+        properties: Box::leak(Box::new([
+            PropertySpec { name: "label", get: Some(render_pipeline_label_get::<E>), set: Some(render_pipeline_label_set::<E>) },
+        ])),
         methods: Box::leak(Box::new([
             MethodSpec { name: "getBindGroupLayout", length: 1, call: render_pipeline_get_bind_group_layout::<E> },
         ])),
@@ -5195,7 +5487,9 @@ pub(super) fn command_encoder_class<E: JsEngine + 'static>() -> &'static ClassSp
         name: "GPUCommandEncoder",
         id: GPU_COMMAND_ENCODER_CLASS,
         constructor: None,
-        properties: &[],
+        properties: Box::leak(Box::new([
+            PropertySpec { name: "label", get: Some(command_encoder_label_get::<E>), set: Some(command_encoder_label_set::<E>) },
+        ])),
         methods: Box::leak(Box::new([
             MethodSpec { name: "copyBufferToBuffer", length: 5, call: command_encoder_copy_buffer_to_buffer::<E> },
             MethodSpec { name: "clearBuffer", length: 1, call: command_encoder_clear_buffer::<E> },
@@ -5219,7 +5513,9 @@ pub(super) fn compute_pass_encoder_class<E: JsEngine + 'static>() -> &'static Cl
         name: "GPUComputePassEncoder",
         id: GPU_COMPUTE_PASS_ENCODER_CLASS,
         constructor: None,
-        properties: &[],
+        properties: Box::leak(Box::new([
+            PropertySpec { name: "label", get: Some(compute_pass_encoder_label_get::<E>), set: Some(compute_pass_encoder_label_set::<E>) },
+        ])),
         methods: Box::leak(Box::new([
             MethodSpec { name: "setPipeline", length: 1, call: compute_pass_set_pipeline::<E> },
             MethodSpec { name: "setBindGroup", length: 2, call: compute_pass_set_bind_group::<E> },
@@ -5239,7 +5535,9 @@ pub(super) fn render_pass_encoder_class<E: JsEngine + 'static>() -> &'static Cla
         name: "GPURenderPassEncoder",
         id: GPU_RENDER_PASS_ENCODER_CLASS,
         constructor: None,
-        properties: &[],
+        properties: Box::leak(Box::new([
+            PropertySpec { name: "label", get: Some(render_pass_encoder_label_get::<E>), set: Some(render_pass_encoder_label_set::<E>) },
+        ])),
         methods: Box::leak(Box::new([
             MethodSpec { name: "setPipeline", length: 1, call: render_pass_set_pipeline::<E> },
             MethodSpec { name: "setVertexBuffer", length: 2, call: render_pass_set_vertex_buffer::<E> },
@@ -5270,7 +5568,9 @@ pub(super) fn render_bundle_encoder_class<E: JsEngine + 'static>() -> &'static C
         name: "GPURenderBundleEncoder",
         id: GPU_RENDER_BUNDLE_ENCODER_CLASS,
         constructor: None,
-        properties: &[],
+        properties: Box::leak(Box::new([
+            PropertySpec { name: "label", get: Some(render_bundle_encoder_label_get::<E>), set: Some(render_bundle_encoder_label_set::<E>) },
+        ])),
         methods: Box::leak(Box::new([
             MethodSpec { name: "setPipeline", length: 1, call: render_pass_set_pipeline::<E> },
             MethodSpec { name: "setVertexBuffer", length: 2, call: render_pass_set_vertex_buffer::<E> },
@@ -5294,7 +5594,9 @@ pub(super) fn render_bundle_class<E: JsEngine + 'static>() -> &'static ClassSpec
         name: "GPURenderBundle",
         id: GPU_RENDER_BUNDLE_CLASS,
         constructor: None,
-        properties: &[],
+        properties: Box::leak(Box::new([
+            PropertySpec { name: "label", get: Some(render_bundle_label_get::<E>), set: Some(render_bundle_label_set::<E>) },
+        ])),
         methods: &[],
         finalizer: finalize_render_bundle,
     })
@@ -5305,7 +5607,9 @@ pub(super) fn command_buffer_class<E: JsEngine + 'static>() -> &'static ClassSpe
         name: "GPUCommandBuffer",
         id: GPU_COMMAND_BUFFER_CLASS,
         constructor: None,
-        properties: &[],
+        properties: Box::leak(Box::new([
+            PropertySpec { name: "label", get: Some(command_buffer_label_get::<E>), set: Some(command_buffer_label_set::<E>) },
+        ])),
         methods: &[],
         finalizer: finalize_command_buffer,
     })

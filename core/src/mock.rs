@@ -56,6 +56,7 @@ pub struct Runtime {
     global: Value,
     symbol_iterator: Value,
     classes: RefCell<BTreeMap<ClassId, MockClassEntry>>,
+    non_enumerable_properties: RefCell<BTreeSet<(Value, String)>>,
     reclaimed_values: Cell<usize>,
     reclaimed_handles: RefCell<Vec<Value>>,
     detach_noop: Cell<bool>,
@@ -115,6 +116,7 @@ impl Runtime {
             global,
             symbol_iterator,
             classes: RefCell::new(BTreeMap::new()),
+            non_enumerable_properties: RefCell::new(BTreeSet::new()),
             reclaimed_values: Cell::new(0),
             reclaimed_handles: RefCell::new(Vec::new()),
             detach_noop: Cell::new(false),
@@ -614,8 +616,18 @@ impl JsEngine for MockEngine {
         cx: Self::Context<'_>,
         obj: Self::Value,
     ) -> Result<Vec<String>, Self::Error> {
+        let obj = cx.runtime.canonical(obj);
         match cx.runtime.get(obj) {
-            MockValue::Object(map) => Ok(map.keys().cloned().collect()),
+            MockValue::Object(map) => Ok(map
+                .keys()
+                .filter(|name| {
+                    !cx.runtime
+                        .non_enumerable_properties
+                        .borrow()
+                        .contains(&(obj, (*name).clone()))
+                })
+                .cloned()
+                .collect()),
             _ => Ok(Vec::new()),
         }
     }
@@ -930,6 +942,10 @@ impl JsEngine for MockEngine {
             };
             properties.insert("constructor".to_owned(), interface);
         });
+        cx.runtime
+            .non_enumerable_properties
+            .borrow_mut()
+            .insert((prototype, "constructor".to_owned()));
         let _ = cx.runtime.with_value(cx.runtime.global, |value| {
             let MockValue::Object(properties) = value else {
                 return;
@@ -2152,6 +2168,31 @@ unsafe fn buffer_set_label(_buffer: WGPUBuffer, label: WGPUStringView) {
         state.native_order.push("buffer_set_label");
     });
 }
+
+macro_rules! mock_set_label {
+    ($name:ident, $handle:ty) => {
+        unsafe fn $name(_handle: $handle, label: WGPUStringView) {
+            GPU_STATE.with(|state| state.borrow_mut().labels.push(read_view(label)));
+        }
+    };
+}
+
+mock_set_label!(device_set_label, WGPUDevice);
+mock_set_label!(texture_set_label, WGPUTexture);
+mock_set_label!(texture_view_set_label, WGPUTextureView);
+mock_set_label!(queue_set_label, WGPUQueue);
+mock_set_label!(shader_module_set_label, WGPUShaderModule);
+mock_set_label!(bind_group_layout_set_label, WGPUBindGroupLayout);
+mock_set_label!(pipeline_layout_set_label, WGPUPipelineLayout);
+mock_set_label!(bind_group_set_label, WGPUBindGroup);
+mock_set_label!(compute_pipeline_set_label, WGPUComputePipeline);
+mock_set_label!(render_pipeline_set_label, WGPURenderPipeline);
+mock_set_label!(command_encoder_set_label, WGPUCommandEncoder);
+mock_set_label!(compute_pass_encoder_set_label, WGPUComputePassEncoder);
+mock_set_label!(render_pass_encoder_set_label, WGPURenderPassEncoder);
+mock_set_label!(render_bundle_encoder_set_label, WGPURenderBundleEncoder);
+mock_set_label!(render_bundle_set_label, WGPURenderBundle);
+mock_set_label!(command_buffer_set_label, WGPUCommandBuffer);
 
 unsafe fn buffer_destroy(buffer: WGPUBuffer) {
     GPU_STATE.with(|state| {
@@ -3431,6 +3472,7 @@ mod tests {
             cx,
             crate::GPU_SHADER_MODULE_CLASS,
             Box::new(ShaderModulePayload {
+                label: Mutex::new(String::new()),
                 module: fake_handle(handle),
             }),
         )
@@ -3904,6 +3946,7 @@ mod tests {
                 ("dimension", rt.string("2d")),
                 ("format", rt.string("rgba8unorm")),
                 ("usage", rt.number(20.0)),
+                ("textureBindingViewDimension", rt.string("2d-array")),
                 ("viewFormats", view_formats),
             ],
         );
@@ -4065,6 +4108,7 @@ mod tests {
             cx,
             crate::GPU_BIND_GROUP_LAYOUT_CLASS,
             Box::new(BindGroupLayoutPayload {
+                label: Mutex::new(String::new()),
                 layout: fake_handle(41),
                 parent_pipeline: None,
             }),
@@ -4086,6 +4130,7 @@ mod tests {
             cx,
             crate::GPU_SHADER_MODULE_CLASS,
             Box::new(ShaderModulePayload {
+                label: Mutex::new(String::new()),
                 module: fake_handle(42),
             }),
         )
@@ -4216,6 +4261,9 @@ mod tests {
         assert!(matches!(rt.get(dimension), MockValue::String(value) if value == "2d"));
         let format = texture_format_get::<Engine>(cx, texture).expect("format");
         assert!(matches!(rt.get(format), MockValue::String(value) if value == "rgba8unorm"));
+        let binding_dimension = crate::texture_binding_view_dimension_get::<Engine>(cx, texture)
+            .expect("texture binding view dimension");
+        assert!(Engine::is_undefined(cx, binding_dimension));
 
         crate::texture_destroy::<Engine>(cx, texture, &[]).expect("destroy");
         crate::texture_destroy::<Engine>(cx, texture, &[]).expect("idempotent destroy");
@@ -4232,8 +4280,11 @@ mod tests {
 
         finalize_texture(
             Box::new(TexturePayload {
+                label: Mutex::new(String::new()),
                 texture: texture_payload.texture,
                 destroyed: AtomicBool::new(true),
+                dimension: crate::WGPUTextureDimension_WGPUTextureDimension_2D,
+                depth_or_array_layers: 1,
             }),
             &rt.env,
         );
@@ -4262,6 +4313,9 @@ mod tests {
 
         finalize_texture_view(
             Box::new(TextureViewPayload {
+                label: Mutex::new(String::new()),
+                dimension: crate::WGPUTextureViewDimension_WGPUTextureViewDimension_2D,
+                mip_depth: 1,
                 texture_view: view_payload.texture_view,
                 texture: view_payload.texture,
             }),
@@ -4531,6 +4585,7 @@ mod tests {
             cx,
             crate::GPU_SHADER_MODULE_CLASS,
             Box::new(ShaderModulePayload {
+                label: Mutex::new(String::new()),
                 module: fake_handle(42),
             }),
         )
@@ -4587,6 +4642,7 @@ mod tests {
             cx,
             crate::GPU_SHADER_MODULE_CLASS,
             Box::new(ShaderModulePayload {
+                label: Mutex::new(String::new()),
                 module: fake_handle(42),
             }),
         )
@@ -4610,6 +4666,7 @@ mod tests {
             cx,
             crate::GPU_SHADER_MODULE_CLASS,
             Box::new(ShaderModulePayload {
+                label: Mutex::new(String::new()),
                 module: fake_handle(42),
             }),
         )
@@ -4836,6 +4893,7 @@ mod tests {
             rt.context(),
             crate::GPU_BIND_GROUP_LAYOUT_CLASS,
             Box::new(BindGroupLayoutPayload {
+                label: Mutex::new(String::new()),
                 layout: fake_handle(41),
                 parent_pipeline: None,
             }),
@@ -4845,6 +4903,7 @@ mod tests {
             rt.context(),
             crate::GPU_BIND_GROUP_LAYOUT_CLASS,
             Box::new(BindGroupLayoutPayload {
+                label: Mutex::new(String::new()),
                 layout: fake_handle(42),
                 parent_pipeline: None,
             }),
@@ -4876,6 +4935,7 @@ mod tests {
             rt.context(),
             crate::GPU_BIND_GROUP_LAYOUT_CLASS,
             Box::new(BindGroupLayoutPayload {
+                label: Mutex::new(String::new()),
                 layout: first_handle,
                 parent_pipeline: None,
             }),
@@ -4885,6 +4945,7 @@ mod tests {
             rt.context(),
             crate::GPU_BIND_GROUP_LAYOUT_CLASS,
             Box::new(BindGroupLayoutPayload {
+                label: Mutex::new(String::new()),
                 layout: second_handle,
                 parent_pipeline: None,
             }),
@@ -5422,6 +5483,7 @@ mod tests {
 
         finalize_queue(
             Box::new(QueuePayload {
+                label: Mutex::new(String::new()),
                 queue: fake_handle(1001),
             }),
             &rt.env,
@@ -5446,6 +5508,7 @@ mod tests {
             cx,
             crate::GPU_BIND_GROUP_LAYOUT_CLASS,
             Box::new(BindGroupLayoutPayload {
+                label: Mutex::new(String::new()),
                 layout: fake_handle(77),
                 parent_pipeline: None,
             }),
@@ -5486,6 +5549,7 @@ mod tests {
             cx,
             crate::GPU_BIND_GROUP_LAYOUT_CLASS,
             Box::new(BindGroupLayoutPayload {
+                label: Mutex::new(String::new()),
                 layout: fake_handle(77),
                 parent_pipeline: None,
             }),
@@ -5515,6 +5579,7 @@ mod tests {
             cx,
             crate::GPU_BIND_GROUP_LAYOUT_CLASS,
             Box::new(BindGroupLayoutPayload {
+                label: Mutex::new(String::new()),
                 layout: fake_handle(77),
                 parent_pipeline: None,
             }),
@@ -5558,6 +5623,7 @@ mod tests {
             cx,
             crate::GPU_BIND_GROUP_LAYOUT_CLASS,
             Box::new(BindGroupLayoutPayload {
+                label: Mutex::new(String::new()),
                 layout: fake_handle(77),
                 parent_pipeline: None,
             }),
@@ -5593,6 +5659,9 @@ mod tests {
             cx,
             crate::GPU_TEXTURE_VIEW_CLASS,
             Box::new(TextureViewPayload {
+                label: Mutex::new(String::new()),
+                dimension: crate::WGPUTextureViewDimension_WGPUTextureViewDimension_2D,
+                mip_depth: 1,
                 texture_view: view_handle,
                 texture: fake_handle(83),
             }),
@@ -5635,8 +5704,11 @@ mod tests {
             cx,
             crate::GPU_TEXTURE_CLASS,
             Box::new(TexturePayload {
+                label: Mutex::new(String::new()),
                 texture: fake_handle(840),
                 destroyed: AtomicBool::new(false),
+                dimension: crate::WGPUTextureDimension_WGPUTextureDimension_2D,
+                depth_or_array_layers: 1,
             }),
         )
         .expect("texture");
@@ -5644,6 +5716,7 @@ mod tests {
             cx,
             crate::GPU_BIND_GROUP_LAYOUT_CLASS,
             Box::new(BindGroupLayoutPayload {
+                label: Mutex::new(String::new()),
                 layout: fake_handle(841),
                 parent_pipeline: None,
             }),
@@ -5689,6 +5762,7 @@ mod tests {
             .expect("bind group payload");
         finalize_bind_group(
             Box::new(BindGroupPayload {
+                label: Mutex::new(String::new()),
                 bind_group: payload.bind_group,
                 layout: payload.layout,
                 buffers: payload.buffers.clone(),
@@ -5731,6 +5805,7 @@ mod tests {
             cx,
             crate::GPU_BIND_GROUP_LAYOUT_CLASS,
             Box::new(BindGroupLayoutPayload {
+                label: Mutex::new(String::new()),
                 layout: fake_handle(77),
                 parent_pipeline: None,
             }),
@@ -5766,6 +5841,7 @@ mod tests {
                 cx,
                 crate::GPU_BIND_GROUP_LAYOUT_CLASS,
                 Box::new(BindGroupLayoutPayload {
+                    label: Mutex::new(String::new()),
                     layout: fake_handle(77),
                     parent_pipeline: None,
                 }),
@@ -5818,6 +5894,9 @@ mod tests {
             cx,
             crate::GPU_TEXTURE_VIEW_CLASS,
             Box::new(TextureViewPayload {
+                label: Mutex::new(String::new()),
+                dimension: crate::WGPUTextureViewDimension_WGPUTextureViewDimension_2D,
+                mip_depth: 1,
                 texture_view: fake_handle(79),
                 texture: fake_handle(80),
             }),
@@ -5827,6 +5906,7 @@ mod tests {
             cx,
             crate::GPU_BIND_GROUP_LAYOUT_CLASS,
             Box::new(BindGroupLayoutPayload {
+                label: Mutex::new(String::new()),
                 layout: fake_handle(77),
                 parent_pipeline: None,
             }),
@@ -5860,6 +5940,7 @@ mod tests {
             .expect("bind group payload");
         finalize_bind_group(
             Box::new(BindGroupPayload {
+                label: Mutex::new(String::new()),
                 bind_group: payload.bind_group,
                 layout: payload.layout,
                 buffers: payload.buffers.clone(),
@@ -5890,6 +5971,7 @@ mod tests {
             cx,
             crate::GPU_SHADER_MODULE_CLASS,
             Box::new(ShaderModulePayload {
+                label: Mutex::new(String::new()),
                 module: fake_handle(42),
             }),
         )
@@ -5898,6 +5980,7 @@ mod tests {
             cx,
             crate::GPU_PIPELINE_LAYOUT_CLASS,
             Box::new(PipelineLayoutPayload {
+                label: Mutex::new(String::new()),
                 layout: fake_handle(43),
             }),
         )
@@ -5917,6 +6000,7 @@ mod tests {
             .expect("compute pipeline payload");
         finalize_compute_pipeline(
             Box::new(ComputePipelinePayload {
+                label: Mutex::new(String::new()),
                 pipeline: payload.pipeline,
                 module: payload.module,
                 layout: payload.layout,
@@ -5942,6 +6026,7 @@ mod tests {
             cx,
             crate::GPU_PIPELINE_LAYOUT_CLASS,
             Box::new(PipelineLayoutPayload {
+                label: Mutex::new(String::new()),
                 layout: fake_handle(73),
             }),
         )
@@ -6513,6 +6598,7 @@ mod tests {
         assert!(payload.fragment_module.is_null());
         finalize_render_pipeline(
             Box::new(RenderPipelinePayload {
+                label: Mutex::new(String::new()),
                 render_pipeline: payload.render_pipeline,
                 vertex_module: payload.vertex_module,
                 fragment_module: payload.fragment_module,
@@ -6644,6 +6730,7 @@ mod tests {
             cx,
             crate::GPU_PIPELINE_LAYOUT_CLASS,
             Box::new(PipelineLayoutPayload {
+                label: Mutex::new(String::new()),
                 layout: fake_handle(103),
             }),
         )
@@ -6673,6 +6760,7 @@ mod tests {
             .expect("render pipeline payload");
         finalize_render_pipeline(
             Box::new(RenderPipelinePayload {
+                label: Mutex::new(String::new()),
                 render_pipeline: payload.render_pipeline,
                 vertex_module: payload.vertex_module,
                 fragment_module: payload.fragment_module,
@@ -6702,6 +6790,7 @@ mod tests {
             cx,
             crate::GPU_PIPELINE_LAYOUT_CLASS,
             Box::new(PipelineLayoutPayload {
+                label: Mutex::new(String::new()),
                 layout: fake_handle(204),
             }),
         )
@@ -6756,6 +6845,7 @@ mod tests {
             .expect("compute pipeline payload");
         finalize_compute_pipeline(
             Box::new(ComputePipelinePayload {
+                label: Mutex::new(String::new()),
                 pipeline: compute_payload.pipeline,
                 module: compute_payload.module,
                 layout: compute_payload.layout,
@@ -6767,6 +6857,7 @@ mod tests {
             .expect("render pipeline payload");
         finalize_render_pipeline(
             Box::new(RenderPipelinePayload {
+                label: Mutex::new(String::new()),
                 render_pipeline: render_payload.render_pipeline,
                 vertex_module: render_payload.vertex_module,
                 fragment_module: render_payload.fragment_module,
@@ -7157,6 +7248,7 @@ mod tests {
             let cx = rt.context();
             let (_, deferred) = Engine::new_promise(cx).expect("promise");
             let mut request = Box::new(DeviceRequest::<Engine> {
+                label: String::new(),
                 deferred: Some(deferred),
                 settlements: Arc::clone(rt.env.settlements()),
                 release_queue: Arc::clone(rt.queue()),
@@ -7367,22 +7459,50 @@ mod tests {
     }
 
     #[test]
-    fn r12_label_getter_reads_wrapper_copy() {
+    fn r12_label_round_trips_embedded_nul_and_survives_destroy() {
         reset_gpu();
         let rt = runtime();
         let cx = rt.context();
         let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
-        let desc = descriptor(&rt, &[("size", rt.number(16.0)), ("usage", rt.number(8.0))]);
+        let desc = descriptor(
+            &rt,
+            &[
+                ("size", rt.number(16.0)),
+                ("usage", rt.number(8.0)),
+                ("label", rt.string("null\0in\0label")),
+            ],
+        );
         let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("buffer");
-        buffer_label_set::<Engine>(cx, buffer, rt.string("new")).expect("set label");
+        let label = buffer_label_get::<Engine>(cx, buffer).expect("created label");
+        assert_eq!(
+            Engine::to_str(cx, label, &Arena::new()).expect("string"),
+            "null\0in\0label"
+        );
+        buffer_destroy::<Engine>(cx, buffer, &[]).expect("destroy");
+        buffer_label_set::<Engine>(cx, buffer, rt.string("after\0destroy")).expect("set label");
         let label = buffer_label_get::<Engine>(cx, buffer).expect("get label");
         assert_eq!(
             Engine::to_str(cx, label, &Arena::new()).expect("string"),
-            "new"
+            "after\0destroy"
         );
         GPU_STATE.with(|state| {
-            assert_eq!(state.borrow().labels, vec![b"new".to_vec()]);
+            assert_eq!(state.borrow().labels, vec![b"after\0destroy".to_vec()]);
         });
+    }
+
+    #[test]
+    fn webidl_prototype_members_are_enumerable_but_constructor_is_not() {
+        let rt = runtime();
+        let cx = rt.context();
+        crate::register_buffer_class::<Engine>(cx).expect("register buffer class");
+        let constructor =
+            Engine::get_property(cx, Engine::global(cx), "GPUBuffer").expect("GPUBuffer interface");
+        let prototype = Engine::get_property(cx, constructor, "prototype").expect("prototype");
+        let names = Engine::own_property_names(cx, prototype).expect("enumerable names");
+        assert!(names.contains(&"label".to_owned()));
+        assert!(names.contains(&"mapState".to_owned()));
+        assert!(names.contains(&"mapAsync".to_owned()));
+        assert!(!names.contains(&"constructor".to_owned()));
     }
 
     #[test]
@@ -7921,24 +8041,28 @@ mod tests {
 
         crate::finalize_command_encoder(
             Box::new(crate::CommandEncoderPayload {
+                label: Mutex::new(String::new()),
                 state: encoder_state,
             }),
             &rt.env,
         );
         crate::finalize_command_buffer(
             Box::new(crate::CommandBufferPayload {
+                label: Mutex::new(String::new()),
                 state: command_buffer_state,
             }),
             &rt.env,
         );
         crate::finalize_compute_pass_encoder(
             Box::new(crate::ComputePassEncoderPayload {
+                label: Mutex::new(String::new()),
                 state: compute_state,
             }),
             &rt.env,
         );
         crate::finalize_render_pass_encoder(
             Box::new(crate::RenderPassEncoderPayload {
+                label: Mutex::new(String::new()),
                 state: render_state,
             }),
             &rt.env,
@@ -8230,6 +8354,41 @@ mod tests {
         }
     }
 
+    fn buffer_map_state_string(cx: Context<'_>, buffer: Value) -> String {
+        let value = crate::buffer_map_state_get::<Engine>(cx, buffer).expect("mapState");
+        Engine::to_str(cx, value, &Arena::new())
+            .expect("mapState string")
+            .to_owned()
+    }
+
+    #[test]
+    fn map_state_transitions_unmapped_pending_mapped_unmapped() {
+        reset_gpu();
+        PENDING_MAP_CALLBACKS.with(|callbacks| callbacks.borrow_mut().clear());
+        let mut gpu = dispatch();
+        gpu.buffer_map_async = pending_buffer_map_async;
+        let rt = Runtime::new(gpu);
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let desc = descriptor(&rt, &[("size", rt.number(16.0)), ("usage", rt.number(2.0))]);
+        let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("buffer");
+
+        assert_eq!(buffer_map_state_string(cx, buffer), "unmapped");
+        let promise =
+            buffer_map_async::<Engine>(cx, buffer, &[rt.number(2.0)]).expect("mapAsync promise");
+        assert_eq!(buffer_map_state_string(cx, buffer), "pending");
+        resolve_pending_map(0, crate::WGPUMapAsyncStatus_WGPUMapAsyncStatus_Success);
+        rt.env
+            .settlements()
+            .drain::<Engine>(cx)
+            .expect("map settlement");
+        assert!(matches!(rt.promise_result(promise), Some(Ok(_))));
+        assert_eq!(buffer_map_state_string(cx, buffer), "mapped");
+        buffer_unmap::<Engine>(cx, buffer, &[]).expect("unmap");
+        assert_eq!(buffer_map_state_string(cx, buffer), "unmapped");
+        release_device_held_values(&rt, cx, device);
+    }
+
     #[test]
     fn map_async_on_mapped_buffer_rejects_early_and_generates_validation() {
         reset_gpu();
@@ -8391,6 +8550,7 @@ mod tests {
             Box::new(DevicePayload::<Engine>::new(
                 device_payload.device(),
                 Arc::clone(&device_payload.events),
+                String::new(),
             )),
             Engine::environment(cx),
         );
@@ -8956,7 +9116,11 @@ mod tests {
             Engine::release_value(cx, value);
         });
         finalize_device::<Engine>(
-            Box::new(DevicePayload::<Engine>::new(native, first_events)),
+            Box::new(DevicePayload::<Engine>::new(
+                native,
+                first_events,
+                String::new(),
+            )),
             &rt.env,
         );
         rt.env
@@ -9197,6 +9361,9 @@ mod tests {
             cx,
             crate::GPU_TEXTURE_VIEW_CLASS,
             Box::new(TextureViewPayload {
+                label: Mutex::new(String::new()),
+                dimension: crate::WGPUTextureViewDimension_WGPUTextureViewDimension_2D,
+                mip_depth: 1,
                 texture_view: fake_handle(501),
                 texture: fake_handle(502),
             }),
@@ -9414,8 +9581,11 @@ mod tests {
             cx,
             crate::GPU_TEXTURE_CLASS,
             Box::new(TexturePayload {
+                label: Mutex::new(String::new()),
                 texture: fake_handle(503),
                 destroyed: AtomicBool::new(false),
+                dimension: crate::WGPUTextureDimension_WGPUTextureDimension_2D,
+                depth_or_array_layers: 1,
             }),
         )
         .expect("texture");
@@ -9450,6 +9620,159 @@ mod tests {
     }
 
     #[test]
+    fn depth_slice_validates_all_definedness_rows_and_mip_bounds() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+
+        let texture_2d = device_create_texture::<Engine>(
+            cx,
+            device,
+            &[descriptor(
+                &rt,
+                &[
+                    ("size", descriptor(&rt, &[("width", rt.number(16.0))])),
+                    ("dimension", rt.string("2d")),
+                    ("format", rt.string("rgba8unorm")),
+                    ("usage", rt.number(16.0)),
+                ],
+            )],
+        )
+        .expect("2d texture");
+        let view_2d = crate::texture_create_view::<Engine>(
+            cx,
+            texture_2d,
+            &[descriptor(&rt, &[("dimension", rt.string("2d"))])],
+        )
+        .expect("2d view");
+        let texture_3d = device_create_texture::<Engine>(
+            cx,
+            device,
+            &[descriptor(
+                &rt,
+                &[
+                    (
+                        "size",
+                        descriptor(
+                            &rt,
+                            &[
+                                ("width", rt.number(16.0)),
+                                ("height", rt.number(1.0)),
+                                ("depthOrArrayLayers", rt.number(10.0)),
+                            ],
+                        ),
+                    ),
+                    ("mipLevelCount", rt.number(2.0)),
+                    ("dimension", rt.string("3d")),
+                    ("format", rt.string("rgba8unorm")),
+                    ("usage", rt.number(16.0)),
+                ],
+            )],
+        )
+        .expect("3d texture");
+        let view_3d = crate::texture_create_view::<Engine>(
+            cx,
+            texture_3d,
+            &[descriptor(
+                &rt,
+                &[
+                    ("dimension", rt.string("3d")),
+                    ("baseMipLevel", rt.number(1.0)),
+                    ("mipLevelCount", rt.number(1.0)),
+                    ("arrayLayerCount", rt.number(1.0)),
+                ],
+            )],
+        )
+        .expect("3d view");
+
+        let view_3d_payload = Engine::payload(cx, view_3d, crate::GPU_TEXTURE_VIEW_CLASS)
+            .and_then(|payload| payload.downcast_ref::<TextureViewPayload>())
+            .expect("3d view payload");
+        assert_eq!(
+            view_3d_payload.dimension,
+            crate::WGPUTextureViewDimension_WGPUTextureViewDimension_3D
+        );
+        assert_eq!(view_3d_payload.mip_depth, 5);
+
+        for (view, depth_slice, should_error) in [
+            (view_2d, None, false),
+            (view_2d, Some(0), true),
+            (view_2d, Some(u32::MAX), true),
+            (view_3d, None, true),
+            (view_3d, Some(0), false),
+            (view_3d, Some(u32::MAX), true),
+            (view_3d, Some(4), false),
+            (view_3d, Some(5), true),
+        ] {
+            let mut members = vec![
+                ("view", view),
+                ("loadOp", rt.string("clear")),
+                ("storeOp", rt.string("store")),
+            ];
+            if let Some(depth_slice) = depth_slice {
+                members.push(("depthSlice", rt.number(f64::from(depth_slice))));
+            }
+            let attachment = descriptor(&rt, &members);
+            let pass_descriptor =
+                descriptor(&rt, &[("colorAttachments", rt.set_like(&[attachment]))]);
+            let encoder =
+                device_create_command_encoder::<Engine>(cx, device, &[]).expect("command encoder");
+            device_push_error_scope::<Engine>(cx, device, &[rt.string("validation")])
+                .expect("validation scope");
+            let pass =
+                crate::command_encoder_begin_render_pass::<Engine>(cx, encoder, &[pass_descriptor])
+                    .expect("render pass");
+            crate::render_pass_end::<Engine>(cx, pass, &[]).expect("end pass");
+            crate::command_encoder_finish::<Engine>(cx, encoder, &[]).expect("finish encoder");
+            if should_error {
+                assert_validation_scope_error(
+                    &rt,
+                    cx,
+                    device,
+                    "GPURenderPassColorAttachment.depthSlice must be provided only for 3d views and be less than the mip depth",
+                );
+            } else {
+                assert_null_scope(&rt, cx, device);
+            }
+        }
+
+        for (texture, should_error) in [(texture_2d, true), (texture_3d, false)] {
+            let attachment = descriptor(
+                &rt,
+                &[
+                    ("view", texture),
+                    ("depthSlice", rt.number(0.0)),
+                    ("loadOp", rt.string("clear")),
+                    ("storeOp", rt.string("store")),
+                ],
+            );
+            let pass_descriptor =
+                descriptor(&rt, &[("colorAttachments", rt.set_like(&[attachment]))]);
+            let encoder =
+                device_create_command_encoder::<Engine>(cx, device, &[]).expect("command encoder");
+            device_push_error_scope::<Engine>(cx, device, &[rt.string("validation")])
+                .expect("validation scope");
+            let pass =
+                crate::command_encoder_begin_render_pass::<Engine>(cx, encoder, &[pass_descriptor])
+                    .expect("render pass");
+            crate::render_pass_end::<Engine>(cx, pass, &[]).expect("end pass");
+            crate::command_encoder_finish::<Engine>(cx, encoder, &[]).expect("finish encoder");
+            if should_error {
+                assert_validation_scope_error(
+                    &rt,
+                    cx,
+                    device,
+                    "GPURenderPassColorAttachment.depthSlice must be provided only for 3d views and be less than the mip depth",
+                );
+            } else {
+                assert_null_scope(&rt, cx, device);
+            }
+        }
+        release_device_held_values(&rt, cx, device);
+    }
+
+    #[test]
     fn t7_texel_copy_descriptors_assert_every_c_field_and_reject_bad_inputs() {
         let rt = runtime();
         let cx = rt.context();
@@ -9467,8 +9790,11 @@ mod tests {
             cx,
             crate::GPU_TEXTURE_CLASS,
             Box::new(TexturePayload {
+                label: Mutex::new(String::new()),
                 texture: fake_handle(601),
                 destroyed: AtomicBool::new(false),
+                dimension: crate::WGPUTextureDimension_WGPUTextureDimension_2D,
+                depth_or_array_layers: 1,
             }),
         )
         .expect("texture");
@@ -9589,6 +9915,7 @@ mod tests {
             cx,
             crate::GPU_COMPUTE_PIPELINE_CLASS,
             Box::new(ComputePipelinePayload {
+                label: Mutex::new(String::new()),
                 pipeline: fake_handle(690),
                 module: ptr::null_mut(),
                 layout: ptr::null_mut(),
@@ -9599,6 +9926,7 @@ mod tests {
             cx,
             crate::GPU_BIND_GROUP_CLASS,
             Box::new(BindGroupPayload {
+                label: Mutex::new(String::new()),
                 bind_group: fake_handle(691),
                 layout: ptr::null_mut(),
                 buffers: Vec::new(),
@@ -9851,6 +10179,7 @@ mod tests {
             crate::command_buffer_state::<Engine>(cx, command_buffer).expect("command state");
         crate::finalize_command_buffer(
             Box::new(crate::CommandBufferPayload {
+                label: Mutex::new(String::new()),
                 state: command_buffer_state,
             }),
             &rt.env,
@@ -10163,6 +10492,9 @@ mod tests {
             cx,
             crate::GPU_TEXTURE_VIEW_CLASS,
             Box::new(TextureViewPayload {
+                label: Mutex::new(String::new()),
+                dimension: crate::WGPUTextureViewDimension_WGPUTextureViewDimension_2D,
+                mip_depth: 1,
                 texture_view: fake_handle(701),
                 texture: fake_handle(702),
             }),
@@ -10172,8 +10504,11 @@ mod tests {
             cx,
             crate::GPU_TEXTURE_CLASS,
             Box::new(TexturePayload {
+                label: Mutex::new(String::new()),
                 texture: fake_handle(702),
                 destroyed: AtomicBool::new(false),
+                dimension: crate::WGPUTextureDimension_WGPUTextureDimension_2D,
+                depth_or_array_layers: 1,
             }),
         )
         .expect("texture");
@@ -10204,6 +10539,7 @@ mod tests {
             cx,
             crate::GPU_RENDER_PIPELINE_CLASS,
             Box::new(RenderPipelinePayload {
+                label: Mutex::new(String::new()),
                 render_pipeline: fake_handle(703),
                 vertex_module: ptr::null_mut(),
                 fragment_module: ptr::null_mut(),
@@ -10255,6 +10591,7 @@ mod tests {
             cx,
             crate::GPU_BIND_GROUP_CLASS,
             Box::new(BindGroupPayload {
+                label: Mutex::new(String::new()),
                 bind_group: fake_handle(704),
                 layout: ptr::null_mut(),
                 buffers: Vec::new(),
@@ -10596,6 +10933,7 @@ mod tests {
             cx,
             crate::GPU_RENDER_PIPELINE_CLASS,
             Box::new(RenderPipelinePayload {
+                label: Mutex::new(String::new()),
                 render_pipeline: fake_handle(14_001),
                 vertex_module: ptr::null_mut(),
                 fragment_module: ptr::null_mut(),
@@ -10617,6 +10955,7 @@ mod tests {
             cx,
             crate::GPU_BIND_GROUP_CLASS,
             Box::new(BindGroupPayload {
+                label: Mutex::new(String::new()),
                 bind_group: fake_handle(14_002),
                 layout: ptr::null_mut(),
                 buffers: Vec::new(),
@@ -10757,6 +11096,7 @@ mod tests {
                 .expect("bundle encoder state");
         crate::finalize_render_bundle_encoder(
             Box::new(crate::RenderBundleEncoderPayload {
+                label: Mutex::new(String::new()),
                 state: bundle_encoder_state,
             }),
             &rt.env,
@@ -10767,6 +11107,7 @@ mod tests {
             .expect("native render bundle");
         crate::finalize_render_bundle(
             Box::new(crate::RenderBundlePayload {
+                label: Mutex::new(String::new()),
                 render_bundle: native_bundle,
                 invalid: false,
             }),
@@ -10837,6 +11178,7 @@ mod tests {
             cx,
             crate::GPU_RENDER_BUNDLE_CLASS,
             Box::new(crate::RenderBundlePayload {
+                label: Mutex::new(String::new()),
                 render_bundle: fake_handle(15_100),
                 invalid: false,
             }),
@@ -10873,7 +11215,11 @@ mod tests {
         let device = Engine::new_instance(
             cx,
             crate::GPU_DEVICE_CLASS,
-            Box::new(DevicePayload::<Engine>::new(fake_device(), events)),
+            Box::new(DevicePayload::<Engine>::new(
+                fake_device(),
+                events,
+                String::new(),
+            )),
         )
         .expect("device");
         let adapter = Engine::new_instance(
@@ -11018,7 +11364,11 @@ mod tests {
         let device = Engine::new_instance(
             cx,
             crate::GPU_DEVICE_CLASS,
-            Box::new(DevicePayload::<Engine>::new(fake_device(), events)),
+            Box::new(DevicePayload::<Engine>::new(
+                fake_device(),
+                events,
+                String::new(),
+            )),
         )
         .expect("device");
         assert_eq!(
@@ -11037,7 +11387,11 @@ mod tests {
         let device = Engine::new_instance(
             cx,
             crate::GPU_DEVICE_CLASS,
-            Box::new(DevicePayload::<Engine>::new(fake_device(), events)),
+            Box::new(DevicePayload::<Engine>::new(
+                fake_device(),
+                events,
+                String::new(),
+            )),
         )
         .expect("device");
         let limits = crate::device_limits_get::<Engine>(cx, device).expect("limits query");
@@ -11059,6 +11413,7 @@ mod tests {
             cx,
             crate::GPU_COMPUTE_PIPELINE_CLASS,
             Box::new(ComputePipelinePayload {
+                label: Mutex::new(String::new()),
                 pipeline: pipeline_handle,
                 module: fake_handle(901),
                 layout: ptr::null_mut(),
@@ -11078,6 +11433,7 @@ mod tests {
                 .expect("layout payload");
             crate::finalize_bind_group_layout(
                 Box::new(BindGroupLayoutPayload {
+                    label: Mutex::new(String::new()),
                     layout: payload.layout,
                     parent_pipeline: payload.parent_pipeline,
                 }),

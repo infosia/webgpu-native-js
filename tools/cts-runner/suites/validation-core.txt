@@ -97,3 +97,13 @@ webgpu:idl,constructable:*
 # is worth.
 webgpu:api,validation,queue,*
 webgpu:api,validation,buffer,mapping:*
+
+# Phase C additions (2026-07-13). The first api,operation families ever run — the
+# Dawn oracle pass exposed four WebIDL conformance bugs that no validation family
+# reaches (prototype enumerability, GPUObjectBase.label, GPUBuffer.mapState, and
+# the depthSlice sentinel collision). These pass on yawgpu AND Dawn.
+webgpu:api,operation,reflection:*
+webgpu:api,operation,labels:*
+webgpu:api,operation,queue,*
+webgpu:api,operation,onSubmittedWorkDone:*
+webgpu:api,operation,device,*
