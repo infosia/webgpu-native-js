@@ -97,7 +97,7 @@ temporal dead zone, circular-import behaviour, `import.meta` — a real loader o
 one side and an approximation on the other. That converts a **visible** gap into
 an **invisible seam**, which is strictly worse than the gap. The two engines are
 Tier 1 precisely because parity is *proven*, and a seam whose two sides differ by
-construction cannot be proven, only hoped about.
+construction cannot be proven.
 
 **L8 — Candidate D: no runtime modules for game code — bundle at build time.**
 The application's build flattens its module graph into one script (esbuild,
@@ -107,7 +107,7 @@ construction* rather than by verification. Zero new code, zero new dependencies,
 zero new OS floor. The cost is that game authors need a build step — normal for
 this audience, but it must be *documented*, not discovered.
 
-This is the fallback, and it is a good one. §7 specifies it.
+This is the fallback. §7 specifies it.
 
 ---
 
@@ -262,8 +262,8 @@ an error path that names the path), extension probing (each probe step, and the
 miss error listing the probes), root-file transform, and alias+probe interaction.
 A JSC module test that has no Boa counterpart, or vice versa, is a gap — say so.
 
-**L16 — the parity suite gets a module graph, and this is the point of the whole
-block.** `tests/parity/` gains a module-graph section run under **both** engines
+**L16 — the parity suite gets a module graph.**
+`tests/parity/` gains a module-graph section run under **both** engines
 with **byte-identical** output (P1). Until now the module system could not be
 parity-verified at all, because only one engine had one. That it now *can* be is
 the deliverable; that it *is* is the exit criterion. A JSC module loader that
@@ -291,8 +291,7 @@ new, load-bearing project fact that did not exist before this block.
 
 ## 7. Phase 2D — implement build-time bundling
 
-Only if §5 selects candidate D. **This is a real deliverable, not a
-consolation.**
+Only if §5 selects candidate D.
 
 **L20 — what shipping D means.**
 
@@ -316,8 +315,7 @@ consolation.**
    `specs/tracking/engine-boundary.md`. The next person who wonders "why don't we
    just use JSC's module loader?" must find the answer, with citations, instead of
    re-running this investigation.
-5. **Do not implement candidate C** (L7). The temptation will be strongest here,
-   at exactly the moment the honest answer looks least satisfying.
+5. **Do not implement candidate C** (L7).
 
 ---
 
@@ -354,11 +352,9 @@ consolation.**
 
 ## 10. Planner review of Phase 2D (2026-07-13) — what must change
 
-Reviewed at `33a1208` against §9. **The decision, the evidence in Q11, the M4
-correction, and the README constraint are all accepted as-is.** Q11 is the most
-carefully cited document in this repository and the L-Q3 deviation was recorded
-rather than buried, which is exactly what L2 and L10 asked for. None of that is
-reopened.
+Reviewed at `04c43d7` against §9. **The decision, the evidence in Q11, the M4
+correction, and the README constraint are all accepted as-is**, including the
+L-Q3 deviation, which was recorded as L2 and L10 require. None of that is reopened.
 
 What follows is about the *test fixture* Phase 2D shipped.
 
@@ -391,11 +387,10 @@ wrong.
 
 The fixture's comment claims it is *"the CommonJS-style shape emitted by bundlers
 such as esbuild and Metro."* **That claim was never checked against esbuild's or
-Metro's actual output.** Phase 1 was scrupulous about exactly this — it opened the
-SDK headers rather than trusting M4 — and then Phase 2 asserted a bundler's
-behaviour from recollection. CLAUDE.md's rule does not stop at Apple's headers.
+Metro's actual output.**
+Rule: a claim about another system's behaviour requires running that system.
 
-**The fix, and it makes the test stronger rather than smaller:**
+**The fix:**
 
 1. `delete __cache[id]` when a factory throws, and assert that a second
    `__require` **re-runs the factory and re-throws**. That exercises exception
@@ -409,22 +404,21 @@ behaviour from recollection. CLAUDE.md's rule does not stop at Apple's headers.
 
 ### L22 — MINOR: `import()` is the one uncited claim in Q11
 
-Q11 → L-Q7 states that dynamic `import()` is out of reach. **It was not tested.**
-Unlike an `import` *declaration*, a dynamic `import()` call is syntactically legal
-in the Script goal, so whether a bare `JSGlobalContextRef` rejects it at runtime is
-an *empirical* question, not one the headers answer. Every other line of Q11 carries
-a citation; this one carries a recollection wearing the same clothes.
+Q11 → L-Q7 states that dynamic `import()` is out of reach. **It was not tested**,
+and it is the one claim in Q11 with no citation. Unlike an `import` *declaration*, a
+dynamic `import()` call is syntactically legal in the Script goal, so whether a bare
+`JSGlobalContextRef` rejects it at runtime is an *empirical* question, not one the
+headers answer.
 
 Add a small test to the JSC suite establishing what actually happens, or mark the
-claim untested in Q11. The stakes are low either way — game code must not rely on
-`import()` under candidate D regardless — but Q11's value is that a reader can trust
-every line of it.
+claim untested in Q11. Game code must not rely on `import()` under candidate D
+regardless.
 
 ### L23 — process: the Phase Review did not run
 
 Exit criterion 7 requires a Phase Review, and the block shipped in two commits with
-no review artifact. The MAJOR above is exactly what that gate exists to catch, and it
-went straight past. Run the review over the cumulative diff before closing.
+no review artifact — the gate that would have caught the MAJOR above. Run the review
+over the cumulative diff before closing.
 
 ### Exit criteria for the reopen
 

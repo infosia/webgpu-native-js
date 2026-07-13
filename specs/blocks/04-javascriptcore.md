@@ -14,7 +14,7 @@ do not restate from memory.
 
 ---
 
-## 1. This is the exam
+## 1. The JSC exit gate
 
 `CLAUDE.md`'s JSC exit gate: *wiring JavaScriptCore must require **zero changes to
 `core/`'s logic** — only additive `JsEngine` methods. Non-trivial core churn means
@@ -22,11 +22,10 @@ the boundary was drawn wrong.*
 
 The gate has already fired once, a phase early. Phase 2's `CopyInCopyOut` arm read
 a **detached** buffer, which JSC cannot do; `core/` had been shaped to what QuickJS
-tolerates, and the mock — written by the same hand — agreed. That cost one
-primitive redesign. It would have cost a boundary redesign under forty generated
-interfaces.
+tolerates, and the mock agreed. Cost: one primitive redesign. Under forty generated
+interfaces it would have cost a boundary redesign.
 
-**It fires again here, and the finding is J4.** Read it before writing code.
+**It fires again here; the finding is J4.** Read it before writing code.
 
 ---
 
@@ -43,7 +42,7 @@ interfaces.
 | **F7** | **`Symbol.iterator` is reachable without `eval`.** Two string property reads (`globalThis.Symbol`, then `.iterator`) yield a symbol `JSValueRef`; `JSObjectGetPropertyForKey` accepts it. A `Set` has it; an array-like does not. Full iteration works from pure C. | Program: iterated `new Set([10,20])` to completion; `JSObjectHasPropertyForKey` returned 1 for the `Set` and 0 for `{length:2,0:1,1:2}`. |
 | **F8** | **LGPL-2.1.** Dynamically link the system framework. macOS and iOS only; Android and Windows are unsupported (`CLAUDE.md` → Engine support tiers). | `engine-boundary.md` → Q2a. |
 
-**The any-thread-finalizer premise is a documented contract, not folklore.**
+**The any-thread-finalizer premise is a documented contract.**
 *(Upgraded 2026-07-10 by the Phase Review, which found the F1 header sweep had
 missed it.)* `JSObjectRef.h` states outright: *"An object may be finalized on
 any thread."* F5 still means it **cannot be provoked** — the project has never
@@ -76,8 +75,8 @@ concern" is meaningless if two engines disagree about when script runs.
 The callback becomes pure Rust: it takes ownership of its `userdata`, records
 `(deferred_id, Result)` into a settlement queue, and returns. It calls no engine
 function, allocates no `JSValue`, opens no scope. `with_async_scope` disappears
-from the callback path — and with it a class of ownership bug this project has
-already paid for twice.
+from the callback path, and with it the ownership-bug class seen twice already
+(P1-C1, A23).
 
 **J2 — `tick()` has four steps, and the third is a trampoline.**
 
@@ -104,12 +103,11 @@ side, so the only structural guarantee of the ordering is that it is written
 once.)*
 
 **J3 — `core/` changes, and that is the gate working.** J1 and J2 alter `core/`'s
-async settlement policy. Per the exit gate this must be reported, not absorbed —
-so: **the boundary is not wrong; `core/` was engine-shaped and nobody noticed.**
-It had encoded QuickJS's checkpoint semantics ("resolving does not run
-continuations") as if universal. The fix makes `core/` *more* neutral, and it is
-the second time the JSC gate has caught engine-shaped `core/` logic before codegen
-multiplied it.
+async settlement policy. Per the exit gate this must be reported, not absorbed:
+the boundary is not wrong; `core/` was engine-shaped, having encoded QuickJS's
+checkpoint semantics ("resolving does not run continuations") as if universal. The
+fix makes `core/` *more* neutral. This is the second time the JSC gate has caught
+engine-shaped `core/` logic before codegen multiplied it.
 
 Record it in `specs/tracking/engine-boundary.md`. Do not let it pass as "just an
 addition".
@@ -202,8 +200,7 @@ no `dyn` on the conversion path.
 
 **J13 — every capability JSC needs is an addition to `JsEngine`.** J1/J2 are the
 declared exception, reported under J3. **Any further `core/` logic change: stop and
-report.** That decision is the planner's, and it is the most important one in the
-project.
+report.** That decision is the planner's.
 
 **J14 — the adapter names no class and no member** (R24) and **holds no lock
 across a call into `core/`** (R25). The boundary is re-entrant through
@@ -234,10 +231,10 @@ script-reachable buffer is CRITICAL — applies to this method with no exemption
 for "it's just a read".
 
 **J20 — unhandled rejections have no JSC hook, and the parity claim must be
-scoped honestly.** QuickJS surfaces them via
+scoped accordingly.** QuickJS surfaces them via
 `JS_SetHostPromiseRejectionTracker` (A22). The F1 header sweep found no JSC
-equivalent in the public C API — no tracker, no job hook. Consequences, stated
-before the adapter exists so nobody discovers them as a red diff:
+equivalent in the public C API — no tracker, no job hook. Consequences, recorded
+before the adapter exists:
 
 - A22's surfacing is a **Tier 1 diagnostic**, not a portable contract. Record it
   as an engine delta in `specs/tracking/engine-boundary.md`.
@@ -278,8 +275,7 @@ At minimum: `wrap_device` → `createBuffer` → `label` round-trip → `mapAsyn
   only.
 - **`tick()` ordering, both engines.** Two promises settling in one `tick()` must
   run their `.then()`s in the same order, after both settlements, on both engines.
-  Assert the log. This is J2's whole point, and it is the test that would have
-  caught the divergence.
+  Assert the log. This is what J2 requires.
 - **No test may provoke a JSC finalizer via GC** (F5). Where Phase 0 simulated an
   any-thread finalizer, say so in the test name, as `spikes/release-queue` does.
 
@@ -323,15 +319,12 @@ still pass if the feature were a no-op?*
   `JSObjectRef.h` documents "An object may be finalized on any thread" (§2
   upgrade). The designs resting on it rest on the header's contract.
 - ~~**Does the handle scope have anything to do under JSC?**~~ **Yes — it is
-  the root set, and treating it as an empty formality was the phase's worst
-  bug.** JSC's collector scans only the machine stack; a `JSValueRef` held in
-  a Rust `Vec` is invisible to it. The first `Scope` was a pure recorder, and
-  the Phase Review found settlement values GC-collectable mid-drain (PR3-C1,
+  the root set.** JSC's collector scans only the machine stack; a `JSValueRef`
+  held in a Rust `Vec` is invisible to it. The first `Scope` was a pure recorder,
+  and the Phase Review found settlement values GC-collectable mid-drain (PR3-C1,
   a use-after-free). `Scope::track` is now `JSValueProtect`; drop unprotects
-  what did not escape. A23's "the scope is not `Option`" aged well; J7's "it
-  has nothing to free" did not — it has nothing to *free*, and everything to
-  *root*.
+  what did not escape. J7's "it has nothing to free" was incomplete: it has
+  nothing to *free*, and everything to *root*.
 - ~~**What does the trampoline cost?**~~ Measured (ignored test, 200 ticks ×
   8 settlements): batched trampoline 16.50 ms vs per-deferred direct calls
-  15.70 ms — about 4 µs per tick, the price of one extra JS call. The parity
-  property costs nothing worth discussing.
+  15.70 ms — about 4 µs per tick, the cost of one extra JS call.

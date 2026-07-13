@@ -8,7 +8,7 @@ pure-Rust JavaScript engine. This block adds `adapters/boa/` implementing
 `trait JsEngine`, then *measures*. Tier assignment and QuickJS's fate are owner
 decisions taken **after** Phase 2's numbers, not assumptions baked in here.
 
-## Why (the motivation, stated honestly)
+## Why
 
 1. **A whole bug class disappears.** Phase B is currently blocked by a QuickJS
    GC defect (`specs/tracking/b4c-fork-handoff.md`): eight sessions of C-level
@@ -152,7 +152,7 @@ nothing hung.
 | `createView:*` | crashes ~1/3 | `1 1 1 1 1` — no crash |
 | `encoding,cmds,render,draw:vertex_buffer_OOB:*` | crashes ~1/4 | `1 1 1 1 1` — no crash |
 
-**The B-4c crash class does not occur under Boa.** Two consequences, both real:
+**The B-4c crash class does not occur under Boa.** Two consequences:
 
 1. **The crash was hiding results.** Under QuickJS these families aborted the
    process, so we never saw their pass/fail at all. Under Boa they *report*:
@@ -190,8 +190,8 @@ Catalogued, not worked around. Boa is pure Rust and MIT/Unlicense, so this is a
 gap we *could* close upstream — unlike the QuickJS defect, which took eight
 sessions of C forensics and is still unfixed.
 
-**Update (2026-07-13, B-6): the CTS runner now shims it, and the shim's limits
-are the honest measure of the gap.** The stack assertion was costing thousands of
+**Update (2026-07-13, B-6): the CTS runner shims it.** The stack assertion was
+costing thousands of
 otherwise-passing validation subcases, so `tools/cts-runner/shims.js` installs a
 *guarded* `Error.prototype.stack` — present only when the engine has none, and
 returning a synthetic string that says exactly that. This is **runner** scaffolding,
@@ -200,7 +200,7 @@ not binding behaviour; the binding never fabricates a stack.
 Two CTS self-tests (`unittests:test_group:stack`,
 `unittests:loaders_and_trees:end2end`) assert real stack *contents* — `.spec.js`
 frame locations — which no synthetic string can satisfy. They remain expected-fail
-with that reason, and they are the standing evidence that the engine gap is real.
+with that reason.
 The two `determinantInterval` failures this section left "not yet characterized"
 are likewise now expected-fail rather than silently red. Boa also has no
 `queueMicrotask`; that one is a plain HTML-global gap and is shimmed outright.
@@ -220,4 +220,4 @@ from 15.
 
 **Gates:** workspace 354 pass, clippy `-D warnings`, fmt, `git diff core/`
 **still empty**, and the QuickJS curated suite still exits 0 at **1,312 pass /
-0 fail** — the incumbent path is bit-for-bit intact.
+0 fail**.

@@ -135,7 +135,7 @@ surface. This example's claim is *"JS logic drove the frame"*, and the state
 dump is the direct evidence for it. What the host must additionally assert is
 that every one of the `K` frames presented successfully.
 
-**F7 — the README states the punchline in one paragraph.** N bodies, **one**
+**F7 — the README states the contract in one paragraph.** N bodies, **one**
 draw call, **one** JS→native crossing per frame, bundle recorded once and never
 re-recorded. Raising N raises the JS cost and the memcpy; it does not raise the
 *binding's* cost, because the binding is crossed once regardless. X5 says what
@@ -209,8 +209,7 @@ and thenable detection uses `get_property` + `is_callable`, which already exist
 
 **F11 — a missing or non-callable global is an error, never a silent no-op.**
 `FrameError::NotCallable(name)`. A host with no script logic calls `tick()`; a
-host that asked for `update` and silently got nothing is the worst debugging
-experience this API could offer.
+host that asked for `update` and silently got nothing has no diagnostic.
 
 ### 4.3 The boundary
 
@@ -278,7 +277,7 @@ withdrawn:
   it dragged a real problem in behind it: block 12 → M4 records that **JSC's
   public C API has no module loader**, so a shared ES module is unrunnable on one
   of the two engines, and the fallback — `eval`-ing a shared file to define a
-  global — trades an honest smell for a hidden one.
+  global — trades a visible problem for a hidden one.
 - The example's `--verify` golden runs on a single engine (examples link
   `boa_adapter`). It needs *intra*-engine reproducibility, which F2's arithmetic
   gives for free. Cross-engine bit-exactness of the example was never required.
@@ -324,7 +323,7 @@ anything committed.
 
 ## 6. Documentation
 
-**F17 — X5's README stops telling half the story.** `examples/triangle`'s README
+**F17 — X5's README cross-references bounce.** `examples/triangle`'s README
 currently says *"JS never runs during the frame loop"* with no pointer to what JS
 *does* do. Read alone it says the product does nothing. It gains one sentence
 pointing at `examples/bounce`, and `bounce`'s README points back: **triangle
@@ -360,8 +359,7 @@ forward reference so it cannot be read as "JS does not run per frame" again.
 
 ## 8. A gap this block surfaced and does not close: JSC has no modules
 
-Designing F14 walked into a standing hole, and it is bigger than the thing that
-found it. Recording it here so it is not lost; **it is not in this block's
+Designing F14 surfaced a standing gap. Recorded here; **it is not in this block's
 scope.**
 
 **The facts, checked on `main`:**

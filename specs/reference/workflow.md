@@ -113,15 +113,15 @@ deliberately cheap and deliberately not automatic:
    breath without having established which of the three it is — that is how a
    binding bug gets filed as a backend gap and disappears.
 
-An expectation's **reason is a claim with an expiry date**. Two of them went stale
-within a day of each other, and a tracking record turned out to be simply false.
-Re-read the reasons against the code before trusting them.
+An expectation's **reason is a claim with an expiry date**. Re-read the reasons
+against the code before trusting them (two went stale and one tracking record was
+false — `specs/tracking/cts.md`, Phase B-5).
 
 **Anything you measure across more than one run, run from a COPIED binary.**
 `target/release/<bin>` is shared mutable state: a later `cargo build` — even a
 successful one, even for a different backend — will replace it underneath a
-running loop. This has produced confident, stable-looking numbers that measured
-nothing, three times. Copy the binary to a fixed path and run the copy.
+running loop. This produced numbers that measured nothing, three times
+(`specs/tracking/cts.md`). Copy the binary to a fixed path and run the copy.
 
 **The engine-agnostic gate is not optional.** `core/` depends on
 `webgpu-native-js-ffi` for its `bindgen` types (block 01 → R1a) but must compile
@@ -254,19 +254,13 @@ The Clean Review reviewer is a throwaway subagent per phase, with no memory of
 previous phases beyond what the diff shows. This is deliberate.
 
 **Reviewers that mutate the tree get their own `git worktree`.** Block 03's review
-ran three lenses in parallel over one working tree. One of them proved a guard by
-deleting it and re-running; another, running its suite at that moment, saw the
-resulting failure and reported it as a **non-deterministic flake in the guard's
-own test** — a finding it could then never reproduce in fifty attempts.
+ran three lenses in parallel over one working tree. One deleted a guard to prove
+it; another, running its suite at that moment, observed the resulting failure
+(`a21_rejects_offsets…: "mapAsync offset=2^32 must be rejected"`) and reported it
+as a non-deterministic flake it could never reproduce in fifty attempts.
 
-The reported failure was `a21_rejects_offsets…: "mapAsync offset=2^32 must be
-rejected"`, which is *exactly and only* the assertion that fails when that guard
-is removed. It was not a flake. It was another reviewer's experiment.
-
-An experiment that deletes a guard is the most valuable thing a Clean Review can
-do (block 03's fifth tautology was found that way). It must not be paid for with a
-phantom defect in someone else's report. **Give any reviewer licensed to edit the
-tree an isolated worktree, or run it alone.**
+**Give any reviewer licensed to edit the tree an isolated worktree, or run it
+alone.**
 
 ### The JSC phase carries an extra exit gate
 
@@ -287,10 +281,9 @@ Commit message convention: `phase-N: <area> — <short>`, e.g.
 **Network git operations (`git push` / `git pull` / `git fetch`, submodule
 fetches) are run by the project owner via the `!` prompt — NEVER by Claude.**
 No qualifier: not sandboxed, not because a host is allowlisted, not for a
-"small" commit. (Hardened 2026-07-11 after Claude pushed autonomously by
-reading the previous wording's "with the sandbox disabled" as permission when
-the sandbox was enabled. It was not permission.) When the remote matters,
-Claude says so and asks.
+"small" commit. (Hardened 2026-07-11 after an autonomous push: the earlier
+wording's "with the sandbox disabled" was read as permission; it is not.) When
+the remote matters, Claude says so and asks.
 
 ## Gate on exit codes, not on result lines
 

@@ -41,8 +41,7 @@ QuickJS on this binding's module loader and shims.
    estimate held. Six consecutive runs, identical counts, exit 0 each time. The
    Dawn oracle run of the same suite is several times slower (real GPU); its
    `--timeout-secs` must be raised well past the runner's 300 s default, and a
-   default-timeout kill reports as an ordinary failure, which is a trap worth
-   knowing about.
+   default-timeout kill reports as an ordinary failure.
 
 ### Pins
 
@@ -63,8 +62,8 @@ inventory note).
 ### Phase A review (one focused lens) — closed 2026-07-12
 
 0 CRITICAL / 3 MAJOR / 8 MINOR. The MAJORs: the README pin was missing while
-this file claimed it existed (the recurring record-honesty class — fixed, and
-the false claim above is annotated rather than erased); the acceptance suite
+this file claimed it existed (fixed; the false claim above is annotated rather
+than erased); the acceptance suite
 file was not committed (now `suites/unittests.txt` — the 1,031-case run is
 reproducible from the tree); and `setInterval(0)` looped forever inside one
 eval, unreachable by `--timeout-secs` (repeating timers now re-arm after the
@@ -100,8 +99,8 @@ timestampWrites conversion itself stays skipped with an updated reason —
 both IDL timestamp dicts join one shared C struct, a name-map shape deferred
 to its own slice. Suites: core 138, JSC 29+1.
 
-**B-2/B-3 landed (2026-07-12): 467 real validation cases green, and the
-oracle starts earning.** The CTS's DevicePool drives our binding through the
+**B-2/B-3 landed (2026-07-12): 467 real validation cases green.** The CTS's
+DevicePool drives our binding through the
 navigator.gpu shim unchanged; constants namespaces come from the CTS's own
 canonical module; a non-constructible GPUDevice global satisfies fixture
 cleanup. `suites/validation-core.txt` (467 cases: buffer create/mapping,
@@ -141,15 +140,15 @@ synchronous error into a rejection (the WebIDL rule) — five methods changed,
 five existing sync-throw tests flipped and listed. (3) GPUDevice.destroy()
 exists at last (idempotent, R14 split, destroy-then-new-requestDevice tested
 — the CTS DevicePool recovery path). (4) Pipeline constants: the deferral
-died; a shape-driven record emitter (own_property_names) fills
+reason expired; a shape-driven record emitter (own_property_names) fills
 WGPUConstantEntry arrays for compute/vertex/fragment. Parity 123 → 124,
 byte-identical on yawgpu AND Dawn (gated). The 467-case seed stays exit 0.
 Remaining from the triage: B-4b (direct buffer/texture binding-resource arms
 + async pipeline methods), B-4c (the gc_decref_child scale investigation),
 Phase C material (transient-attachment arbitration).
 
-**B-4b landed (2026-07-11): the union grows its direct arms; pipelines go
-async.** (1) `GPUBindingResource` accepts a direct `GPUBuffer` (flattened to
+**B-4b landed (2026-07-11): direct binding-resource arms; async pipeline
+creation.** (1) `GPUBindingResource` accepts a direct `GPUBuffer` (flattened to
 `{buffer, offset: 0, size: WHOLE_SIZE}`) and a direct `GPUTexture` — the
 latter creates an **implicit default view** (`wgpuTextureCreateView(texture,
 NULL)`; the header marks the descriptor `WGPU_NULLABLE` and the result
@@ -175,9 +174,9 @@ their own section's scope line). Async completion latency across ticks is
 unspecified, so neither backend was wrong — the script was nondeterministic.
 Fix: `validationScope` now chains `Promise.resolve(action())` before popping
 the scope, making every section's async work settle before its scope line.
-Suite-design rule going forward: **a parity line that depends on a settlement
-must be sequenced by an await/then the section chain actually waits on;
-fire-and-forget printing is a determinism bug even while both backends agree.**
+Suite-design rule: a parity line that depends on a settlement must be sequenced
+by an await/then the section chain actually waits on; fire-and-forget printing is
+a determinism bug even while both backends agree.
 
 CTS shape after B-4b (yawgpu, informational — not yet suite-gated):
 `createBindGroup:*` 1,819/1,901 (all 82 fails are the unsupported
@@ -219,9 +218,9 @@ instead of the gate. That driver is deferred until the fork fix is attempted;
 if the fix lands first it is moot. Recorded so the next agent does not mistake
 the curated suite's exclusions for missing coverage.
 
-**Indirect draw/dispatch implemented (2026-07-12) — the first bug the QuickJS
-crash had been hiding.** Under QuickJS these cases aborted the process, so their
-failures were never observable. Boa runs them and reported
+**Indirect draw/dispatch implemented (2026-07-12).** Under QuickJS these cases
+aborted the process, so their failures were never observable. Boa runs them and
+reported
 `TypeError: not a callable function` on every `drawIndirect` /
 `drawIndexedIndirect` subcase. Cause: the indirect methods were simply absent
 from the surface. Added, from the pins:
@@ -236,8 +235,8 @@ Result: `buffer_binding_overlap:*` **2 pass/2 fail → 4/0**;
 `vertex_buffer_OOB:*` **30/30 → 60/0**. Parity 127 → 133 lines, byte-identical
 under Boa and JSC.
 
-**A premise of the handoff was wrong, and the agent said so** rather than
-building on it: `setVertexBuffer`/`setIndexBuffer` do *not* capture buffers in
+**A premise of the handoff was wrong:**
+`setVertexBuffer`/`setIndexBuffer` do *not* capture buffers in
 Rust-side encoder state — native command recording retains them. The indirect
 methods follow that same established behaviour; no new wrapper-side retention
 scheme was invented, and the mock tests verify native ownership transfers from
@@ -247,12 +246,12 @@ encoder to command buffer / render bundle and survives wrapper release.
 fail / 1 skip**. The 16 are unrelated to the indirect gap and are not yet
 triaged.
 
-## Phase B-5 (2026-07-12): the crash blocker is gone, and the suite more than doubles
+## Phase B-5 (2026-07-12) — the crash blocker removed; the suite more than doubles
 
 Dropping QuickJS for Boa (block 14) removed the B-4c engine crash that had
 forced the earlier curation. The families that used to abort the process now
-*report* — and what they reported was a run of genuine, previously invisible
-binding gaps. All are now fixed:
+report, and what they reported was a set of previously invisible binding gaps.
+All are now fixed:
 
 | Gap | Was | Now |
 |---|---|---|
@@ -269,7 +268,7 @@ binding gaps. All are now fixed:
 skip, 2 expected-fail. Parity grew 127 → 154 lines, byte-identical under Boa and
 JSC throughout.
 
-The two expected-fails are honest and reasoned, not swept under the rug:
+The two expected-fails, with reasons:
 - `setBindGroup:u32array_start_and_length` — **Boa engine gap**: no
   `Error.prototype.stack` (block 14 → B7, verified in Boa's own CLI). Not a
   binding defect.
@@ -282,15 +281,15 @@ The two expected-fails are honest and reasoned, not swept under the rug:
 `vertex_buffer_OOB`, and `createView` — the three families excluded as crashers —
 are all in the suite now and all green.
 
-**timestampWrites landed (2026-07-12) — and the record that justified skipping it
-was false.** `timestampWrites` was policy-skipped in both twins with
+**timestampWrites landed (2026-07-12); the record that justified skipping it was
+false.** `timestampWrites` was policy-skipped in both twins with
 `reject_if_present`, reasoned "timestamp-query feature not yet requested in
 tests". That reason had expired: `requiredFeatures`/`requiredLimits` are fully
 plumbed through `requestDevice`, and the parity suite already proved it
-(`features:requested:core-features-and-limits,timestamp-query`). Worse,
-`codegen-deltas.md` still asserted "`requiredFeatures`/`requiredLimits` are
-unplumbed in `requestDevice` (`requiredFeatureCount` is hard-coded 0)" — **flatly
-false against the code**. Both the skip and the stale record are now retired
+(`features:requested:core-features-and-limits,timestamp-query`).
+`codegen-deltas.md` also still asserted "`requiredFeatures`/`requiredLimits` are
+unplumbed in `requestDevice` (`requiredFeatureCount` is hard-coded 0)", which was
+false against the code. Both the skip and the stale record are now retired
 (annotated, not erased).
 
 Both IDL dictionaries (`GPUComputePassTimestampWrites`,
@@ -303,10 +302,9 @@ Unblocked three families that had been gated behind the skip:
 **22/0**; `query_set,*` **4/0**. All three added to the suite, which grows
 **2,822 → 2,852 cases**, 3/3 stable, exit 0, 0 fail.
 
-Lesson worth keeping: a policy skip's *reason* is a claim with an expiry date.
-Two of them (`maxDrawCount`, `timestampWrites`) turned out to be stale within a
-day of each other, and one tracking record was simply wrong. Re-read skip
-reasons against the code before trusting them.
+Rule: a policy skip's reason is a claim with an expiry date — re-read skip reasons
+against the code before trusting them. Two (`maxDrawCount`, `timestampWrites`)
+were stale, and one tracking record was wrong.
 
 **GPUDevice becomes an EventTarget; GPUUncapturedErrorEvent lands (2026-07-12) —
 retiring a Phase-6 deviation.** The recorded deviation read: "`onuncapturederror`
@@ -339,18 +337,16 @@ the parity suite (`error:GPUOutOfMemoryError`). Verify on a real backend (Dawn)
 Suite grows **2,852 → 2,889 cases**, 3/3 stable, exit 0, 0 fail, 14
 expected-fail (all the Noop OOM cases).
 
-## Phase B-6 (2026-07-13) — the unscreened families, and what running them found
+## Phase B-6 (2026-07-13) — the unscreened families
 
 Every remaining `api,validation` family was screened. Suite grows **2,889 →
-23,178 cases**, 3/3 stable, exit 0, 0 fail, 16 expected-fail. Three findings,
-in ascending order of how much they had been hiding.
+23,178 cases**, 3/3 stable, exit 0, 0 fail, 16 expected-fail. Three findings.
 
-**Finding 1 — most families were already green; they had simply never been
-run.** `image_copy,*` (6,557), `encoding,cmds,copyTextureToTexture:*` (3,194),
+**Finding 1 — most families were already green; they had never been run.**
+`image_copy,*` (6,557), `encoding,cmds,copyTextureToTexture:*` (3,194),
 `layout_shader_compat:*` (110), the four `texture,*` families, `buffer,destroy`,
 `getBindGroupLayout`, `debugMarker`, `dispatch`, `encoding,cmds,compute_pass`,
-`beginComputePass` — all passed on first contact, no binding change. Coverage was
-bounded by what we had thought to run, not by what worked.
+`beginComputePass` — all passed on first contact, no binding change.
 
 **Finding 2 — the binding installed no WebIDL interface objects.** The adapters'
 `register_class` put a global on the object graph **only when the class had a
@@ -372,19 +368,18 @@ complete surface). Results: `resource_usages,*` 3,286 pass/280 fail → **3,566/
 `encoding,encoder_open_state:*` → **47/0**; `createPipelineLayout:*` 3/11 →
 **11/3** (the 3 are the recorded null-BGL nullability deviation).
 
-*A cross-engine parity bug surfaced inside this fix, and it is the reason the
-parity suite exists.* JSC's `JSObjectMakeConstructor` defines
+A cross-engine parity bug surfaced inside this fix. JSC's `JSObjectMakeConstructor` defines
 `prototype.constructor` as **enumerable**; Boa defines it non-enumerable (ES
 semantics: writable, non-enumerable, configurable). So `Object.keys(X.prototype)`
 would have differed by engine. JSC's public C API has no `JSObjectDefineProperty`
 and `JSObjectSetProperty` follows *assignment* semantics — it honours the
 inherited `constructor` and recreates the own property with default attributes.
 The adapter therefore detaches the prototype chain, defines the property with
-`DontEnum`, and restores the chain. Ugly, documented, and correct.
+`DontEnum`, and restores the chain.
 
-**Finding 3 — `GPUPipelineError` was the single thing standing between us and
-2,000 cases.** After findings 1–2, **the sole remaining failure message** in four
-whole families was `THREW OperationError, instead of GPUPipelineError`. The B-4b
+**Finding 3 — `GPUPipelineError` was missing.** After findings 1–2, the sole
+remaining failure message in four whole families was
+`THREW OperationError, instead of GPUPipelineError`. The B-4b
 deviation had said to revisit "when a second DOMException-subclass consumer
 appears **or a CTS family blocks on it**" — four did.
 
@@ -408,7 +403,7 @@ pass/1,772 fail → **6,239/0**; `compute_pipeline:*` 128/146 → **274/0**;
 **160/0**. `webgpu:idl,constructable:*` (which constructs a `GPUPipelineError`
 directly) is now **8/0** and joins the suite.
 
-### Two runner shims, and one honest limit
+### Two runner shims, and one limit
 
 Boa has no `queueMicrotask` and no `Error.prototype.stack` (the latter is block
 14 → B7). The CTS asserts `typeof ex.stack === "string"` on every expected
@@ -432,10 +427,10 @@ failures B7 recorded but never characterized.
 - `createBindGroup:external_texture,*` (82) — external textures are out of scope.
 - `createTexture:texture_usage` (42), `render_pass_descriptor:loadOp_storeOp`,
   `queue,submit` command-buffer reuse, `buffer,mapping` — a mix of yawgpu Noop
-  backend gaps and suspected binding bugs; **untriaged**, and the honest state is
-  that they are not yet separated. Next slice.
+  backend gaps and suspected binding bugs; **untriaged** — not yet separated.
+  Next slice.
 
-### The Boa bug blocking `capability_checks` — characterized, not guessed
+### The Boa bug blocking `capability_checks` — characterized
 
 The CTS builds its limit fixtures with (`capability_checks/limits/limit_utils.js`,
 `makeLimitTestFixture`):
@@ -486,11 +481,11 @@ entry as its reason. Revisit if the family becomes load-bearing, or if a Boa
 release fixes it (re-test the repro above against each pin bump — the repro is
 the acceptance test).
 
-## Phase B-7 (2026-07-13) — error routing, and a crash that was not what it looked like
+## Phase B-7 (2026-07-13) — error routing, and a non-deterministic Boa crash
 
-### Four spec-shaped error-routing bugs, all the same mistake
+### Four spec-shaped error-routing bugs, all the same class
 
-Commit 45d18fc established the rule (principle 8): *a spec-level validation
+Commit 403fd29 established the rule (principle 8): *a spec-level validation
 failure routes to the device error sink, not to a JS exception.* Screening found
 four sites that rule had not reached.
 
@@ -524,10 +519,10 @@ four sites that rule had not reached.
 4. **`TypeError` vs `OperationError` was conflated in range checks**
    (`queue.writeBuffer`, `getMappedRange`). The rule that fell out: `[EnforceRange]`
    coercion failure of a *supplied argument* is a `TypeError`; failure of the
-   resulting *range* against the resource is an `OperationError`. `getMappedRange`
-   made this vivid — with `size` omitted its default is `max(0, buffer.size -
-   offset)`, and we underflowed and reported a `TypeError` naming an argument the
-   script never passed.
+   resulting *range* against the resource is an `OperationError`. In
+   `getMappedRange`, with `size` omitted its default is `max(0, buffer.size -
+   offset)`; the binding underflowed and reported a `TypeError` naming an argument
+   the script never passed.
 
 Results: `queue,*` 37 pass/3 fail → **40/0**; `buffer,mapping:*` 22/13 → **35/0**;
 `state,device_lost,*` 3,288/44 → **3,332/0**. The first two join the suite, which
@@ -551,14 +546,12 @@ A GC that runs while a JS `Map` is being iterated re-enters `MapLock`'s finalize
 which `unwrap()`s a `borrow_mut()`. It aborts rather than unwinds, so no `catch`
 at any layer can contain it.
 
-**Correction, recorded because the reasoning error is the lesson.** The crash
-first appeared immediately after a slice landed, and the obvious inference — "the
-new code introduced it" — was wrong. Re-running the *unmodified* HEAD binary
-aborted **2 of 3 times**. The earlier clean run of that family had simply been a
-lucky one. The crash is **pre-existing and non-deterministic**; the new code only
-changed how often it is hit. *Assert a fresh build and re-run the baseline before
-attributing a nondeterministic failure to the change in front of you* — the same
-trap as the stale-binary incident, wearing different clothes.
+**Correction.** The crash first appeared immediately after a slice landed and was
+attributed to the new code. That was wrong: re-running the *unmodified* HEAD binary
+aborted **2 of 3 times**. The crash is pre-existing and non-deterministic; the new
+code only changed how often it is hit.
+Rule: re-run the baseline with a fresh build before attributing a non-deterministic
+failure to the change in front of you.
 
 Naive repros (iterating a large `Map` while allocating hard, forcing GC between
 rounds) do **not** reproduce it; the trigger needs a collection during Map
@@ -571,7 +564,7 @@ stable precisely because it excludes it. This is the second Boa engine defect
 catalogued (with the class-field scope bug), and unlike that one it is a **crash**
 — relevant to Boa's production suitability, not just to CTS coverage.
 
-### Backend gaps confirmed, with the blame isolated before it was assigned
+### Backend gaps confirmed, with the paths isolated before blame was assigned
 
 `createTexture:texture_usage` (42) and `render_pass,render_pass_descriptor`
 (121 subcases) fail as *"Validation succeeded unexpectedly"* on
@@ -596,7 +589,7 @@ The oracle's precondition holds: our `third_party/webgpu-headers` pin is
 ### C1 — the curated validation suite on Dawn
 
 **23,247 pass / 6 fail / 13 unexpected-pass**, against a suite that is 23,253 / 0
-on yawgpu Noop. Every number in that line is a finding.
+on yawgpu Noop.
 
 *(One methodology note: the first C1 attempt died at the runner's default 300 s
 timeout, which reports as a plain failure. Dawn is a real GPU and the suite is
@@ -608,7 +601,7 @@ every one as a **backend** limitation, not a binding bug:
 
 - `error_scope:*` — 12 cases. Dawn is **49/0** where yawgpu Noop is 37/12. Dawn
   can actually run out of memory (the CTS provokes it with a 256 GiB texture);
-  Noop allocates it without complaint. The binding's OOM path was right all along.
+  Noop allocates it without complaint. The binding's OOM path is correct.
 - `createView:texture_view_usage_of_multiple_usages` — Dawn is **1192/0** where
   yawgpu is 1191/1. Dawn validates the view-usage subset; yawgpu does not.
 
@@ -635,30 +628,29 @@ been hiding.*
 on yawgpu — neither bug is observable there):
 
 - `getMappedRange` now tracks the ranges it has handed out for the current mapping
-  and throws `OperationError` on overlap, per the IDL (this one *is* a synchronous
-  throw, not a device error — the distinction this project keeps getting wrong).
+  and throws `OperationError` on overlap, per the IDL (a synchronous throw, not a
+  device error).
   Non-overlap is `a.start >= b.end || b.start >= a.end`, so ranges that merely touch
   are fine and an empty range inside a non-empty one is not. `unmap()` clears the
   bookkeeping; a re-`mapAsync` starts clean.
 - Beginning a second pass while one is open now invalidates the command encoder and
   surfaces a `GPUValidationError` at `finish()` (which returns an invalid command
-  buffer) — extending the encoder-state machinery from 45d18fc rather than inventing
+  buffer) — extending the encoder-state machinery from 403fd29 rather than inventing
   a parallel one.
 
 **C1 re-run on Dawn: 23,305 pass / 0 fail.** The suite is now zero-fail on *both*
 backends. (The run still exits nonzero on Dawn, and correctly so: the 13
 unexpected-passes are the Noop-based expectations that Dawn passes. That is the
 arbitration signal, not a regression — the runner has no backend-conditional
-expectation syntax, and adding one would hide exactly the thing we want shouted.)
+expectation syntax, and adding one would hide the signal.)
 
-### C2 — the first `api,operation` families ever run, and what they cost us
+### C2 — the first `api,operation` families run
 
-`api,operation` had never been run against anything. Four families are green on
+`api,operation` had never been run against any backend. Four families are green on
 both backends on first contact (`queue`, `onSubmittedWorkDone`, `device`, and —
-after the fixes below — `reflection` and `labels`). Getting there exposed **four
-WebIDL conformance bugs that no validation family reaches**, three of which fail
-identically on yawgpu *and* Dawn — so they were never Dawn-specific, only
-never-tested.
+after the fixes below — `reflection` and `labels`). Getting there exposed four
+WebIDL conformance bugs that no validation family reaches, three of which fail
+identically on yawgpu *and* Dawn — they were never Dawn-specific, only never-tested.
 
 1. **Prototype properties were non-enumerable; WebIDL requires them enumerable.**
    `reflection:*` was 2/4. The CTS reflects with a plain **`for...in`**
@@ -666,8 +658,8 @@ never-tested.
    accessors were installed CONFIGURABLE-only (Boa) and our methods with
    `DontEnum` (JSC). WebIDL puts operations at
    `{writable, enumerable, configurable}` and attributes at
-   `{enumerable, configurable}`; only `constructor` is non-enumerable. **We had
-   it exactly backwards**, in both adapters. Now **6/0**.
+   `{enumerable, configurable}`; only `constructor` is non-enumerable. Both
+   adapters had it inverted. Now **6/0**.
 2. **`label` existed on 3 of 19 interfaces.** `labels:*` was 4/16. The IDL puts
    `label` on `GPUObjectBase` — every WebGPU object — as a *writable* attribute;
    policy listed it only for `GPUBuffer`, `GPUSampler`, `GPUQuerySet`. It must
@@ -676,8 +668,7 @@ never-tested.
    **20/0**.
 3. **`GPUBuffer.mapState` did not exist.** In the IDL, absent from the subset.
    Added; the state machine was already there.
-4. **`depthSlice`: a C sentinel collided with a legal script value.** See below —
-   it is the most interesting bug of the phase.
+4. **`depthSlice`: a C sentinel collided with a legal script value.** See below.
 
 ### The depthSlice sentinel collision — a hazard class, not a one-off
 
@@ -705,26 +696,25 @@ changed the crash's severity from "a CTS coverage problem" to "the gate is flaky
 Measured with a **pinned binary copy** (see the trap below): **6 consecutive clean
 runs**, 23,305 / 0 every time.
 
-State it precisely, because the two claims are different:
+The two claims are different:
 
 - The crash **is** confirmed in `state,device_lost,*` — 2 aborts in 3 runs of the
   *unmodified HEAD* binary. That family stays out of the suite.
 - The curated suite is **not proven crash-free**; it is *unreproduced* in 6 clean
   runs. The one contrary report came from an agent that rebuilds
-  `target/release/cts-runner` constantly, so it is exactly as vulnerable to the
-  binary-contamination trap below as the planner turned out to be. Treat it as
-  unexplained, not as refuted, and re-measure if it recurs.
+  `target/release/cts-runner` constantly, so it is subject to the
+  binary-contamination trap below. Treat it as unexplained, not as refuted, and
+  re-measure if it recurs.
 
-### A third instance of the same trap — and it is about tooling, not luck
+### Binary-contamination trap (third instance)
 
-While measuring how often the Boa GC crash hits the curated suite, the planner
-launched a five-run loop against `target/release/cts-runner` and then, *while the
-loop was still running*, rebuilt that same path with `--features backend-dawn` to
-do an oracle run. Runs 2–5 therefore executed the **Dawn** binary against yawgpu's
-library directory and produced a confident, stable-looking "16 failures, 1
-unexpected-pass" — a number that measured nothing.
+While measuring how often the Boa GC crash hits the curated suite, a five-run loop
+was launched against `target/release/cts-runner`; while the loop was still running,
+that same path was rebuilt with `--features backend-dawn` for an oracle run. Runs
+2–5 therefore executed the Dawn binary against yawgpu's library directory and
+produced a stable-looking "16 failures, 1 unexpected-pass" that measured nothing.
 
-This is the **third** appearance of the same trap in this project:
+Third appearance of the same trap:
 
 1. A failing `cargo build` left the previous binary in place, and three B-4c
    conclusions were drawn from it.
@@ -733,11 +723,10 @@ This is the **third** appearance of the same trap in this project:
 3. This one: a *successful* build silently replaced the binary a running
    measurement depended on.
 
-The common shape is that **`target/release/<bin>` is shared mutable state**, and a
-measurement that spans time does not own it. The rule that follows is mechanical,
-not a matter of care: **copy the binary you are measuring to a fixed path and run
-that copy.** Every multi-run or backgrounded measurement in this file from here on
-does so.
+Common cause: `target/release/<bin>` is shared mutable state, and a measurement that
+spans time does not own it.
+Rule: copy the binary you are measuring to a fixed path and run that copy. Every
+multi-run or backgrounded measurement in this file from here on does so.
 
 ### Acceptance
 

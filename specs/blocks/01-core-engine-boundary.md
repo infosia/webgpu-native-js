@@ -12,7 +12,7 @@ This block establishes **the project's central design bet** (`CLAUDE.md`
 invariant 1): descriptor conversion is written **once**, in `core/`, generic over
 `E: JsEngine`, and monomorphized per engine. If that bet is wrong, every
 conversion gets written twice and Phase 4's codegen doubles in size. Phase 3
-(JavaScriptCore) is the exam; this block is the answer sheet.
+(JavaScriptCore) is what tests it.
 
 Every claim below about `webgpu.h`, `quickjs.h`, or WebIDL was checked against
 the pinned files in `third_party/` while writing this document. Per the Phase 0
@@ -247,15 +247,15 @@ Consequence, found by the Phase 1 review: `createBuffer({ size, usage, label:
 `convert_buffer_descriptor` never frees the four values `get_property` handed it.
 Integer-tagged values hide it; a heap value does not.
 
-**The fix does not touch `core/`'s logic, and this is the point.** `E::Context<'a>`
+**The fix does not touch `core/`'s logic.** `E::Context<'a>`
 is engine-defined and already threaded through every conversion. Make it a
 **per-call handle scope**: QuickJS's `Context<'a>` carries a list of owned
 `JSValue`s that `get_property` registers and the scope frees on drop; JSC's and
 the mock's carry nothing. No `core/` signature changes, no `free_value` on the
 trait, and `E::Value: Copy` survives.
 
-This retroactively answers §6's first open question. **The GAT is not ceremony.**
-`type Context<'a>` is exactly where an engine's per-call obligations live, and
+This answers §6's first open question: the GAT is load-bearing.
+`type Context<'a>` is where an engine's per-call obligations live, and
 Phase 1's tracking doc was wrong to call the lifetime unnecessary. Do not remove
 it.
 
@@ -291,7 +291,7 @@ reported, not routed around. Phase 1's hardcoding grew from an **unverified**
 claim that QuickJS delivered `magic == 0`; the claim was never root-caused, and
 the workaround silently disabled the mechanism it was meant to protect.
 
-**Root cause, once someone opened the file:** QuickJS stores a C function's magic
+**Root cause:** QuickJS stores a C function's magic
 as an **`int16_t`** (`quickjs.c`, `JSObject::u.cfunc.magic`). Phase 1's encoding
 packed a class id into the high bits — `(class << 16) | …` — which a 16-bit field
 silently truncates. Nothing was wrong with `magic`; the encoding did not fit. Use
@@ -333,8 +333,7 @@ the exception left pending, while `to_f64`/`to_str` returned the exception
 first convention, so a coercion failure — `createBuffer({size: 10n})` — was
 returned to script as a normal value: **the method handed back a `TypeError`
 object instead of throwing it.** On the settlement path the sentinel, not the
-error, became a rejection reason. One contract, written down, replaces both
-guesses.
+error, became a rejection reason.
 
 **R27 — `core/` takes no engine call while holding a payload lock.** R25 stated
 this for adapters; the 2026-07-10 review found `core/` violating its own rule:

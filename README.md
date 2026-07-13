@@ -68,8 +68,8 @@ binding an already-created `WGPUDevice` and pumps one `tick()` per frame.
      yawgpu · wgpu-native · Dawn   (dynamic library)
 ```
 
-- **`core/`** — the heart. Contains zero references to any JS engine and zero
-  backend-specific branches; it is tested against a mock engine with no GPU,
+- **`core/`** — the engine-agnostic binding. Contains zero references to any JS
+  engine and zero backend-specific branches; it is tested against a mock engine with no GPU,
   no engine, and no backend library present. The mock deliberately models the
   *strictest* union of both engines' obligations (value ownership, detach
   semantics, mapped-range overlap rules), so core bugs fail core tests.
@@ -84,9 +84,9 @@ binding an already-created `WGPUDevice` and pumps one `tick()` per frame.
 | Tier | Engine | Notes |
 |---|---|---|
 | **1 — Supported, all platforms** | [Boa](https://github.com/boa-dev/boa) (MIT/Unlicense, exact crates.io pin) | Primary cross-platform engine. Pure Rust, JIT-less, and portable; it needs no C toolchain or engine-specific `bindgen`, and cross-compiles with an ordinary Cargo target build. |
-| **1 — Supported (Apple platforms)** | JavaScriptCore | Default-on (`jsc` feature; compiles to an empty crate off Apple platforms). **macOS and iOS** — dynamically linked system framework, so there is no bundled engine and no binary-size cost, and the App Store bundled-engine question does not arise. macOS is fully tested on every run; iOS compiles, with on-device verification deferred to mobile bring-up. Born as the engine-boundary validator — it earned the promotion by finding five core defects before code generation could multiply them. |
+| **1 — Supported (Apple platforms)** | JavaScriptCore | Default-on (`jsc` feature; compiles to an empty crate off Apple platforms). **macOS and iOS** — dynamically linked system framework, so there is no bundled engine and no binary-size cost, and the App Store bundled-engine question does not arise. macOS is fully tested on every run; iOS compiles, with on-device verification deferred to mobile bring-up. Added as the engine-boundary validator; it found five core defects before code generation could multiply them. |
 
-Cross-engine parity is not assumed, it is asserted: one conformance script
+Cross-engine parity is asserted, not assumed: one conformance script
 runs under both engines on every test run and must produce **byte-identical
 output** — the suite has already caught and retired real divergences (engine
 error-class names, method identity, lone-surrogate string handling).
@@ -195,7 +195,7 @@ Filled so far (headless-tested end-to-end under both engines):
   compute pass: `setPipeline`, `setBindGroup`, `dispatchWorkgroups`, `end`;
   single-use command buffers
 
-WebIDL semantics are taken seriously: iterator-based `sequence<T>` conversion
+WebIDL semantics are followed: iterator-based `sequence<T>` conversion
 (a `Set` or generator is accepted, an array-like is rejected), `[EnforceRange]`
 width checks on both the 64→32 and 64→`size_t` edges (tested with 2^32 on
 64-bit hosts), nullable vs non-null string distinctions, and required-member

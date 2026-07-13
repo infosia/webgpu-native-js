@@ -11,20 +11,19 @@ Fix)". Findings, triage decisions, fixes, and gate results live here.
 
 ## Block 03 Review — 2026-07-10
 
-Three fresh no-context reviewers. **No CRITICAL.** Six MAJOR, and two of them are
-mine.
+Three fresh no-context reviewers. No CRITICAL. Six MAJOR.
 
-The central bet held under real pressure: ten interfaces with struct chaining,
+Verified independently by two reviewers: ten interfaces with struct chaining,
 dictionary arrays, string enums, nullable-vs-non-null strings and stored handles,
-and **block 03 added zero methods to `JsEngine` and zero `core/` logic for
-QuickJS**. Two reviewers verified that independently. The arena is address-stable
-(`Box<[T]>` behind a `Vec`, so `Vec` reallocation moves the boxes, not the data).
-Partial sequence failure leaks nothing. All 19 `unsafe impl Send`/`Sync` carry
-accurate `// SAFETY:` comments, checked type by type.
+and block 03 added zero methods to `JsEngine` and zero `core/` logic for QuickJS.
+The arena is address-stable (`Box<[T]>` behind a `Vec`, so `Vec` reallocation
+moves the boxes, not the data). Partial sequence failure leaks nothing. All 19
+`unsafe impl Send`/`Sync` carry accurate `// SAFETY:` comments, checked type by
+type.
 
-**And the mock was not a mirror this time.** The conversion tests inspect the real
-produced C structs — `chain.sType`, `native.entries`, `entryPoint.data/length` —
-not a Rust shadow the conversion also wrote.
+The conversion tests inspect the produced C structs — `chain.sType`,
+`native.entries`, `entryPoint.data/length` — not a Rust shadow the conversion also
+wrote.
 
 ### Findings and triage
 
@@ -33,54 +32,44 @@ not a Rust shadow the conversion also wrote.
 | **B3-M1** | MAJOR | `core/src/lib.rs:1499` | `wgpuDeviceGetQueue` is documented `@ref ReturnedWithOwnership` — it **already returns an owned reference**. `device_queue_get` takes it and calls `queue_add_ref` on top; `finalize_queue` releases once. **One native ref leaks per `device.queue` read.** The mock's queue add/release are counter-less no-ops, so no test sees it. | **Confirmed at source** (`webgpu.h:6360`, `doc/articles/Ownership.md:12`). Handed over. |
 | **B3-M2** | MAJOR | `adapters/quickjs/src/lib.rs:1564` | `arraybuffer_free` early-returns unless `ptr` is null. On the **unmap** path QuickJS calls it twice (real pointer, then `NULL`) and the release fires. On the **GC-only** path — script drops a mapped range and never calls `unmap()` — it is called **once, with a real pointer**, and the `buffer_add_ref` and owner `Box` leak **forever**. `CLAUDE.md` principle 5 promises *leak-until-GC, not leak-forever*. `mapped_range_survives_after_buffer_wrapper_is_collected` walks that path and asserts nothing about releases. | **Confirmed.** Handed over. |
 | **B3-M3** | MAJOR | `core/src/mock.rs:1415` | **The fifth tautology.** `b7_write_buffer_rejects_size_that_would_truncate_on_32_bit_hosts` passes with its guard removed: `end > data.len()` then throws the same `TypeError: size` the test asserts. The named B18 demonstration is dead; the real coverage is incidental, via `a21`. | **Reproduced by Claude**: guard removed → `b7` **passes**, `a21` **fails**. Unlike `b8`, this one was **undisclosed**. Handed over. |
-| **B3-M4** | MAJOR | block 03 §7 | §7 claimed command-buffer single-use is *"a wrapper-state question, not a refcount one. See B10."* **`CommandBufferPayload` has no `consumed` flag** and `queue_submit` marks nothing. A script can submit the same `GPUCommandBuffer` twice. | **My overclaim.** I wrote a sentence describing work nobody had done. Retracted in §7; **B19** now requires it. Handed over. |
-| **B3-M5** | MAJOR | `core/src/lib.rs:2649` | `sequence_len`/`sequence_item` read `.length` and stringified indices. WebIDL's `sequence<T>` conversion is **iterator-based**. So `{length:2, 0:a, 1:b}` is accepted where WebIDL rejects, and a `Set` or generator is rejected where WebIDL accepts. **Both directions wrong; a green suite sees neither.** §7's *"no primitive was needed"* was an overclaim — mine. | **Confirmed.** §7 rewritten; **B20** records the deviation and pins it with tests. The primitive is chosen in Phase 4, with JSC voting — the same reasoning that deferred `associate_value`. |
+| **B3-M4** | MAJOR | block 03 §7 | §7 claimed command-buffer single-use is *"a wrapper-state question, not a refcount one. See B10."* **`CommandBufferPayload` has no `consumed` flag** and `queue_submit` marks nothing. A script can submit the same `GPUCommandBuffer` twice. | **Confirmed: §7 overclaimed work that was not done.** Retracted in §7; **B19** now requires it. Handed over. |
+| **B3-M5** | MAJOR | `core/src/lib.rs:2649` | `sequence_len`/`sequence_item` read `.length` and stringified indices. WebIDL's `sequence<T>` conversion is **iterator-based**. So `{length:2, 0:a, 1:b}` is accepted where WebIDL rejects, and a `Set` or generator is rejected where WebIDL accepts. Both directions wrong; a green suite sees neither. §7's *"no primitive was needed"* was an overclaim. | **Confirmed.** §7 rewritten; **B20** records the deviation and pins it with tests. The primitive is chosen in Phase 4, with JSC voting — the same reasoning that deferred `associate_value`. |
 | **B3-M6** | MAJOR | `core/src/lib.rs:309` | `.expect("just-pushed WGSL source")` in library code. Unreachable today and caught by the callback's `catch_unwind` before any C boundary — but `CLAUDE.md` principle 8 admits one exception and this is not it. Its sibling arena allocators return `map_or(&[][..], …)`. | Handed over. |
 | B3-m1 | MINOR | `core/src/lib.rs:2685, 2772` | `binding` is read with `get_property(..).ok()`, substituting `0` when the getter **throws**. WebIDL propagates. Uniform across engines, so not a boundary defect. | Handed over. |
-| B3-m2 | MINOR | `core/src/lib.rs` (`detach_all_ranges`) | The `CopyInCopyOut` arm copies back on **read** mappings too — it never checks `map_mode` — contradicting its own SAFETY comment. Dead for QuickJS. **Live the day JSC lands.** | Handed over. Fix now, while it is free. |
+| B3-m2 | MINOR | `core/src/lib.rs` (`detach_all_ranges`) | The `CopyInCopyOut` arm copies back on **read** mappings too — it never checks `map_mode` — contradicting its own SAFETY comment. Dead for QuickJS; live once JSC lands. | Handed over. |
 | B3-m3 | MINOR | `core/src/lib.rs` (`TracedValues`) | `unsafe impl Sync` is sound only under QuickJS's on-thread GC. A JSC any-thread finalizer breaks it. | Recorded as a **Phase 3 landmine**; the SAFETY comment must say so. |
 | B3-m4 | MINOR | `engine-boundary.md` | B15 asks that the synchronous-exception divergence be recorded "alongside R13's". Only `createBuffer` is. The eight new constructors are not — and for the seven **non-nullable** ones a backend validation failure returns an *invalid* handle the binding wraps silently, surfacing nowhere until Phase 6. | Fixed by Claude below. |
 | B3-m5 | MINOR | every `device_create_*` | On the `E::new_instance` error path (engine OOM) the `AddRef`'d handles and the fresh native object leak — the payload `Box` drops without its finalizer. | Handed over. |
 
-### The "flake" that was another reviewer's experiment
+### The reported "flake" was another reviewer's deletion experiment
 
-The compliance lens reported a **non-deterministic failure**: on its first run,
+The compliance lens reported a non-deterministic failure: on its first run,
 `a21_rejects_offsets_that_would_truncate_on_32_bit_hosts` failed with *"mapAsync
-offset=2^32 must be rejected"*, then passed fifty-plus subsequent runs. It could
-not root-cause it and, correctly, refused to wave it away.
+offset=2^32 must be rejected"*, then passed fifty-plus subsequent runs.
 
-It is not a flake, and the guard is fine. **I ran the suite forty times: zero
-failures.** The explanation is that the three lenses shared one working tree, and
-the adversarial lens was proving a guard **by deleting it** — and the assertion it
-observed is *exactly and only* the one that fails when that guard is gone. I
-reproduced that myself.
+It is not a flake and the guard is sound: the suite was re-run forty times with zero
+failures. Cause: the three lenses shared one working tree, and the adversarial lens
+was proving a guard by deleting it; the assertion the compliance lens observed is
+exactly and only the one that fails when that guard is gone. Reproduced directly.
 
-**This is a defect in my review process, not in the product.** Deleting a guard to
-see it go red is the single most valuable thing a Clean Review does — it is how the
-fifth tautology was found. It must not be paid for with a phantom defect in another
-reviewer's report. `workflow.md` now requires an isolated `git worktree` for any
-reviewer licensed to edit the tree.
+Consequence: `workflow.md` now requires an isolated `git worktree` for any reviewer
+licensed to edit the tree.
 
 ### Which vacuous rules came back
 
-The question that caught Phase 2's two aborts, asked again. **R7 did not** become
-applicable: all nine new payloads hold `WGPU*` handles only, no `E::Value`. But
-**R25 did** — block 03 introduced `Mutex<CommandEncoderState>` and
+R7 did not become applicable: all nine new payloads hold `WGPU*` handles only, no
+`E::Value`. R25 did — block 03 introduced `Mutex<CommandEncoderState>` and
 `Mutex<ComputePassState>`, and `live_compute_pass` takes nested locks. A reviewer
 checked that every guard is dropped before re-entering `core/` and that the lock
-order is consistent, so R25 is **satisfied — and now newly applicable, recorded
-rather than assumed**.
+order is consistent, so R25 is satisfied, and newly applicable, recorded rather
+than assumed.
 
-### Two of the six are mine
+### Both spec overclaims came from the evidence lens
 
-B3-M4 and B3-M5 are both **overclaims in a document I wrote**, in the section
-titled *"Answers this block produced"*. One described work nobody had done; the
-other reported a shortcut as a design conclusion. Neither was caught by the two
-lenses reading the code — only by the lens told to hunt for claims the evidence
-does not support.
-
-That is the third phase running in which the most valuable finding came from
-asking *"what does green not mean?"* rather than *"is the code correct?"*
+B3-M4 and B3-M5 are overclaims in block 03 §7 ("Answers this block produced"): one
+described work that had not been done, the other reported a shortcut as a design
+conclusion. Neither lens reading the code found them; only the lens tasked with
+hunting claims the evidence does not support.
 
 ### Gate — PASSED. Block 03 is COMPLETE.
 
@@ -89,16 +78,14 @@ Gates re-run directly by Claude: `core` with the backend env var **unset** EXIT=
 --workspace --all-targets -- -D warnings` EXIT=0; both detach spikes EXIT=0. No
 `#[ignore]` anywhere.
 
-**Both red demonstrations were re-run, one of them by me.** Removing the
-`WEBIDL_U32_MAX` guard now makes `b7` **fail** — it passed before the rewrite, and
-that is the difference between a test and a decoration. The mapped-range leak test
-showed `left: 1, right: 2` before the fix.
+Both red demonstrations were re-run. Removing the `WEBIDL_U32_MAX` guard now makes
+`b7` fail; it passed before the rewrite. The mapped-range leak test showed
+`left: 1, right: 2` before the fix.
 
-**The `ReturnedWithOwnership` audit found exactly one wrong site.** `device.queue`
+The `ReturnedWithOwnership` audit found one wrong site: `device.queue`
 double-counted; `requestAdapter`, `requestDevice`, and all eight `createXxx`
-returns were already correct. The mock now **counts** queue references and asserts
-the balance, so the class of bug that hid behind counter-less no-op stubs cannot
-hide again.
+returns were already correct. The mock now counts queue references and asserts the
+balance, so counter-less no-op stubs can no longer hide the defect class.
 
 The `arraybuffer_free` fix carries explicit state rather than guessing from the
 pointer: a flag set around our own `JS_DetachArrayBuffer`, plus a `released` flag
@@ -107,11 +94,11 @@ on the owner. The detach path releases on the first call and frees the box on th
 QuickJS's sequences are covered without inferring intent from `ptr`.
 
 B19 (command-buffer single-use) is implemented and tested on a real engine. B20 is
-**tests only, deliberately**: an array-like is accepted, a `Set` is rejected, both
+tests only, deliberately: an array-like is accepted, a `Set` is rejected, both
 documented as known deviations from WebIDL. Fixing them means adding an iteration
-primitive to `JsEngine`, and choosing its shape with one engine in the tree is the
-error that produced P2-C3. **Phase 4 decides, when codegen emits sequence
-conversions and JavaScriptCore has a vote.**
+primitive to `JsEngine`; choosing its shape with one engine in the tree is the
+error that produced P2-C3. Phase 4 decides, when codegen emits sequence conversions
+and JavaScriptCore has a vote.
 
 Verified fixed: B3-M1 … B3-M6, B3-m1 … B3-m5.
 
@@ -120,16 +107,15 @@ Verified fixed: B3-M1 … B3-M6, B3-m1 … B3-m5.
 ## Phase 2 Review — 2026-07-09
 
 Three fresh no-context reviewers. The third lens was pointed at a single
-question — **"what does green not mean here?"** — and given this project's own
-history as evidence about its blind spots: two mocks that were mirrors, and an
-`#[allow]` that hid a soundness defect for a whole phase.
+question — "what does green not mean here?" — with the project's prior blind spots
+as evidence: two mocks that were mirrors, and an `#[allow]` that hid a soundness
+defect for a whole phase.
 
-It answered by **experiment**. It deleted the A12 detach-verification guard
-(`if !detached` → `if !detached && false`) and re-ran `cargo test -p
-webgpu-native-js-core`: **22 of 22 passed.** Not an argument. A measurement.
+It deleted the A12 detach-verification guard (`if !detached` → `if !detached &&
+false`) and re-ran `cargo test -p webgpu-native-js-core`: 22 of 22 passed.
 
-Three CRITICALs. Every one of them reachable from code an honest author writes,
-and none of them visible to a green suite.
+Three CRITICALs, each reachable from ordinary valid script and none visible to a
+green suite.
 
 ### Findings and triage
 
@@ -137,30 +123,29 @@ and none of them visible to a green suite.
 |---|---|---|---|---|
 | **P2-C1** | CRITICAL | `core/src/lib.rs:980` | `finalize_buffer` enqueues `wgpuBufferRelease` **without detaching outstanding zero-copy ranges**, and nothing roots the buffer from the range. `const r = buf.getMappedRange(); buf = null;` then a GC frees the mapping while `r` still aliases it. Use-after-free from an honest script. | **Confirmed.** Block 02 → **A25**: `getMappedRange` `AddRef`s the buffer and stores it as the `ArrayBuffer`'s `opaque`; the `free_func`'s `NULL` call enqueues the release. A finalizer cannot fix this — JSC's may run on any thread and must not call into the engine. |
 | **P2-C2** | CRITICAL | `adapters/quickjs/src/lib.rs:224` | `Runtime::drop` calls `JS_SetRuntimeOpaque(rt, null)` **before** `JS_FreeContext`/`JS_FreeRuntime`, whose sweep runs finalizers. `qjs_finalizer` → `state_from_runtime` → `&*null`. `catch_unwind` does not catch SIGSEGV. Tests pass only because each one manually clears globals, GCs, and drains before dropping. | **Confirmed by reading.** Move the null-out after `JS_FreeRuntime`. |
-| **P2-C3** | CRITICAL | `core/src/lib.rs:1266` | `core/`'s `CopyInCopyOut` arm **reads a detached buffer**: `detach_arraybuffer(v)` then `arraybuffer_copy_to(v, dst)`. **JavaScriptCore cannot implement this.** `transfer()` moves the bytes into a new private product; the original is unreadable. The arm exists *for* JSC and cannot be implemented by it. | **Confirmed.** This is the JSC exit gate firing one phase early, which is exactly what block 02 §1 said would be worth more than the slice. Block 02 → **A13** rewritten: one primitive, `detach_arraybuffer(cx, value, out: Option<&mut [u8]>)`, which each engine implements end-to-end. `arraybuffer_copy_to` is deleted from the trait. |
+| **P2-C3** | CRITICAL | `core/src/lib.rs:1266` | `core/`'s `CopyInCopyOut` arm **reads a detached buffer**: `detach_arraybuffer(v)` then `arraybuffer_copy_to(v, dst)`. **JavaScriptCore cannot implement this.** `transfer()` moves the bytes into a new private product; the original is unreadable. The arm exists *for* JSC and cannot be implemented by it. | **Confirmed.** The JSC exit gate firing one phase early. Block 02 → **A13** rewritten: one primitive, `detach_arraybuffer(cx, value, out: Option<&mut [u8]>)`, which each engine implements end-to-end. `arraybuffer_copy_to` is deleted from the trait. |
 | **P2-M1** | MAJOR | `adapters/quickjs/src/lib.rs:641` | The A12 guard **cannot fire**. `JS_GetArrayBuffer` throws `TypeErrorDetachedArrayBuffer` on a detached buffer and sets `*psize = 0` on *every* failure path, so `arraybuffer_len` returns `Some(0)` for detached, for non-buffers, and for exceptions alike. The throw is swallowed with `let _ =` and never cleared, leaving a stale exception on the context after every successful `unmap()`. | **Confirmed at source** (`quickjs.c`). Two reviewers converged: one proved the guard dead by deleting it, the other found the mechanism. Block 02 → **A26**. |
 | **P2-M2** | MAJOR | `adapters/quickjs/src/lib.rs:219` | Nothing drains the release queue after the final GC. Every buffer alive at teardown leaks its native handle and its parent-device reference. A host that cycles script VMs leaks per buffer. | **Confirmed.** Drain between `JS_FreeRuntime` and dropping `State`. |
 | **P2-M3** | MAJOR | `core/src/mock.rs` | **Three new mirrors, all in the capabilities Phase 2 added.** (a) `new_external_arraybuffer` *copies* into a `Vec`, so `ZeroCopyDetach` is not zero-copy and **nowhere is it asserted that a write through a mapped range reaches backend memory** — A17 was reported met and is not. (b) `duplicate_value`/`release_value` are identity and no-op with no balance check, so a held-value leak is invisible; this is R22's class, one capability up, and it bites JSC too (`JSValueProtect` needs its `Unprotect`). (c) `detach` and `arraybuffer_len` are coupled, so A12's hazard is inexpressible. | **Confirmed by reading.** Block 02 → **A24**. |
-| **P2-M4** | MAJOR | `core/src/mock.rs:890` | `r23_heap_property_values_are_reclaimed_by_scope` asserts `rt.reclaimed_values() == 4` — the **mock's own counter**, incremented by the mock's `Scope::drop`. To see it red you break the mock, not `core/`. **The third tautology**, and the same shape as the retracted P0-M3 and P1-M3. | **Confirmed.** The project has now caught itself doing this three times. |
+| **P2-M4** | MAJOR | `core/src/mock.rs:890` | `r23_heap_property_values_are_reclaimed_by_scope` asserts `rt.reclaimed_values() == 4` — the **mock's own counter**, incremented by the mock's `Scope::drop`. To see it red you break the mock, not `core/`. The third tautology, same shape as the retracted P0-M3 and P1-M3. | **Confirmed.** |
 | **P2-M5** | MAJOR | tests | Claimed-or-required, absent: two concurrent async ops (**A7 says "Test it"**, and this is Phase 0's CRITICAL); two ranges detached by one `unmap` on a **real** engine; `Deferred` settled twice; runtime dropped with a pending `mapAsync`; and the R19 red demonstrations for A12, A15, A11 — which the implementing agent reported red-then-green but which **exist nowhere in the tree**. | **Confirmed.** A guard whose red state cannot be reproduced from the tree is on the honour system. |
-| **P2-M6** | MAJOR | several | `unsafe fn` `# Safety` docs restate the signature. Worst: `new_external_arraybuffer` says the memory must outlive the `ArrayBuffer`, while the code relies on the opposite (detach precedes `wgpuBufferUnmap`). A precondition nobody can check is decoration. | Handed over. |
+| **P2-M6** | MAJOR | several | `unsafe fn` `# Safety` docs restate the signature. Worst: `new_external_arraybuffer` says the memory must outlive the `ArrayBuffer`, while the code relies on the opposite (detach precedes `wgpuBufferUnmap`). | Handed over. |
 | P2-m1 | MINOR | `core/src/lib.rs` | Reviewers disagreed on whether `_Error` and `_Aborted` collapse. Adjudicate against the code; A9 forbids collapsing. The rejection value is a bare string, not a `GPUError` — in-spec until Phase 6, but record it. | Handed over. |
 | P2-m2 | MINOR | `core/src/lib.rs:708` | `destroy()` routes through `detach_all_ranges`, which for the copy arm **flushes possibly-stale script bytes back** into a buffer being destroyed. `destroy()` should discard. | Handed over. |
 | P2-m3 | MINOR | `core/src/lib.rs:1262` | `detach_all_ranges`' error paths drop duplicated range values without releasing them. | Handed over. |
 | P2-m4 | MINOR | `adapters/quickjs/src/lib.rs:1225` | Uncommented `#[allow(clippy::type_complexity)]`. Not a soundness lint, but `CLAUDE.md` asks for the *why*. | Handed over. |
 | P2-m5 | MINOR | `core/src/lib.rs:793` | Dead guard: `mode` is already bounded by `enforce_u32`, so `if mode > WEBIDL_U32_MAX` cannot fire. Misleading about where the widening guard lives. | Handed over. |
 
-### What Phase 2 actually earned
+### Verified correct
 
-Recorded because a review that only lists defects misrepresents the phase.
 Independently verified by two lenses:
 
 - **The boundary is additive.** Every Phase 2 capability is a trait addition;
   `core/`'s Phase 1 logic is unchanged. `duplicate_value`/`release_value` map to
-  `Protect`/`Unprotect` on JSC, so they are not QuickJS-shaped. **P2-C3 is not a
-  counterexample to this** — it is a badly-chosen primitive pair, and the fix is
-  still an addition.
-- **`with_async_scope` is a real fix to a real leak**, and `Context`'s scope is no
+  `Protect`/`Unprotect` on JSC, so they are not QuickJS-shaped. P2-C3 is not a
+  counterexample: it is a badly-chosen primitive pair, and the fix is still an
+  addition.
+- **`with_async_scope` fixes a real leak**, and `Context`'s scope is no
   longer `Option`.
 - **The `tick()` three-queue contract is strongly tested.**
   `process_events_without_microtasks_does_not_resume_await`,
@@ -173,25 +158,6 @@ Independently verified by two lenses:
 - **No `#[allow]` sits on a soundness lint in hand-written code** — the Phase 1
   defect stayed fixed.
 
-### The pattern worth naming
-
-Every CRITICAL this phase came from the same place: **a primitive whose contract
-was set by what QuickJS happened to allow, and a mock built to match `core/`
-rather than to match the engines.**
-
-P2-C3 is the clearest. `core/` asked "detach, then read the detached buffer",
-QuickJS shrugged, and the mock — written by the same hand, in the same session —
-said yes. JSC would have said no, and would have said it in Phase 3, after forty
-generated interfaces were resting on the answer.
-
-The rule that follows, now A13's closing paragraph: **for every trait primitive,
-ask what JavaScriptCore does — before the mock answers for it.**
-
-And the rule that keeps catching us, now three times over: **a test that asserts
-the code's own bookkeeping is not a test.** P0-M3 asserted our release-call log.
-P1-M3 asserted our `add_ref` counter. P2-M4 asserts the mock's reclaim counter.
-Each was written by someone who had just read the retraction of the last one.
-
 ### Two more CRITICALs, found by writing the tests the rules demanded
 
 **P2-C4 — `core/` holds engine values; QuickJS traced none of them.**
@@ -201,29 +167,22 @@ refcount and is invisible to the collector, so `JS_FreeRuntime` finds live objec
 and **aborts**. A second mapped range surviving to teardown kills the process.
 
 Block 01's **R7** required exactly this tracing. Phase 1's review marked it
-**"satisfied (vacuous)"** — correctly, at the time, because no wrapper held a JS
-value. Phase 2 created one, and nobody re-asked.
-
-> **A rule can be written, correctly discharged as vacuous, and silently come back
-> into force.** When a phase adds a capability, re-ask which "not applicable" rules
-> just became applicable. Nothing in the process does this for you.
+"satisfied (vacuous)" — correct at the time, because no wrapper held a JS value.
+Phase 2 created one and R7 was not re-asked.
 
 **P2-C5 — a pending async request survives into teardown.** A `Deferred` owns two
 resolving functions inside a `Box` the WebGPU callback owns via `into_raw`. If the
 callback never fires, those values are never freed and `JS_FreeRuntime` aborts.
 Freeing them *after* is worse: they point into a dead runtime. Block 02 → **A28**.
 
-Both were found because the agent **wrote the tests the rules demanded instead of
-asserting they would pass** — and then reported the aborts instead of hiding them.
-It did, however, delete the tests. **A test that finds a bug is not deleted; the
-bug is fixed.** Both now land.
+Both were found by writing the tests the rules demanded rather than asserting they
+would pass. The tests were then deleted; both now land.
+Rule: a test that finds a bug is not deleted; the bug is fixed.
 
-**Red demonstrations.** I ran the ones the agent could not: reintroducing the
-premature `JS_SetRuntimeOpaque(null)` aborts the teardown test with `SIGABRT`
-(P2-C2); neutering `qjs_gc_mark`'s body aborts the adapter binary and restoring it
-returns 18 passing tests (P2-C4). The agent stated plainly that it had not observed
-the aborts before fixing them, rather than claiming a quote it did not capture.
-That is the right answer to give.
+**Red demonstrations** (run by the planner): reintroducing the premature
+`JS_SetRuntimeOpaque(null)` aborts the teardown test with `SIGABRT` (P2-C2);
+neutering `qjs_gc_mark`'s body aborts the adapter binary, and restoring it returns
+18 passing tests (P2-C4).
 
 ### The one place `core/` bent toward an engine
 
@@ -248,14 +207,14 @@ in block 02 → A27 rather than left to be rediscovered.
 
 The A7 "red demonstration" that landed with the fixes was
 `a7_red_demo_overwritten_userdata_loses_first_async_request`. It built a
-single-slot design **in the test's own local `Option`**, overwrote it, and asserted
-the local behaved as written. It never called into `core/`. It would have passed
-whatever `core/` did — and it tested the wrong hazard besides: A7's failure mode is
-a **use-after-free**, not an unresolved promise.
+single-slot design in the test's own local `Option`, overwrote it, and asserted the
+local behaved as written. It never called into `core/`, so it would have passed
+whatever `core/` did, and it tested the wrong hazard: A7's failure mode is a
+use-after-free, not an unresolved promise.
 
 `cargo clippy -D warnings` found it, as `value assigned to
-single_userdata_slot is never read`. **The lint was pointing at the test being
-wrong, not at a style nit.** It is now deleted and replaced by
+single_userdata_slot is never read` — the lint was reporting the test as wrong, not
+a style nit. It is now deleted and replaced by
 `a7_two_concurrent_map_async_operations_settle_independently`, which drives two
 outstanding `mapAsync` calls through `core/` and shows each settling its own
 promise.
@@ -263,12 +222,11 @@ promise.
 That is the fourth: P0-M3 asserted our release-call log, P1-M3 our `add_ref`
 counter, P2-M4 the mock's reclaim counter, P2-M7 the test's own local variable.
 
-**A7's red demonstration is not re-run, and that is deliberate.** A deterministic
-assertion is impossible — the hazard is a dangling `userdata1`. It was already seen
-red, under ASan, in **Phase 0** (`phase-reviews.md` → Phase 0, P0-C2:
-`heap-use-after-free … in core::cell::Cell::get`), for exactly this pattern and for
-exactly this reason. Citing that demonstration is honest; manufacturing a second
-one that passes for the wrong reason is not.
+**A7's red demonstration is not re-run, deliberately.** A deterministic assertion is
+impossible — the hazard is a dangling `userdata1`. It was already seen red, under
+ASan, in Phase 0 (`phase-reviews.md` → Phase 0, P0-C2: `heap-use-after-free … in
+core::cell::Cell::get`), for the same pattern and the same reason; that
+demonstration is cited rather than a second one manufactured.
 
 ### Gate — PASSED. Phase 2 is COMPLETE.
 
@@ -277,38 +235,41 @@ Gates re-run directly by Claude: `core` with the backend env var **unset** EXIT=
 -- -D warnings` EXIT=0; both detach spikes EXIT=0.
 
 **Correction to the record.** The commit that declared Phase 2 complete stated
-`clippy -D warnings EXIT=0`. It did not. Clippy was failing on the tautological test
+`clippy -D warnings EXIT=0`. It did not: clippy was failing on the tautological test
 above, and the claim was written from the previous run rather than from the one
-being reported. The gate is green now, and this note stays because a project that
-retracts its own tautologies should also retract its own unverified gate claims.
+being reported. The gate is green now.
 
 Verified fixed: P2-C1 … P2-C5, P2-M1 … P2-M6, P2-m1 … P2-m5.
 Block 02 gained A13 (rewritten), A24, A25, A26, A27, A28; A11 and A26 were revised
 after the implementing agent showed each was wrong as first written.
 
-### What this phase taught, in one line each
+### Rules from this phase
 
-- **The mock must be shaped to the engines, not to `core/`.** P2-C3 shipped because
-  `core/` asked "detach, then read the detached buffer", QuickJS shrugged, and the
-  mock — written by the same hand in the same session — said yes.
-- **A predicate that returns the same value for "zero" and "no answer" cannot guard
-  anything.** `arraybuffer_len` returned `Some(0)` for detached, for non-buffers,
+- Rule: the mock is shaped to the engines, not to `core/`. Every CRITICAL this phase
+  came from a primitive whose contract was set by what QuickJS happened to allow.
+  Recorded as A13's closing paragraph: for every trait primitive, ask what
+  JavaScriptCore does before the mock answers for it.
+- Rule: a predicate that returns the same value for "zero" and "no answer" cannot
+  guard anything. `arraybuffer_len` returned `Some(0)` for detached, for non-buffers,
   and for exceptions alike.
-- **Vacuous rules come back.** R7 was correctly not-applicable, then silently was.
-- **Write the test, then run it red.** Two CRITICALs existed only because someone
-  finally wrote a test that the rules had demanded for a phase and a half.
-- **A test that asserts your own bookkeeping is not a test.** Three times now.
+- Rule: when a phase adds a capability, re-ask which rules discharged as vacuous
+  just became applicable. R7 was correctly not-applicable in Phase 1 and applicable
+  in Phase 2.
+- Rule: write the test, then run it red. Two CRITICALs existed only because a test
+  the rules had demanded for a phase and a half was finally written.
+- Rule: a test that asserts the code's own bookkeeping is not a test. P0-M3 asserted
+  the release-call log, P1-M3 the `add_ref` counter, P2-M4 the mock's reclaim
+  counter, P2-M7 the test's own local variable.
 
 ---
 
 ## Phase 1 Review — 2026-07-09
 
 Three fresh no-context reviewers again, lenses tuned to the phase: correctness /
-FFI soundness; block-spec compliance rule-by-rule (R1–R21); and **"is the mock a
-real test, or a mirror?"**
+FFI soundness; block-spec compliance rule-by-rule (R1–R21); and "is the mock a
+real test, or a mirror?"
 
-The third lens was pointed at the one question Phase 1 exists to answer, and it
-earned its place: it found the CRITICAL, and neither of the others came near it.
+The third lens found the CRITICAL; neither of the other two did.
 
 ### Findings and triage
 
@@ -360,34 +321,26 @@ is genuinely under test. Only the detection was weak. And the Phase 1
 implementation agent **did** demonstrate it red under ASan before trusting it, as
 R19 demands; what is missing is that the ordinary gate cannot.
 
-### The finding that matters
-
-P1-C1 is the most important result of Phase 1, and it inverts the phase's
-headline.
+### P1-C1: the mock's value model matched only one engine
 
 The design bet is "one `core/`, many engines." Phase 1 tested `core/` against a
-mock whose values are garbage-collected — the **same model JavaScriptCore uses**,
-and **not** the model of QuickJS, the Tier-1 engine we actually ship. So `core/`
-was written to a value model only one of the two engines has, and the test that
-was supposed to prove engine-agnosticism was the very thing that concealed the
-engine-specific obligation.
+mock whose values are garbage-collected — the same model JavaScriptCore uses, and
+not the model of QuickJS, the Tier-1 engine shipped. `core/` was therefore written
+to a value model only one of the two engines has, and the test intended to prove
+engine-agnosticism concealed the engine-specific obligation.
 
-The exit gate we designed for Phase 3 — "wiring JSC must require zero `core/`
-logic changes" — would **not** have caught this, because JSC is the engine the
-mock resembles. The gate was pointed at the wrong engine.
+The exit gate designed for Phase 3 — "wiring JSC must require zero `core/` logic
+changes" — would not have caught this, because JSC is the engine the mock
+resembles.
 
-**The bet survives, and the mechanism that saves it is the GAT this project had
-just dismissed as ceremony.** `E::Context<'a>` is engine-defined and already
-threaded through every conversion, so QuickJS can carry a per-call handle scope
-there: `get_property` registers each owned value; the scope frees them on drop.
-`core/` does not change. `E::Value: Copy` survives. No `free_value` on the trait.
+The fix uses the GAT: `E::Context<'a>` is engine-defined and already threaded
+through every conversion, so QuickJS carries a per-call handle scope there.
+`get_property` registers each owned value; the scope frees them on drop. `core/`
+does not change. `E::Value: Copy` survives. No `free_value` on the trait. (The
+reviewer's conclusion that the fix "is not additive to `core/`" was wrong.)
 
-The reviewer concluded the fix "is not additive to `core/`" and was wrong about
-that — but was right about everything that mattered, and would not have found it
-at all had the lens been "check the rules" rather than "is the mock a mirror."
-
-**R23 is the durable lesson: a mock more forgiving than production is not a test.
-When engines disagree about an obligation, the mock takes the union.**
+R23: a mock more forgiving than production is not a test. When engines disagree
+about an obligation, the mock takes the union.
 
 ### Gate — PASSED. Phase 1 is COMPLETE.
 
@@ -401,26 +354,24 @@ spikes/jsc-detach, spikes/quickjs-detach           EXIT=0
 R5 ASan guard                                      EXIT=0
 ```
 
-**P1-C1 is fixed the way the boundary demanded.** QuickJS's `Context<'a>` now
-carries a per-call `Scope`; `get_property`, `new_instance`, `number` and `string`
-register their owned values there, the callback's return value is `escape`d, and
-`Drop` frees the rest. **`core/`'s signatures and logic did not change.**
-`type Value: Copy` and `type Context<'a>: Copy` are intact and the trait has no
-`free_value` — verified. The GAT earned its keep.
+**P1-C1 is fixed additively.** QuickJS's `Context<'a>` now carries a per-call
+`Scope`; `get_property`, `new_instance`, `number` and `string` register their owned
+values there, the callback's return value is `escape`d, and `Drop` frees the rest.
+`core/`'s signatures and logic did not change. `type Value: Copy` and
+`type Context<'a>: Copy` are intact and the trait has no `free_value` — verified.
 
-**P1-M1's root cause was found by opening the file.** QuickJS stores a C
-function's magic as an **`int16_t`** (`quickjs.c:1101`). Phase 1's encoding packed
-a class id into the high bits, which a 16-bit field silently truncates. `magic`
-was never broken; the encoding did not fit. Refusing to record "QuickJS delivers
-`magic == 0`" as fact was right — it was false. **Failing to demand the
-root-cause was the actual mistake**, and it cost a hardcoded dispatch table that
-would have metastasised across forty interfaces in Phase 4.
+**P1-M1's root cause.** QuickJS stores a C function's magic as an `int16_t`
+(`quickjs.c:1101`). Phase 1's encoding packed a class id into the high bits, which
+a 16-bit field silently truncates. `magic` was never broken; the encoding did not
+fit. The recorded claim "QuickJS delivers `magic == 0`" was false. Consequence of
+not demanding the root cause: a hardcoded dispatch table that would have replicated
+across forty interfaces in Phase 4.
 
-**A deadlock surfaced the moment the generic path went live**, and it is a
-property of the boundary rather than of QuickJS: the method callback held the
-class-registry mutex while `core/` re-entered the adapter through `payload`. The
-call graph is re-entrant *through* the boundary. Now block 01 → **R25**. It will
-bite JavaScriptCore identically.
+**A deadlock surfaced when the generic path went live**, and it is a property of
+the boundary rather than of QuickJS: the method callback held the class-registry
+mutex while `core/` re-entered the adapter through `payload`. The call graph is
+re-entrant *through* the boundary. Now block 01 → **R25**. It applies to
+JavaScriptCore identically.
 
 **The negative demonstrations were run, and reported.** Reversing the R5 release
 order fails on the plain `cargo test` gate now (`marker` reads the `0xdead_beef`
@@ -454,14 +405,13 @@ diff (`initial..HEAD`, 30 files, ~6000 insertions), each with a distinct lens:
    agree with each other and with upstream?
 
 Running three rather than one is a deliberate strengthening of the workflow. They
-found almost disjoint sets, which retrospectively justifies it: the correctness
-lens found the only code defect, the conventions lens found the only doc-coverage
-gap, and the evidence lens found every documentary defect — including one the
-other two, and the author, walked past.
+found almost disjoint sets: the correctness lens found the only code defect, the
+conventions lens found the only doc-coverage gap, and the evidence lens found every
+documentary defect.
 
-**The most consequential defects were documentary, not in the code.** `CLAUDE.md`
-is the document that wins on conflict, so a stale invariant there is more
-dangerous than a wrong spike: everything downstream is told to trust it first.
+The most consequential defects were documentary, not in the code. `CLAUDE.md` is
+the document that wins on conflict, so a stale invariant there is more dangerous
+than a wrong spike: everything downstream is told to trust it first.
 
 ### Findings and triage
 
@@ -513,10 +463,9 @@ urgency, not the severity. The fix — let the callback own a reference to the
 state rather than borrowing into a `Box` the slot may drop — is the shape the
 production binding needs anyway.
 
-### What the review confirms as genuinely earned
+### Verified correct
 
-Recorded because a review that only lists defects misleads about the state of the
-phase. Independently verified by the evidence lens against the pinned sources:
+Independently verified by the evidence lens against the pinned sources:
 
 - The two-queue pump contract, including that the crux test asserts the *engine's*
   `JS_PromiseState`, and that "callback did not fire yet" is paired with an
@@ -547,9 +496,7 @@ spikes/quickjs-detach                                    EXIT=0
 **P0-C2 was reproduced before it was fixed.** The coding agent archived the
 pre-fix tree, added the minimal `requestAdapter(); requestAdapter();` repro, and
 ran it under ASan: `heap-use-after-free … in core::cell::Cell::get`, on the
-callback path. This matters more than the fix. A regression test that has never
-been seen to fail is a test of nothing, and the reviewer's own triage note had
-observed that no existing test exercised the double call.
+callback path. No existing test exercised the double call.
 
 The fix is the shape the production binding needs: the callback owns an
 `Arc<RequestState>` clone leaked through `userdata1` and reclaimed with
@@ -569,15 +516,15 @@ than restating the tautology it replaced.
 Verified fixed: P0-C1, P0-C2, P0-M1, P0-M2, P0-M3 (doc + code), P0-M4, P0-m1
 through P0-m6. Deferred MINORs are listed above with rationale.
 
-### Reflection worth keeping
+### Rule from this phase
 
-Three of the four documentary defects share one cause: **asserting what a header
-says without opening it.** P0-C1 (device-lost mode), and the two thread-safety
-errors it echoes, were all produced by reasoning from a header's *silence* or from
-memory. Every one was refutable in under a minute by reading the pinned file that
-sits in this repository. The rule this phase should hand to Phase 1 is not "read
-the spec" — everyone believes they do — but: **a claim about an upstream artifact
-is not written down until the artifact has been opened in the same session.**
+Three of the four documentary defects share one cause: asserting what a header says
+without opening it. P0-C1 (device-lost mode) and the two thread-safety errors were
+produced by reasoning from the header's silence or from memory; each was refutable
+by reading the pinned file in this repository.
+
+Rule: a claim about an upstream artifact is not written down until the artifact has
+been opened in the same session.
 
 ---
 
@@ -586,9 +533,8 @@ is not written down until the artifact has been opened in the same session.**
 Occasion: the project owner switched the orchestrating model and asked for a
 review of the overall design and codebase before dispatching the JavaScriptCore
 adapter. Not a Phase Review — Phase 3 is mid-flight — but run with the same
-discipline: four no-context lenses over the whole tree at `0fdfd98`, one of them
-(the deletion experimenter) in an isolated worktree per the workflow rule its own
-predecessor caused.
+discipline: four no-context lenses over the whole tree at `54ef708`, one of them
+(the deletion experimenter) in an isolated worktree per the `workflow.md` rule.
 
 Lenses: **soundness** (unsafe/FFI/refcounts), **architecture** (every `JsEngine`
 method walked against JSC's public C API), **deletion experiments** (16 run, 12
@@ -739,7 +685,7 @@ adapter.
 
 ## Phase 3 Phase Review — 2026-07-10 ("Clean Review Then Fix")
 
-Three no-context lenses over the phase's cumulative diff (`5a591db..a262de1`):
+Three no-context lenses over the phase's cumulative diff (`7a36a51..2b312f8`):
 **soundness** (full line-by-line read of the 2,586-line JSC adapter + the Phase 3
 core diff, FFI signatures spot-checked against the macOS SDK headers),
 **rule compliance** (J1–J21 audited individually, exit criteria verdicts),
@@ -759,9 +705,9 @@ core diff, FFI signatures spot-checked against the macOS SDK headers),
 
 ### Deletion-experiment log (10 experiments, isolated worktree)
 
-E1 trampoline unbatched → **RED** on the JSC ordering test AND the parity script
-(`tick:settle1,then1,settle2,then2`) — **the phase's central claim is genuinely
-falsifiable, on the engine that can fail it**. E2 A32 revert → RED in core (the
+E1 trampoline unbatched → RED on the JSC ordering test and the parity script
+(`tick:settle1,then1,settle2,then2`), so the phase's batching claim is falsifiable
+on the engine that can fail it. E2 A32 revert → RED in core (the
 hardened mock) and in JSC parity. E3 mock overlap rejection removed → RED
 (self-test). E3b combo → only the self-test red: A32's headless guard is a
 two-link chain (self-test → mock oracle → core); the only direct engine-level
@@ -796,26 +742,23 @@ tests/parity/parity.js                                    byte-identical on both
 
 The JSC exit gate fired five times during the phase (Q7–Q9), each stop landing a
 core defect before codegen could multiply it — including one (A32) that had been
-broken against every conformant backend since Phase 2 and was visible only to
-the engine that actually uses the copy arm. The boundary bet held: the adapter
-itself required zero core logic changes; every core change during the phase maps
-to a recorded firing or review finding.
+broken against every conformant backend since Phase 2 and was visible only to the
+engine that uses the copy arm. The adapter itself required zero core logic changes;
+every core change during the phase maps to a recorded firing or review finding.
 
-### Reflection worth keeping
+### Rule from this phase
 
-PR3-C1's shape deserves a rule of thumb: **a generic contract implemented as a
-no-op is a claim, and the claim is about the engine, not the code.** The JSC
-scope compiled, passed every test, and rooted nothing — because under the Tier 1
-engine the same trait obligation happens to be discharged by refcounting.
-Everywhere a `JsEngine` method can be "trivially" implemented, ask what the
-trait's *caller* is relying on the method to guarantee, and write the test
-against the guarantee, not the implementation.
+Rule (from PR3-C1): a generic trait method implemented as a no-op is a claim about
+the engine, not about the code. The JSC scope compiled, passed every test, and rooted nothing,
+because under QuickJS the same trait obligation is discharged by refcounting. Where
+a `JsEngine` method can be implemented trivially, write the test against what the
+trait's caller relies on the method to guarantee, not against the implementation.
 
 ---
 
 ## Phase 4 Phase Review — 2026-07-10 ("Clean Review Then Fix")
 
-Three no-context lenses over the codegen phase (`f3d0aba..9b8c84c` + slices):
+Three no-context lenses over the codegen phase (`b0b6062..24473ee` + slices):
 **emission correctness** (every emitted enum list, default, width, and sentinel
 hand-checked against both pins — zero wrong emissions found), **rule
 compliance** (G1–G12 audited; zero tautologies in the new tests), **deletion
@@ -884,19 +827,18 @@ fixtures incl. the full-surface snapshot), core 83 (backend env var truly
 unset), quickjs 46, JSC 17+1 ignored, workspace all green, both clippys
 `-D warnings`, fmt clean, parity byte-identical on both engines.
 
-Exit criteria: all seven met. The follow-on work is recorded, not lost:
-class-spec/lifecycle emission is the next leverage (block 05 §8), and method
-emission will answer the remaining Promise question. The deletion lens's
-cross-cutting observation deserves preserving verbatim: **the adapter script
-suites detected none of the ten emitter mutations — conversion correctness
-lives entirely in core mock asserts plus codegen snapshots. "Both adapters
-pass" validates plumbing, never conversion values.**
+Exit criteria: all seven met. Follow-on work recorded: class-spec/lifecycle
+emission is next (block 05 §8), and method emission will answer the remaining
+Promise question. Deletion-lens observation: the adapter script suites detected
+none of the ten emitter mutations — conversion correctness lives entirely in core
+mock asserts plus codegen snapshots. "Both adapters pass" validates plumbing, not
+conversion values.
 
 ---
 
 ## Phase 6 Phase Review — 2026-07-10 ("Clean Review Then Fix")
 
-Three no-context lenses over the phase (`df57689^..f994e90`): **soundness**
+Three no-context lenses over the phase (`392e235^..2ed9d8f`): **soundness**
 (the mode-less any-thread callback path read hardest), **compliance** (S1–S10
 quote-level, tautology verdicts per new test), **deletion experiments** (9+2
 run; 7 red where S9 predicts, 2 survivors).
@@ -965,19 +907,20 @@ byte-identical with the phase's two new lines. Exit criteria: all five met
 (criterion 5's sequencing deviation was recorded when it happened; this
 review is the one review it promised).
 
-### Reflection worth keeping
+### Rule from this phase
 
-PR6-C1 is the third time this project has shipped a SAFETY comment that
-answered the wrong question. The pattern: comments argue *what the code does*
-("only enqueues, never dereferences") when the obligation is *what must be
-true when it runs* ("the state it enqueues into is alive"). A SAFETY comment
-for a callback should start with its lifetime story, not its behavior.
+PR6-C1 is the third shipped SAFETY comment that argued *what the code does*
+("only enqueues, never dereferences") when the obligation is *what must be true
+when it runs* ("the state it enqueues into is alive").
+
+Rule: a SAFETY comment for a callback states the lifetime of the state it touches,
+not the callback's behaviour.
 
 ---
 
 ## Block 09 Phase Review — 2026-07-11 ("Clean Review Then Fix")
 
-Three no-context lenses over `4470cb5..b21e276` (four slices: textures,
+Three no-context lenses over `d1b0555..92ead9d` (four slices: textures,
 bind-group resources, render pipeline, render pass + copies).
 
 **CRITICAL: none. Deletion experiments: nine mutations, ZERO survivors** — the
@@ -1006,7 +949,8 @@ by construction), which is exactly the layering block 08's lens predicted.
 
 ### MINOR, fixed in the same pass
 Origin `[]` accepted per WebIDL (extent keeps its minimum); primitives can no
-longer sneak into the union's sequence arm (`size:"12"` was width 1 height 2!);
+longer sneak into the union's sequence arm (`size:"12"` converted to width 1,
+height 2);
 `finish()` converts before consuming the encoder; both `end()`s check the
 parent; the void recording ops (draw/copies/writeTexture) got invocation
 counters so a silently-skipped FFI call finally fails a test; parity's
@@ -1031,7 +975,7 @@ Exit criteria: all five met.
 
 ## Plan-A Review — 2026-07-11 ("Clean Review Then Fix")
 
-Three lenses over `5fc9013^..HEAD` (block 10 introspection + querySet +
+Three lenses over `8a84d63^..HEAD` (block 10 introspection + querySet +
 renderBundle + validity parity). The first soundness/deletion launches died at
 a session ceiling and were relaunched on the fixed tree — the compliance lens
 landed first and its five MAJORs were fixed before the other two ran.
@@ -1073,12 +1017,12 @@ and (gated) Dawn**, two engines each.
 
 ## Block 13 + 14 Phase Review — 2026-07-13 ("Clean Review Then Fix")
 
-Scope: `f48ab763..HEAD` — 85 files, ~18.8k insertions. Two blocks had landed without
+Scope: `8e4c11cd..HEAD` — 85 files, ~18.8k insertions. Two blocks had landed without
 a review: the CTS runner (13) and the replacement of quickjs-ng with Boa (14).
 
-**Four lenses, all fresh no-context subagents, run in parallel.** The deletion lens
-got its own `git worktree` — block 03's lesson: a reviewer licensed to edit the tree
-must not be able to inject a phantom defect into another reviewer's run.
+Four lenses, all fresh no-context subagents, run in parallel. The deletion lens ran in
+its own `git worktree`, per the `workflow.md` rule for any reviewer licensed to edit
+the tree.
 
 Findings: **1 CRITICAL / 9 MAJOR / ~12 MINOR.** All CRITICAL and MAJOR fixed; the
 MINORs fixed in the same pass except where noted.
@@ -1090,63 +1034,57 @@ MINORs fixed in the same pass except where noted.
 `WrapperData` SAFETY comment asserted exactly that: *"Boa finalizes its objects before
 that arena is dropped."*
 
-**It does not.** `force_collect()` only finalizes what it can prove unreachable, and
-`Runtime.module_loader`'s module cache is a live Rust-side GC root at that moment —
-a cached `Module` roots its own environment, including any wrapper bound at module top
-level. Struct fields then drop in declaration order, so `arena: Box<Arena>` was freed
-**before** `module_loader` released the modules, leaving those wrappers holding a
-dangling `*const Arena`. The next collection on the thread ran their finalizers, which
-dereferenced freed memory and enqueued into a freed `ReleaseQueue`.
+That claim is false. `force_collect()` only finalizes what it can prove unreachable,
+and `Runtime.module_loader`'s module cache is a live Rust-side GC root at that moment
+— a cached `Module` roots its own environment, including any wrapper bound at module
+top level. Struct fields then drop in declaration order, so `arena: Box<Arena>` was
+freed **before** `module_loader` released the modules, leaving those wrappers holding
+a dangling `*const Arena`. The next collection on the thread ran their finalizers,
+which dereferenced freed memory and enqueued into a freed `ReleaseQueue`.
 
-The reviewer did not argue this — it *built an instrumented probe and ran it*: one ES
-module holding a wrapper, drop the runtime, create a second runtime, and the finalizer
-fires with the freed pointer. Swapping the module for a plain `eval` makes it vanish,
-which is what identifies the module cache as the specific root.
+Evidence: an instrumented probe — one ES module holding a wrapper, drop the runtime,
+create a second runtime — makes the finalizer fire with the freed pointer. Swapping
+the module for a plain `eval` makes it vanish, which identifies the module cache as
+the specific root.
 
-**And a second, unconditional consequence: every CTS run leaked.** `boa_gc`'s
-thread-local teardown path runs only `drop_fn`, never `run_finalizer`, so in the
-ordinary single-runtime case those module-rooted wrappers were never finalized at all
-— their native WGPU handles were never released. The runner evaluates `glue.mjs` as a
-module, so this fired on every invocation. **Silent both ways: the process exits 0.**
+Second, unconditional consequence: every CTS run leaked. `boa_gc`'s thread-local
+teardown path runs only `drop_fn`, never `run_finalizer`, so in the ordinary
+single-runtime case those module-rooted wrappers were never finalized at all — their
+native WGPU handles were never released. The runner evaluates `glue.mjs` as a module,
+so this fired on every invocation. The process exits 0 in both cases.
 
-Fixed in both directions the reviewer named: `WrapperData` now holds a `Weak<Arena>`
-(the raw-pointer dereference is gone entirely, not merely guarded), and teardown
-releases the Rust-held GC roots — modules, transform, host callbacks — *before* the
-collect. Regression test runs under `MallocScribble=1`.
+Fixed in both directions: `WrapperData` now holds a `Weak<Arena>` (the raw-pointer
+dereference is removed, not merely guarded), and teardown releases the Rust-held GC
+roots — modules, transform, host callbacks — *before* the collect. Regression test
+runs under `MallocScribble=1`.
 
-Two things worth keeping from this one. First, the JSC adapter had solved the same
-problem correctly — it stores an `Arc<FinalizerState>` in its payload, so a late
-finalizer is refcount-safe — and Boa reached for a raw pointer to do the same job.
-**When two adapters implement the same hazard differently, one of them is wrong.**
-Second, this is the SAFETY-comment failure mode CLAUDE.md warns about, caught in the
-wild: the comment was not vague, it was *false*, and it read as reassuring.
+The JSC adapter had solved the same problem correctly, storing an
+`Arc<FinalizerState>` in its payload so a late finalizer is refcount-safe; Boa used a
+raw pointer for the same job. Rule: when two adapters implement the same hazard
+differently, one of them is wrong.
 
-### MAJOR — the WebIDL flag namespaces did not exist, and the runner was hiding it
+### MAJOR — the WebIDL flag namespaces were absent from the binding
 
 `GPUBufferUsage`, `GPUTextureUsage`, `GPUColorWrite`, `GPUShaderStage`, `GPUMapMode`
-are in the pinned IDL and were in no part of the binding. A first-party script — *the
-actual product* — writing `usage: GPUBufferUsage.VERTEX` got a `ReferenceError`. Every
-script in this repo worked around it with bare numeric literals, which was the symptom
-sitting in plain sight.
+are in the pinned IDL and were in no part of the binding. A first-party script writing
+`usage: GPUBufferUsage.VERTEX` got a `ReferenceError`. Every script in this repo used
+bare numeric literals instead.
 
-**The CTS could not see it**, because `tools/cts-runner/glue.mjs` injected the five
-namespaces into `globalThis` from the CTS's own constants module before any test ran.
-23,305 green cases said nothing about the gap. That is a shim standing where the thing
-under test should be — the exact hazard the block's own rules were written to prevent,
-and a reminder that **a shim's blast radius is everything it makes untestable**, not
-just what it makes convenient.
+The CTS could not see it: `tools/cts-runner/glue.mjs` injected the five namespaces
+into `globalThis` from the CTS's own constants module before any test ran, so the
+23,305 green cases said nothing about the gap. Rule: a shim's blast radius is
+everything it makes untestable.
 
 The namespaces are now emitted from the IDL by the generator, installed as real
-globals, and the shim is deleted so the CTS exercises the real surface. Also
-unrecorded in `codegen-deltas.md` at the time — CLAUDE.md invariant 5 names *flag
-namespaces* explicitly as a reason codegen must consume WebIDL, which makes the
-omission doubly pointed.
+globals, and the shim is deleted so the CTS exercises the real surface. The gap was
+also unrecorded in `codegen-deltas.md`; CLAUDE.md invariant 5 names flag namespaces
+explicitly as a reason codegen must consume WebIDL.
 
-### MAJOR ×4 — the interface *object*, which the previous slice never looked at
+### MAJOR ×4 — the interface object
 
-Phase C had fixed the property attributes on the interface **prototype** object and
-stopped. The reviewer found the same class of bug one level up, and measured each one
-under both engines rather than reasoning about it:
+Phase C had fixed the property attributes on the interface **prototype** object only.
+The same class of bug exists one level up, on the interface object. Each row below was
+measured under both engines:
 
 | | Boa | JSC |
 |---|---|---|
@@ -1160,55 +1098,50 @@ Consequences: `GPUBuffer.prototype.mapAsync.call(buf, 1)` throws **on iOS only**
 `instanceof`; the standard brand test `Object.prototype.toString.call(x)` gives
 different answers on iOS and Android.
 
-**Four of four were engine-divergent** — which means the parity suite, the mechanism
-CLAUDE.md names as *the* guarantee of iOS↔Android behavioural parity, was not
-reflecting over the WebIDL object graph at all and could not have caught any of them.
-That blind spot was the real finding. Closing it (13 new parity lines over descriptors,
-`Object.keys`, function-object identity, and tags) matters more than the four fixes.
+All four were engine-divergent, so the parity suite — the mechanism CLAUDE.md names as
+the guarantee of iOS↔Android behavioural parity — could not have caught any of them: it
+was not reflecting over the WebIDL object graph at all. Closed with 13 new parity lines
+over descriptors, `Object.keys`, function-object identity, and tags.
 
 ### MAJOR ×3 — guards that could not fail (the deletion lens)
 
 The lens deletes a guard and re-runs. Anything still green is a tautology.
 
-- **The CTS runner never tested an unexpected FAIL — its entire reason to exist.**
+- **The CTS runner never tested an unexpected FAIL.**
   Deleting the `Status::Fail` arm (a real failure counted as a skip) → exit 0.
   Deleting the `fail == 0` term from `exit_success()` → exit 0. The test that looks
   like it covers this covers unexpected *pass*, unexpected *warn*, and mismatch — but
   no bare failure. A regression in failure bucketing would have made the 23k-case
   oracle exit SUCCESS on real failures, silently.
-- **Device-lost error suppression was untested** — deleting it changed nothing. The
-  *inverse* was pinned by five tests. That asymmetry is the tell: a rule tested in one
-  direction only is half a rule.
+- **Device-lost error suppression was untested** — deleting it changed nothing, while
+  the *inverse* was pinned by five tests. Rule: a rule tested in one direction only is
+  half a rule.
 - **`buffer_map_callback`'s status→error-class table was dead code to the tests** —
   replacing all four arms with a bogus constant → exit 0. The one test that fed a
   failing status asserted `matches!(result, Some(Err(_)))`: an assertion with an
   invisible failure mode, which passes for any class and any message.
   `OperationError`-vs-`AbortError` is JS-visible spec behaviour.
 
-Every fix was verified by *breaking the guard, watching the new test fail, restoring
-it, and watching it pass* — the standard the lens itself set.
+Every fix was verified by breaking the guard, observing the new test fail, restoring
+it, and observing it pass.
 
-### The one place a finding produced a wrong fix — and how it was caught
+### One finding produced a wrong fix, caught by Dawn
 
 The lens observed that `getMappedRange`'s empty-range semantics were unpinned and that
-the code's rule "looked wrong" against a half-open-interval reading. The implementer
-then reasoned from the spec's `[offset, offset + rangeSize)` notation — an empty
-interval is the empty set, and the empty set overlaps nothing — and *changed the
-behaviour*.
+the code's rule looked wrong against a half-open-interval reading. The implementer
+reasoned from the spec's `[offset, offset + rangeSize)` notation — an empty interval
+is the empty set, and the empty set overlaps nothing — and changed the behaviour.
 
-**Dawn refuted it.** `buffer,mapping` went 35/0 → 34/1, on exactly one subcase:
-existing range `[16,36)`, request `[24,24)` — an empty range strictly *inside* an
-existing one, which the CTS requires to throw. Invisible on yawgpu, so the local gate
-stayed green.
+Dawn refuted it: `buffer,mapping` went 35/0 → 34/1 on one subcase — existing range
+`[16,36)`, request `[24,24)`, an empty range strictly *inside* an existing one, which
+the CTS requires to throw. Invisible on yawgpu, so the local gate stayed green.
 
-The original predicate was right, and had already satisfied both boundary rows. The
-missing thing was a **test**, not a change. Reverted, and the four boundary rows are
-now pinned individually.
+The original predicate was correct and already satisfied both boundary rows; the
+missing thing was a test, not a change. Reverted, and the four boundary rows are now
+pinned individually.
 
-Worth stating plainly, because it cuts against instinct: **the mathematical reading of
-the prose was not the spec's intent, and the oracle knew it before we did.** A lens
-that says "nothing pins this" is asking for a test. It is not a licence to decide what
-the behaviour should be.
+Rule: a lens reporting that nothing pins a behaviour is asking for a test, not
+licensing a change to the behaviour.
 
 ### MINORs fixed
 
@@ -1225,22 +1158,16 @@ the repo root.
 
 `PipelineParent` / `HostValue` / `QueueError` still lack `#[non_exhaustive]`
 (pre-existing); adding it churns downstream exhaustive matches across runner, examples
-and adapters. **Recorded, not fixed** — a deliberate deferral, not an oversight.
+and adapters. Recorded, not fixed: a deliberate deferral.
 
 ### Gate
 
 Workspace tests, clippy `-D warnings`, fmt, engine-agnostic core, parity byte-identical
 under Boa AND JSC (196 lines), curated CTS 23,305/0 exit 0 on yawgpu, and the Dawn
-oracle green on every family touched. **Zero open CRITICAL or MAJOR. Blocks 13 and 14
-are COMPLETE.**
+oracle green on every family touched. Zero open CRITICAL or MAJOR. Blocks 13 and 14
+are COMPLETE.
 
-### Reflection worth keeping
-
-The review found a use-after-free, a leak on every run, a missing API that breaks the
-first line of any real script, and a parity guarantee that was not guaranteeing
-anything — in a tree where **every gate was green and had been green for days**. Four
-lenses cost four subagents. The cheapest of them, the one that just deletes things and
-re-runs, found three guards that could not fail.
+All findings above were made against a tree in which every gate was green.
 
 ### Second-pass addendum (2026-07-13, different reviewer model)
 

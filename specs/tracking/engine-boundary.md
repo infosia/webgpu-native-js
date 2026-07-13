@@ -128,18 +128,18 @@ Per `specs/reference/workflow.md` → "The JSC phase carries an extra exit gate"
 adding a trait method or capability variant is **additive** and does not trip the
 gate. `CLAUDE.md` invariant 1 stands.
 
-Had we discovered this in Phase 3 instead of Phase 0, the copy path would have
-been retrofitted into ~40 generated interfaces. This is what Phase 0 is for.
+Found in Phase 0 rather than Phase 3, so the copy path did not have to be
+retrofitted into ~40 generated interfaces.
 
 ---
 
 ## Q1b — The pinning hazard (found by the JSC spike, 2026-07-09)
 
-**Status: ANSWERED. This is the most dangerous thing found so far.**
+**Status: ANSWERED (2026-07-09).**
 
-The Q1a JSC-arm spike (`spikes/jsc-detach/`) came back with an unexpected
-report: taking the buffer's C bytes pointer appeared to prevent later detach.
-Independently reproduced, and it is **worse than reported**.
+The Q1a JSC-arm spike (`spikes/jsc-detach/`) reported that taking the buffer's C
+bytes pointer appeared to prevent later detach. Independently reproduced; the
+effect is broader than the spike reported.
 
 ### E5 — taking a C bytes pointer permanently and *silently* disables detach
 
@@ -153,13 +153,12 @@ This is WebKit's `ArrayBuffer::pinAndLock()`: once a C client takes the pointer,
 the buffer is non-detachable for the rest of its life. `transfer()` does not
 throw — it **silently degrades to a copy** and leaves the original attached.
 
-**Why this is the worst possible failure mode.** The natural, obvious
-implementation of `CopyInCopyOut` is: allocate an engine-owned `ArrayBuffer`,
-take its bytes pointer, `memcpy`, hand it to script; at `unmap()`, `memcpy` back
-and `transfer()` to detach. **Every step succeeds. No error is raised. And the
-buffer is never detached** — script keeps a live, readable, writable view after
-`unmap()`. The exact hazard `CopyInCopyOut` exists to prevent is reintroduced
-through the back door, with no diagnostic.
+**Why the obvious implementation fails silently.** The natural implementation of
+`CopyInCopyOut` is: allocate an engine-owned `ArrayBuffer`, take its bytes pointer,
+`memcpy`, hand it to script; at `unmap()`, `memcpy` back and `transfer()` to
+detach. Every step succeeds, no error is raised, and the buffer is never detached —
+script keeps a live, readable, writable view after `unmap()`, with no diagnostic.
+That reintroduces the exact hazard `CopyInCopyOut` exists to prevent.
 
 A test suite that never calls `bytes_ptr()` and `unmap()` on the *same* mapping
 will not catch this. The spike's own tests do not: `read_mapping_…` calls
@@ -243,7 +242,7 @@ carries the JS exception message, the observable `__mapped_range_buffer` global
 is gone, and the silent `NaN → 0` path was removed with the per-byte copy. The
 `quickjs-detach` aliasing finding is fixed.
 
-**ASan caveat, stated once and for all:** Apple platforms ship no
+**ASan caveat:** Apple platforms ship no
 LeakSanitizer. A clean ASan run on macOS demonstrates no double-free and no
 use-after-free. It does **not** demonstrate the absence of leaks. In
 `quickjs-detach`, leak coverage comes from the asserted `free_func` call
@@ -543,21 +542,21 @@ What was **not** established, and what this entry previously implied:
 - **The conversion is written once; the *dispatch* is not.** Those are different
   claims, and only the first was earned.
 
-### The GAT is not ceremony — retracted
+### The GAT is load-bearing — earlier claim retracted
 
 This entry previously said: *"`E::Context<'a>` did not need the GAT. A plain
 `Copy` handle sufficed."* **Withdrawn.**
 
-R22's fix is a **per-call handle scope**, and `Context<'a>` is exactly where it
+R22's fix is a **per-call handle scope**, and `Context<'a>` is where it
 lives: QuickJS's context carries the owned values `get_property` produced and
 frees them when the scope drops; JSC's and the mock's carry nothing. That fix
 requires **no change to `core/`'s logic and no `free_value` on the trait**, and
 `E::Value: Copy` survives.
 
-So the lifetime parameter is what lets an engine attach per-call obligations
-without leaking them into `core/`. It is the mechanism that keeps the bet
-alive. The reviewer who found R22 concluded the fix "is not additive to `core/`";
-that conclusion is wrong for this reason, and the finding is right anyway.
+The lifetime parameter is what lets an engine attach per-call obligations
+without leaking them into `core/`. The reviewer who found R22 concluded the fix
+"is not additive to `core/`"; that conclusion is wrong for this reason, and the
+finding stands.
 
 ### Secondary answers that stand
 
@@ -566,9 +565,9 @@ that conclusion is wrong for this reason, and the finding is right anyway.
 - The claim that QuickJS delivers `magic == 0` was **false**, and is now
   root-caused: QuickJS stores a C function's magic as an **`int16_t`**
   (`quickjs.c:1101`). Phase 1's encoding packed a class id into the high bits;
-  a 16-bit field truncated them. Refusing to record the claim as fact was right.
-  **Failing to demand the root-cause was the mistake** — it cost a hardcoded
-  dispatch table that would have metastasised across forty interfaces in Phase 4.
+  a 16-bit field truncated them. The claim had been recorded without being
+  root-caused; the consequence was a hardcoded dispatch table that Phase 4 would
+  have replicated across forty interfaces.
 
 ### Resolved: the boundary is re-entrant
 
@@ -600,7 +599,7 @@ constructors** with the same throw-on-null shape: `createShaderModule`,
 `createComputePipeline`, `createCommandEncoder`, `commandEncoder.finish`, and
 `beginComputePass`. All are recorded here now, not just the first.
 
-**And there is a sharper problem the null check does not reach.** Only
+**A second problem the null check does not reach.** Only
 `wgpuDeviceCreateBuffer` is declared `WGPU_NULLABLE`. The other seven **cannot
 return null**: on a validation failure they return a non-null **invalid** handle,
 which the binding wraps and hands to script as though it were fine. The failure
@@ -610,9 +609,6 @@ scopes are Phase 6.
 So the deviation is asymmetric: `createBuffer` fails loudly and wrongly; the other
 seven fail silently and wrongly. Both are temporary. When error scopes land, all
 nine must stop throwing, return their invalid object, and route the error.
-
-Until then, this is written down rather than shipped quietly — which is the whole
-point of B15.
 
 ### R11 — recorded limit: `GPUSize64` through a JS `Number`
 
@@ -683,9 +679,8 @@ execute **script** inside that callstack under JSC and not under QuickJS. Two
 engines, two orderings, one script. `CLAUDE.md` makes behavioural parity a
 first-class concern; this breaks it.
 
-**And the cause is that `core/` had encoded QuickJS's checkpoint semantics as
-universal.** Nobody wrote that assumption down; it was simply what "settle the
-promise in the callback" means on a refcounted engine with an explicit job queue.
+Cause: `core/` had encoded QuickJS's checkpoint semantics as universal — the
+assumption was never written down.
 
 The fix, block 04 → J1/J2: the callback becomes **pure Rust** — it records a
 result and returns, touching no engine — and `tick()` settles every recorded
@@ -693,16 +688,15 @@ result **inside a single JS frame**, then drains. Measured: two separate C→JS
 resolve calls give JSC two microtask checkpoints; one trampoline gives one, which
 is what QuickJS does natively.
 
-This is the **second** time the JSC gate has caught engine-shaped `core/` logic
-before codegen could multiply it by forty. The first was P2-C3, a phase early. The
-gate is doing exactly what `CLAUDE.md` built it for, and both findings argue for
-running Phase 3 *before* Phase 4 rather than after.
+This is the second time the JSC gate has caught engine-shaped `core/` logic before
+codegen could multiply it by forty (the first was P2-C3, a phase early). Both
+findings argue for running Phase 3 before Phase 4 rather than after.
 
 ---
 
 ## Q5 — Did the boundary survive Phase 2?
 
-**Status: YES, and this is the first result worth much.** Phase 1 only needed
+**Status: YES.** Phase 1 only needed
 property reads and object creation, where the two engines agree. Phase 2 added
 Promises, the microtask pump, external `ArrayBuffer`s, and detach — where they do
 not.
@@ -722,7 +716,7 @@ refcounted, or that would differ if JSC were the only engine?* — the answer is
 against a const-generic mock, so the JSC arm is exercised before JSC exists. That
 is R23 doing its job.
 
-### The hole that opened, and why it matters more than the result
+### The hole that opened
 
 The first Phase 2 attempt gave the trait
 `fn context_from_async(cx) -> Context<'static>`, and QuickJS implemented it as
@@ -737,9 +731,9 @@ Two rules came out of it (block 02 → A23): `Context`'s scope is **not** an
 callback opens its own scope via `with_async_scope`, which drops on the way out.
 `Context<'static>` must not exist.
 
-**Value ownership has now been the boundary's hardest edge twice.** It is the one
-place where QuickJS's model and JSC's genuinely differ, and both times the escape
-was a type that made the obligation optional.
+Value ownership has been the boundary's hardest edge twice (P1-C1 and A23). It is
+the one place where QuickJS's model and JSC's genuinely differ, and both times the
+escape was a type that made the obligation optional.
 
 `AsyncContext` survives, and legitimately: a WebGPU callback outlives the JS call
 that started it, so it cannot hold a `Context<'_>`. It is a raw engine token, and
@@ -749,16 +743,15 @@ reviving it is `unsafe` — which the type now says.
 
 `cargo clippy -D warnings` was green through Phase 1 because `pub fn wrap_device`
 carried `#[allow(clippy::not_unsafe_ptr_arg_deref)]`: a **safe** public function
-taking a raw pointer and dereferencing it. Three independent reviewers and every
-gate walked past it. Phase 2's clippy run — with the allow removed — also found
+taking a raw pointer and dereferencing it. Neither the three reviewers nor any gate
+flagged it. Phase 2's clippy run — with the allow removed — also found
 `arc_with_non_send_sync`, an `Arc` whose payload is `!Send + !Sync`.
 
-That `Arc` is **my error**, from a Phase 0 handoff: *"an `Arc` of a non-`Send`
-type is fine as long as it never crosses a thread."* Clippy is right. The type
-lied about what it permitted; `Rc` is both sound here — `AllowProcessEvents`
-guarantees the callback fires on the pumping thread (`event-loop.md` → E3) — and
-honest. `CLAUDE.md` now treats an unjustified `#[allow]` on a correctness lint as
-a review finding.
+That `Arc` came from a Phase 0 handoff claiming *"an `Arc` of a non-`Send` type is
+fine as long as it never crosses a thread."* Clippy is right: the type permitted
+more than the code intended. `Rc` is sound here — `AllowProcessEvents` guarantees
+the callback fires on the pumping thread (`event-loop.md` → E3). `CLAUDE.md` now
+treats an unjustified `#[allow]` on a correctness lint as a review finding.
 
 ---
 
@@ -837,7 +830,7 @@ third-party `build.rs` between us and the engine we are abstracting, and it
 honours `CLAUDE.md` principle 9 (generated code is a build artifact, never
 committed, fix the generator not the output).
 
-**Cost, stated honestly:** we own the NDK / iOS / MSVC build wiring for the C
+**Cost:** we own the NDK / iOS / MSVC build wiring for the C
 sources. We own it under either choice, because of reason 2.
 
 **`rquickjs-sys` remains useful as a reference** (MIT): its `build.rs` shows a
@@ -863,7 +856,7 @@ Two ways out:
    real symbols wrapping each inline; compile it alongside quickjs. Mechanical.
 2. Reimplement the 38 in Rust.
 
-**Use (1).** Option (2) looks cheap and is a trap: several inlines depend on the
+**Use (1).** Option (2) is a trap: several inlines depend on the
 `JSValue` representation, which changes under `JS_NAN_BOXING`. Hand-maintaining
 that in Rust duplicates an ABI decision the C header already owns, and it would
 break silently on a build-flag change.
@@ -964,13 +957,13 @@ tests, both seen red first (`Ok(0)` against expected `Ok(1)`). Map/work-done
 callbacks audited: they own no handles. Three gate firings, three core defects
 caught before an adapter existed to hide them.
 
-**And a fourth firing, same day, same path — this one caught the planner.** The
+**A fourth firing, same day, same path.** The
 re-dispatched P3b-1 agent refused the tree again: the authorized fix enqueued
 the late handle into a queue whose **last `Arc` owner is the callback itself** —
 `Runtime::drop` had already dropped every other owner — so the queued release
 died un-drained the moment the callback returned. The leak had moved, not
-closed. Worse, the regression tests I accepted kept the queue alive and drained
-it by hand, which is precisely the shape that hides this hole. Planner decision
+closed. The regression tests accepted with it kept the queue alive and drained it
+by hand, which hides that defect. Planner decision
 (A8 amendment, 2026-07-10): on the post-teardown path only, the callback
 releases the handle **directly** — the header exempts the `ProcessEvents`
 callstack from the re-entrancy prohibition and `AllowProcessEvents` confines it
@@ -1006,7 +999,7 @@ JSC will not finalize them sooner. Fix: cache the callable per (wrapper, name)
 in the payload holder, protected, released through the deferred-unprotect
 queue at finalize.
 
-**The fifth firing — and it is the one the phase was built to produce.**
+**The fifth firing.**
 P3b-2's first parity run failed under JSC inside `unmap()`: `core/`'s
 `CopyInCopyOut` copy-back requested the same mutable native range twice, and
 `BufferMapping.md` makes overlapping non-const ranges fail — yawgpu is
@@ -1034,11 +1027,10 @@ the marked demo.
 **Phase 3 COMPLETE (2026-07-10).** Phase Review: 2 CRITICAL / 4 MAJOR / 9 MINOR,
 all closed — full record in `phase-reviews.md` → "Phase 3 Phase Review". The
 block's three open questions are answered in block 04 §6: the JSC scope is the
-**root set** (PR3-C1 — a no-op scope was the phase's worst bug), the any-thread
-finalizer premise is the header's own documented contract, and the settlement
-trampoline costs ≈4 µs/tick. The boundary bet held end to end: zero core logic
-changes for the adapter itself; five exit-gate firings, five core defects landed
-before codegen.
+**root set** (PR3-C1), the any-thread finalizer premise is the header's own
+documented contract, and the settlement trampoline costs ≈4 µs/tick. Zero core
+logic changes for the adapter itself; five exit-gate firings, five core defects
+landed before codegen.
 
 ---
 
@@ -1113,9 +1105,8 @@ reasons. Only two hand-written `convert_*` remain in core, both generic
 non-descriptor machinery (the WebIDL sequence walker; command-buffer state
 collection).
 
-**And the oracle earned its keep in the other direction: G7 preserved five
-hand-written deviations as loud policy entries, and the planner retired all
-five.** `GPUBindGroupEntry.binding` optional-default-0 (IDL: `required` —
+**G7 preserved five hand-written deviations as policy entries; all five were
+retired.** `GPUBindGroupEntry.binding` optional-default-0 (IDL: `required` —
 DR-M3's missed sibling); three `required sequence` members defaulting to empty
 (`entries` ×2, `bindGroupLayouts`); and `entryPoint: null` treated as absent —
 where the pinned IDL (`USVString entryPoint;`, line 685) refutes B4's own
@@ -1138,13 +1129,13 @@ conversion logic**. Parity extended by one line (`sampler:sampler-round-trip`),
 byte-identical on both engines. Suites: codegen 26, core 79, quickjs 44,
 JSC 17+1.
 
-The datum's message: descriptor conversion — invariant 1's "bulk of the work" —
-now costs nothing per interface; the remaining per-interface cost is class/
-lifecycle plumbing, which is itself mechanical and pattern-identical. The
-full-vs-subset decision (criterion 6) and a class-spec-emission slice are the
-open items, then the Phase 4 review.
+Consequence: descriptor conversion — invariant 1's "bulk of the work" — now costs
+nothing per interface; the remaining per-interface cost is class/lifecycle
+plumbing, which is mechanical and pattern-identical. The full-vs-subset decision
+(criterion 6) and a class-spec-emission slice are the open items, then the Phase 4
+review.
 
-**Slice 4a landed (2026-07-10): G13, the dispatch triplicate dies.** The
+**Slice 4a landed (2026-07-10): G13, the dispatch triplicate removed.** The
 generator now emits `GpuDispatch` and a `for_each_gpu_dispatch_entry!` macro
 from `webgpu.yml`; each adapter's passthrough table and the mock's are one
 macro invocation. Net deltas: quickjs −353, JSC −353, core −130, mock −44.
@@ -1224,8 +1215,8 @@ throwing, because a conformant backend does not return null for scope-routable
 validation errors. The recorded deviation is now only: "a null handle from
 createXxx is a synchronous exception", which is by design, permanently.
 
-**Block 08 part 1 landed (2026-07-10): the parity suite grows 12 → 52 lines,
-and P2 pays for itself on day one.** Two real divergences found and excluded
+**Block 08 part 1 landed (2026-07-10): the parity suite grows 12 → 52 lines.**
+Two real divergences found and excluded
 pending triage: the SYNC operation-error throw path leaks the engine's native
 error class name (`InternalError` under QuickJS via `JS_ThrowInternalError`,
 plain `Error` under JSC via its error constructor) — S4 named async rejections
@@ -1300,8 +1291,8 @@ kind (T1) generates Extent3D/Origin3D with per-arm tests; GPUTexture and
 GPUTextureView ride the generated lifecycle (readonly attributes through the
 eight verified `wgpuTextureGet*` getters; view retains its texture per the B8
 derivation). The GPUTextureFormat join: 101 IDL formats all joined, C-only
-`undefined` sentinel policied — the "stress test" enum was a non-event, which
-is the machinery working. Parity 62 → 77 lines, byte-identical. Adapter diff:
+`undefined` sentinel policied — the enum joined without incident.
+Parity 62 → 77 lines, byte-identical. Adapter diff:
 zero. Suites: core 112, quickjs 54, JSC 23+1, codegen 40.
 
 **Block 09 slice 2 landed: the bind-group resource arms complete (T4).** The
@@ -1343,14 +1334,14 @@ lifetime bugs structurally untestable under the iOS production engine —
 lifetime coverage lives in core mocks and QuickJS; keep that in mind whenever
 a retention bug class appears. Parity: 95 lines.
 
-**Windows check attempted honestly (2026-07-11):** the MSVC Rust target is
+**Windows check (2026-07-11):** the MSVC Rust target is
 installed on this macOS host, but `cargo check --target x86_64-pc-windows-msvc`
 fails in ffi's build script — bindgen cannot resolve a Windows libc sysroot
 (`math.h` not found) from macOS. Per block 03's own wording: no Windows run is
 implied; a real Windows verification needs the Windows dev machine.
 
 **Windows verification COMPLETE (2026-07-11, run by the owner's Windows-side
-session).** The full suite passes on Windows/MSVC after `63e1592` (MSVC C11
+session).** The full suite passes on Windows/MSVC after `d82d689` (MSVC C11
 flag spelling; a bindgen wrapper restoring the ui64-suffixed sentinel macros;
 the earlier rpath/import-lib/gitattributes fixes). Both dev platforms now run
 the binding.
@@ -1364,8 +1355,8 @@ copied-struct lifecycle didn't justify generalizing the creator/release
 generator), all 36 attributes + the compatibility chain. `adapterInfo` copies
 its seven strings and frees immediately; FreeMembers pairings counter-asserted
 (exactly 2+2, cache re-reads add zero). `getBindGroupLayout` is [NewObject]
-per the pin, adopts the ReturnedWithOwnership handle with NO extra AddRef (the
-device.queue lesson paying rent), and retains its pipeline per B8 because the
+per the pin, adopts the ReturnedWithOwnership handle with NO extra AddRef (per
+the `device.queue` finding, B3-M1), and retains its pipeline per B8 because the
 header guarantees nothing about independence. `isFallbackAdapter` derives from
 `adapterType == CPU` (no direct C field — recorded). Parity 94 → 103,
 byte-identical on yawgpu AND Dawn (gated run) — device-scoped features/limits
@@ -1473,8 +1464,6 @@ citation it lacked.
 
 ### L-Q2 — What does the Objective-C API expose? **The bridge, and nothing to bridge to.**
 
-This is the finding, and it is sharper than expected.
-
 | Symbol | Public header? | Note |
 |---|---|---|
 | `+[JSContext contextWithJSGlobalContextRef:]` | **YES** — `JSContext.h` | The C→ObjC bridge exists and is public. |
@@ -1488,7 +1477,7 @@ This is the finding, and it is sharper than expected.
 Verified against **both** `xcrun --sdk macosx` and `xcrun --sdk iphoneos` — iOS is
 the ship target, so a macOS-only answer would have been worthless.
 
-**And yet the symbol ships.** The SDK's `JavaScriptCore.tbd` advertises exactly
+The symbol nevertheless ships. The SDK's `JavaScriptCore.tbd` advertises exactly
 five Objective-C classes — `JSContext`, `JSManagedValue`, `JSScript`, `JSValue`,
 `JSVirtualMachine`. `JSScript` **links**. Its interface is simply not published.
 
@@ -1499,20 +1488,19 @@ risk and is not a supportable foundation for a shipping iOS product. If a module
 symbol is found that is not in a public SDK header, that is a finding to record,
 not a path to take."*
 
-### L-Q3 — The bridge spike: **not built, and the reason is the finding.**
+### L-Q3 — The bridge spike: **not built.**
 
 The block made this spike the decisive experiment, on the assumption that the ObjC
 module API was public and the open question was whether the bridge preserved our
 C-created custom global object (`JSGlobalContextCreate(global_object_class)` —
 `imp.rs`:890).
 
-**The bridge is public and would almost certainly work. There is nothing on the
-other side of it.** A spike would have to call SPI to reach a module at all — and
-whatever it returned, L6 forbids shipping it, so the experiment could not change
-the decision. Building it would be padding an investigation whose answer is
-already in the headers. L2 says the null result is a first-class outcome and *"do
-not strain to make the ObjC path work because 'implement' appeared in the
-assignment"*; L10 says the spike is throwaway, not an end in itself.
+The bridge is public; there is nothing public on the other side of it. A spike
+would have to call SPI to reach a module at all, and whatever it returned, L6
+forbids shipping it, so the experiment could not change the decision. L2 says the
+null result is a first-class outcome and *"do not strain to make the ObjC path work
+because 'implement' appeared in the assignment"*; L10 says the spike is throwaway,
+not an end in itself.
 
 **This is a deviation from the block's exit criterion 2**, which asked for the
 spike to exist and run. Recording it as a deviation rather than quietly skipping
@@ -1520,12 +1508,12 @@ it: the criterion was written to force an unambiguous answer to "can a module se
 the custom global", and the SDK answered a *prior* question — "can we make a
 module at all, publicly" — with no. The prior question dominates.
 
-### L-Q4, L-Q5, L-Q6, L-Q8 — **moot, and stated so rather than guessed.**
+### L-Q4, L-Q5, L-Q6, L-Q8 — **moot.**
 
 The delegate's async model (L-Q4), the cost of an Objective-C dependency (L-Q5),
 the OS floor it would impose (L-Q6), and its error channel (L-Q8) are all
-questions *about candidate A*. Candidate A is dead on L-Q2. Answering them would
-be fiction.
+questions *about candidate A*. Candidate A is dead on L-Q2, so they are
+unanswerable and unnecessary.
 
 Two consequences worth stating explicitly:
 
@@ -1539,9 +1527,8 @@ Two consequences worth stating explicitly:
 
 ### L-Q7 — Dynamic `import()`: **measured under JSC, 2026-07-13 (block 16 → L22).**
 
-*This entry originally asserted "out of reach" from recollection — the one line of
-Q11 that carried no citation, in a document whose whole value is that every other
-line does. The planner review (block 16 → §10, L22) caught it. It is now measured.*
+*Correction: this entry originally asserted "out of reach" with no citation
+(caught by the planner review, block 16 → §10, L22). It is now measured.*
 
 Unlike an `import` **declaration**, a dynamic `import()` **call** is syntactically
 legal in the Script goal, so what a bare `JSGlobalContextRef` does with one is an
@@ -1555,14 +1542,13 @@ legal in the Script goal, so what a bare `JSGlobalContextRef` does with one is a
 - The rejection value is an `Error` whose message is exactly:
   `Could not import the module './x.js'.`
 
-So `import()` is *reachable and inert*: JSC accepts the syntax and fails the load,
+So `import()` is reachable and inert: JSC accepts the syntax and fails the load,
 because there is no module loader to service it and no public way to install one.
-The practical conclusion is unchanged, but it now rests on an observation instead
-of a memory.
+The practical conclusion is unchanged.
 
 `import.meta` is a **module-goal** construct and is not legal in a script at all,
 so it is unreachable by syntax rather than by loader absence. Not separately
-tested; the distinction is worth keeping straight.
+tested.
 
 **Consequence for game code (unchanged):** under candidate D the game's code is a
 single script on both engines. Runtime ES modules — including `import()` — remain
@@ -1680,8 +1666,7 @@ The fixture now models all three shapes:
 
   *(Corrected 2026-07-14 by the block 16 Phase Review. This entry originally said
   the flat section modelled "`let`/`const` TDZ across the flat scope". It does
-  not, and it cannot — see the next section. Third time this block asserted a
-  bundler's behaviour without running the bundler.)*
+  not, and it cannot — see the next section.)*
 - **`__commonJS`** — cache-before-evaluate, partially-initialised exports on a
   circular require (correct for CommonJS), and a throw that **re-runs** the factory
   (counter reaches 2, two distinct errors).

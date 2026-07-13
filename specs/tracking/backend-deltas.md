@@ -58,8 +58,8 @@ All 16 `SetLabel` functions landed (21 total, with the 5 that pre-existed), as
 did `wgpuDeviceGetAdapterInfo`, `wgpuTextureGetTextureBindingViewDimension`, and
 the instance capability quartet.
 
-**The `WGPUStringView` trap was handled correctly**, which was the part most
-likely to go wrong. yawgpu added a `label_from_string_view` distinct from
+**The `WGPUStringView` trap was handled correctly.** yawgpu added a
+`label_from_string_view` distinct from
 `string_view_to_str`, and it discriminates on **length before nullness**:
 
 | Input | Spec | yawgpu |
@@ -116,9 +116,8 @@ void wgpuXxxSetLabel(WGPUXxx xxx, WGPUStringView label);
 to `wgpuXxxSetLabel`. So the moment Phase 4 generates from IDL, the binding will
 reference 14 symbols yawgpu does not export, and **static linking will fail.**
 
-This is the first concrete case of the rule in `CLAUDE.md` biting the way it was
-designed to: the fix is **upstream in yawgpu**, not a `cfg(backend)` in our
-codegen. Fortunately the same organisation owns yawgpu.
+Per `CLAUDE.md`'s backend-independent-core rule, the fix is **upstream in yawgpu**,
+not a `cfg(backend)` in our codegen. The same organisation owns yawgpu.
 
 **`wgpuGetProcAddress` being absent** also forecloses one design escape: we
 cannot fall back on runtime proc-table resolution to paper over per-backend
@@ -164,8 +163,8 @@ project, but part of canonical conformance.
 by this project.* `wgpuBufferGetMappedRange` is exported and is what
 `getMappedRange()` lowers to. Listed for canonical completeness only.
 
-**`wgpuGetProcAddress` — deliberately last, and worth a decision rather than a
-reflex.** Nothing in this project's design needs it, since we link directly. It
+**`wgpuGetProcAddress` — last.** Nothing in this project's design needs it,
+since we link directly. It
 is only interesting if a future consumer wants runtime backend selection from a
 single binary. Do not implement it just to close the diff.
 
@@ -189,9 +188,9 @@ Irrelevant to us for the same reason as D1: we generate from canonical
 future reader who diffs wgpu-native's header does not conclude the backend is
 incomplete. It is the most complete of the three.
 
-Note the irony worth remembering when choosing what to trust: **the Tier 1
-backend has the symbol gap and the Tier 2 backend does not.** Tiers express
-where development effort goes, not which implementation is most finished today.
+Note: the Tier 1 backend has the symbol gap and the Tier 2 backend does not.
+Tiers express where development effort goes, not which implementation is most
+finished today.
 
 ---
 
@@ -201,9 +200,8 @@ where development effort goes, not which implementation is most finished today.
 
 yawgpu now sets `install_name` to `@rpath/libyawgpu.dylib`. Verified: the Phase
 0.2 test binary's load command changed from an absolute path to
-`@rpath/libyawgpu.dylib`, and **our `LC_RPATH` is now the thing that resolves
-it.** The rpath emission that D5 called "dead code, do not delete" became
-load-bearing exactly as predicted.
+`@rpath/libyawgpu.dylib`, and our `LC_RPATH` now resolves it. The rpath emission
+that D5 called "dead code, do not delete" is now load-bearing.
 
 wgpu-native still exports an absolute `install_name` into its build tree. It is
 Tier 2, upstream is not ours, and iOS ships yawgpu — so this stays open at low
@@ -228,7 +226,7 @@ the binary records that **absolute path** as the library to load. Our `build.rs`
 emits an `LC_RPATH` entry, and dyld **never consults it**, because the load
 command is absolute rather than `@rpath/…`.
 
-Two things follow, and the second is the one that matters.
+Two things follow.
 
 1. **Our rpath is currently dead code.** The Phase 0.2 tests pass only because
    the absolute path happens to exist on the machine that built the backend.
@@ -271,15 +269,15 @@ yawgpu now colocates `libtint_shim.dylib` beside `libyawgpu.dylib` and reference
 it as `@loader_path/libtint_shim.dylib`, so it resolves relative to the library
 that needs it rather than relative to the consumer's binary — fix (2) below.
 
-Verified three ways, because "it builds" proves nothing here:
+Verified three ways:
 
 1. `WEBGPU_NATIVE_JS_BACKEND_LIB_DIR` pointed at yawgpu's own `target/release`
    now passes (previously: `dyld: Library not loaded: @rpath/libtint_shim.dylib`).
 2. The test binary's load command is `@rpath/libyawgpu.dylib`, resolved through
    the `LC_RPATH` we emit — so D5's fix is actually in force, not merely present.
 3. **Relocation test.** Both dylibs copied into a scratch directory unrelated to
-   yawgpu's build tree; tests pass from there. That is the property that
-   matters, and it is the one a compile check never exercises.
+   yawgpu's build tree; tests pass from there — a property a compile check does
+   not exercise.
 
 The original analysis follows.
 
@@ -413,10 +411,11 @@ handler PANICS. The real deltas, restated:
   old sampler line did not — the B2 lesson, one layer up).
 
 The spec-valid sampler inputs stay (correct regardless). The yawgpu handoff is
-closed with a retraction note. The reflection worth keeping: the planner
-inferred "backend A accepts, backend B rejects" from "suite green on A, loud
-on B" without isolating WHERE the paths diverge — a green line proves only
-what it observes, and this project had already written that rule down twice.
+closed with a retraction note. The diagnosis inferred "backend A accepts, backend
+B rejects" from "suite green on A, loud on B" without isolating where the paths
+diverge.
+Rule: a green line proves only what it observes; isolate where the paths diverge
+before assigning blame.
 
 ---
 
@@ -452,7 +451,7 @@ semantics alone.
 enforces it, so a surface texture can never carry `CopySrc` against yawgpu —
 on any platform. Consequence: the triangle example's `--verify` center-pixel
 readback (which copies from the surface texture) cannot run against yawgpu;
-the gated `--verify` evidence was produced against Dawn (commit `bf6d7db`).
+the gated `--verify` evidence was produced against Dawn (commit `e7e112b`).
 Capabilities are allowed to vary per backend, so this is catalogued as a floor,
 not a divergence. The example now checks the advertised usages up front and
 fails `--verify` with a clear message instead of the silent status-6 loop.
@@ -488,9 +487,9 @@ run here, and they fail as *"Validation succeeded unexpectedly"*:
   transient attachment may not be stored (`storeOp: "store"` / `loadOp: "load"`);
   not enforced.
 
-**The binding was cleared first, not assumed innocent** (the D11 lesson: isolate
-*where* the paths diverge before assigning blame — a binding that silently dropped
-the 0x20 bit would produce an identical symptom). A texture created through the
+**The binding was cleared first** (per D11: isolate *where* the paths diverge
+before assigning blame — a binding that silently dropped the 0x20 bit would produce
+an identical symptom). A texture created through the
 binding with `usage: RENDER_ATTACHMENT | TRANSIENT_ATTACHMENT`, `dimension: "3d"`
 reads back **`texture.usage === 48`** via `wgpuTextureGetUsage`. The bit reaches
 the C ABI intact and the backend echoes it; the backend simply does not validate
