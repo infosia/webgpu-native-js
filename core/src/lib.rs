@@ -1342,6 +1342,82 @@ pub enum TickError<E> {
     Engine(E),
 }
 
+/// Failure from a host-to-JavaScript frame callback.
+#[derive(Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum FrameError<E> {
+    /// Promise settlement or release queue failure.
+    Queue(QueueError),
+    /// JavaScript invocation, promise-settlement, or microtask-drain failure.
+    Engine(E),
+    /// The named callback returned a thenable and therefore is asynchronous.
+    AsyncCallback(String),
+    /// The named global is missing or is not callable.
+    NotCallable(String),
+}
+
+impl<E: std::fmt::Display> std::fmt::Display for FrameError<E> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Queue(error) => write!(formatter, "frame queue error: {error:?}"),
+            Self::Engine(error) => write!(formatter, "JavaScript frame error: {error}"),
+            Self::AsyncCallback(name) => write!(
+                formatter,
+                "global function '{name}' must be synchronous; await inside it straddles frames"
+            ),
+            Self::NotCallable(name) => {
+                write!(formatter, "global '{name}' is missing or not callable")
+            }
+        }
+    }
+}
+
+fn frame_error_from_tick<E>(error: TickError<E>) -> FrameError<E> {
+    match error {
+        TickError::Queue(error) => FrameError::Queue(error),
+        TickError::Engine(error) => FrameError::Engine(error),
+    }
+}
+
+unsafe fn pump<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    instance: webgpu_native_js_ffi::native::WGPUInstance,
+) -> std::result::Result<(), TickError<E::Error>> {
+    let env = E::environment(cx);
+    unsafe { (env.gpu().instance_process_events)(instance) };
+    let settlements = env.settlements().drain::<E>(cx);
+    let microtasks = E::drain_microtasks(cx).map_err(TickError::Engine);
+    match (settlements, microtasks) {
+        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+        (Ok(_), Ok(())) => Ok(()),
+    }
+}
+
+/// Calls a named function on `globalThis` and rejects thenable return values.
+///
+/// The global object is used as the callback receiver. A missing or non-callable
+/// global returns [`FrameError::NotCallable`]. A callable `then` property on an
+/// object return value returns [`FrameError::AsyncCallback`].
+pub fn call_global_function<E: JsEngine>(
+    cx: E::Context<'_>,
+    name: &str,
+    args: &[E::Value],
+) -> std::result::Result<E::Value, FrameError<E::Error>> {
+    let global = E::global(cx);
+    let callback = E::get_property(cx, global, name).map_err(FrameError::Engine)?;
+    if !E::is_callable(cx, callback) {
+        return Err(FrameError::NotCallable(name.to_owned()));
+    }
+    let result = E::call(cx, callback, global, args).map_err(FrameError::Engine)?;
+    if E::is_object(cx, result) {
+        let then = E::get_property(cx, result, "then").map_err(FrameError::Engine)?;
+        if E::is_callable(cx, then) {
+            return Err(FrameError::AsyncCallback(name.to_owned()));
+        }
+    }
+    Ok(result)
+}
+
 /// Runs one host tick in the required cross-engine order.
 ///
 /// The order is WebGPU `ProcessEvents`, one batched settlement drain, engine
@@ -1356,12 +1432,45 @@ pub unsafe fn tick<E: JsEngine + 'static>(
     cx: E::Context<'_>,
     instance: webgpu_native_js_ffi::native::WGPUInstance,
 ) -> std::result::Result<usize, TickError<E::Error>> {
-    let env = E::environment(cx);
-    unsafe { (env.gpu().instance_process_events)(instance) };
-    let settlements = env.settlements().drain::<E>(cx);
-    let microtasks = E::drain_microtasks(cx).map_err(TickError::Engine);
-    let releases = env.queue().drain().map_err(TickError::Queue);
-    match (settlements, microtasks, releases) {
+    let pumped = unsafe { pump::<E>(cx, instance) };
+    let releases = E::environment(cx).queue().drain().map_err(TickError::Queue);
+    match (pumped, releases) {
+        (Err(error), _) | (Ok(()), Err(error)) => Err(error),
+        (Ok(()), Ok(drained)) => Ok(drained),
+    }
+}
+
+/// Runs one host frame with a synchronous named JavaScript callback.
+///
+/// The order is WebGPU `ProcessEvents`, one batched settlement drain, engine
+/// microtasks, the named callback, a second microtask drain, then the native
+/// release queue. The second microtask drain and the release drain still run
+/// when the callback throws or returns a thenable.
+///
+/// # Safety
+///
+/// `instance` must be a live instance from `E`'s configured backend and must
+/// remain valid for this call. The caller must invoke this on the designated
+/// engine/tick thread.
+pub unsafe fn frame<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    instance: webgpu_native_js_ffi::native::WGPUInstance,
+    name: &str,
+    args: &[E::Value],
+) -> std::result::Result<usize, FrameError<E::Error>> {
+    if let Err(error) = unsafe { pump::<E>(cx, instance) } {
+        let releases = E::environment(cx).queue().drain();
+        drop(releases);
+        return Err(frame_error_from_tick(error));
+    }
+
+    let callback = call_global_function::<E>(cx, name, args);
+    let microtasks = E::drain_microtasks(cx).map_err(FrameError::Engine);
+    let releases = E::environment(cx)
+        .queue()
+        .drain()
+        .map_err(FrameError::Queue);
+    match (callback, microtasks, releases) {
         (Err(error), _, _) | (Ok(_), Err(error), _) | (Ok(_), Ok(()), Err(error)) => Err(error),
         (Ok(_), Ok(()), Ok(drained)) => Ok(drained),
     }

@@ -78,6 +78,7 @@ pub struct Runtime {
     property_errors: RefCell<BTreeMap<(Value, String), String>>,
     property_value_errors: RefCell<BTreeMap<(Value, Value), String>>,
     call_errors: RefCell<BTreeMap<Value, String>>,
+    call_results: RefCell<BTreeMap<Value, Value>>,
     construct_errors: RefCell<BTreeMap<Value, String>>,
     property_value_calls: Cell<usize>,
     calls: Cell<usize>,
@@ -153,6 +154,7 @@ impl Runtime {
             property_errors: RefCell::new(BTreeMap::new()),
             property_value_errors: RefCell::new(BTreeMap::new()),
             call_errors: RefCell::new(BTreeMap::new()),
+            call_results: RefCell::new(BTreeMap::new()),
             construct_errors: RefCell::new(BTreeMap::new()),
             property_value_calls: Cell::new(0),
             calls: Cell::new(0),
@@ -220,6 +222,25 @@ impl Runtime {
         self.call_errors
             .borrow_mut()
             .insert(self.canonical(callable), error.to_owned());
+    }
+
+    fn set_call_result(&self, callable: Value, result: Value) {
+        self.call_results
+            .borrow_mut()
+            .insert(self.canonical(callable), result);
+    }
+
+    fn set_global(&self, name: &str, value: Value) {
+        let _ = self.with_value(self.global, |stored| {
+            let MockValue::Object(properties) = stored else {
+                return;
+            };
+            properties.insert(name.to_owned(), value);
+        });
+    }
+
+    fn handler(&self) -> Value {
+        self.insert(MockValue::Callable(MockCallable::Handler))
     }
 
     fn set_construct_error(&self, constructor: Value, error: &str) {
@@ -873,6 +894,7 @@ impl JsEngine for MockEngine {
         args: &[Self::Value],
     ) -> Result<Self::Value, Self::Error> {
         cx.runtime.calls.set(cx.runtime.calls.get() + 1);
+        GPU_STATE.with(|state| state.borrow_mut().native_order.push("call"));
         let args = args
             .iter()
             .map(|value| cx.runtime.canonical(*value))
@@ -927,7 +949,13 @@ impl JsEngine for MockEngine {
                 let done = cx.runtime.bool(done);
                 cx.runtime.object(&[("done", done), ("value", value)])
             }
-            MockValue::Callable(MockCallable::Handler) => cx.runtime.undefined(),
+            MockValue::Callable(MockCallable::Handler) => cx
+                .runtime
+                .call_results
+                .borrow()
+                .get(&f)
+                .copied()
+                .unwrap_or_else(|| cx.runtime.undefined()),
             MockValue::Callable(MockCallable::Boolean) => cx.runtime.bool(
                 args.first()
                     .is_some_and(|value| match cx.runtime.get(*value) {
@@ -4057,6 +4085,109 @@ mod tests {
             assert_eq!(
                 state.borrow().native_order,
                 ["process_events", "settle", "microtasks", "device_release"]
+            );
+        });
+    }
+
+    #[test]
+    fn call_global_function_calls_with_arguments_and_rejects_thenables() {
+        let rt = runtime();
+        let callback = rt.handler();
+        let result = rt.number(42.0);
+        rt.set_call_result(callback, result);
+        rt.set_global("update", callback);
+        let first = rt.string("first");
+        let second = rt.number(2.0);
+
+        rt.with_scope(|cx| {
+            let actual = crate::call_global_function::<Engine>(cx, "update", &[first, second])
+                .expect("call global function");
+            assert_eq!(Engine::to_f64(cx, actual), Ok(42.0));
+        });
+        assert_eq!(rt.call_args.borrow().as_slice(), &[first, second]);
+
+        let then = rt.handler();
+        let thenable = rt.object(&[("then", then)]);
+        rt.set_call_result(callback, thenable);
+        rt.with_scope(|cx| {
+            let error = crate::call_global_function::<Engine>(cx, "update", &[])
+                .expect_err("thenable return must fail");
+            assert_eq!(error, crate::FrameError::AsyncCallback("update".to_owned()));
+            assert_eq!(
+                error.to_string(),
+                "global function 'update' must be synchronous; await inside it straddles frames"
+            );
+        });
+
+        rt.with_scope(|cx| {
+            assert_eq!(
+                crate::call_global_function::<Engine>(cx, "missing", &[]),
+                Err(crate::FrameError::NotCallable("missing".to_owned()))
+            );
+        });
+    }
+
+    #[test]
+    fn core_frame_orders_callback_between_microtask_drains_and_drains_releases() {
+        reset_gpu();
+        let rt = runtime();
+        let callback = rt.handler();
+        rt.set_global("update", callback);
+        rt.queue()
+            .enqueue(crate::ReleaseRequest::Device {
+                device: fake_device(),
+                gpu: dispatch(),
+            })
+            .expect("enqueue release");
+
+        let drained =
+            unsafe { crate::frame::<Engine>(rt.context(), fake_handle(99), "update", &[]) }
+                .expect("frame");
+
+        assert_eq!(drained, 1);
+        GPU_STATE.with(|state| {
+            assert_eq!(
+                state.borrow().native_order,
+                [
+                    "process_events",
+                    "microtasks",
+                    "call",
+                    "microtasks",
+                    "device_release"
+                ]
+            );
+        });
+    }
+
+    #[test]
+    fn core_frame_drains_after_a_throwing_callback_before_returning_the_error() {
+        reset_gpu();
+        let rt = runtime();
+        let callback = rt.handler();
+        rt.set_call_error(callback, "update threw");
+        rt.set_global("update", callback);
+        rt.queue()
+            .enqueue(crate::ReleaseRequest::Device {
+                device: fake_device(),
+                gpu: dispatch(),
+            })
+            .expect("enqueue release");
+
+        let error = unsafe { crate::frame::<Engine>(rt.context(), fake_handle(99), "update", &[]) }
+            .expect_err("callback throw must escape");
+
+        assert_eq!(error, crate::FrameError::Engine("update threw".to_owned()));
+        assert_eq!(rt.queue().len(), Ok(0));
+        GPU_STATE.with(|state| {
+            assert_eq!(
+                state.borrow().native_order,
+                [
+                    "process_events",
+                    "microtasks",
+                    "call",
+                    "microtasks",
+                    "device_release"
+                ]
             );
         });
     }

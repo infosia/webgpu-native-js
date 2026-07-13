@@ -32,6 +32,40 @@
         globalThis.parityLog.push(String(line));
     }
 
+    var frameContractLines = [];
+    var frameContractOrder = [];
+    var frameContractPostThrow = false;
+    Promise.resolve().then(function () {
+        frameContractOrder.push("pre");
+    });
+    globalThis.frameContractUpdate = function () {
+        frameContractOrder.push("update");
+        Promise.resolve().then(function () {
+            frameContractOrder.push("post");
+        });
+    };
+    globalThis.frameContractAsync = async function () {};
+    globalThis.frameContractThenable = function () {
+        return { then: function () {} };
+    };
+    globalThis.frameContractThrow = function () {
+        enqueueFrameContractRelease();
+        Promise.resolve().then(function () {
+            frameContractPostThrow = true;
+        });
+        throw new Error("frame contract throw");
+    };
+    globalThis.frameContractRecordOrder = function () {
+        frameContractLines.push("frame:order:" + frameContractOrder.join(","));
+    };
+    globalThis.frameContractRecordError = function (caseName, variant) {
+        frameContractLines.push("frame:" + caseName + ":" + variant);
+    };
+    globalThis.frameContractRecordThrow = function (variant, released, remaining) {
+        frameContractLines.push("frame:throw:" + variant + ":" +
+            frameContractPostThrow + ":" + released + ":" + remaining);
+    };
+
     function fail(error) {
         if (finished) {
             return;
@@ -1859,6 +1893,7 @@
                 return runDestroyedErrorSuppression();
             })
             .then(function () {
+                frameContractLines.forEach(log);
                 finished = true;
                 globalThis.parityDone = true;
             });

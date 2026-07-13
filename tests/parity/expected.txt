@@ -210,3 +210,8 @@ submit:double:GPUValidationError:returned
 destroy:ok
 lostReason:destroyed
 destroy:validation-suppressed:null:returned
+frame:order:pre,update,post
+frame:async:AsyncCallback
+frame:thenable:AsyncCallback
+frame:missing:NotCallable
+frame:throw:Engine:true:1:0

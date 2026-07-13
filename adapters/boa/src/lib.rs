@@ -29,9 +29,10 @@ use boa_engine::{
 use boa_gc::{Finalize, Trace};
 use webgpu_native_js_core as core;
 use webgpu_native_js_core::__gpu_dispatch_from_ffi;
+use webgpu_native_js_core::JsEngine;
 use webgpu_native_js_ffi::native as ffi_wgpu;
 
-pub use core::HostValue;
+pub use core::{FrameError, HostValue};
 
 /// Adapter result type.
 pub type Result<T> = std::result::Result<T, Error>;
@@ -43,6 +44,8 @@ pub enum Error {
     Exception(String),
     /// An engine-neutral queue operation failed.
     Queue(core::QueueError),
+    /// A host-to-JavaScript callback violated the frame contract or failed.
+    Frame(FrameError<String>),
     /// A module source file could not be read.
     Io {
         /// The module path that failed.
@@ -57,6 +60,7 @@ impl fmt::Display for Error {
         match self {
             Self::Exception(message) => formatter.write_str(message),
             Self::Queue(error) => write!(formatter, "{error:?}"),
+            Self::Frame(error) => error.fmt(formatter),
             Self::Io { path, source } => {
                 write!(
                     formatter,
@@ -589,6 +593,25 @@ impl Runtime {
             .map_err(|error| Error::Exception(js_error_string(error, context)))
     }
 
+    /// Calls a named function on `globalThis` with primitive host arguments.
+    ///
+    /// Thenable return values are rejected because this call-in contract is
+    /// synchronous. Other return values use the existing [`HostValue`]
+    /// conversion rules.
+    pub fn call_global_function(&self, name: &str, args: &[HostValue]) -> Result<HostValue> {
+        self.with_scope(|cx| {
+            let args = args
+                .iter()
+                .map(|value| js_value(cx, value))
+                .collect::<core::Result<Vec<_>, _>>()
+                .map_err(|error| Error::Frame(FrameError::Engine(value_string(cx, error))))?;
+            let value = core::call_global_function::<Engine>(cx, name, &args)
+                .map_err(|error| Error::Frame(host_frame_error(cx, error)))?;
+            host_value(&cx.arena.get(value), cx.boa())
+                .map_err(|error| Error::Exception(js_error_string(error, cx.boa())))
+        })
+    }
+
     /// Clears a global property by assigning `undefined`.
     pub fn clear_global(&self, name: &str) -> Result<()> {
         let value = self.arena.insert(JsValue::undefined());
@@ -734,6 +757,32 @@ impl Runtime {
         })
     }
 
+    /// Runs one frame pump with a synchronous named JavaScript callback.
+    ///
+    /// The callback runs between pre- and post-callback microtask drains, and
+    /// the native release queue drains last even when the callback throws.
+    ///
+    /// # Safety
+    /// `instance` must be live and this must run on the runtime's owning thread.
+    pub unsafe fn frame(
+        &self,
+        instance: ffi_wgpu::WGPUInstance,
+        name: &str,
+        args: &[HostValue],
+    ) -> Result<usize> {
+        self.with_scope(|cx| {
+            let args = args
+                .iter()
+                .map(|value| js_value(cx, value))
+                .collect::<core::Result<Vec<_>, _>>()
+                .map_err(|error| Error::Frame(FrameError::Engine(value_string(cx, error))))?;
+            // SAFETY: the caller guarantees a live instance and engine-thread
+            // execution, which are the requirements of the core frame.
+            unsafe { core::frame::<Engine>(cx, instance, name, &args) }
+                .map_err(|error| Error::Frame(host_frame_error(cx, error)))
+        })
+    }
+
     /// Runs the engine garbage collector.
     pub fn run_gc(&self) {
         boa_gc::force_collect();
@@ -867,6 +916,26 @@ fn host_value(value: &JsValue, context: &mut BoaContext) -> JsResult<HostValue> 
     value
         .to_string(context)
         .map(|value| HostValue::String(value.to_std_string_lossy()))
+}
+
+fn js_value(cx: Context<'_>, value: &HostValue) -> core::Result<BoaValue, BoaValue> {
+    match value {
+        HostValue::String(value) => Engine::string(cx, value),
+        HostValue::Number(value) => Engine::number(cx, *value),
+        HostValue::Bool(value) => Ok(Engine::boolean(cx, *value)),
+        HostValue::Null => Ok(Engine::null(cx)),
+        HostValue::Undefined => Ok(Engine::undefined(cx)),
+    }
+}
+
+fn host_frame_error(cx: Context<'_>, error: FrameError<BoaValue>) -> FrameError<String> {
+    match error {
+        FrameError::Queue(error) => FrameError::Queue(error),
+        FrameError::Engine(error) => FrameError::Engine(value_string(cx, error)),
+        FrameError::AsyncCallback(name) => FrameError::AsyncCallback(name),
+        FrameError::NotCallable(name) => FrameError::NotCallable(name),
+        _ => FrameError::Engine("unknown frame failure".to_owned()),
+    }
 }
 
 fn host_function_callback(
@@ -1773,8 +1842,8 @@ mod tests {
     use boa_gc::{Finalize, Trace};
 
     use super::{
-        core, ffi_wgpu as wgpu, gpu_dispatch, BoaValue, Engine, HostValue, ModuleEvaluationStatus,
-        Runtime,
+        core, ffi_wgpu as wgpu, gpu_dispatch, BoaValue, Engine, Error, FrameError, HostValue,
+        ModuleEvaluationStatus, Runtime,
     };
     use webgpu_native_js_core::JsEngine;
 
@@ -1817,6 +1886,29 @@ mod tests {
         dispatch.device_add_ref = count_module_device_add_ref;
         dispatch.device_release = count_module_device_release;
         dispatch
+    }
+
+    unsafe fn count_frame_device_release(device: wgpu::WGPUDevice) {
+        let counter = unsafe { Arc::from_raw(device.cast::<AtomicUsize>().cast_const()) };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn enqueue_counted_frame_release(
+        queue: &core::ReleaseQueue,
+        counter: &Arc<AtomicUsize>,
+    ) -> std::result::Result<(), String> {
+        let raw_counter = Arc::into_raw(Arc::clone(counter));
+        let mut dispatch = gpu_dispatch();
+        dispatch.device_release = count_frame_device_release;
+        let request = core::ReleaseRequest::Device {
+            device: raw_counter.cast_mut().cast(),
+            gpu: dispatch,
+        };
+        if let Err(error) = queue.enqueue(request) {
+            unsafe { drop(Arc::from_raw(raw_counter)) };
+            return Err(format!("could not enqueue frame release: {error:?}"));
+        }
+        Ok(())
     }
 
     struct AdapterRequestState {
@@ -2062,6 +2154,96 @@ mod tests {
         }
     }
 
+    fn exercise_frame_contract(runtime: &Runtime, instance: wgpu::WGPUInstance) {
+        let releases = Arc::new(AtomicUsize::new(0));
+        let queue = Arc::clone(runtime.arena.env.queue());
+        let captured_releases = Arc::clone(&releases);
+        runtime
+            .register_host_function("enqueueFrameContractRelease", move |_| {
+                enqueue_counted_frame_release(&queue, &captured_releases)
+            })
+            .expect("register parity frame release");
+
+        let drained = unsafe { runtime.frame(instance, "frameContractUpdate", &[]) }
+            .expect("parity ordered frame");
+        assert_eq!(drained, 0);
+        runtime
+            .call_global_function("frameContractRecordOrder", &[])
+            .expect("record parity frame order");
+
+        let async_error = unsafe { runtime.frame(instance, "frameContractAsync", &[]) }
+            .expect_err("parity async frame must fail");
+        assert!(matches!(
+            async_error,
+            Error::Frame(FrameError::AsyncCallback(ref name)) if name == "frameContractAsync"
+        ));
+        runtime
+            .call_global_function(
+                "frameContractRecordError",
+                &[
+                    HostValue::String("async".to_owned()),
+                    HostValue::String("AsyncCallback".to_owned()),
+                ],
+            )
+            .expect("record parity async rejection");
+
+        let thenable_error = unsafe { runtime.frame(instance, "frameContractThenable", &[]) }
+            .expect_err("parity thenable frame must fail");
+        assert!(matches!(
+            thenable_error,
+            Error::Frame(FrameError::AsyncCallback(ref name)) if name == "frameContractThenable"
+        ));
+        runtime
+            .call_global_function(
+                "frameContractRecordError",
+                &[
+                    HostValue::String("thenable".to_owned()),
+                    HostValue::String("AsyncCallback".to_owned()),
+                ],
+            )
+            .expect("record parity thenable rejection");
+
+        let missing_error = unsafe { runtime.frame(instance, "frameContractMissing", &[]) }
+            .expect_err("parity missing frame must fail");
+        assert!(matches!(
+            missing_error,
+            Error::Frame(FrameError::NotCallable(ref name)) if name == "frameContractMissing"
+        ));
+        runtime
+            .call_global_function(
+                "frameContractRecordError",
+                &[
+                    HostValue::String("missing".to_owned()),
+                    HostValue::String("NotCallable".to_owned()),
+                ],
+            )
+            .expect("record parity missing rejection");
+
+        let throw_error = unsafe { runtime.frame(instance, "frameContractThrow", &[]) }
+            .expect_err("parity throwing frame must fail");
+        assert!(matches!(
+            throw_error,
+            Error::Frame(FrameError::Engine(ref message))
+                if message.contains("frame contract throw")
+        ));
+        let remaining = runtime
+            .drain_releases()
+            .expect("parity remaining release drain");
+        let released = releases.load(Ordering::Relaxed);
+        assert_eq!(released, 1);
+        assert_eq!(remaining, 0);
+        runtime
+            .call_global_function(
+                "frameContractRecordThrow",
+                &[
+                    HostValue::String("Engine".to_owned()),
+                    HostValue::Number(released as f64),
+                    HostValue::Number(remaining as f64),
+                ],
+            )
+            .expect("record parity throwing frame");
+    }
+
     #[test]
     fn public_runtime_and_copy_handles_work() {
         let runtime = Runtime::new().expect("Boa runtime");
@@ -2147,6 +2329,250 @@ mod tests {
             "hostString() === 'text' && hostNumber() === 3.5 && hostTrue() === true && hostNull() === null && hostUndefined() === undefined",
             "host-results.js",
         ));
+    }
+
+    #[test]
+    fn frame_orders_pending_callback_and_new_microtasks() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("Boa runtime");
+        runtime
+            .eval(
+                r#"
+                    globalThis.frameOrder = [];
+                    Promise.resolve().then(() => frameOrder.push("pre"));
+                    globalThis.update = () => {
+                        frameOrder.push("update");
+                        Promise.resolve().then(() => frameOrder.push("post"));
+                    };
+                    globalThis.frameOrderResult = () => frameOrder.join(",");
+                "#,
+                "frame-order.js",
+            )
+            .expect("install ordered callback");
+
+        let drained =
+            unsafe { runtime.frame(setup.instance, "update", &[]) }.expect("run ordered frame");
+
+        assert_eq!(drained, 0);
+        assert_eq!(
+            runtime
+                .call_global_function("frameOrderResult", &[])
+                .expect("read frame order"),
+            HostValue::String("pre,update,post".to_owned())
+        );
+    }
+
+    #[test]
+    fn frame_rejects_an_async_callback_with_a_synchronous_guidance_message() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("Boa runtime");
+        runtime
+            .eval(
+                "globalThis.update = async function () {};",
+                "frame-async.js",
+            )
+            .expect("install async callback");
+
+        let error = unsafe { runtime.frame(setup.instance, "update", &[]) }
+            .expect_err("async callback must fail");
+
+        assert!(matches!(
+            &error,
+            Error::Frame(FrameError::AsyncCallback(name)) if name == "update"
+        ));
+        let message = error.to_string();
+        assert!(message.contains("must be synchronous"), "{message}");
+        assert!(
+            message.contains("await inside it straddles frames"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn call_global_function_rejects_a_hand_rolled_thenable() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("Boa runtime");
+        runtime
+            .eval(
+                "globalThis.update = () => ({ then() {} });",
+                "frame-thenable.js",
+            )
+            .expect("install thenable callback");
+
+        let error = runtime
+            .call_global_function("update", &[])
+            .expect_err("thenable callback must fail");
+
+        assert!(matches!(
+            error,
+            Error::Frame(FrameError::AsyncCallback(ref name)) if name == "update"
+        ));
+        let frame_error = unsafe { runtime.frame(setup.instance, "update", &[]) }
+            .expect_err("frame must reject a thenable callback");
+        assert!(matches!(
+            frame_error,
+            Error::Frame(FrameError::AsyncCallback(ref name)) if name == "update"
+        ));
+    }
+
+    #[test]
+    fn frame_rejects_missing_and_non_callable_globals() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("Boa runtime");
+
+        let missing = unsafe { runtime.frame(setup.instance, "missingUpdate", &[]) }
+            .expect_err("missing callback must fail");
+        assert!(matches!(
+            missing,
+            Error::Frame(FrameError::NotCallable(ref name)) if name == "missingUpdate"
+        ));
+
+        runtime
+            .eval("globalThis.update = 42;", "frame-non-callable.js")
+            .expect("install non-callable global");
+        let non_callable = unsafe { runtime.frame(setup.instance, "update", &[]) }
+            .expect_err("non-callable callback must fail");
+        assert!(matches!(
+            non_callable,
+            Error::Frame(FrameError::NotCallable(ref name)) if name == "update"
+        ));
+    }
+
+    #[test]
+    fn throwing_frame_callback_still_drains_microtasks_and_releases() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("Boa runtime");
+        let releases = Arc::new(AtomicUsize::new(0));
+        let queue = Arc::clone(runtime.arena.env.queue());
+        let captured_releases = Arc::clone(&releases);
+        runtime
+            .register_host_function("enqueueFrameRelease", move |_| {
+                enqueue_counted_frame_release(&queue, &captured_releases)
+            })
+            .expect("register release enqueue");
+        runtime
+            .eval(
+                r#"
+                    globalThis.framePostThrow = false;
+                    globalThis.update = () => {
+                        enqueueFrameRelease();
+                        Promise.resolve().then(() => { framePostThrow = true; });
+                        throw new Error("frame boom");
+                    };
+                    globalThis.framePostThrowResult = () => framePostThrow;
+                "#,
+                "frame-throw.js",
+            )
+            .expect("install throwing callback");
+
+        let error = unsafe { runtime.frame(setup.instance, "update", &[]) }
+            .expect_err("throwing callback must fail");
+
+        assert!(matches!(
+            error,
+            Error::Frame(FrameError::Engine(ref message)) if message.contains("frame boom")
+        ));
+        assert_eq!(releases.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            runtime.drain_releases().expect("remaining release drain"),
+            0
+        );
+        assert_eq!(
+            runtime
+                .call_global_function("framePostThrowResult", &[])
+                .expect("read post-throw microtask"),
+            HostValue::Bool(true)
+        );
+    }
+
+    #[test]
+    fn finalizer_release_enqueued_inside_update_drains_in_the_same_frame() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("Boa runtime");
+        let wrapper = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");
+        runtime.with_scope(|cx| {
+            Engine::duplicate_value(cx, wrapper);
+        });
+        runtime
+            .set_global_value("frameWrapper", wrapper)
+            .expect("set frame wrapper");
+        let arena = Rc::downgrade(&runtime.arena);
+        runtime
+            .register_host_function("dropFrameWrapper", move |_| {
+                let arena = arena
+                    .upgrade()
+                    .ok_or_else(|| "frame wrapper arena was dropped".to_owned())?;
+                let value = arena.get(wrapper);
+                let object = value
+                    .as_object()
+                    .ok_or_else(|| "frame wrapper was not an object".to_owned())?;
+                let data = object
+                    .downcast_ref::<super::WrapperData>()
+                    .ok_or_else(|| "frame wrapper payload was missing".to_owned())?;
+                data.finalize();
+                arena.release(wrapper);
+                Ok(())
+            })
+            .expect("register wrapper drop");
+        runtime
+            .eval(
+                "globalThis.update = () => { globalThis.frameWrapper = undefined; dropFrameWrapper(); };",
+                "frame-wrapper-drop.js",
+            )
+            .expect("install wrapper-dropping callback");
+
+        let drained = unsafe { runtime.frame(setup.instance, "update", &[]) }
+            .expect("run wrapper-dropping frame");
+
+        assert_eq!(drained, 1);
+    }
+
+    #[test]
+    fn call_global_function_round_trips_every_host_value_variant() {
+        let runtime = Runtime::new().expect("Boa runtime");
+        runtime
+            .eval(
+                "globalThis.identity = value => value;",
+                "frame-arguments.js",
+            )
+            .expect("install identity callback");
+        let values = [
+            HostValue::Number(3.5),
+            HostValue::String("text".to_owned()),
+            HostValue::Bool(true),
+            HostValue::Null,
+            HostValue::Undefined,
+        ];
+
+        for value in values {
+            assert_eq!(
+                runtime
+                    .call_global_function("identity", std::slice::from_ref(&value))
+                    .expect("round-trip host value"),
+                value
+            );
+        }
+    }
+
+    #[test]
+    fn tick_never_invokes_an_update_global() {
+        let setup = native_setup();
+        let runtime = Runtime::new().expect("Boa runtime");
+        runtime
+            .eval(
+                "globalThis.updateCalls = 0; globalThis.update = () => { updateCalls += 1; }; globalThis.updateCallCount = () => updateCalls;",
+                "tick-does-not-update.js",
+            )
+            .expect("install update counter");
+
+        unsafe { runtime.tick(setup.instance) }.expect("tick");
+
+        assert_eq!(
+            runtime
+                .call_global_function("updateCallCount", &[])
+                .expect("read update count"),
+            HostValue::Number(0.0)
+        );
     }
 
     #[test]
@@ -2897,6 +3323,7 @@ mod tests {
         runtime
             .eval(SCRIPT, "tests/parity/parity.js")
             .expect("evaluate parity script");
+        exercise_frame_contract(&runtime, setup.instance);
         runtime
             .device_event_forwarder()
             .forward_uncaptured_error(
