@@ -620,6 +620,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "example-bounce"
+version = "0.1.0"
+dependencies = [
+ "boa-adapter",
+ "raw-window-handle",
+ "raw-window-metal",
+ "webgpu-native-js-ffi",
+ "winit",
+]
+
+[[package]]
 name = "example-compute"
 version = "0.1.0"
 dependencies = [

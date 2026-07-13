@@ -1,0 +1,35 @@
+[package]
+name = "example-bounce"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "example-bounce"
+path = "src/main.rs"
+test = false
+
+[features]
+default = ["backend-yawgpu"]
+backend-yawgpu = [
+    "boa-adapter/backend-yawgpu",
+    "webgpu-native-js-ffi/backend-yawgpu",
+]
+backend-wgpu-native = [
+    "boa-adapter/backend-wgpu-native",
+    "webgpu-native-js-ffi/backend-wgpu-native",
+]
+backend-dawn = [
+    "boa-adapter/backend-dawn",
+    "webgpu-native-js-ffi/backend-dawn",
+]
+
+[dependencies]
+boa-adapter = { path = "../../adapters/boa", default-features = false }
+raw-window-handle = "0.6"
+webgpu-native-js-ffi = { path = "../../ffi", default-features = false }
+winit = "0.30"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+raw-window-metal = "1.1"

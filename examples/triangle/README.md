@@ -7,6 +7,8 @@ part in the frame loop: the host borrows the bundle while its JS global keeps
 the wrapper alive, then acquires, clears, renders, submits, and presents every
 frame through `webgpu.h`. The host deliberately does not call `eval` or `tick`
 between frames; queued wrapper releases are drained during teardown.
+`examples/bounce` shows the dynamic case: one JavaScript update per frame drives
+multiple bodies while the host still submits one draw call.
 
 Build the selected real backend first and point the loader at its library
 directory:
