@@ -216,6 +216,32 @@ the parity actually holds rather than assuming it.
 - **All repository documentation, specs, comments, and identifiers: English.**
 - Conversation with the user (chat responses): Japanese.
 
+## Writing style (applies to everything: specs, tracking, comments, commit
+## messages, and chat reports)
+
+**State fact, evidence, and consequence. Nothing else.**
+
+Forbidden:
+
+- Rhetorical or dramatic framing ("third strike, same pitch", "the real finding
+  was…", "do not be the fourth", bolded slogans).
+- Narrating a mistake as a story, or restating the same lesson in more than one
+  document.
+- Self-referential commentary about the process of finding a bug.
+- Emphatic repetition of a point already made.
+
+Required:
+
+- A lesson worth keeping is written **once**, as a one-line rule. Example:
+  *"Rule: a claim about another system's behaviour requires running that system."*
+  Not as a narrative.
+- Reports: what changed, what was measured, what is next. Short.
+- A correction to a prior record states what was wrong, the evidence, and the
+  corrected claim. It does not editorialise about how the error happened.
+
+**Why:** these documents exist so a reader can make a decision. Rhetoric and
+repetition obscure the technical content and cost the reader time.
+
 ## Core principles
 
 1. **Every public API has a direct unit test.** Any `pub fn` in `core`, `ffi`,
