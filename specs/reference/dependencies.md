@@ -47,6 +47,25 @@ codegen follows (plan §2.3): **WebIDL supplies the JS-facing shape, `webgpu.yml
 both, and recording how they are kept consistent, is a standing obligation of
 this document — not something to rediscover at Phase 4.
 
+## Locating target SDKs for `bindgen`
+
+The FFI build always derives and passes an explicit Clang target from Cargo's
+`TARGET` triple. The spelling is identical except for Rust's iOS simulator
+suffix, which is translated to Clang's `simulator` suffix. Cross-target system
+headers are resolved without committed machine-local paths:
+
+- Android builds read the NDK root from `ANDROID_NDK_HOME`, falling back to
+  `ANDROID_NDK_ROOT`. The build inspects `toolchains/llvm/prebuilt` for the
+  toolchain shipped for the current build host, then uses that toolchain's
+  `sysroot`. If neither variable is set, the build fails with an error naming
+  both variables.
+- iOS device builds locate the `iphoneos` SDK with `xcrun`; iOS simulator builds
+  locate `iphonesimulator` the same way.
+
+These variables locate headers for binding generation only. With no backend
+feature enabled, the FFI crate remains types-only and does not need a target
+build of a backend library.
+
 ## Locating a backend at build time
 
 The FFI crate links one backend, selected by Cargo feature (`yawgpu`,

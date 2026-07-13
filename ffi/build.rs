@@ -1,8 +1,14 @@
+mod build_support;
+
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use build_support::{android_sysroot_path, clang_target, derive_android_host_tag};
+
 const BACKEND_LIB_DIR_ENV: &str = "WEBGPU_NATIVE_JS_BACKEND_LIB_DIR";
+const ANDROID_NDK_HOME_ENV: &str = "ANDROID_NDK_HOME";
+const ANDROID_NDK_ROOT_ENV: &str = "ANDROID_NDK_ROOT";
 
 #[derive(Clone, Copy)]
 struct Backend {
@@ -35,6 +41,12 @@ const BACKENDS: &[Backend] = &[
 
 fn main() {
     println!("cargo:rerun-if-env-changed={BACKEND_LIB_DIR_ENV}");
+    println!("cargo:rerun-if-env-changed={ANDROID_NDK_HOME_ENV}");
+    println!("cargo:rerun-if-env-changed={ANDROID_NDK_ROOT_ENV}");
+    println!("cargo:rerun-if-env-changed=DEVELOPER_DIR");
+
+    let target = env::var("TARGET").expect("TARGET is set by Cargo");
+    let host = env::var("HOST").expect("HOST is set by Cargo");
     let target_os = env::var("CARGO_CFG_TARGET_OS").expect("CARGO_CFG_TARGET_OS is set by Cargo");
 
     let manifest_dir = PathBuf::from(
@@ -83,10 +95,20 @@ fn main() {
     std::fs::write(&wrapper_path, &wrapper)
         .expect("bindgen wrapper header can be written to OUT_DIR");
 
+    let mut clang_args = vec![format!("--target={}", clang_target(&target))];
+    if target_os == "android" {
+        let sysroot = resolve_android_sysroot(&host);
+        clang_args.push(format!("--sysroot={}", sysroot.display()));
+    } else if let Some(sdk) = apple_sdk_for_target(&target) {
+        let sysroot = resolve_apple_sdk(sdk, &target);
+        clang_args.push(format!("--sysroot={}", sysroot.display()));
+    }
+
     let bindings = bindgen::Builder::default()
         .header(wrapper_path.to_string_lossy())
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .clang_macro_fallback()
+        .clang_args(clang_args)
         .generate()
         .expect("bindgen can generate bindings from the canonical webgpu.h");
 
@@ -116,6 +138,105 @@ fn main() {
         println!("cargo:rustc-link-lib=dylib={}", backend.library);
         println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib_dir.display());
     }
+}
+
+fn resolve_android_sysroot(host: &str) -> PathBuf {
+    let (env_name, ndk_root) = env::var_os(ANDROID_NDK_HOME_ENV)
+        .map(|root| (ANDROID_NDK_HOME_ENV, PathBuf::from(root)))
+        .or_else(|| {
+            env::var_os(ANDROID_NDK_ROOT_ENV)
+                .map(|root| (ANDROID_NDK_ROOT_ENV, PathBuf::from(root)))
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "cannot generate WebGPU bindings for Android: set {ANDROID_NDK_HOME_ENV} to the Android NDK root (or {ANDROID_NDK_ROOT_ENV} as a fallback)"
+            )
+        });
+
+    let prebuilt_dir = ndk_root.join("toolchains").join("llvm").join("prebuilt");
+    let entries = std::fs::read_dir(&prebuilt_dir).unwrap_or_else(|error| {
+        panic!(
+            "cannot generate WebGPU bindings for Android: {env_name} points to '{}', but its prebuilt toolchain directory '{}' cannot be read: {error}",
+            ndk_root.display(),
+            prebuilt_dir.display()
+        )
+    });
+
+    let mut available_tags = Vec::new();
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|error| {
+            panic!(
+                "cannot inspect Android NDK prebuilt toolchains under '{}': {error}",
+                prebuilt_dir.display()
+            )
+        });
+        let file_type = entry.file_type().unwrap_or_else(|error| {
+            panic!(
+                "cannot inspect Android NDK prebuilt toolchain '{}': {error}",
+                entry.path().display()
+            )
+        });
+        if file_type.is_dir() {
+            available_tags.push(entry.file_name().to_string_lossy().into_owned());
+        }
+    }
+
+    let host_tag = derive_android_host_tag(host, &available_tags).unwrap_or_else(|error| {
+        panic!(
+            "cannot generate WebGPU bindings for Android using {env_name}='{}': {error}",
+            ndk_root.display()
+        )
+    });
+    let sysroot = android_sysroot_path(&ndk_root, &host_tag);
+    if !sysroot.is_dir() {
+        panic!(
+            "cannot generate WebGPU bindings for Android: the sysroot derived from {env_name} does not exist at '{}'",
+            sysroot.display()
+        );
+    }
+
+    sysroot
+}
+
+fn apple_sdk_for_target(target: &str) -> Option<&'static str> {
+    match target {
+        "aarch64-apple-ios" => Some("iphoneos"),
+        "aarch64-apple-ios-sim" | "x86_64-apple-ios" => Some("iphonesimulator"),
+        _ => None,
+    }
+}
+
+fn resolve_apple_sdk(sdk: &str, target: &str) -> PathBuf {
+    let output = Command::new("xcrun")
+        .args(["--sdk", sdk, "--show-sdk-path"])
+        .output()
+        .unwrap_or_else(|error| {
+            panic!(
+                "cannot generate WebGPU bindings for target '{target}': failed to run xcrun for the '{sdk}' SDK: {error}"
+            )
+        });
+    if !output.status.success() {
+        panic!(
+            "cannot generate WebGPU bindings for target '{target}': xcrun could not locate the '{sdk}' SDK (status {}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let path = String::from_utf8(output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "cannot generate WebGPU bindings for target '{target}': xcrun returned a non-UTF-8 path for the '{sdk}' SDK: {error}"
+        )
+    });
+    let path = PathBuf::from(path.trim());
+    if !path.is_dir() {
+        panic!(
+            "cannot generate WebGPU bindings for target '{target}': xcrun returned missing SDK path '{}'",
+            path.display()
+        );
+    }
+
+    path
 }
 
 fn resolve_backend_lib_dir(backend: Backend) -> PathBuf {

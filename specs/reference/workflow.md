@@ -76,6 +76,18 @@ A slice is the smallest unit of dispatchable work. Depending on the phase:
 | Dual-engine | the slice's `.js` conformance script under **both** engines, identical expected output — concretely, the parity suite (`tests/parity/`, block 08): byte-identical, both adapters, every run | Claude |
 | CTS (local, not CI) | `cts-runner --cts-path <built-cts> --suite tools/cts-runner/suites/validation-core.txt --expectations tools/cts-runner/expectations.txt --timeout-secs 1200` — **exit code 0**, on yawgpu | Claude, every slice that touches JS-visible behaviour |
 | CTS oracle (gated, real GPU) | the same suite built `--no-default-features --features backend-dawn`, against a local Dawn — see "The oracle protocol" in CLAUDE.md | Claude, before a slice that extends the API surface lands |
+| Cross-compile (block 06) | `cargo check -p {webgpu-native-js-ffi,webgpu-native-js-core,boa-adapter,javascriptcore-adapter} --target {aarch64-apple-ios,aarch64-linux-android}` — 8 checks, all **exit 0**, with `WEBGPU_NATIVE_JS_BACKEND_LIB_DIR` **unset** | Claude, on any slice touching `ffi`, `core`, or an adapter |
+
+**The cross-compile gate runs with no backend library.** iOS and Android are the
+ship targets; the binding must build for them without an iOS/Android build of any
+backend existing (block 06 → M4). `webgpu-native-js-ffi` with zero backend
+features is a types-only crate and emits no link directives — if this gate ever
+starts needing a backend, that property has been broken.
+
+Prerequisites are resolved from the environment, never from a committed path:
+`ANDROID_NDK_HOME` (or `ANDROID_NDK_ROOT`) for the NDK sysroot, and `xcrun` for
+the Apple SDKs. A missing NDK fails with a message naming the variable — see
+`specs/reference/dependencies.md`.
 
 **There is no hosted CI, by owner decision (2026-07-13).** The gates above are
 run locally and are no less binding for it. A hosted CI job would need two things
