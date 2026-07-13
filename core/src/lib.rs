@@ -9,6 +9,7 @@
 use std::any::Any;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::ptr;
@@ -302,6 +303,7 @@ impl DeviceEventForwarder {
         }
         let message = message.into();
         for state in states {
+            state.mark_lost();
             state.enqueue_lost(reason, message.clone())?;
         }
         Ok(())
@@ -588,6 +590,8 @@ enum SettlementRequest<E: JsEngine + 'static> {
         pipeline: WGPUComputePipeline,
         status: WGPUCreatePipelineAsyncStatus,
         message: String,
+        state: Arc<DeviceEventState<E>>,
+        lost_at_start: bool,
         module: WGPUShaderModule,
         layout: WGPUPipelineLayout,
         queue: Arc<ReleaseQueue>,
@@ -598,6 +602,8 @@ enum SettlementRequest<E: JsEngine + 'static> {
         pipeline: WGPURenderPipeline,
         status: WGPUCreatePipelineAsyncStatus,
         message: String,
+        state: Arc<DeviceEventState<E>>,
+        lost_at_start: bool,
         vertex_module: WGPUShaderModule,
         fragment_module: WGPUShaderModule,
         layout: WGPUPipelineLayout,
@@ -612,12 +618,21 @@ enum SettlementRequest<E: JsEngine + 'static> {
         name: &'static str,
         message: String,
     },
+    StartMap {
+        buffer: WGPUBuffer,
+        mode: WGPUMapMode,
+        offset: usize,
+        size: usize,
+        request: Box<MapRequest<E>>,
+        gpu: GpuDispatch,
+    },
     PopErrorScope {
         deferred: Deferred<E>,
         status: WGPUPopErrorScopeStatus,
         type_: WGPUErrorType,
         message: String,
         synthetic_error: Option<SyntheticDeviceError>,
+        state: Arc<DeviceEventState<E>>,
     },
     UncapturedError {
         state: Arc<DeviceEventState<E>>,
@@ -641,6 +656,7 @@ unsafe impl<E: JsEngine + 'static> Send for SettlementRequest<E> {}
 
 enum SettlementOutcome<E: JsEngine + 'static> {
     Deferred(DeferredSettlement<E>),
+    Retry(Box<SettlementRequest<E>>),
     UncapturedError {
         state: Arc<DeviceEventState<E>>,
         type_: WGPUErrorType,
@@ -715,13 +731,30 @@ impl<E: JsEngine + 'static> SettlementRequest<E> {
                 pipeline,
                 status,
                 message,
+                state,
+                lost_at_start,
                 module,
                 layout,
                 queue,
                 gpu,
             } => {
-                if status != WGPUCreatePipelineAsyncStatus_WGPUCreatePipelineAsyncStatus_Success
-                    || pipeline.is_null()
+                if state.is_lost() && !lost_at_start && !state.is_lost_settled() {
+                    return SettlementOutcome::Retry(Box::new(Self::ComputePipeline {
+                        deferred,
+                        pipeline,
+                        status,
+                        message,
+                        state,
+                        lost_at_start,
+                        module,
+                        layout,
+                        queue,
+                        gpu,
+                    }));
+                }
+                if (status != WGPUCreatePipelineAsyncStatus_WGPUCreatePipelineAsyncStatus_Success
+                    || pipeline.is_null())
+                    && !(state.is_lost() && (lost_at_start || state.is_lost_settled()))
                 {
                     enqueue_compute_pipeline_release(&queue, pipeline, module, layout, gpu);
                     let reason = if status
@@ -764,14 +797,32 @@ impl<E: JsEngine + 'static> SettlementRequest<E> {
                 pipeline,
                 status,
                 message,
+                state,
+                lost_at_start,
                 vertex_module,
                 fragment_module,
                 layout,
                 queue,
                 gpu,
             } => {
-                if status != WGPUCreatePipelineAsyncStatus_WGPUCreatePipelineAsyncStatus_Success
-                    || pipeline.is_null()
+                if state.is_lost() && !lost_at_start && !state.is_lost_settled() {
+                    return SettlementOutcome::Retry(Box::new(Self::RenderPipeline {
+                        deferred,
+                        pipeline,
+                        status,
+                        message,
+                        state,
+                        lost_at_start,
+                        vertex_module,
+                        fragment_module,
+                        layout,
+                        queue,
+                        gpu,
+                    }));
+                }
+                if (status != WGPUCreatePipelineAsyncStatus_WGPUCreatePipelineAsyncStatus_Success
+                    || pipeline.is_null())
+                    && !(state.is_lost() && (lost_at_start || state.is_lost_settled()))
                 {
                     enqueue_render_pipeline_release(
                         &queue,
@@ -839,12 +890,24 @@ impl<E: JsEngine + 'static> SettlementRequest<E> {
                     Err(E::async_error_value(cx, name, &message)),
                 ))
             }
+            Self::StartMap {
+                buffer,
+                mode,
+                offset,
+                size,
+                request,
+                gpu,
+            } => {
+                start_buffer_map(buffer, mode, offset, size, request, gpu);
+                SettlementOutcome::None
+            }
             Self::PopErrorScope {
                 deferred,
                 status,
                 type_,
                 message,
                 synthetic_error,
+                state,
             } => {
                 if status != WGPUPopErrorScopeStatus_WGPUPopErrorScopeStatus_Success {
                     // S8: WebGPU specifies a DOMException here. This binding's
@@ -858,6 +921,9 @@ impl<E: JsEngine + 'static> SettlementRequest<E> {
                         deferred,
                         Err(E::async_error_value(cx, "OperationError", &message)),
                     ));
+                }
+                if state.is_lost() {
+                    return SettlementOutcome::Deferred((deferred, Ok(E::null(cx))));
                 }
                 let (type_, message) = if type_ == WGPUErrorType_WGPUErrorType_NoError {
                     synthetic_error.map_or((type_, message), |error| (error.type_, error.message))
@@ -876,11 +942,17 @@ impl<E: JsEngine + 'static> SettlementRequest<E> {
                 state,
                 type_,
                 message,
-            } => SettlementOutcome::UncapturedError {
-                state,
-                type_,
-                message,
-            },
+            } => {
+                if state.is_lost() {
+                    SettlementOutcome::None
+                } else {
+                    SettlementOutcome::UncapturedError {
+                        state,
+                        type_,
+                        message,
+                    }
+                }
+            }
             Self::DeviceLost {
                 state,
                 reason,
@@ -942,6 +1014,7 @@ impl SettlementQueue {
         cx: E::Context<'_>,
     ) -> std::result::Result<usize, TickError<E::Error>> {
         let mut requests = Vec::new();
+        let mut retries = Vec::new();
         let mut uncaptured = Vec::new();
         loop {
             let request = {
@@ -959,6 +1032,7 @@ impl SettlementQueue {
                 .map_err(|_| TickError::Queue(QueueError::UnexpectedSettlementType))?;
             match request.prepare(cx) {
                 SettlementOutcome::Deferred(request) => requests.push(request),
+                SettlementOutcome::Retry(request) => retries.push(request),
                 SettlementOutcome::UncapturedError {
                     state,
                     type_,
@@ -966,6 +1040,17 @@ impl SettlementQueue {
                 } => uncaptured.push((state, type_, message)),
                 SettlementOutcome::None => {}
             }
+        }
+        if !retries.is_empty() {
+            let mut queued = self
+                .requests
+                .lock()
+                .map_err(|_| TickError::Queue(QueueError::Poisoned("settlement queue")))?;
+            queued.extend(
+                retries
+                    .into_iter()
+                    .map(|request| request as Box<dyn Any + Send>),
+            );
         }
         let count = requests.len();
         if !requests.is_empty() {
@@ -1006,11 +1091,18 @@ impl SettlementQueue {
                     | SettlementRequest::PopErrorScope { deferred, .. } => {
                         E::release_deferred(cx, deferred)
                     }
+                    SettlementRequest::StartMap { mut request, .. } => {
+                        if let Some(deferred) = request.deferred.take() {
+                            E::release_deferred(cx, deferred);
+                        }
+                    }
                     SettlementRequest::ComputePipeline {
                         deferred,
                         pipeline,
                         status: _,
                         message: _,
+                        state: _,
+                        lost_at_start: _,
                         module,
                         layout,
                         queue,
@@ -1024,6 +1116,8 @@ impl SettlementQueue {
                         pipeline,
                         status: _,
                         message: _,
+                        state: _,
+                        lost_at_start: _,
                         vertex_module,
                         fragment_module,
                         layout,
@@ -1349,6 +1443,7 @@ struct DeviceEventState<E: JsEngine + 'static> {
     self_weak: OnceLock<Weak<Self>>,
     registration: OnceLock<DeviceEventRegistration>,
     wrapper_finalized: AtomicBool,
+    lost: AtomicBool,
     lost_settled: AtomicBool,
     js: Mutex<Option<Box<DeviceEventJs<E>>>>,
     error_scopes: Mutex<Vec<SyntheticErrorScope>>,
@@ -1375,6 +1470,7 @@ impl<E: JsEngine + 'static> DeviceEventState<E> {
             self_weak: OnceLock::new(),
             registration: OnceLock::new(),
             wrapper_finalized: AtomicBool::new(false),
+            lost: AtomicBool::new(false),
             lost_settled: AtomicBool::new(false),
             js: Mutex::new(None),
             error_scopes: Mutex::new(Vec::new()),
@@ -1398,6 +1494,26 @@ impl<E: JsEngine + 'static> DeviceEventState<E> {
     fn mark_lost_settled(&self) {
         self.lost_settled.store(true, Ordering::Release);
         self.prune_registration_if_complete();
+    }
+
+    fn mark_lost(&self) {
+        self.lost.store(true, Ordering::Release);
+        for scope in self
+            .error_scopes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter_mut()
+        {
+            scope.error = None;
+        }
+    }
+
+    fn is_lost(&self) -> bool {
+        self.lost.load(Ordering::Acquire)
+    }
+
+    fn is_lost_settled(&self) -> bool {
+        self.lost_settled.load(Ordering::Acquire)
     }
 
     fn prune_registration_if_complete(&self) {
@@ -1480,6 +1596,9 @@ impl<E: JsEngine + 'static> DeviceEventState<E> {
         type_: WGPUErrorType,
         message: String,
     ) -> std::result::Result<(), QueueError> {
+        if self.is_lost() {
+            return Ok(());
+        }
         let Some(state) = self.self_weak.get().and_then(Weak::upgrade) else {
             return Ok(());
         };
@@ -1546,6 +1665,9 @@ impl<E: JsEngine + 'static> DeviceEventState<E> {
 
 impl<E: JsEngine + 'static> DeviceErrorSink for DeviceEventState<E> {
     fn generate_validation_error(&self, message: String) {
+        if self.is_lost() {
+            return;
+        }
         let mut scopes = self
             .error_scopes
             .lock()
@@ -1725,7 +1847,11 @@ pub struct BufferState<E: JsEngine> {
     label: String,
     destroyed: bool,
     mapped: bool,
+    pending_map: Option<u64>,
+    canceling_map: Option<u64>,
+    next_map_id: u64,
     map_mode: WGPUMapMode,
+    error_sink: Arc<dyn DeviceErrorSink>,
     ranges: Vec<MappedRange<E>>,
 }
 
@@ -3826,6 +3952,7 @@ pub fn device_pop_error_scope<E: JsEngine + 'static>(
             deferred: deferred.take(),
             settlements: Arc::clone(E::environment(cx).settlements()),
             synthetic_error: payload.events.pop_error_scope(),
+            state: Arc::clone(&payload.events),
             _registration: None,
         });
         request._registration = Some(E::register_deferred(
@@ -3902,11 +4029,15 @@ pub fn device_create_buffer<E: JsEngine + 'static>(
         label: converted.label,
         destroyed: false,
         mapped: converted.mapped_at_creation,
+        pending_map: None,
+        canceling_map: None,
+        next_map_id: 0,
         map_mode: if converted.mapped_at_creation {
             WGPUMapMode_Write
         } else {
             0
         },
+        error_sink: Arc::clone(&device_payload.events) as Arc<dyn DeviceErrorSink>,
         ranges: Vec::new(),
     };
     match E::new_instance(
@@ -3935,11 +4066,14 @@ pub fn buffer_destroy<E: JsEngine + 'static>(
 ) -> Result<E::Value, E::Error> {
     with_buffer_state::<E, _, _>(cx, this, |state| {
         if !state.destroyed {
+            state.canceling_map = state.pending_map.take();
             detach_all_ranges::<E>(cx, state, false)?;
             unsafe {
                 (E::environment(cx).gpu().buffer_destroy)(state.buffer);
             }
             state.destroyed = true;
+            state.mapped = false;
+            state.map_mode = 0;
         }
         Ok(E::undefined(cx))
     })
@@ -3987,6 +4121,7 @@ pub fn device_destroy<E: JsEngine + 'static>(
 ) -> Result<E::Value, E::Error> {
     let payload = device_wrapper_payload::<E>(cx, this)?;
     if !payload.destroyed.swap(true, Ordering::AcqRel) {
+        payload.events.mark_lost();
         unsafe {
             (E::environment(cx).gpu().device_destroy)(payload.device);
         }
@@ -4174,7 +4309,7 @@ pub fn device_create_compute_pipeline_async<E: JsEngine + 'static>(
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
     promise_operation::<E>(cx, |deferred| {
-        let device = device_handle::<E>(cx, this)?;
+        let payload = device_wrapper_payload::<E>(cx, this)?;
         let arena = Arena::new();
         let descriptor = required_argument::<E>(cx, args, 0, "GPUComputePipelineDescriptor")?;
         let converted = convert_compute_pipeline_descriptor::<E>(cx, descriptor, &arena)?;
@@ -4191,6 +4326,8 @@ pub fn device_create_compute_pipeline_async<E: JsEngine + 'static>(
             settlements: Arc::clone(E::environment(cx).settlements()),
             release_queue: Arc::clone(E::environment(cx).queue()),
             gpu,
+            state: Arc::clone(&payload.events),
+            lost_at_start: payload.events.is_lost(),
             module: converted.module,
             layout: converted.layout,
             _registration: None,
@@ -4208,7 +4345,7 @@ pub fn device_create_compute_pipeline_async<E: JsEngine + 'static>(
         };
         unsafe {
             (gpu.device_create_compute_pipeline_async)(
-                device,
+                payload.device,
                 ptr::from_ref(&converted.native),
                 info,
             );
@@ -4224,7 +4361,7 @@ pub fn device_create_render_pipeline_async<E: JsEngine + 'static>(
     args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
     promise_operation::<E>(cx, |deferred| {
-        let device = device_handle::<E>(cx, this)?;
+        let payload = device_wrapper_payload::<E>(cx, this)?;
         let arena = Arena::new();
         let descriptor = required_argument::<E>(cx, args, 0, "GPURenderPipelineDescriptor")?;
         let converted = convert_render_pipeline_descriptor::<E>(cx, descriptor, &arena)?;
@@ -4244,6 +4381,8 @@ pub fn device_create_render_pipeline_async<E: JsEngine + 'static>(
             settlements: Arc::clone(E::environment(cx).settlements()),
             release_queue: Arc::clone(E::environment(cx).queue()),
             gpu,
+            state: Arc::clone(&payload.events),
+            lost_at_start: payload.events.is_lost(),
             vertex_module: converted.vertex_module,
             fragment_module: converted.fragment_module,
             layout: converted.layout,
@@ -4262,7 +4401,7 @@ pub fn device_create_render_pipeline_async<E: JsEngine + 'static>(
         };
         unsafe {
             (gpu.device_create_render_pipeline_async)(
-                device,
+                payload.device,
                 ptr::from_ref(&converted.native),
                 info,
             );
@@ -4309,35 +4448,75 @@ fn buffer_map_async_inner<E: JsEngine + 'static>(
             "GPUBuffer.mapAsync called on an incompatible object",
         ));
     };
-    let (buffer, state) = {
-        let Ok(state) = payload.state.lock() else {
+    let (buffer, state, map_id, defer_native_start) = {
+        let Ok(mut state) = payload.state.lock() else {
             return Err(E::operation_error(cx, "GPUBuffer state is poisoned"));
         };
         if state.destroyed {
-            return Err(E::operation_error(cx, "GPUBuffer is destroyed"));
+            let error_sink = Arc::clone(&state.error_sink);
+            drop(state);
+            error_sink.generate_validation_error("GPUBuffer is destroyed".to_owned());
+            let deferred = deferred
+                .take()
+                .ok_or_else(|| E::operation_error(cx, "mapAsync deferred is unavailable"))?;
+            E::environment(cx)
+                .settlements()
+                .enqueue::<E>(SettlementRequest::Error {
+                    deferred,
+                    name: "OperationError",
+                    message: "GPUBuffer is destroyed".to_owned(),
+                })
+                .map_err(|_| E::operation_error(cx, "mapAsync settlement queue is unavailable"))?;
+            return Ok(());
         }
-        (state.buffer, Arc::clone(&payload.state))
+        if state.mapped || state.pending_map.is_some() {
+            let error_sink = Arc::clone(&state.error_sink);
+            drop(state);
+            error_sink.generate_validation_error(
+                "GPUBuffer.mapAsync requires the buffer to be unmapped".to_owned(),
+            );
+            return Err(E::operation_error(
+                cx,
+                "GPUBuffer.mapAsync requires the buffer to be unmapped",
+            ));
+        }
+        state.next_map_id = state.next_map_id.wrapping_add(1);
+        let map_id = state.next_map_id;
+        state.pending_map = Some(map_id);
+        (
+            state.buffer,
+            Arc::clone(&payload.state),
+            map_id,
+            state.canceling_map.is_some() && !state.destroyed,
+        )
     };
     let mut request = Box::new(MapRequest::<E> {
         deferred: deferred.take(),
         settlements: Arc::clone(E::environment(cx).settlements()),
         _registration: None,
         mode,
+        map_id,
         state,
     });
     request._registration = Some(E::register_deferred(
         cx,
         NonNull::from(&mut request.deferred),
     ));
-    let info = WGPUBufferMapCallbackInfo {
-        nextInChain: ptr::null_mut(),
-        mode: WGPUCallbackMode_WGPUCallbackMode_AllowProcessEvents,
-        callback: Some(buffer_map_callback::<E>),
-        userdata1: Box::into_raw(request).cast(),
-        userdata2: ptr::null_mut(),
-    };
-    unsafe {
-        (E::environment(cx).gpu().buffer_map_async)(buffer, mode, offset, size, info);
+    let gpu = E::environment(cx).gpu();
+    if defer_native_start {
+        E::environment(cx)
+            .settlements()
+            .enqueue::<E>(SettlementRequest::StartMap {
+                buffer,
+                mode,
+                offset,
+                size,
+                request,
+                gpu,
+            })
+            .map_err(|_| E::operation_error(cx, "mapAsync start queue is unavailable"))?;
+    } else {
+        start_buffer_map(buffer, mode, offset, size, request, gpu);
     }
     Ok(())
 }
@@ -4361,12 +4540,10 @@ pub fn buffer_get_mapped_range<E: JsEngine + 'static>(
         }
         let size = match explicit_size {
             Some(size) => size,
-            None => state
-                .size
-                .checked_sub(offset as u64)
-                .and_then(|len| usize::try_from(len).ok())
+            None => usize::try_from(state.size.saturating_sub(offset as u64))
+                .ok()
                 .filter(|len| *len <= u32::MAX as usize)
-                .ok_or_else(|| E::type_error(cx, "size"))?,
+                .ok_or_else(|| E::operation_error(cx, "mapped range size is unsupported"))?,
         };
         let ptr = mapped_range_ptr::<E>(cx, state, offset, size);
         if ptr.is_null() {
@@ -4401,13 +4578,18 @@ pub fn buffer_unmap<E: JsEngine + 'static>(
         if state.destroyed {
             return Ok(E::undefined(cx));
         }
+        let pending = state.pending_map.take();
+        if pending.is_some() {
+            state.canceling_map = pending;
+        }
         if state.mapped {
             detach_all_ranges::<E>(cx, state, true)?;
-            unsafe {
-                (E::environment(cx).gpu().buffer_unmap)(state.buffer);
-            }
-            state.mapped = false;
         }
+        if state.mapped || pending.is_some() {
+            unsafe { (E::environment(cx).gpu().buffer_unmap)(state.buffer) };
+        }
+        state.mapped = false;
+        state.map_mode = 0;
         Ok(E::undefined(cx))
     })
 }
@@ -5255,40 +5437,43 @@ pub fn queue_write_buffer<E: JsEngine + 'static>(
         .copied()
         .ok_or_else(|| E::type_error(cx, "data"))?;
     let source = convert_buffer_source::<E>(cx, data_value)?;
-    let data_offset = optional_gpu_size_to_u64::<E>(cx, args.get(3).copied(), "dataOffset", 0)?;
+    let data_offset = optional_gpu_size64_to_u64::<E>(cx, args.get(3).copied(), "dataOffset", 0)?;
     let byte_offset = data_offset
         .checked_mul(source.bytes_per_element)
-        .ok_or_else(|| E::type_error(cx, "dataOffset"))?;
+        .ok_or_else(|| E::operation_error(cx, "dataOffset is outside the source range"))?;
     if byte_offset > source.byte_length {
-        return Err(E::type_error(cx, "dataOffset"));
+        return Err(E::operation_error(
+            cx,
+            "dataOffset is outside the source range",
+        ));
     }
     let byte_size = match args.get(4).copied() {
         Some(value) if !E::is_undefined(cx, value) => {
-            let size = optional_gpu_size_to_u64::<E>(cx, Some(value), "size", 0)?;
+            let size = optional_gpu_size64_to_u64::<E>(cx, Some(value), "size", 0)?;
             size.checked_mul(source.bytes_per_element)
-                .ok_or_else(|| E::type_error(cx, "size"))?
+                .ok_or_else(|| E::operation_error(cx, "size is outside the source range"))?
         }
         _ => source.byte_length - byte_offset,
     };
     let relative_end = byte_offset
         .checked_add(byte_size)
-        .ok_or_else(|| E::type_error(cx, "size"))?;
-    if relative_end > source.byte_length || byte_size > WEBIDL_U32_MAX {
-        return Err(E::type_error(cx, "size"));
+        .ok_or_else(|| E::operation_error(cx, "size is outside the source range"))?;
+    if relative_end > source.byte_length {
+        return Err(E::operation_error(cx, "size is outside the source range"));
+    }
+    if byte_size % 4 != 0 {
+        return Err(E::operation_error(
+            cx,
+            "writeBuffer size must be a multiple of 4 bytes",
+        ));
     }
     let start = source
         .byte_offset
         .checked_add(byte_offset)
         .ok_or_else(|| E::type_error(cx, "dataOffset"))?;
-    if start > WEBIDL_U32_MAX {
-        return Err(E::type_error(cx, "dataOffset"));
-    }
     let end = start
         .checked_add(byte_size)
         .ok_or_else(|| E::type_error(cx, "size"))?;
-    if end > WEBIDL_U32_MAX {
-        return Err(E::type_error(cx, "size"));
-    }
     let start = usize::try_from(start).map_err(|_| E::type_error(cx, "dataOffset"))?;
     let end = usize::try_from(end).map_err(|_| E::type_error(cx, "size"))?;
     let size = usize::try_from(byte_size).map_err(|_| E::type_error(cx, "size"))?;
@@ -5457,15 +5642,26 @@ pub fn queue_submit<E: JsEngine + 'static>(
     let command_states = convert_command_buffer_sequence::<E>(cx, commands_value)?;
     let mut command_handles = Vec::with_capacity(command_states.len());
     let mut invalid_sink = None;
+    let mut seen = HashSet::with_capacity(command_states.len());
     for state in &command_states {
+        let duplicate = !seen.insert(Arc::as_ptr(state) as usize);
         let state = state
             .lock()
             .map_err(|_| E::operation_error(cx, "GPUCommandBuffer state is poisoned"))?;
-        if state.consumed {
-            return Err(E::operation_error(cx, "GPUCommandBuffer is consumed"));
+        if duplicate && invalid_sink.is_none() {
+            invalid_sink = Some((
+                Arc::clone(&state.error_sink),
+                "GPUCommandBuffer occurs more than once in submit",
+            ));
+        }
+        if state.consumed && invalid_sink.is_none() {
+            invalid_sink = Some((
+                Arc::clone(&state.error_sink),
+                "GPUCommandBuffer is consumed",
+            ));
         }
         if state.invalid && invalid_sink.is_none() {
-            invalid_sink = Some(Arc::clone(&state.error_sink));
+            invalid_sink = Some((Arc::clone(&state.error_sink), "GPUCommandBuffer is invalid"));
         }
         command_handles.push(state.command_buffer);
     }
@@ -5475,8 +5671,8 @@ pub fn queue_submit<E: JsEngine + 'static>(
             .map_err(|_| E::operation_error(cx, "GPUCommandBuffer state is poisoned"))?
             .consumed = true;
     }
-    if let Some(error_sink) = invalid_sink {
-        error_sink.generate_validation_error("GPUCommandBuffer is invalid".to_owned());
+    if let Some((error_sink, message)) = invalid_sink {
+        error_sink.generate_validation_error(message.to_owned());
         return Ok(E::undefined(cx));
     }
     let commands = arena.alloc_slice(command_handles);
@@ -6757,7 +6953,26 @@ struct MapRequest<E: JsEngine + 'static> {
     settlements: Arc<SettlementQueue>,
     _registration: Option<E::DeferredRegistration>,
     mode: WGPUMapMode,
+    map_id: u64,
     state: Arc<Mutex<BufferState<E>>>,
+}
+
+fn start_buffer_map<E: JsEngine + 'static>(
+    buffer: WGPUBuffer,
+    mode: WGPUMapMode,
+    offset: usize,
+    size: usize,
+    request: Box<MapRequest<E>>,
+    gpu: GpuDispatch,
+) {
+    let info = WGPUBufferMapCallbackInfo {
+        nextInChain: ptr::null_mut(),
+        mode: WGPUCallbackMode_WGPUCallbackMode_AllowProcessEvents,
+        callback: Some(buffer_map_callback::<E>),
+        userdata1: Box::into_raw(request).cast(),
+        userdata2: ptr::null_mut(),
+    };
+    unsafe { (gpu.buffer_map_async)(buffer, mode, offset, size, info) };
 }
 
 struct QueueWorkDoneRequest<E: JsEngine + 'static> {
@@ -6770,6 +6985,7 @@ struct PopErrorScopeRequest<E: JsEngine + 'static> {
     deferred: Option<Deferred<E>>,
     settlements: Arc<SettlementQueue>,
     synthetic_error: Option<SyntheticDeviceError>,
+    state: Arc<DeviceEventState<E>>,
     _registration: Option<E::DeferredRegistration>,
 }
 
@@ -6778,6 +6994,8 @@ struct ComputePipelineRequest<E: JsEngine + 'static> {
     settlements: Arc<SettlementQueue>,
     release_queue: Arc<ReleaseQueue>,
     gpu: GpuDispatch,
+    state: Arc<DeviceEventState<E>>,
+    lost_at_start: bool,
     module: WGPUShaderModule,
     layout: WGPUPipelineLayout,
     _registration: Option<E::DeferredRegistration>,
@@ -6788,6 +7006,8 @@ struct RenderPipelineRequest<E: JsEngine + 'static> {
     settlements: Arc<SettlementQueue>,
     release_queue: Arc<ReleaseQueue>,
     gpu: GpuDispatch,
+    state: Arc<DeviceEventState<E>>,
+    lost_at_start: bool,
     vertex_module: WGPUShaderModule,
     fragment_module: WGPUShaderModule,
     layout: WGPUPipelineLayout,
@@ -7011,6 +7231,8 @@ unsafe extern "C" fn create_compute_pipeline_callback<E: JsEngine + 'static>(
             pipeline,
             status,
             message: unsafe { callback_string(message) },
+            state: request.state,
+            lost_at_start: request.lost_at_start,
             module: request.module,
             layout: request.layout,
             queue: Arc::clone(&request.release_queue),
@@ -7048,6 +7270,8 @@ unsafe extern "C" fn create_render_pipeline_callback<E: JsEngine + 'static>(
             pipeline,
             status,
             message: unsafe { callback_string(message) },
+            state: request.state,
+            lost_at_start: request.lost_at_start,
             vertex_module: request.vertex_module,
             fragment_module: request.fragment_module,
             layout: request.layout,
@@ -7072,11 +7296,27 @@ unsafe extern "C" fn buffer_map_callback<E: JsEngine + 'static>(
         let Some(deferred) = request.deferred.take() else {
             return;
         };
-        let settlement = if status == WGPUMapAsyncStatus_WGPUMapAsyncStatus_Success {
-            if let Ok(mut state) = request.state.lock() {
+        let canceled = request.state.lock().map_or(true, |mut state| {
+            if state.pending_map != Some(request.map_id) {
+                if state.canceling_map == Some(request.map_id) {
+                    state.canceling_map = None;
+                }
+                return true;
+            }
+            state.pending_map = None;
+            if status == WGPUMapAsyncStatus_WGPUMapAsyncStatus_Success {
                 state.mapped = true;
                 state.map_mode = request.mode;
             }
+            false
+        });
+        let settlement = if canceled {
+            SettlementRequest::Error {
+                deferred,
+                name: "AbortError",
+                message: "mapAsync was canceled".to_owned(),
+            }
+        } else if status == WGPUMapAsyncStatus_WGPUMapAsyncStatus_Success {
             SettlementRequest::Success { deferred }
         } else {
             let (name, fallback) = if status == WGPUMapAsyncStatus_WGPUMapAsyncStatus_Error {
@@ -7163,6 +7403,7 @@ unsafe extern "C" fn device_lost_callback<E: JsEngine + 'static>(
         // created in adapter_request_device. DeviceLost is a future event and
         // this is its terminal callback (including CallbackCancelled).
         let state = unsafe { &*raw.as_ptr() };
+        state.mark_lost();
         let message = unsafe { callback_string(message) };
         let _ = state.enqueue_lost(reason, message);
         // SAFETY: the terminal callback has finished using the shared userdata,
@@ -7194,6 +7435,7 @@ unsafe extern "C" fn pop_error_scope_callback<E: JsEngine + 'static>(
             type_,
             message: unsafe { callback_string(message) },
             synthetic_error: request.synthetic_error.take(),
+            state: request.state,
         };
         let _ = request.settlements.enqueue::<E>(settlement);
     }));

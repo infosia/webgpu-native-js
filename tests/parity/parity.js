@@ -3,6 +3,7 @@
 
     globalThis.parityLog = [];
     globalThis.parityDone = false;
+    globalThis.parityReadyForDeviceLoss = false;
 
     var finished = false;
     var labelBuffer;
@@ -288,10 +289,16 @@
 
         var destroyed = device.createBuffer({ size: 4, usage: 1 });
         destroyed.destroy();
+        device.pushErrorScope("validation");
         return destroyed.mapAsync(1, 0, 4).then(function () {
             throw new Error("destroyed mapAsync unexpectedly resolved");
         }, function (destroyedMapError) {
             log(errorLine("reject:mapAsync", destroyedMapError));
+            return device.popErrorScope();
+        }).then(function (validationError) {
+            if (!(validationError instanceof GPUValidationError)) {
+                throw new Error("destroyed mapAsync did not emit validation");
+            }
             return runMappedAtCreationRoundTrip().then(runOffsetWindowRoundTrip);
         });
     }
@@ -319,6 +326,89 @@
             destination.unmap();
             source.destroy();
             destination.destroy();
+        });
+    }
+
+    function runMapAsyncErrorRouting() {
+        var mapped = device.createBuffer({ size: 4, usage: 1 });
+        return mapped.mapAsync(1, 0, 4).then(function () {
+            device.pushErrorScope("validation");
+            var repeat = mapped.mapAsync(1, 0, 4).then(function () {
+                throw new Error("mapped mapAsync unexpectedly resolved");
+            }, function (error) {
+                return error;
+            });
+            return Promise.all([repeat, device.popErrorScope()]);
+        }).then(function (results) {
+            var rejection = results[0];
+            var validation = results[1];
+            if (rejection.name !== "OperationError" ||
+                !(validation instanceof GPUValidationError)) {
+                throw new Error("mapped mapAsync routing mismatch");
+            }
+            log("mapAsync:mapped:" + rejection.name + ":" +
+                validation.constructor.name);
+            mapped.unmap();
+            mapped.destroy();
+
+            var canceled = device.createBuffer({ size: 4, usage: 1 });
+            var pending = canceled.mapAsync(1, 0, 4);
+            canceled.unmap();
+            return pending.then(function () {
+                throw new Error("canceled mapAsync unexpectedly resolved");
+            }, function (error) {
+                if (error.name !== "AbortError") {
+                    throw new Error("canceled mapAsync rejection mismatch");
+                }
+                log("mapAsync:cancel:" + error.name);
+                canceled.destroy();
+            });
+        });
+    }
+
+    function runSubmitErrorRouting() {
+        var encoder = device.createCommandEncoder();
+        var command = encoder.finish();
+        device.queue.submit([command]);
+        device.pushErrorScope("validation");
+        var exception = caught(function () {
+            device.queue.submit([command]);
+        });
+        if (exception !== null) {
+            throw new Error("double submit threw: " + exception);
+        }
+        return device.popErrorScope().then(function (error) {
+            if (!(error instanceof GPUValidationError)) {
+                throw new Error("double submit did not emit validation");
+            }
+            log("submit:double:" + error.constructor.name + ":returned");
+        });
+    }
+
+    function runDestroyedErrorSuppression() {
+        var encoder = device.createCommandEncoder();
+        var command = encoder.finish();
+        device.queue.submit([command]);
+        device.pushErrorScope("validation");
+        device.destroy();
+        globalThis.parityReadyForDeviceLoss = true;
+
+        var submitException = caught(function () {
+            device.queue.submit([command]);
+        });
+        var finishException = caught(function () {
+            encoder.finish();
+        });
+        if (submitException !== null || finishException !== null) {
+            throw new Error("lost-device validation path threw");
+        }
+        return device.lost.then(function () {
+            return device.popErrorScope();
+        }).then(function (error) {
+            if (error !== null) {
+                throw new Error("lost-device validation was surfaced");
+            }
+            log("destroy:validation-suppressed:null:returned");
         });
     }
 
@@ -1306,11 +1396,16 @@
             .then(runRenderBundles)
             .then(runIndirectCommands)
             .then(runErrorScopes)
+            .then(runMapAsyncErrorRouting)
             .then(runOrdering)
             .then(runRequestedFeatureOrdering)
+            .then(runSubmitErrorRouting)
             .then(function () {
                 labelBuffer.destroy();
                 log("destroy:ok");
+                return runDestroyedErrorSuppression();
+            })
+            .then(function () {
                 finished = true;
                 globalThis.parityDone = true;
             });

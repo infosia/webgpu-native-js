@@ -3247,15 +3247,18 @@ mod tests {
                 "parity uncaptured",
             )
             .expect("forward parity uncaptured");
-        runtime
-            .forward_device_lost(
-                setup.device,
-                wgpu::WGPUDeviceLostReason_WGPUDeviceLostReason_Destroyed,
-                "parity loss",
-            )
-            .expect("forward parity loss");
-
+        let mut lost_forwarded = false;
         tick_until(&runtime, setup.instance, 5000, || {
+            if !lost_forwarded && global_bool(&runtime, "parityReadyForDeviceLoss") {
+                runtime
+                    .forward_device_lost(
+                        setup.device,
+                        wgpu::WGPUDeviceLostReason_WGPUDeviceLostReason_Destroyed,
+                        "parity loss",
+                    )
+                    .expect("forward parity loss");
+                lost_forwarded = true;
+            }
             global_bool(&runtime, "parityDone")
         });
 
@@ -4021,24 +4024,34 @@ mod tests {
         let forwarder = runtime.device_event_forwarder();
         let device = SendPtr::new(setup.device);
         std::thread::spawn(move || {
-            let device = device.get();
             forwarder
                 .forward_uncaptured_error(
-                    device,
+                    device.get(),
                     wgpu::WGPUErrorType_WGPUErrorType_Validation,
                     "script uncaptured",
                 )
                 .expect("forward uncaptured");
+        })
+        .join()
+        .expect("forward error thread");
+        tick_until(&runtime, setup.instance, 5000, || {
+            global_bool(&runtime, "uncapturedEventPassed")
+                && global_bool(&runtime, "uncapturedListenerPassed")
+        });
+
+        let forwarder = runtime.device_event_forwarder();
+        let device = SendPtr::new(setup.device);
+        std::thread::spawn(move || {
             forwarder
                 .forward_device_lost(
-                    device,
+                    device.get(),
                     wgpu::WGPUDeviceLostReason_WGPUDeviceLostReason_Destroyed,
                     "script lost",
                 )
                 .expect("forward lost");
         })
         .join()
-        .expect("forward thread");
+        .expect("forward loss thread");
         tick_until(&runtime, setup.instance, 5000, || {
             global_bool(&runtime, "uncapturedEventPassed")
                 && global_bool(&runtime, "uncapturedListenerPassed")

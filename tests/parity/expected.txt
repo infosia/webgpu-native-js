@@ -106,7 +106,6 @@ sequence generator:ok
 sequence string:TypeError:GPUCommandBuffer is required
 sequence array-like:TypeError:commands is not iterable
 sequence iterator-throw:Error:mid-iteration next failed
-lostReason:destroyed
 identity:adapter.features:true
 identity:adapter.limits:true
 identity:adapter.info:true
@@ -160,10 +159,15 @@ indirect:bundle.drawIndexedIndirect:TypeError
 scope:indirect-commands:null
 scope:nested:null,GPUValidationError
 reject:popErrorScope:OperationError:popErrorScope failed:[backend-detail]
+mapAsync:mapped:OperationError:GPUValidationError
+mapAsync:cancel:AbortError
 order:same-tick:mapAsync,workDone
 order:promise-all:resolved
 order:then-chain:first,second
 order:await:true,true
 features:requested:core-features-and-limits,timestamp-query
 timestampWrites:render-compute:null
+submit:double:GPUValidationError:returned
 destroy:ok
+lostReason:destroyed
+destroy:validation-suppressed:null:returned

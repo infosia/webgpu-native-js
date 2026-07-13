@@ -3413,6 +3413,19 @@ mod tests {
         assert_eq!(payload.message, expected_message);
     }
 
+    fn assert_null_scope(rt: &Runtime, cx: Context<'_>, device: Value) {
+        let promise = device_pop_error_scope::<Engine>(cx, device, &[]).expect("pop scope");
+        rt.env
+            .settlements()
+            .drain::<Engine>(cx)
+            .expect("drain scope result");
+        let result = rt
+            .promise_result(promise)
+            .expect("scope promise settled")
+            .expect("scope promise resolved");
+        assert!(matches!(rt.get(result), MockValue::Null));
+    }
+
     fn shader_module(_rt: &Runtime, cx: Context<'_>, handle: usize) -> Value {
         Engine::new_instance(
             cx,
@@ -5171,7 +5184,7 @@ mod tests {
     }
 
     #[test]
-    fn b7_write_buffer_method_rejects_size_that_would_truncate_on_32_bit_hosts() {
+    fn write_buffer_source_range_failure_is_operation_error() {
         reset_gpu();
         let rt = runtime();
         let cx = rt.context();
@@ -5193,7 +5206,7 @@ mod tests {
         )
         .expect_err("oversized size must fail before narrowing");
 
-        assert_eq!(error, "TypeError: size");
+        assert_eq!(error, "OperationError: size is outside the source range");
         release_device_held_values(&rt, cx, device);
     }
 
@@ -5280,11 +5293,11 @@ mod tests {
         queue_write_buffer::<Engine>(
             cx,
             queue,
-            &[buffer, rt.number(0.0), view, rt.number(2.0), rt.number(2.0)],
+            &[buffer, rt.number(0.0), view, rt.number(1.0), rt.number(4.0)],
         )
         .expect("DataView byte write");
 
-        assert_eq!(buffer_bytes(native).expect("bytes"), [3, 4, 0, 0]);
+        assert_eq!(buffer_bytes(native).expect("bytes"), [2, 3, 4, 5]);
         release_device_held_values(&rt, cx, device);
     }
 
@@ -5310,7 +5323,7 @@ mod tests {
     }
 
     #[test]
-    fn b22_write_buffer_rejects_bounds_violations_before_narrowing() {
+    fn b22_write_buffer_rejects_source_range_violations_with_operation_error() {
         reset_gpu();
         let rt = runtime();
         let cx = rt.context();
@@ -5323,15 +5336,15 @@ mod tests {
         for (args, expected) in [
             (
                 vec![buffer, rt.number(0.0), data, rt.number(9.0)],
-                "TypeError: dataOffset",
+                "OperationError: dataOffset is outside the source range",
             ),
             (
                 vec![buffer, rt.number(0.0), data, rt.number(4.0), rt.number(5.0)],
-                "TypeError: size",
+                "OperationError: size is outside the source range",
             ),
             (
                 vec![buffer, rt.number(0.0), data, rt.number(4_294_967_296.0)],
-                "TypeError: dataOffset",
+                "OperationError: dataOffset is outside the source range",
             ),
             (
                 vec![
@@ -5341,7 +5354,7 @@ mod tests {
                     rt.number(0.0),
                     rt.number(4_294_967_296.0),
                 ],
-                "TypeError: size",
+                "OperationError: size is outside the source range",
             ),
         ] {
             assert_eq!(
@@ -5350,6 +5363,29 @@ mod tests {
                 expected
             );
         }
+        release_device_held_values(&rt, cx, device);
+    }
+
+    #[test]
+    fn write_buffer_rejects_unaligned_content_size_with_operation_error() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let queue = device_queue_get::<Engine>(cx, device).expect("queue");
+        let desc = descriptor(&rt, &[("size", rt.number(8.0)), ("usage", rt.number(8.0))]);
+        let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("buffer");
+        let data = Engine::new_arraybuffer_copy(cx, &[0; 8]).expect("arraybuffer");
+
+        assert_eq!(
+            queue_write_buffer::<Engine>(
+                cx,
+                queue,
+                &[buffer, rt.number(0.0), data, rt.number(0.0), rt.number(7.0)],
+            )
+            .expect_err("unaligned size must throw"),
+            "OperationError: writeBuffer size must be a multiple of 4 bytes"
+        );
         release_device_held_values(&rt, cx, device);
     }
 
@@ -6794,6 +6830,107 @@ mod tests {
     }
 
     #[test]
+    fn lost_device_async_pipeline_validation_completions_resolve_pipeline_objects() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let compute_module = shader_module(&rt, cx, 212);
+        let vertex_module = shader_module(&rt, cx, 213);
+        let compute_desc = descriptor(
+            &rt,
+            &[
+                ("layout", rt.string("auto")),
+                ("compute", descriptor(&rt, &[("module", compute_module)])),
+            ],
+        );
+        let render_desc = descriptor(
+            &rt,
+            &[
+                ("layout", rt.string("auto")),
+                ("vertex", descriptor(&rt, &[("module", vertex_module)])),
+            ],
+        );
+        device_destroy::<Engine>(cx, device, &[]).expect("destroy device");
+
+        GPU_STATE.with(|state| {
+            state.borrow_mut().next_pipeline_async_error = Some((
+                crate::WGPUCreatePipelineAsyncStatus_WGPUCreatePipelineAsyncStatus_ValidationError,
+                "lost compute validation".to_owned(),
+            ));
+        });
+        let compute =
+            crate::device_create_compute_pipeline_async::<Engine>(cx, device, &[compute_desc])
+                .expect("compute promise");
+        GPU_STATE.with(|state| {
+            state.borrow_mut().next_pipeline_async_error = Some((
+                crate::WGPUCreatePipelineAsyncStatus_WGPUCreatePipelineAsyncStatus_ValidationError,
+                "lost render validation".to_owned(),
+            ));
+        });
+        let render =
+            crate::device_create_render_pipeline_async::<Engine>(cx, device, &[render_desc])
+                .expect("render promise");
+
+        assert_eq!(rt.env.settlements().drain::<Engine>(cx), Ok(2));
+        let compute = rt
+            .promise_result(compute)
+            .expect("compute settled")
+            .expect("lost compute creation resolves");
+        let render = rt
+            .promise_result(render)
+            .expect("render settled")
+            .expect("lost render creation resolves");
+        assert!(Engine::payload(cx, compute, crate::GPU_COMPUTE_PIPELINE_CLASS).is_some());
+        assert!(Engine::payload(cx, render, crate::GPU_RENDER_PIPELINE_CLASS).is_some());
+        release_device_held_values(&rt, cx, device);
+    }
+
+    #[test]
+    fn async_pipeline_completion_waits_for_loss_settlement_before_resolving() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let native = fake_device();
+        let device = unsafe { wrap_device::<Engine>(cx, native) }.expect("device");
+        let module = shader_module(&rt, cx, 214);
+        let desc = descriptor(
+            &rt,
+            &[
+                ("layout", rt.string("auto")),
+                ("compute", descriptor(&rt, &[("module", module)])),
+            ],
+        );
+        GPU_STATE.with(|state| {
+            state.borrow_mut().next_pipeline_async_error = Some((
+                crate::WGPUCreatePipelineAsyncStatus_WGPUCreatePipelineAsyncStatus_ValidationError,
+                "racing validation".to_owned(),
+            ));
+        });
+        let promise = crate::device_create_compute_pipeline_async::<Engine>(cx, device, &[desc])
+            .expect("pipeline promise");
+        device_destroy::<Engine>(cx, device, &[]).expect("destroy device");
+        rt.env
+            .device_event_forwarder()
+            .forward_device_lost::<Engine>(
+                native,
+                crate::WGPUDeviceLostReason_WGPUDeviceLostReason_Destroyed,
+                "test loss",
+            )
+            .expect("forward loss");
+
+        assert_eq!(rt.env.settlements().drain::<Engine>(cx), Ok(1));
+        assert_eq!(rt.promise_result(promise), None, "pipeline waits one turn");
+        assert_eq!(rt.env.settlements().drain::<Engine>(cx), Ok(1));
+        let pipeline = rt
+            .promise_result(promise)
+            .expect("pipeline settled")
+            .expect("lost pipeline resolves");
+        assert!(Engine::payload(cx, pipeline, crate::GPU_COMPUTE_PIPELINE_CLASS).is_some());
+        release_device_held_values(&rt, cx, device);
+    }
+
+    #[test]
     fn a9_callback_rejection_preserves_backend_message() {
         reset_gpu();
         let rt = runtime();
@@ -7343,16 +7480,38 @@ mod tests {
     #[test]
     fn map_async_on_destroyed_buffer_rejects_operation_error_with_message() {
         reset_gpu();
-        let rt = runtime();
+        PENDING_MAP_CALLBACKS.with(|callbacks| callbacks.borrow_mut().clear());
+        let mut gpu = dispatch();
+        gpu.buffer_map_async = pending_buffer_map_async;
+        let rt = Runtime::new(gpu);
         let cx = rt.context();
         let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
         let desc = descriptor(&rt, &[("size", rt.number(4.0)), ("usage", rt.number(1.0))]);
         let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("buffer");
         buffer_destroy::<Engine>(cx, buffer, &[]).expect("destroy");
+        device_push_error_scope::<Engine>(cx, device, &[rt.string("validation")])
+            .expect("validation scope");
 
         let promise = buffer_map_async::<Engine>(cx, buffer, &[rt.number(1.0)])
             .expect("destroyed mapAsync must return a promise");
+        assert_eq!(
+            rt.promise_result(promise),
+            None,
+            "rejection must be deferred"
+        );
+        PENDING_MAP_CALLBACKS.with(|callbacks| {
+            assert!(
+                callbacks.borrow().is_empty(),
+                "destroyed buffers must not start a native map"
+            );
+        });
+        rt.env
+            .settlements()
+            .drain::<Engine>(cx)
+            .expect("drain destroyed-buffer rejection");
         assert_rejection(&rt, promise, "OperationError", "GPUBuffer is destroyed");
+        assert_validation_scope_error(&rt, cx, device, "GPUBuffer is destroyed");
+        release_device_held_values(&rt, cx, device);
     }
 
     #[test]
@@ -7538,6 +7697,32 @@ mod tests {
                 .expect_err("reentrant unmap must invalidate the range request"),
             "OperationError: buffer is not mapped"
         );
+    }
+
+    #[test]
+    fn get_mapped_range_classifies_default_range_and_supplied_size_errors() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let desc = descriptor(
+            &rt,
+            &[
+                ("size", rt.number(8.0)),
+                ("usage", rt.number(2.0)),
+                ("mappedAtCreation", rt.bool(true)),
+            ],
+        );
+        let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("buffer");
+
+        let implicit_size_error = buffer_get_mapped_range::<Engine>(cx, buffer, &[rt.number(16.0)])
+            .expect_err("an offset past the buffer must fail range validation");
+        assert!(implicit_size_error.starts_with("OperationError:"));
+
+        let supplied_size_error =
+            buffer_get_mapped_range::<Engine>(cx, buffer, &[rt.number(0.0), rt.number(-1.0)])
+                .expect_err("a negative supplied size must fail WebIDL conversion");
+        assert_eq!(supplied_size_error, "TypeError: size");
     }
 
     #[test]
@@ -7769,7 +7954,7 @@ mod tests {
     }
 
     #[test]
-    fn b19_queue_submit_core_guard_consumes_command_buffer_once() {
+    fn queue_submit_twice_emits_validation_without_throwing() {
         reset_gpu();
         let rt = runtime();
         let cx = rt.context();
@@ -7780,10 +7965,100 @@ mod tests {
         let commands = rt.set_like(&[command]);
 
         queue_submit::<Engine>(cx, queue, &[commands]).expect("first submit");
-        assert_eq!(
-            queue_submit::<Engine>(cx, queue, &[commands]).expect_err("second submit"),
-            "OperationError: GPUCommandBuffer is consumed"
+        device_push_error_scope::<Engine>(cx, device, &[rt.string("validation")])
+            .expect("validation scope");
+        queue_submit::<Engine>(cx, queue, &[commands]).expect("second submit returns normally");
+        assert_validation_scope_error(&rt, cx, device, "GPUCommandBuffer is consumed");
+        release_device_held_values(&rt, cx, device);
+    }
+
+    #[test]
+    fn duplicate_command_buffer_in_one_submit_emits_validation_without_throwing() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let queue = device_queue_get::<Engine>(cx, device).expect("queue");
+        let encoder = device_create_command_encoder::<Engine>(cx, device, &[]).expect("encoder");
+        let command = command_encoder_finish::<Engine>(cx, encoder, &[]).expect("command");
+
+        device_push_error_scope::<Engine>(cx, device, &[rt.string("validation")])
+            .expect("validation scope");
+        queue_submit::<Engine>(cx, queue, &[rt.set_like(&[command, command])])
+            .expect("duplicate submit returns normally");
+        assert_validation_scope_error(
+            &rt,
+            cx,
+            device,
+            "GPUCommandBuffer occurs more than once in submit",
         );
+        release_device_held_values(&rt, cx, device);
+    }
+
+    #[test]
+    fn submit_after_device_loss_is_silent() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let queue = device_queue_get::<Engine>(cx, device).expect("queue");
+        let encoder = device_create_command_encoder::<Engine>(cx, device, &[]).expect("encoder");
+        let command = command_encoder_finish::<Engine>(cx, encoder, &[]).expect("command");
+        let commands = rt.set_like(&[command]);
+        queue_submit::<Engine>(cx, queue, &[commands]).expect("first submit");
+        rt.env
+            .device_event_forwarder()
+            .forward_device_lost::<Engine>(
+                fake_device(),
+                crate::WGPUDeviceLostReason_WGPUDeviceLostReason_Unknown,
+                "test loss",
+            )
+            .expect("forward device loss");
+        assert_eq!(rt.env.settlements().drain::<Engine>(cx), Ok(1));
+        queue_submit::<Engine>(cx, queue, &[commands]).expect("lost-device submit is a no-op");
+        assert!(rt
+            .env
+            .settlements()
+            .requests
+            .lock()
+            .expect("settlement queue")
+            .is_empty());
+        assert_eq!(rt.env.settlements().drain::<Engine>(cx), Ok(0));
+        release_device_held_values(&rt, cx, device);
+    }
+
+    #[test]
+    fn double_finish_on_lost_device_is_silent() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let encoder = device_create_command_encoder::<Engine>(cx, device, &[]).expect("encoder");
+        command_encoder_finish::<Engine>(cx, encoder, &[]).expect("first finish");
+        device_push_error_scope::<Engine>(cx, device, &[rt.string("validation")])
+            .expect("validation scope");
+        device_destroy::<Engine>(cx, device, &[]).expect("destroy device");
+
+        command_encoder_finish::<Engine>(cx, encoder, &[])
+            .expect("lost-device repeat finish returns normally");
+        assert_null_scope(&rt, cx, device);
+        release_device_held_values(&rt, cx, device);
+    }
+
+    #[test]
+    fn double_finish_on_live_device_still_emits_validation() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let encoder = device_create_command_encoder::<Engine>(cx, device, &[]).expect("encoder");
+        command_encoder_finish::<Engine>(cx, encoder, &[]).expect("first finish");
+        device_push_error_scope::<Engine>(cx, device, &[rt.string("validation")])
+            .expect("validation scope");
+
+        command_encoder_finish::<Engine>(cx, encoder, &[])
+            .expect("live-device repeat finish returns normally");
+        assert_validation_scope_error(&rt, cx, device, "GPUCommandEncoder is finished");
         release_device_held_values(&rt, cx, device);
     }
 
@@ -7953,6 +8228,88 @@ mod tests {
                 info.userdata2,
             );
         }
+    }
+
+    #[test]
+    fn map_async_on_mapped_buffer_rejects_early_and_generates_validation() {
+        reset_gpu();
+        PENDING_MAP_CALLBACKS.with(|callbacks| callbacks.borrow_mut().clear());
+        let mut gpu = dispatch();
+        gpu.buffer_map_async = pending_buffer_map_async;
+        let rt = Runtime::new(gpu);
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let desc = descriptor(
+            &rt,
+            &[
+                ("size", rt.number(16.0)),
+                ("usage", rt.number(2.0)),
+                ("mappedAtCreation", rt.bool(true)),
+            ],
+        );
+        let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("buffer");
+        device_push_error_scope::<Engine>(cx, device, &[rt.string("validation")])
+            .expect("validation scope");
+
+        let promise = buffer_map_async::<Engine>(cx, buffer, &[rt.number(2.0)])
+            .expect("mapAsync returns a promise");
+        assert_rejection(
+            &rt,
+            promise,
+            "OperationError",
+            "GPUBuffer.mapAsync requires the buffer to be unmapped",
+        );
+        PENDING_MAP_CALLBACKS.with(|callbacks| assert!(callbacks.borrow().is_empty()));
+        assert_validation_scope_error(
+            &rt,
+            cx,
+            device,
+            "GPUBuffer.mapAsync requires the buffer to be unmapped",
+        );
+        release_device_held_values(&rt, cx, device);
+    }
+
+    #[test]
+    fn pending_map_rejects_duplicate_early_and_cancellation_is_abort_error() {
+        reset_gpu();
+        PENDING_MAP_CALLBACKS.with(|callbacks| callbacks.borrow_mut().clear());
+        let mut gpu = dispatch();
+        gpu.buffer_map_async = pending_buffer_map_async;
+        let rt = Runtime::new(gpu);
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let desc = descriptor(&rt, &[("size", rt.number(16.0)), ("usage", rt.number(2.0))]);
+        let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("buffer");
+        let pending =
+            buffer_map_async::<Engine>(cx, buffer, &[rt.number(2.0)]).expect("pending map promise");
+        PENDING_MAP_CALLBACKS.with(|callbacks| assert_eq!(callbacks.borrow().len(), 1));
+        device_push_error_scope::<Engine>(cx, device, &[rt.string("validation")])
+            .expect("validation scope");
+
+        let duplicate = buffer_map_async::<Engine>(cx, buffer, &[rt.number(2.0)])
+            .expect("duplicate map returns a promise");
+        assert_rejection(
+            &rt,
+            duplicate,
+            "OperationError",
+            "GPUBuffer.mapAsync requires the buffer to be unmapped",
+        );
+        assert_validation_scope_error(
+            &rt,
+            cx,
+            device,
+            "GPUBuffer.mapAsync requires the buffer to be unmapped",
+        );
+        PENDING_MAP_CALLBACKS.with(|callbacks| assert_eq!(callbacks.borrow().len(), 1));
+
+        buffer_unmap::<Engine>(cx, buffer, &[]).expect("cancel pending map");
+        resolve_pending_map(0, crate::WGPUMapAsyncStatus_WGPUMapAsyncStatus_Error);
+        rt.env
+            .settlements()
+            .drain::<Engine>(cx)
+            .expect("drain cancellation");
+        assert_rejection(&rt, pending, "AbortError", "mapAsync was canceled");
+        release_device_held_values(&rt, cx, device);
     }
 
     #[test]
@@ -8742,10 +9099,12 @@ mod tests {
         let cx = rt.context();
         let handler = rt.insert(MockValue::Callable(MockCallable::Handler));
         let barrier = Arc::new(std::sync::Barrier::new(N + 1));
+        let mut natives = Vec::new();
         let mut promises = Vec::new();
         let mut threads = Vec::new();
         for index in 0..N {
             let native = fake_handle(2_000 + index);
+            natives.push(native);
             let device = unsafe { wrap_device::<Engine>(cx, native) }.expect("device");
             device_on_uncaptured_error_set::<Engine>(cx, device, handler).expect("handler");
             promises.push(device_lost_get::<Engine>(cx, device).expect("lost"));
@@ -8762,13 +9121,6 @@ mod tests {
                         format!("error-{index}"),
                     )
                     .expect("forward error");
-                forwarder
-                    .forward_device_lost::<Engine>(
-                        native,
-                        crate::WGPUDeviceLostReason_WGPUDeviceLostReason_Destroyed,
-                        format!("lost-{index}"),
-                    )
-                    .expect("forward loss");
             }));
         }
         barrier.wait();
@@ -8811,6 +9163,17 @@ mod tests {
             .collect::<Vec<_>>();
         expected.sort();
         assert_eq!(messages, expected);
+        let forwarder = rt.env.device_event_forwarder();
+        for (index, native) in natives.into_iter().enumerate() {
+            forwarder
+                .forward_device_lost::<Engine>(
+                    native,
+                    crate::WGPUDeviceLostReason_WGPUDeviceLostReason_Destroyed,
+                    format!("lost-{index}"),
+                )
+                .expect("forward loss");
+        }
+        unsafe { crate::tick::<Engine>(cx, fake_handle(2_102)) }.expect("device-loss tick");
         for promise in promises {
             assert_eq!(rt.settlement_attempts.borrow().get(&promise), Some(&1));
         }

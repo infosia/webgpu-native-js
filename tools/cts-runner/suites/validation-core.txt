@@ -83,3 +83,17 @@ webgpu:api,validation,compute_pipeline:*
 webgpu:api,validation,shader_module,*
 webgpu:api,validation,non_filterable_texture:*
 webgpu:idl,constructable:*
+
+# Phase B-7 growth (2026-07-13). Error-routing fixes: submitting a consumed
+# command buffer is a validation error (not a JS exception); a lost device
+# surfaces no errors at all (spec: "no errors are generated from a device which
+# is lost"); mapAsync validates buffer state on the content timeline and rejects
+# early; writeBuffer/getMappedRange separate TypeError (argument coercion) from
+# OperationError (range).
+#
+# NOT added: state,device_lost,* — it passes 3,332/0 but the family intermittently
+# ABORTS the process (Boa GC bug; see specs/tracking/cts.md). Excluded until the
+# engine defect is resolved; a flaky abort in the gate is worse than the coverage
+# is worth.
+webgpu:api,validation,queue,*
+webgpu:api,validation,buffer,mapping:*

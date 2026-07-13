@@ -2295,6 +2295,9 @@ mod tests {
                 "script uncaptured",
             )
             .expect("forward uncaptured");
+        // Deliver the pre-loss error before declaring the device lost; queued
+        // errors are intentionally suppressed once loss becomes observable.
+        unsafe { runtime.tick(setup.instance) }.expect("uncaptured-error tick");
         runtime
             .forward_device_lost(
                 setup.device,
@@ -2600,19 +2603,28 @@ mod tests {
                 "parity uncaptured",
             )
             .expect("forward parity uncaptured");
-        runtime
-            .forward_device_lost(
-                setup.device,
-                wgpu::WGPUDeviceLostReason_WGPUDeviceLostReason_Destroyed,
-                "parity loss",
-            )
-            .expect("forward parity loss");
-
         let deadline = Instant::now() + Duration::from_secs(5);
+        let mut lost_forwarded = false;
         loop {
             // SAFETY: setup keeps the instance live and this loop runs on the
             // runtime's owning thread.
             unsafe { runtime.tick(setup.instance) }.expect("parity tick");
+            if !lost_forwarded
+                && eval_bool(
+                    &runtime,
+                    "Boolean(globalThis.parityReadyForDeviceLoss)",
+                    "tests/parity/device-loss-ready.js",
+                )
+            {
+                runtime
+                    .forward_device_lost(
+                        setup.device,
+                        wgpu::WGPUDeviceLostReason_WGPUDeviceLostReason_Destroyed,
+                        "parity loss",
+                    )
+                    .expect("forward parity loss");
+                lost_forwarded = true;
+            }
             let done = eval_bool(
                 &runtime,
                 "Boolean(globalThis.parityDone)",

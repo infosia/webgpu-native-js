@@ -478,3 +478,104 @@ dependency rule stands; `capability_checks,*` stays out of the suite with this
 entry as its reason. Revisit if the family becomes load-bearing, or if a Boa
 release fixes it (re-test the repro above against each pin bump — the repro is
 the acceptance test).
+
+## Phase B-7 (2026-07-13) — error routing, and a crash that was not what it looked like
+
+### Four spec-shaped error-routing bugs, all the same mistake
+
+Commit 45d18fc established the rule (principle 8): *a spec-level validation
+failure routes to the device error sink, not to a JS exception.* Screening found
+four sites that rule had not reached.
+
+1. **`queue.submit()` of a consumed command buffer threw `OperationError`.** The
+   spec makes it a validation error. The throw also escaped the CTS's
+   `expectValidationError`, leaving its pushed scope on the stack — the
+   "extra error scope" failure was a *consequence*, not a second bug. A failed
+   submit must also invalidate every command buffer passed to it.
+2. **A lost device still surfaced binding-originated validation errors.** Spec
+   §22: *"No errors are generated from a device which is lost."* Our client-side
+   encoder/command-buffer state checks fired regardless. The CTS's
+   `executeAfterDestroy` runs the same operation twice — once live (must be
+   clean), once after `destroy()` (must produce **no uncaptured error**) — and we
+   failed the second. Lost is now recorded synchronously at `destroy()`, at the
+   native lost callback, and on the adopted-device path; suppression covers error
+   scopes, the uncaptured-error queue, and the settlement race. Live-device
+   behaviour is unchanged and pinned by regression tests (`encoding,encoder_state`
+   stays green).
+   - Same rule, async arm: on an already-lost device
+     `createRenderPipelineAsync`/`createComputePipelineAsync` must **resolve**,
+     not reject — even for a descriptor that is invalid on a live device.
+3. **`mapAsync` threw synchronously and never validated buffer state.** It must
+   *never* throw — it always returns a promise. The buffer-state checks (already
+   mapped / mappedAtCreation / mapping pending) belong on the content timeline:
+   reject the returned promise **immediately** with `OperationError` *and* raise a
+   validation error. Descriptor failures (usage, alignment, OOB, invalid,
+   destroyed) reject deferred; a pending map cancelled by `unmap()`/`destroy()`
+   rejects with `AbortError` and no validation error. We had handed all of it to
+   the backend, which variously succeeded, rejected late, or rejected with the
+   wrong name.
+4. **`TypeError` vs `OperationError` was conflated in range checks**
+   (`queue.writeBuffer`, `getMappedRange`). The rule that fell out: `[EnforceRange]`
+   coercion failure of a *supplied argument* is a `TypeError`; failure of the
+   resulting *range* against the resource is an `OperationError`. `getMappedRange`
+   made this vivid — with `size` omitted its default is `max(0, buffer.size -
+   offset)`, and we underflowed and reported a `TypeError` naming an argument the
+   script never passed.
+
+Results: `queue,*` 37 pass/3 fail → **40/0**; `buffer,mapping:*` 22/13 → **35/0**;
+`state,device_lost,*` 3,288/44 → **3,332/0**. The first two join the suite, which
+grows **23,178 → 23,253 cases**, 3/3 stable, exit 0, 0 fail.
+
+### `device_lost` passes but is NOT in the suite — a Boa crash, and a correction
+
+`state,device_lost,*` reaches 3,332/0, but the family **intermittently aborts the
+process** (`exit 134`): Boa panics inside its own Map builtin during garbage
+collection —
+
+```
+boa_engine-0.21.1/src/builtins/map/ordered_map.rs:225
+  Object already borrowed: BorrowMutError
+  <MapLock as Finalize>::finalize
+  ...GcBox<VTableObject<MapIterator>> drop...
+panic in a destructor during cleanup — thread caused non-unwinding panic. aborting.
+```
+
+A GC that runs while a JS `Map` is being iterated re-enters `MapLock`'s finalizer,
+which `unwrap()`s a `borrow_mut()`. It aborts rather than unwinds, so no `catch`
+at any layer can contain it.
+
+**Correction, recorded because the reasoning error is the lesson.** The crash
+first appeared immediately after a slice landed, and the obvious inference — "the
+new code introduced it" — was wrong. Re-running the *unmodified* HEAD binary
+aborted **2 of 3 times**. The earlier clean run of that family had simply been a
+lucky one. The crash is **pre-existing and non-deterministic**; the new code only
+changed how often it is hit. *Assert a fresh build and re-run the baseline before
+attributing a nondeterministic failure to the change in front of you* — the same
+trap as the stale-binary incident, wearing different clothes.
+
+Naive repros (iterating a large `Map` while allocating hard, forcing GC between
+rounds) do **not** reproduce it; the trigger needs a collection during Map
+iteration *inside a native call*, which is what the CTS's promise-heavy
+device-lost path produces. Not chased further.
+
+Consequence: the family stays out of the curated suite. A flaky abort in the gate
+is worth more damage than the coverage is worth, and the curated suite is 3/3
+stable precisely because it excludes it. This is the second Boa engine defect
+catalogued (with the class-field scope bug), and unlike that one it is a **crash**
+— relevant to Boa's production suitability, not just to CTS coverage.
+
+### Backend gaps confirmed, with the blame isolated before it was assigned
+
+`createTexture:texture_usage` (42) and `render_pass,render_pass_descriptor`
+(121 subcases) fail as *"Validation succeeded unexpectedly"* on
+**transient-attachment** rules: the CTS gates these behind
+`'TRANSIENT_ATTACHMENT' in GPUTextureUsage`, which is true here because the
+pinned `webgpu.h` has `WGPUTextureUsage_TransientAttachment` (0x20).
+
+A dropped usage bit in the *binding* would produce an identical symptom, so per
+the D11 lesson the paths were separated before blame was assigned: a texture
+created with `usage: RENDER_ATTACHMENT | TRANSIENT_ATTACHMENT` and `dimension:
+"3d"` reads **`texture.usage === 48`** back through `wgpuTextureGetUsage`. The
+binding forwards the bit; the backend creates the texture without complaint.
+**Backend validation gap**, parked for Dawn arbitration — same class as the
+recorded `createView` view-usage gap. Never worked around in the binding.

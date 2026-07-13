@@ -466,3 +466,36 @@ D11 lesson), pins-win-over-implementations, pin lockstep with Dawn's DEPS,
 gated Dawn parity runs required for surface-extending slices, and
 yawgpu-vs-Dawn disagreements remain owner-handoff findings. wgpu-native stays
 Tier 2 Experimental.
+
+---
+
+## D14 — yawgpu does not validate transient-attachment rules
+
+**Status: OPEN (Noop backend; needs Dawn arbitration). Found 2026-07-13 (CTS B-6/B-7).**
+
+The pinned header declares `WGPUTextureUsage_TransientAttachment = 0x20`, and the
+CTS gates its transient-attachment cases on that usage being exposed — so they
+run here, and they fail as *"Validation succeeded unexpectedly"*:
+
+- `api,validation,createTexture:texture_usage` (42 cases) — a texture with
+  `RENDER_ATTACHMENT | TRANSIENT_ATTACHMENT` and a dimension other than `2d` must
+  fail validation; yawgpu creates it.
+- `api,validation,createTexture:depthOrArrayLayers_and_mipLevelCount_for_transient_attachments`
+  (2), `:transient_viewFormats` (2) — `depthOrArrayLayers` and `mipLevelCount`
+  must be 1 for transient attachments; not enforced.
+- `api,validation,render_pass,render_pass_descriptor:color_attachments,loadOp_storeOp`
+  and the depth/stencil twin (121 subcases, all `transientTexture=true`) — a
+  transient attachment may not be stored (`storeOp: "store"` / `loadOp: "load"`);
+  not enforced.
+
+**The binding was cleared first, not assumed innocent** (the D11 lesson: isolate
+*where* the paths diverge before assigning blame — a binding that silently dropped
+the 0x20 bit would produce an identical symptom). A texture created through the
+binding with `usage: RENDER_ATTACHMENT | TRANSIENT_ATTACHMENT`, `dimension: "3d"`
+reads back **`texture.usage === 48`** via `wgpuTextureGetUsage`. The bit reaches
+the C ABI intact and the backend echoes it; the backend simply does not validate
+the rules that go with it.
+
+Same class as D13 and the recorded `createView` view-usage gap. Never worked
+around in the binding. The affected families stay out of the curated suite until a
+real-backend (Dawn) run arbitrates.
