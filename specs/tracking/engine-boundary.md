@@ -1653,3 +1653,62 @@ who approved the trace and wrote *"real CommonJS behaviour"* into the commit
 message. All three were wrong, in three different ways. **The four-line experiment
 that settled it took under a minute.** When a claim is about what some other
 system *does*, run that system.
+
+### Q11 addendum 2 — and the fix for L21 was ALSO not right (2026-07-13)
+
+Running esbuild once fixed the throw path and left a bigger error standing. Running
+it *properly* — every input shape, not just the one that produced the helper I
+happened to look at — showed the fixture was modelling a bundler artifact that
+**esbuild never emits**.
+
+**Measured, `esbuild --bundle --format=cjs`, one probe per input shape:**
+
+| Input | What esbuild actually emits |
+|---|---|
+| **static ESM only** | **no registry at all** — modules hoisted and concatenated into one flat scope |
+| ESM + a dynamic `import()` | the **`__esm`** helper (lazy init) |
+| CommonJS input, or ESM importing a CJS dep | the **`__commonJS`** helper + `__require` |
+
+And the two registries **disagree with each other** on the throw path:
+
+```js
+// __commonJS: resets `mod`, so the next require RE-RUNS the factory and throws a NEW error
+catch (e) { throw mod = 0, e; }
+
+// __esm: MEMOISES the error, re-throws the SAME error, factory never runs again
+catch (e) { throw err = [e], e; }
+```
+
+Confirmed by running the emitted bundles: `__commonJS` → factory re-runs, second error
+is a *different* object; `__esm` → same error re-thrown, factory ran once. (Node's own
+`require()` matches `__commonJS`.) **Neither ever hands out partial exports** — the
+original fixture was wrong against *both*.
+
+**So both prior positions were half-right, and neither noticed.** §10 prescribed
+"delete the cache entry and re-run" — correct for **`__commonJS`**. The planner
+"corrected" it to "memoise the error, do not re-run" — correct for **`__esm`**. Each
+was describing a real bundler, and a *different* one, while arguing about a single
+fixture. The fixture that resulted was a **chimera**: `__commonJS`'s structure with
+`__esm`'s error semantics, a combination esbuild never produces.
+
+**And the shape that matters most was not modelled at all.** Block 16's premise is
+*game code authored as ES modules and bundled*. For pure static ESM the real artifact
+is a **flat concatenation with no registry**, and the fixture had no such section —
+the most likely shape of the actual shipped bundle was entirely untested.
+
+**The fixture now models all three real shapes**, each faithful to what esbuild
+emits, each stressing something different:
+
+- **flat concatenation** — hoisting, `let`/`const` TDZ across the flat scope,
+  evaluation order, and a circular reference resolving to `undefined` through
+  hoisting. Reproduces the measured trace exactly (`b saw a = undefined`).
+- **`__commonJS`** — cache-before-evaluate, partially-initialised exports on a
+  circular require (correct for CommonJS), and a throw that **re-runs** the factory
+  (counter reaches 2, two distinct errors).
+- **`__esm`** — lazy init, memoised error, **same** error re-thrown, factory runs
+  **exactly once**.
+
+**The compounded lesson, which is the one worth keeping:** running the experiment
+*once* is not the same as running it *enough*. The first probe answered the question
+that had been asked and hid the question that should have been. When the answer
+depends on an input, vary the input.

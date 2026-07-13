@@ -58,132 +58,279 @@
         }
     }
 
-    // Deliberately hand-written as a pre-bundled registry. Its error record
-    // mirrors esbuild's __esm helper: a factory throw is memoised and later
-    // loads rethrow that same error without re-running evaluation. This tests
-    // the shipped bundle artifact, not a runtime module loader in either engine.
-    (function runPreBundledScript(__modules) {
-        var __cache = Object.create(null);
+    // Static ESM-only input makes esbuild hoist and concatenate the modules into
+    // one flat scope. It emits no registry or helper for this input shape.
+    (function runFlatStaticEsmBundle() {
+        var flatOrder = [];
+        var flatSharedEvaluationCount = 0;
+        var flatThrowCallCount = 0;
 
-        function __require(id) {
-            if (Object.prototype.hasOwnProperty.call(__cache, id)) {
-                var cached = __cache[id];
-                if (cached.error) {
-                    throw cached.error[0];
+        var flatLetTdzError = caught(readFlatLet);
+        var flatConstTdzError = caught(readFlatConst);
+
+        flatOrder.push("shared");
+        flatSharedEvaluationCount += 1;
+        var flatShared = "shared";
+
+        flatOrder.push("left");
+        var flatLeftShared = flatShared;
+
+        flatOrder.push("right");
+        var flatRightShared = flatShared;
+
+        flatOrder.push("b");
+        var flatCircleB = "b-ready";
+        log("bundle:flat:esm:b saw a = " + flatCircleA);
+
+        flatOrder.push("a");
+        var flatCircleA = "a-ready";
+        log("bundle:flat:esm:a saw b = " + flatCircleB);
+
+        flatOrder.push("entry");
+        log("bundle:flat:esm:entry " + flatCircleA + " " + flatCircleB);
+        log("bundle:flat:order:" + flatOrder.join(","));
+        log("bundle:flat:evaluate-once:" +
+            (flatSharedEvaluationCount === 1) + ":" + flatSharedEvaluationCount + ":" +
+            flatLeftShared + "," + flatRightShared);
+
+        var flatThrown = caught(flatThrow);
+        if (!flatThrown) {
+            throw new Error("flat bundled function did not throw");
+        }
+        log("bundle:flat:throw:hoisted-function:" + (flatThrowCallCount === 1) + ":" +
+            flatThrowCallCount + ":" + flatThrown.name + ":" + flatThrown.message);
+
+        let flatLet = "let-ready";
+        const flatConst = "const-ready";
+        log("bundle:flat:tdz:" +
+            (flatLetTdzError ? flatLetTdzError.name : "none") + "," +
+            (flatConstTdzError ? flatConstTdzError.name : "none") + ":" +
+            readFlatLet() + "," + readFlatConst());
+
+        function readFlatLet() {
+            return flatLet;
+        }
+
+        function readFlatConst() {
+            return flatConst;
+        }
+
+        function flatThrow() {
+            flatThrowCallCount += 1;
+            throw new Error("flat bundle failure");
+        }
+    }());
+
+    // CommonJS input, or ESM importing a CommonJS dependency, makes esbuild emit
+    // its __commonJS helper and __require closures. The helper caches before
+    // evaluation for cycles and resets `mod` when a factory throws.
+    (function runCommonJsBundle() {
+        var __getOwnPropNames = Object.getOwnPropertyNames;
+        var __commonJS = function (callback, mod) {
+            return function __require() {
+                try {
+                    return mod || (0, callback[__getOwnPropNames(callback)[0]])(
+                        (mod = { exports: {} }).exports,
+                        mod
+                    ), mod.exports;
+                } catch (error) {
+                    throw mod = 0, error;
                 }
-                return cached.module.exports;
-            }
+            };
+        };
 
-            var module = { exports: {} };
-            var record = { module: module, error: null };
-            __cache[id] = record;
-            try {
-                __modules[id](module, module.exports, __require);
-            } catch (error) {
-                record.error = [error];
-                throw error;
-            }
-            return module.exports;
-        }
+        var cjsOrder = [];
+        var cjsSharedEvaluationCount = 0;
+        var cjsThrowEvaluationCount = 0;
 
-        __require.sharedEvaluationCount = 0;
-        __require.throwEvaluationCount = 0;
-        __require("entry");
-    }({
-        "entry": function (module, exports, __require) {
-            log("bundle:factory:entry:start");
+        var requireCjsShared = __commonJS({
+            "cjs/shared.js": function (exports) {
+                cjsOrder.push("shared");
+                cjsSharedEvaluationCount += 1;
+                exports.value = "shared";
+            }
+        });
+        var requireCjsLeft = __commonJS({
+            "cjs/left.js": function (exports) {
+                cjsOrder.push("left");
+                exports.shared = requireCjsShared();
+            }
+        });
+        var requireCjsRight = __commonJS({
+            "cjs/right.js": function (exports) {
+                cjsOrder.push("right");
+                exports.shared = requireCjsShared();
+            }
+        });
+        var requireCjsCircleA = __commonJS({
+            "cjs/circle-a.js": function (exports) {
+                cjsOrder.push("circle-a");
+                exports.phase = "a-initialising";
+                var circleB = requireCjsCircleB();
+                exports.sawB = circleB.phase;
+                exports.phase = "a-ready";
+            }
+        });
+        var requireCjsCircleB = __commonJS({
+            "cjs/circle-b.js": function (exports) {
+                cjsOrder.push("circle-b");
+                exports.phase = "b-initialising";
+                var circleA = requireCjsCircleA();
+                exports.sawA = circleA.phase;
+                exports.phase = "b-ready";
+            }
+        });
+        var requireCjsThrows = __commonJS({
+            "cjs/throws.js": function (exports) {
+                cjsOrder.push("throws");
+                cjsThrowEvaluationCount += 1;
+                exports.phase = "before-throw";
+                throw new Error("cjs module failure " + cjsThrowEvaluationCount);
+            }
+        });
+        var requireCjsThrowChain = __commonJS({
+            "cjs/throw-chain.js": function (exports) {
+                cjsOrder.push("throw-chain");
+                exports.value = requireCjsThrows().value;
+            }
+        });
+        var requireCjsEntry = __commonJS({
+            "cjs/entry.js": function () {
+                cjsOrder.push("entry");
+                var left = requireCjsLeft();
+                var right = requireCjsRight();
+                log("bundle:cjs:memoised:" + (left.shared === right.shared) + ":" +
+                    cjsSharedEvaluationCount + ":" + left.shared.value + "," +
+                    right.shared.value);
 
-            var left = __require("left");
-            var right = __require("right");
-            log("bundle:diamond:values:" + left.shared + "," + right.shared);
-            log("bundle:diamond:evaluate-once:" +
-                (__require.sharedEvaluationCount === 1) + ":" +
-                __require.sharedEvaluationCount);
-            if (__require.sharedEvaluationCount !== 1) {
-                throw new Error("bundled shared module evaluated more than once");
-            }
+                var circleA = requireCjsCircleA();
+                var circleB = requireCjsCircleB();
+                log("bundle:cjs:circle:" + circleA.phase + "," + circleB.phase + "," +
+                    circleA.sawB + "," + circleB.sawA);
 
-            var circleA = __require("circle-a");
-            var circleB = __require("circle-b");
-            log("bundle:circle:final:" + circleA.phase + "," +
-                circleB.phase + "," + circleA.sawB + "," + circleB.sawA);
+                var firstThrown = caught(requireCjsThrowChain);
+                var secondThrown = caught(requireCjsThrows);
+                if (!firstThrown || !secondThrown) {
+                    throw new Error("CommonJS throwing module handed out partial exports");
+                }
+                log("bundle:cjs:throw:rerun:" + (cjsThrowEvaluationCount === 2) +
+                    ":new-error:" + (firstThrown !== secondThrown) + ":" +
+                    cjsThrowEvaluationCount + ":" + firstThrown.name + ":" +
+                    firstThrown.message + ":" + secondThrown.name + ":" +
+                    secondThrown.message);
+                log("bundle:cjs:order:" + cjsOrder.join(","));
+            }
+        });
 
-            var thrown;
-            try {
-                __require("throw-chain");
-            } catch (error) {
-                thrown = error;
-            }
-            if (!thrown) {
-                throw new Error("bundled throwing module did not throw");
-            }
-            log("bundle:throw:caught:" + thrown.name + ":" + thrown.message);
+        requireCjsEntry();
+    }());
 
-            var rethrown;
-            try {
-                __require("throws");
-            } catch (error) {
-                rethrown = error;
-            }
-            if (rethrown !== thrown) {
-                throw new Error("bundled throwing module did not rethrow the same error");
-            }
-            log("bundle:throw:rethrown-same-error:" + (rethrown === thrown) + ":" +
-                rethrown.name + ":" + rethrown.message);
-            if (__require.throwEvaluationCount !== 1) {
-                throw new Error("bundled throwing module evaluated more than once");
-            }
-            log("bundle:throw:evaluate-once:" +
-                (__require.throwEvaluationCount === 1) + ":" +
-                __require.throwEvaluationCount);
+    // A dynamic import() makes esbuild emit its lazy __esm helper. The helper
+    // clears `fn` before evaluation, memoises a thrown error, and rethrows that
+    // same error without re-running the initializer.
+    (function runEsmHelperBundle() {
+        var __getOwnPropNames = Object.getOwnPropertyNames;
+        var __esm = function (fn, res, err) {
+            return function __init() {
+                if (err) {
+                    throw err[0];
+                }
+                try {
+                    return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;
+                } catch (error) {
+                    throw err = [error], error;
+                }
+            };
+        };
 
-            exports.complete = true;
-            log("bundle:factory:entry:end");
-        },
-        "left": function (module, exports, __require) {
-            log("bundle:factory:left:start");
-            exports.shared = __require("shared").value;
-            log("bundle:factory:left:end");
-        },
-        "right": function (module, exports, __require) {
-            log("bundle:factory:right:start");
-            exports.shared = __require("shared").value;
-            log("bundle:factory:right:end");
-        },
-        "shared": function (module, exports, __require) {
-            __require.sharedEvaluationCount += 1;
-            log("bundle:factory:shared:" + __require.sharedEvaluationCount);
-            exports.value = "shared";
-        },
-        "circle-a": function (module, exports, __require) {
-            log("bundle:factory:circle-a:start");
-            exports.phase = "a-initialising";
-            var circleB = __require("circle-b");
-            exports.sawB = circleB.phase;
-            log("bundle:circle:a-saw-b:" + circleB.phase + "," + circleB.sawA);
-            exports.phase = "a-ready";
-            log("bundle:factory:circle-a:end");
-        },
-        "circle-b": function (module, exports, __require) {
-            log("bundle:factory:circle-b:start");
-            exports.phase = "b-initialising";
-            var circleA = __require("circle-a");
-            exports.sawA = circleA.phase;
-            log("bundle:circle:b-saw-a:" + circleA.phase);
-            exports.phase = "b-ready";
-            log("bundle:factory:circle-b:end");
-        },
-        "throw-chain": function (module, exports, __require) {
-            log("bundle:factory:throw-chain:start");
-            exports.value = __require("throws").value;
-        },
-        "throws": function (module, exports, __require) {
-            __require.throwEvaluationCount += 1;
-            log("bundle:factory:throws:" + __require.throwEvaluationCount);
-            exports.phase = "before-throw";
-            throw new Error("bundled module failure");
-        }
-    }));
+        var esmOrder = [];
+        var esmSharedEvaluationCount = 0;
+        var esmThrowEvaluationCount = 0;
+        var esmShared;
+        var esmLeftShared;
+        var esmRightShared;
+        var esmCircleA;
+        var esmCircleB;
+        var esmCircleASawB;
+        var esmCircleBSawA;
+
+        var initEsmShared = __esm({
+            "esm/shared.js": function () {
+                esmOrder.push("shared");
+                esmSharedEvaluationCount += 1;
+                esmShared = "shared";
+            }
+        });
+        var initEsmLeft = __esm({
+            "esm/left.js": function () {
+                initEsmShared();
+                esmOrder.push("left");
+                esmLeftShared = esmShared;
+            }
+        });
+        var initEsmRight = __esm({
+            "esm/right.js": function () {
+                initEsmShared();
+                esmOrder.push("right");
+                esmRightShared = esmShared;
+            }
+        });
+        var initEsmCircleA = __esm({
+            "esm/circle-a.js": function () {
+                initEsmCircleB();
+                esmOrder.push("a");
+                esmCircleA = "a-ready";
+                esmCircleASawB = esmCircleB;
+                log("bundle:esm:circle:a-saw-b:" + esmCircleASawB);
+            }
+        });
+        var initEsmCircleB = __esm({
+            "esm/circle-b.js": function () {
+                initEsmCircleA();
+                esmOrder.push("b");
+                esmCircleB = "b-ready";
+                esmCircleBSawA = esmCircleA;
+                log("bundle:esm:circle:b-saw-a:" + esmCircleBSawA);
+            }
+        });
+        var initEsmThrows = __esm({
+            "esm/throws.js": function () {
+                esmOrder.push("throws");
+                esmThrowEvaluationCount += 1;
+                throw new Error("esm module failure");
+            }
+        });
+        var initEsmThrowChain = __esm({
+            "esm/throw-chain.js": function () {
+                initEsmThrows();
+            }
+        });
+        var initEsmEntry = __esm({
+            "esm/entry.js": function () {
+                initEsmLeft();
+                initEsmRight();
+                initEsmCircleA();
+                initEsmCircleB();
+                esmOrder.push("entry");
+                log("bundle:esm:circle:entry:" + esmCircleA + "," + esmCircleB);
+                log("bundle:esm:memoised:" + (esmSharedEvaluationCount === 1) + ":" +
+                    esmSharedEvaluationCount + ":" + esmLeftShared + "," + esmRightShared);
+
+                var firstThrown = caught(initEsmThrowChain);
+                var secondThrown = caught(initEsmThrows);
+                if (!firstThrown || !secondThrown) {
+                    throw new Error("__esm throwing initializer did not throw");
+                }
+                log("bundle:esm:throw:same-error:" + (firstThrown === secondThrown) +
+                    ":evaluate-once:" + (esmThrowEvaluationCount === 1) + ":" +
+                    esmThrowEvaluationCount + ":" + secondThrown.name + ":" +
+                    secondThrown.message);
+                log("bundle:esm:order:" + esmOrder.join(","));
+            }
+        });
+
+        initEsmEntry();
+    }());
 
     log("namespace:GPUBufferUsage:object:" +
         (typeof GPUBufferUsage === "object"));

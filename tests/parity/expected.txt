@@ -1,24 +1,20 @@
-bundle:factory:entry:start
-bundle:factory:left:start
-bundle:factory:shared:1
-bundle:factory:left:end
-bundle:factory:right:start
-bundle:factory:right:end
-bundle:diamond:values:shared,shared
-bundle:diamond:evaluate-once:true:1
-bundle:factory:circle-a:start
-bundle:factory:circle-b:start
-bundle:circle:b-saw-a:a-initialising
-bundle:factory:circle-b:end
-bundle:circle:a-saw-b:b-ready,a-initialising
-bundle:factory:circle-a:end
-bundle:circle:final:a-ready,b-ready,b-ready,a-initialising
-bundle:factory:throw-chain:start
-bundle:factory:throws:1
-bundle:throw:caught:Error:bundled module failure
-bundle:throw:rethrown-same-error:true:Error:bundled module failure
-bundle:throw:evaluate-once:true:1
-bundle:factory:entry:end
+bundle:flat:esm:b saw a = undefined
+bundle:flat:esm:a saw b = b-ready
+bundle:flat:esm:entry a-ready b-ready
+bundle:flat:order:shared,left,right,b,a,entry
+bundle:flat:evaluate-once:true:1:shared,shared
+bundle:flat:throw:hoisted-function:true:1:Error:flat bundle failure
+bundle:flat:tdz:ReferenceError,ReferenceError:let-ready,const-ready
+bundle:cjs:memoised:true:1:shared,shared
+bundle:cjs:circle:a-ready,b-ready,b-ready,a-initialising
+bundle:cjs:throw:rerun:true:new-error:true:2:Error:cjs module failure 1:Error:cjs module failure 2
+bundle:cjs:order:entry,left,shared,right,circle-a,circle-b,throw-chain,throws,throws
+bundle:esm:circle:b-saw-a:undefined
+bundle:esm:circle:a-saw-b:b-ready
+bundle:esm:circle:entry:a-ready,b-ready
+bundle:esm:memoised:true:1:shared,shared
+bundle:esm:throw:same-error:true:evaluate-once:true:1:Error:esm module failure
+bundle:esm:order:shared,left,right,b,a,entry,throws
 namespace:GPUBufferUsage:object:true
 namespace:GPUBufferUsage:VERTEX:32
 namespace:GPUBufferUsage:readonly:true
