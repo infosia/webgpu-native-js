@@ -1,12 +1,5 @@
 use std::path::{Path, PathBuf};
 
-pub(crate) fn clang_target(cargo_target: &str) -> String {
-    cargo_target.strip_suffix("-apple-ios-sim").map_or_else(
-        || cargo_target.to_owned(),
-        |arch| format!("{arch}-apple-ios-simulator"),
-    )
-}
-
 pub(crate) fn derive_android_host_tag(
     host: &str,
     available_tags: &[String],
@@ -75,27 +68,11 @@ pub(crate) fn android_sysroot_path(ndk_root: &Path, host_tag: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{android_sysroot_path, clang_target, derive_android_host_tag};
+    use super::{android_sysroot_path, derive_android_host_tag};
     use std::path::{Path, PathBuf};
 
     fn tags(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
-    }
-
-    #[test]
-    fn preserves_cargo_target_when_clang_uses_the_same_spelling() {
-        assert_eq!(
-            clang_target("aarch64-linux-android"),
-            "aarch64-linux-android"
-        );
-    }
-
-    #[test]
-    fn translates_rust_ios_simulator_suffix_for_clang() {
-        assert_eq!(
-            clang_target("aarch64-apple-ios-sim"),
-            "aarch64-apple-ios-simulator"
-        );
     }
 
     #[test]

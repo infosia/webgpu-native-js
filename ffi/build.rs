@@ -4,7 +4,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use build_support::{android_sysroot_path, clang_target, derive_android_host_tag};
+use build_support::{android_sysroot_path, derive_android_host_tag};
 
 const BACKEND_LIB_DIR_ENV: &str = "WEBGPU_NATIVE_JS_BACKEND_LIB_DIR";
 const ANDROID_NDK_HOME_ENV: &str = "ANDROID_NDK_HOME";
@@ -95,7 +95,7 @@ fn main() {
     std::fs::write(&wrapper_path, &wrapper)
         .expect("bindgen wrapper header can be written to OUT_DIR");
 
-    let mut clang_args = vec![format!("--target={}", clang_target(&target))];
+    let mut clang_args = vec![format!("--target={target}")];
     if target_os == "android" {
         let sysroot = resolve_android_sysroot(&host);
         clang_args.push(format!("--sysroot={}", sysroot.display()));
@@ -201,7 +201,6 @@ fn resolve_android_sysroot(host: &str) -> PathBuf {
 fn apple_sdk_for_target(target: &str) -> Option<&'static str> {
     match target {
         "aarch64-apple-ios" => Some("iphoneos"),
-        "aarch64-apple-ios-sim" | "x86_64-apple-ios" => Some("iphonesimulator"),
         _ => None,
     }
 }

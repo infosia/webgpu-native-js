@@ -7,10 +7,21 @@ Everything shipped so far has been verified on macOS. This block closes the gap
 between "the code is portable in principle" and "the code builds for the
 platforms it is meant to ship on".
 
-**Owner decision (2026-07-13): cross-compilation first.** Device and simulator
-execution, and any performance claim, are explicitly *out of scope for Phase 1*.
-A build that does not exist cannot be run; get the build, then decide whether
-running it is worth the next slice.
+**Owner decision (2026-07-13): cross-compilation first.** Execution and any
+performance claim are explicitly *out of scope for Phase 1*. A build that does
+not exist cannot be run; get the build, then decide whether running it is worth
+the next slice.
+
+**Owner decision (2026-07-13): no simulators, no emulators — ever, in this
+block.** Not in Phase 1, not in Phase 2, not as a convenience. The ship targets
+are **physical iOS and Android devices**, and a simulator is a different platform
+wearing the target's name: different ABI on the Apple side, different GPU stack
+on both. Verifying against one would produce exactly the kind of result that
+looks like evidence and is not. When execution comes, it comes on hardware.
+
+Consequence, applied immediately: `aarch64-apple-ios-sim` and
+`x86_64-linux-android` are **not supported targets**, and any code that exists
+only to serve them is dead code and gets deleted.
 
 ## Why this is tractable now, and was not before
 
@@ -31,8 +42,10 @@ asserted.
 | `webgpu-native-js-codegen` | host-only (build-time) | host-only |
 | `cts-runner`, `examples/*`, `spikes/*` | **out of scope** — host development tools; they pull `winit` and a CTS checkout | out of scope |
 
-**Android is 64-bit ARM only for now.** `armv7`/`x86_64` (emulator) are deferred
-until something needs them; adding a target is cheap once the first one works.
+**Android is 64-bit ARM only.** `armv7` is deferred until a concrete requirement
+appears (adding a target is cheap once the first one works). `x86_64-linux-android`
+is the *emulator* target and is out of scope by the owner decision above, not
+merely deferred.
 
 ## The known blocker (measured 2026-07-13)
 
@@ -64,8 +77,8 @@ discipline as `WEBGPU_NATIVE_JS_BACKEND_LIB_DIR`. Absence must produce a *clear
 build error naming the variable*, not a clang diagnostic about `math.h`.
 
 **M3 — The Apple SDK is located by `xcrun`, never by a committed path.**
-`xcrun --sdk iphoneos --show-sdk-path` for device, `iphonesimulator` for the
-simulator target.
+`xcrun --sdk iphoneos --show-sdk-path`. **Device SDK only** — there is no
+simulator target (owner decision above).
 
 **M4 — No backend library is required to cross-compile.** `webgpu-native-js-ffi`
 with zero backend features is a **types-only** crate: it emits no link
@@ -93,8 +106,6 @@ unset:
 | `boa-adapter` | 0 | 0 |
 | `javascriptcore-adapter` | 0 | 0 (empty crate) |
 
-`aarch64-apple-ios-sim` also passes.
-
 **The fix was one root cause, as the diagnosis predicted:** `ffi/build.rs` now
 passes `--target=<triple>` to `bindgen` for *every* target including the host
 (M1), resolves the Android sysroot from `ANDROID_NDK_HOME` / `ANDROID_NDK_ROOT`
@@ -111,19 +122,34 @@ nothing off Apple platforms.
 variable. Neither silently falls back to the host's headers — which is what the
 old code did, and why the failure surfaced as an unreadable `math.h` diagnostic.
 
-### One finding, worth keeping
+### One finding, worth keeping — even though the code that found it is now gone
 
-**Rust's `aarch64-apple-ios-sim` is not a triple clang accepts.** Clang wants
-`aarch64-apple-ios-simulator`. Cargo's `TARGET` cannot be passed through to
-`bindgen` verbatim; the build script translates it. A narrow, real difference
-between the two toolchains' spelling of the same thing — recorded because the
-next person to add a target (`x86_64-linux-android` for the emulator, say) will
-hit the same class of problem and should look for it rather than trust
-`TARGET`.
+While Phase 1 was in flight the simulator target was briefly made to work, and
+doing so surfaced a real trap: **Rust's `aarch64-apple-ios-sim` is not a triple
+clang accepts.** Clang wants `aarch64-apple-ios-simulator`, so Cargo's `TARGET`
+had to be translated before it could reach `bindgen`.
+
+The simulator is now out of scope (owner, 2026-07-13). Before deleting the
+translation, it was checked rather than assumed: **for both supported targets
+clang accepts Cargo's spelling verbatim**, so the translation really was dead and
+is gone rather than left as a vestigial identity function.
+
+```
+xcrun clang --target=aarch64-apple-ios     -fsyntax-only -x c /dev/null   # exit 0
+xcrun clang --target=aarch64-linux-android -fsyntax-only -x c /dev/null   # exit 0
+```
+
+**The lesson is kept because it is about `TARGET`, not about simulators:** the two
+toolchains do not always spell the same platform the same way, and when they
+disagree the failure arrives as a confusing header error rather than an honest
+"unknown target". Anyone adding a target should check that clang accepts the
+triple Cargo hands them, instead of assuming — as this block did, briefly, and
+was wrong.
 
 ## Deferred, and recorded so it is not mistaken for done
 
-- **Running anything.** No device, no simulator, no emulator. Phase 2.
+- **Running anything.** Phase 2 — and when it happens, **on hardware only**
+  (owner: no simulators, no emulators).
 - **Linking a backend.** Needs an iOS/Android build of yawgpu. Phase 2+.
 - **Performance.** Owner-deferred (2026-07-12): Boa publishes its own benchmarks;
   in-process JSC-on-iOS claims stay unwritten until measured.
