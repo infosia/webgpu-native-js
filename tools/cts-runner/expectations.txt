@@ -34,3 +34,15 @@ webgpu:api,validation,error_scope:current_scope:errorFilter="out-of-memory";stac
 webgpu:api,validation,error_scope:current_scope:errorFilter="out-of-memory";stackDepth=100 fail # Noop backend cannot OOM (see header above)
 webgpu:api,validation,error_scope:current_scope:errorFilter="out-of-memory";stackDepth=1000 fail # Noop backend cannot OOM (see header above)
 webgpu:api,validation,error_scope:current_scope:errorFilter="out-of-memory";stackDepth=100000 fail # Noop backend cannot OOM (see header above)
+
+# Dawn on Metal does not aggregate timestamp query sets past Metal's 32-buffer limit
+# (backend-deltas.md -> D15). The boundary is exact: numQuerySets 8/16/32 pass, 64+
+# fail. The CTS's own description names the limit and says implementations are
+# "supposed to work around" it. The test requires 64k SIMULTANEOUSLY LIVE query sets,
+# so the binding's release behaviour is irrelevant — aggregation is Dawn's job.
+webgpu:api,operation,command_buffer,queries,timestampQuery:many_query_sets:numQuerySets=64;stage="compute" fail # D15: Dawn/Metal 32-buffer limit
+webgpu:api,operation,command_buffer,queries,timestampQuery:many_query_sets:numQuerySets=64;stage="render" fail # D15: Dawn/Metal 32-buffer limit
+webgpu:api,operation,command_buffer,queries,timestampQuery:many_query_sets:numQuerySets=256;stage="compute" fail # D15: Dawn/Metal 32-buffer limit
+webgpu:api,operation,command_buffer,queries,timestampQuery:many_query_sets:numQuerySets=256;stage="render" fail # D15: Dawn/Metal 32-buffer limit
+webgpu:api,operation,command_buffer,queries,timestampQuery:many_query_sets:numQuerySets=65536;stage="compute" fail # D15: Dawn/Metal 32-buffer limit
+webgpu:api,operation,command_buffer,queries,timestampQuery:many_query_sets:numQuerySets=65536;stage="render" fail # D15: Dawn/Metal 32-buffer limit

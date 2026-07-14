@@ -26,3 +26,17 @@ webgpu:api,operation,storage_texture,*
 #   helper's `texture instanceof GPUExternalTexture` brand check.
 webgpu:api,operation,buffers,*
 webgpu:api,operation,rendering,*
+
+# Phase B-10 (2026-07-14). command_buffer, screened sub-family by sub-family (the whole
+# family times out as one query — 3,700 execution-result cases).
+#
+# NOT added: programmable,immediate — immediate data is unimplemented (recorded).
+# queries carries six expectations for D15 (Dawn/Metal's 32-buffer timestamp limit).
+webgpu:api,operation,command_buffer,basic:*
+webgpu:api,operation,command_buffer,clearBuffer:*
+webgpu:api,operation,command_buffer,copyBufferToBuffer:*
+webgpu:api,operation,command_buffer,image_copy:*
+webgpu:api,operation,command_buffer,render,*
+webgpu:api,operation,command_buffer,queries,*
+webgpu:api,operation,command_buffer,programmable,state_tracking:*
+webgpu:api,operation,command_buffer,copyTextureToTexture:*

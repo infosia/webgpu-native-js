@@ -498,3 +498,37 @@ the rules that go with it.
 Same class as D13 and the recorded `createView` view-usage gap. Never worked
 around in the binding. The affected families stay out of the curated suite until a
 real-backend (Dawn) run arbitrates.
+
+---
+
+## D15 — Dawn on Metal does not aggregate timestamp query sets past Metal's limit
+
+**Status: OPEN (Dawn/Metal). Found 2026-07-14 (CTS B-10).**
+
+`api,operation,command_buffer,queries,timestampQuery:many_query_sets` — 6 cases fail
+on Dawn:
+
+```
+[Invalid QuerySet (unlabeled)] is invalid due to a previous error.
+```
+
+**The boundary is exact: `numQuerySets` of 8, 16 and 32 pass; 64, 256 and 65536 fail.**
+
+The CTS test names the cause in its own description:
+
+> *This test is because there is a **Metal limit of 32 MTLCounterSampleBuffers**.
+> Implementations are **supposed to work around this limit** by internally allocating
+> larger MTLCounterSampleBuffers and having the WebGPU sets be subsets of those larger
+> buffers.*
+
+32 is exactly where it stops passing.
+
+**The binding is cleared without a probe, by the shape of the test.** The test requires
+64k query sets to be **simultaneously live** — that is what it is testing. Whether the
+binding releases promptly or leaks is therefore irrelevant: 64 live query sets is the
+premise, and Metal's per-process limit of 32 counter-sample buffers is hit unless the
+implementation aggregates them. Aggregation is entirely Dawn's internal business; the
+binding only calls `wgpuDeviceCreateQuerySet`.
+
+Recorded as a backend delta. The six cases are carried in `expectations.txt` with this
+reason; they stay out of the Dawn suite's green count rather than being hidden.

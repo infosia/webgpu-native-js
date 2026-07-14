@@ -928,5 +928,27 @@ it stands at **23,324 / 0**.
 | `programmable,immediate` | fails — **immediate data is unimplemented** (recorded) |
 | `copyTextureToTexture` | timed out at 7,200 s; needs splitting |
 
-Two items remain open: `queries:timestampQuery:many_query_sets` (6 cases, 64 query
-sets, one becomes invalid — untriaged), and `copyTextureToTexture`'s runtime.
+Both open items are now closed.
+
+**`queries:timestampQuery:many_query_sets` — a Dawn/Metal backend limit (D15).** The
+boundary is exact: `numQuerySets` of 8, 16 and 32 pass; 64, 256 and 65536 fail. The
+CTS test names the cause in its own description — *"there is a Metal limit of 32
+MTLCounterSampleBuffers. Implementations are supposed to work around this limit"* —
+and 32 is exactly where it stops passing.
+
+The binding is cleared **by the shape of the test, without a probe**: it requires 64k
+query sets to be *simultaneously live*, which is what it is testing. Whether the
+binding releases promptly or leaks is therefore irrelevant — 64 live query sets is the
+premise, and Metal's per-process limit is hit unless the implementation aggregates
+them. Aggregation is Dawn's internal business; the binding only calls
+`wgpuDeviceCreateQuerySet`. Recorded as `backend-deltas.md` → D15, with the six cases
+carried as reasoned expectations.
+
+**`copyTextureToTexture` — zero failures, but it does not fit in one query.** 719
+execution-result cases; the family times out as a single run and had to be screened
+test by test. All green: compressed non-array 172/0, compressed array 172/0,
+non-compressed non-array 141/0, depth-stencil 6/0, multisampled depth 5/0, and the
+three single-case tests.
+
+Runtime, not correctness, is now the constraint on this family. Screening at
+sub-family granularity is the working method for `command_buffer`.
