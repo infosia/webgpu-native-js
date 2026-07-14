@@ -275,6 +275,14 @@ a trait method or a capability variant is additive and does not trip this gate.
 Repository initialized 2026-07-09 on branch `main`. Claude commits per slice;
 the coding agent never commits.
 
+**"Per slice" is the whole of the commit authority** (owner directive,
+2026-07-14). Claude commits unasked only to close a **planned slice** — one that
+has a written block spec and a task handoff. **All other work — a smoke run, a
+drive-by fix, a follow-up to "just fix it" — ends by showing the diff and
+asking.** The narrower rule was written after Claude read "Claude commits per
+slice" as blanket permission and committed the result of an ad-hoc smoke-test
+fix; the commit itself was sound and stayed, but it had not been asked for.
+
 Commit message convention: `phase-N: <area> — <short>`, e.g.
 `phase-0: engine-boundary — resolve JSC ArrayBuffer detach`.
 
