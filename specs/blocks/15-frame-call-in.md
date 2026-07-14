@@ -15,6 +15,18 @@ from the returned `FrameError`); the pump-failure release drain was untested.
 
 F13's deferred decision is recorded as `specs/tracking/engine-boundary.md` → HV1.
 
+**F6 verified on two real backends:** `cargo run -p example-bounce -- --verify`
+matches the golden and exits 0 on **Dawn** and on **yawgpu with
+`YAWGPU_BACKEND=metal`** (60 frames presented, state matched). Corrupting one
+golden line gives exit 1, so the golden gates.
+
+**Correction to the bounce commit message (`6ac798b`).** Its "Backend note"
+claimed the examples fail to link against yawgpu because the Metal build predates
+the `wgpuXxxSetLabel` symbols. That is false. yawgpu's default `target/release`
+build carries those symbols and runs the example on Metal. The failure observed
+came from pointing `WEBGPU_NATIVE_JS_BACKEND_LIB_DIR` at a stale `target-metal/`
+*variant* directory, not at the default build. No backend work is required.
+
 Rules are numbered **F1–F18**. Blocks 01 (R1–R27), 02 (A1–A32), 03 (B1–B22),
 08 (P1–P8), and 11 (X1–X10) still bind.
 
