@@ -470,7 +470,29 @@ Tier 2 Experimental.
 
 ## D14 — yawgpu does not validate transient-attachment rules
 
-**Status: OPEN (Noop backend; needs Dawn arbitration). Found 2026-07-13 (CTS B-6/B-7).**
+**Status: OPEN (yawgpu). Found 2026-07-13 (CTS B-6/B-7). Dawn-arbitrated and handed
+off to yawgpu 2026-07-15.**
+
+**Arbitration (2026-07-15).** The affected families were run side by side on the
+current CTS pin: yawgpu Noop (headless) vs Dawn (Metal, oracle). Dawn passes all to
+0 fail; yawgpu accepts the descriptors the CTS expects it to reject
+(`Validation succeeded unexpectedly`). Confirmed a yawgpu validation gap, binding
+cleared. Filed to yawgpu's `HANDOFF.md` (Finding 1) with the four sub-rules and
+reproduction. The `createView` view-usage-subset gap (the
+`texture_view_usage_of_multiple_usages:usage1=16;usage2=32` expectation) went in the
+same handoff as Finding 2.
+
+| CTS query | yawgpu | Dawn |
+|---|---|---|
+| `createView:texture_view_usage_of_multiple_usages` | 15 / 1 | 16 / 0 |
+| `createTexture:texture_usage` | 288 / 42 | 330 / 0 |
+| `createTexture:depthOrArrayLayers_and_mipLevelCount_for_transient_attachments` | 0 / 2 | 2 / 0 |
+| `createTexture:transient_viewFormats` | 0 / 2 | 2 / 0 |
+| `render_pass,render_pass_descriptor:color_attachments,loadOp_storeOp` | 0 / 39 | 39 / 0 |
+
+The original analysis follows.
+
+**Status when opened: OPEN (Noop backend; needs Dawn arbitration). Found 2026-07-13 (CTS B-6/B-7).**
 
 The pinned header declares `WGPUTextureUsage_TransientAttachment = 0x20`, and the
 CTS gates its transient-attachment cases on that usage being exposed — so they
