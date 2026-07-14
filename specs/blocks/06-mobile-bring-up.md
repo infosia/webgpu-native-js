@@ -133,11 +133,49 @@ xcrun clang --target=aarch64-linux-android -fsyntax-only -x c /dev/null   # exit
 **Rule:** when adding a target, verify clang accepts the triple Cargo supplies. A
 mismatch surfaces as a header error, not as an unknown-target error.
 
+## Phase 2 — backend link — DONE (2026-07-14)
+
+The binding now links against a real backend on both ship targets, and produces
+executable binaries.
+
+**yawgpu builds** (recipe from yawgpu's own README; no changes needed on either
+side):
+
+| Target | Command | Artifact |
+|---|---|---|
+| iOS | `cargo build --release --target aarch64-apple-ios -p yawgpu --features metal` | `libyawgpu.{dylib,a}` |
+| Android | `cargo build --release --target aarch64-linux-android -p yawgpu --features vulkan` | `libyawgpu.{so,a}` |
+
+Android additionally needs the NDK toolchain env block yawgpu's README documents
+(`CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER`, `CC_*`, `AR_*`).
+
+**Binding links against it**, with `WEBGPU_NATIVE_JS_BACKEND_LIB_DIR` pointing at
+the per-target directory:
+
+| | iOS | Android |
+|---|---|---|
+| `boa-adapter` (link) | exit 0 | exit 0 |
+| `javascriptcore-adapter` | exit 0 | exit 0 (empty crate) |
+| `example-compute` (headless) | `Mach-O 64-bit executable arm64` | `ELF 64-bit LSB pie executable, ARM aarch64` |
+
+`examples/compute` is the headless example (no window), so it is the artifact a
+device run would use.
+
+**M4 restated.** M4 says the *cross-compile gate* must not require a backend — that
+still holds and is still the gate. Phase 2 is the separate question of whether a
+backend, once supplied, links. It does.
+
+**Note on the bindgen fix.** yawgpu solves the same `math.h` failure from the
+outside, with `BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android` in the environment.
+This project solves it inside `ffi/build.rs` (M1–M2), so no caller-side env var is
+needed for the binding's own bindgen pass.
+
 ## Deferred, and recorded so it is not mistaken for done
 
-- **Running anything.** Phase 2 — and when it happens, **on hardware only**
-  (owner: no simulators, no emulators).
-- **Linking a backend.** Needs an iOS/Android build of yawgpu. Phase 2+.
+- **Running anything.** Not done. Executable binaries exist for both targets
+  (Phase 2), but nothing has been run on a device. When it happens it is **on
+  hardware only** (owner: no simulators, no emulators).
+- ~~**Linking a backend.**~~ **DONE (Phase 2, 2026-07-14).**
 - **Performance.** Owner-deferred (2026-07-12): Boa publishes its own benchmarks;
   in-process JSC-on-iOS claims stay unwritten until measured.
 - **`jsvalue-enum`.** Boa's NaN-boxing assumes a pointer alignment some platforms
