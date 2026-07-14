@@ -68,6 +68,7 @@ A slice is the smallest unit of dispatchable work. Depending on the phase:
 
 | Gate | Command | Who |
 |---|---|---|
+| Format | `cargo fmt --all -- --check` | both |
 | Build | `cargo build --workspace --features webgpu-native-js-ffi/backend-yawgpu` | both |
 | Test | `cargo test --workspace --features webgpu-native-js-ffi/backend-yawgpu` | Claude (backstop); agent runs targeted subsets |
 | Lint | `cargo clippy --workspace --all-targets --features webgpu-native-js-ffi/backend-yawgpu -- -D warnings` | both |
@@ -77,6 +78,18 @@ A slice is the smallest unit of dispatchable work. Depending on the phase:
 | CTS (local, not CI) | `cts-runner --cts-path <built-cts> --suite tools/cts-runner/suites/validation-core.txt --expectations tools/cts-runner/expectations.txt --timeout-secs 1200` — **exit code 0**, on yawgpu | Claude, every slice that touches JS-visible behaviour |
 | CTS oracle (gated, real GPU) | the same suite built `--no-default-features --features backend-dawn`, against a local Dawn — see "The oracle protocol" in CLAUDE.md | Claude, before a slice that extends the API surface lands |
 | Cross-compile (block 06) | `cargo check -p {webgpu-native-js-ffi,webgpu-native-js-core,boa-adapter,javascriptcore-adapter} --target {aarch64-apple-ios,aarch64-linux-android}` — 8 checks, all **exit 0**, with `WEBGPU_NATIVE_JS_BACKEND_LIB_DIR` **unset** | Claude, on any slice touching `ffi`, `core`, or an adapter |
+
+**The toolchain is pinned, and the format gate depends on it.** `rust-toolchain.toml`
+pins the channel; rustup applies it to every `cargo` invocation in this
+workspace. Without it the format gate is not a gate: rustfmt changed its import
+ordering between 1.8.0 and 1.9.0, so on 2026-07-14 `cargo fmt --check` failed on
+a machine whose stable toolchain was four months stale, against files that 1.9.0
+formats correctly. **A formatter that disagrees across machines cannot arbitrate
+anything**, and the near-miss was reformatting two correct adapter files to
+satisfy the older rustfmt — which would have broken the gate for everyone on the
+newer one. Bumping the pin is its own commit: change `channel`, run
+`cargo fmt --all`, land the reformatting separately so it never hides inside a
+behavioural change.
 
 **The cross-compile gate runs with no backend library.** iOS and Android are the
 ship targets; the binding must build for them without an iOS/Android build of any

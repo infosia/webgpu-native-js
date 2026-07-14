@@ -1,0 +1,16 @@
+# Pinned toolchain. rustup reads this file and uses it for every cargo/rustc
+# invocation in this workspace, so `rustfmt`, `clippy`, and the compiler are the
+# same version for every developer and every gate.
+#
+# Why it exists: rustfmt's import ordering changed between 1.8.0 and 1.9.0. With
+# no pin, `cargo fmt --check` failed on a Windows machine whose stable toolchain
+# was four months old, against files that were correctly formatted by 1.9.0 —
+# the formatter disagreed with itself across machines, so the fmt gate could not
+# be trusted (2026-07-14). A pin makes formatting reproducible; without one, the
+# gate is only as stable as each developer's last `rustup update`.
+#
+# Moving the pin is a deliberate act: bump `channel`, run `cargo fmt --all`, and
+# land any reformatting as its own commit so it never hides inside a change.
+[toolchain]
+channel = "1.97.0"
+components = ["rustfmt", "clippy"]
