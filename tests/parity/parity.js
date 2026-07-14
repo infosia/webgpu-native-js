@@ -1777,10 +1777,8 @@
                 computePass.setBindGroup(0, computeBindGroup, new Int32Array([]), 0, 0);
             });
             log("setBindGroup:u32array-type:" + offsetsTypeError.name);
-            var nullBindGroupError = caught(function () {
-                computePass.setBindGroup(0, null, []);
-            });
-            log("setBindGroup:null-bindGroup:" + nullBindGroupError.name);
+            computePass.setBindGroup(0, null);
+            log("setBindGroup:compute-null:ok");
             computePass.dispatchWorkgroupsIndirect(indirectBuffer, 0);
             var computeTypeError = caught(function () {
                 computePass.dispatchWorkgroupsIndirect({}, 0);
@@ -1825,6 +1823,8 @@
                 renderPass.setBindGroup(0, renderBindGroup, [0, 4294967296]);
             });
             log("setBindGroup:render-offsets:" + renderOffsetsError.name);
+            renderPass.setBindGroup(0, null);
+            log("setBindGroup:render-null:ok");
             renderPass.setBlendConstant([0.125, 0.25, 0.5, 1]);
             renderPass.setBlendConstant({ r: 0.75, g: 0.5, b: 0.25, a: 1 });
             renderPass.setStencilReference(4294967295);
@@ -1889,6 +1889,8 @@
         log(errorLine("required:bindGroupLayouts", layoutsError));
 
         var emptyLayout = device.createBindGroupLayout({ entries: [] });
+        device.createPipelineLayout({ bindGroupLayouts: [null, emptyLayout] });
+        log("pipelineLayout:null-slot:ok");
         var bindingError = caught(function () {
             device.createBindGroup({
                 layout: emptyLayout,

@@ -37,10 +37,15 @@ enum sentinels `Undefined` / `BindingNotUsed` (emitted only for absent optionals
 - **Dictionary property read order** is required-first, then declaration order —
   not WebIDL's lexicographic order. Observable only via getter side effects;
   trusted scripts (invariant 8). (Emission lens item 8.)
-- **`sequence<GPUBindGroupLayout?>` element nullability is dropped**: a null
-  element (valid WebGPU: an empty bind group slot) raises a TypeError instead.
-  Clear-early-error until null-slot support is actually needed. (Compliance
-  lens m3.)
+- ~~**`sequence<GPUBindGroupLayout?>` element nullability is dropped**~~ **RETIRED
+  2026-07-14 (B-9).** The exit condition this entry named — *"until null-slot
+  support is actually needed"* — arrived: `api,operation,command_buffer,programmable,
+  state_tracking` calls `setBindGroup(index, null)`, and the three
+  `createPipelineLayout` null-BGL cases were carried as expectations. Null slots are
+  now implemented at all three IDL sites — `setBindGroup`'s `GPUBindGroup?` (both
+  overloads) and each element of `sequence<GPUBindGroupLayout?>` — and pass a NULL
+  handle to the C ABI. `createPipelineLayout` 11/3 → **14/0**; `state_tracking` 8/10
+  → **18/0**; the three expectations are retired.
 - **Attribute-setter join (`label` → `set_label`) is a convention hard-coded in
   the generator**, not policy — it mirrors `webgpu.yml`'s own naming; a wrongly
   guessed mapping surfaces as a join mismatch. (Compliance m5; accepted.)

@@ -5,7 +5,8 @@ use std::fmt::Write as _;
 
 use crate::{
     ChainPolicy, CodegenError, DescriptorEntry, DictOrSequenceUnionPolicy, HandleOrEnumUnionPolicy,
-    JoinReport, MemberPair, Policy, SkipPolicy, TypePair, UnionFlattenPolicy, ValueModel,
+    HandleSequencePolicy, JoinReport, MemberPair, Policy, SkipPolicy, TypePair, UnionFlattenPolicy,
+    ValueModel,
 };
 
 pub(crate) fn emit_namespaces(report: &JoinReport) -> String {
@@ -664,11 +665,15 @@ fn validate_descriptor_policy(
             )));
         }
     }
-    for handle in descriptor
-        .handles
-        .iter()
-        .chain(descriptor.handle_sequences.iter())
-    {
+    for handle in &descriptor.handles {
+        validate_identifier(
+            &descriptor.dictionary,
+            &handle.member,
+            &handle.helper,
+            "helper",
+        )?;
+    }
+    for handle in &descriptor.handle_sequences {
         validate_identifier(
             &descriptor.dictionary,
             &handle.member,
@@ -814,10 +819,33 @@ fn validate_descriptor_policy(
             continue;
         }
         if handle_sequences.contains(name) {
-            if sequence_element(&idl.type_name).is_none() || !c.count_and_pointer {
+            let Some(element) = sequence_element(&idl.type_name) else {
                 return Err(CodegenError::Policy(format!(
                     "dead handle sequence policy {}.{name}: member is not a joined sequence/count-pointer",
                     descriptor.dictionary
+                )));
+            };
+            if !c.count_and_pointer {
+                return Err(CodegenError::Policy(format!(
+                    "dead handle sequence policy {}.{name}: member is not a joined sequence/count-pointer",
+                    descriptor.dictionary
+                )));
+            }
+            let policy = descriptor
+                .handle_sequences
+                .iter()
+                .find(|entry| entry.member == name)
+                .ok_or_else(|| {
+                    CodegenError::Policy(format!(
+                        "missing handle sequence policy {}.{name}",
+                        descriptor.dictionary
+                    ))
+                })?;
+            let idl_nullable = element.ends_with('?');
+            if policy.nullable_elements != idl_nullable {
+                return Err(CodegenError::Policy(format!(
+                    "handle sequence element nullability disagreement for {}.{name}: policy={}, IDL={idl_nullable}",
+                    descriptor.dictionary, policy.nullable_elements
                 )));
             }
             continue;
@@ -1440,10 +1468,10 @@ fn emit_descriptor(
         .iter()
         .map(|entry| (entry.member.as_str(), entry))
         .collect();
-    let handle_sequences: BTreeMap<&str, &str> = descriptor
+    let handle_sequences: BTreeMap<&str, &HandleSequencePolicy> = descriptor
         .handle_sequences
         .iter()
-        .map(|entry| (entry.member.as_str(), entry.helper.as_str()))
+        .map(|entry| (entry.member.as_str(), entry))
         .collect();
     let flatten: BTreeMap<&str, &UnionFlattenPolicy> = descriptor
         .union_flatten
@@ -1698,8 +1726,16 @@ fn emit_descriptor(
                 }
                 output.push_str("    };\n");
             }
-        } else if let Some(helper) = handle_sequences.get(name.as_str()) {
-            emit_handle_sequence_local(&mut output, name, &local, &value, helper, idl.required);
+        } else if let Some(policy) = handle_sequences.get(name.as_str()) {
+            emit_handle_sequence_local(
+                &mut output,
+                name,
+                &local,
+                &value,
+                &policy.helper,
+                idl.required,
+                policy.nullable_elements,
+            );
         } else if let Some(policy) = handle_or_enum.get(name.as_str()) {
             emit_handle_or_enum_local(&mut output, name, &local, &value, policy);
         } else if is_idl_string(idl) {
@@ -1976,6 +2012,7 @@ fn emit_handle_sequence_local(
     value: &str,
     helper: &str,
     required: bool,
+    nullable_elements: bool,
 ) {
     if required {
         let _ = writeln!(output, "    let {local} = {{");
@@ -1992,7 +2029,15 @@ fn emit_handle_sequence_local(
         output,
         "        let converted = convert_sequence::<E, _>(cx, {value}, \"{name}\", |item| {{"
     );
-    let _ = writeln!(output, "            {helper}::<E>(cx, item)");
+    if nullable_elements {
+        output.push_str("            if E::is_null(cx, item) || E::is_undefined(cx, item) {\n");
+        output.push_str("                Ok(ptr::null_mut())\n");
+        output.push_str("            } else {\n");
+        let _ = writeln!(output, "                {helper}::<E>(cx, item)");
+        output.push_str("            }\n");
+    } else {
+        let _ = writeln!(output, "            {helper}::<E>(cx, item)");
+    }
     output.push_str("        })?;\n        arena.alloc_slice(converted)\n    };\n");
 }
 
@@ -2876,7 +2921,7 @@ fn emit_field(
     unsupported: &BTreeSet<&str>,
     skips: &BTreeMap<&str, &SkipPolicy>,
     handles: &BTreeMap<&str, &crate::HandlePolicy>,
-    handle_sequences: &BTreeMap<&str, &str>,
+    handle_sequences: &BTreeMap<&str, &HandleSequencePolicy>,
     handle_or_enum: &BTreeMap<&str, &HandleOrEnumUnionPolicy>,
     required_defaults: &BTreeMap<&str, u64>,
     absent_constants: &BTreeMap<&str, &str>,

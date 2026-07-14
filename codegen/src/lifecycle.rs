@@ -170,6 +170,7 @@ fn validate_lifecycle(
                 mapping.interface, mapping.member
             )));
         }
+        validate_nullable_handle_arguments(&interfaces, mapping)?;
     }
     let mut properties = BTreeSet::new();
     for mapping in &lifecycle.properties {
@@ -368,6 +369,104 @@ fn validate_lifecycle(
             return Err(CodegenError::Policy(format!(
                 "unknown lifecycle quirk {}.{}",
                 quirk.interface, quirk.kind
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_nullable_handle_arguments(
+    interfaces: &BTreeMap<&str, &TypePair>,
+    mapping: &crate::MethodMappingPolicy,
+) -> Result<(), CodegenError> {
+    if mapping.nullable_handle_arguments.is_empty() {
+        return Ok(());
+    }
+    let interface = interfaces.get(mapping.interface.as_str()).ok_or_else(|| {
+        CodegenError::Policy(format!(
+            "nullable handle argument policy lost interface {}",
+            mapping.interface
+        ))
+    })?;
+    let member = interface
+        .members
+        .iter()
+        .find(|member| member.member == mapping.member)
+        .ok_or_else(|| {
+            CodegenError::Policy(format!(
+                "nullable handle argument policy lost method {}.{}",
+                mapping.interface, mapping.member
+            ))
+        })?;
+    let mut seen = BTreeSet::new();
+    for argument in &mapping.nullable_handle_arguments {
+        if argument.is_empty() || !seen.insert(argument.as_str()) {
+            return Err(CodegenError::Policy(format!(
+                "nullable handle argument policy {}.{} contains an empty or duplicate argument",
+                mapping.interface, mapping.member
+            )));
+        }
+        let mut argument_index = None;
+        let mut native_type = None;
+        for overload in &member.idl {
+            let (index, value) = overload
+                .values
+                .iter()
+                .enumerate()
+                .skip(1)
+                .find(|(_, value)| value.name == *argument)
+                .ok_or_else(|| {
+                    CodegenError::Policy(format!(
+                        "nullable handle argument policy {}.{}.{} is absent from an overload",
+                        mapping.interface, mapping.member, argument
+                    ))
+                })?;
+            if !value.required || !value.nullable {
+                return Err(CodegenError::Policy(format!(
+                    "nullable handle argument policy {}.{}.{} requires a required nullable WebIDL argument",
+                    mapping.interface, mapping.member, argument
+                )));
+            }
+            let idl_type = value.type_name.trim_end_matches('?');
+            let handle = interfaces.get(idl_type).ok_or_else(|| {
+                CodegenError::Policy(format!(
+                    "nullable handle argument policy {}.{}.{} names non-handle WebIDL type {}",
+                    mapping.interface, mapping.member, argument, value.type_name
+                ))
+            })?;
+            let c_type = handle.c_name.as_deref().ok_or_else(|| {
+                CodegenError::Policy(format!(
+                    "nullable handle argument policy {}.{}.{} has no joined C handle",
+                    mapping.interface, mapping.member, argument
+                ))
+            })?;
+            if argument_index.is_some_and(|prior| prior != index)
+                || native_type.is_some_and(|prior| prior != c_type)
+            {
+                return Err(CodegenError::Policy(format!(
+                    "nullable handle argument policy {}.{}.{} differs across overloads",
+                    mapping.interface, mapping.member, argument
+                )));
+            }
+            argument_index = Some(index);
+            native_type = Some(c_type);
+        }
+        let index = argument_index.ok_or_else(|| {
+            CodegenError::Policy(format!(
+                "nullable handle argument policy {}.{}.{} has no overload",
+                mapping.interface, mapping.member, argument
+            ))
+        })?;
+        let native = member.c.values.get(index).ok_or_else(|| {
+            CodegenError::Policy(format!(
+                "nullable handle argument policy {}.{}.{} has no C argument",
+                mapping.interface, mapping.member, argument
+            ))
+        })?;
+        if !native.nullable || Some(native.type_name.as_str()) != native_type {
+            return Err(CodegenError::Policy(format!(
+                "nullable handle argument policy {}.{}.{} disagrees with C-ABI type {} nullable={}",
+                mapping.interface, mapping.member, argument, native.type_name, native.nullable
             )));
         }
     }
@@ -943,11 +1042,19 @@ fn emit_release_request(output: &mut String, standards: &[StandardInterface<'_>]
         );
         for retained in &standard.retained {
             if retained.sequence {
-                let _ = writeln!(
-                    output,
-                    "                for handle in {} {{ (gpu.{}_release)(handle); }}",
-                    retained.field, retained.dispatch
-                );
+                if retained.nullable {
+                    let _ = writeln!(
+                        output,
+                        "                for handle in {} {{ if !handle.is_null() {{ (gpu.{}_release)(handle); }} }}",
+                        retained.field, retained.dispatch
+                    );
+                } else {
+                    let _ = writeln!(
+                        output,
+                        "                for handle in {} {{ (gpu.{}_release)(handle); }}",
+                        retained.field, retained.dispatch
+                    );
+                }
             } else if retained.nullable {
                 let _ = writeln!(
                     output,
@@ -1101,11 +1208,19 @@ fn emit_create(output: &mut String, standard: &StandardInterface<'_>) -> Result<
                     retained.dispatch, retained.source
                 );
             } else if retained.sequence {
-                let _ = writeln!(
-                    output,
-                    "        for handle in &converted.{} {{ (gpu.{}_add_ref)(*handle); }}",
-                    retained.source, retained.dispatch
-                );
+                if retained.nullable {
+                    let _ = writeln!(
+                        output,
+                        "        for handle in &converted.{} {{ if !handle.is_null() {{ (gpu.{}_add_ref)(*handle); }} }}",
+                        retained.source, retained.dispatch
+                    );
+                } else {
+                    let _ = writeln!(
+                        output,
+                        "        for handle in &converted.{} {{ (gpu.{}_add_ref)(*handle); }}",
+                        retained.source, retained.dispatch
+                    );
+                }
             } else if retained.nullable {
                 let _ = writeln!(
                     output,
@@ -1238,11 +1353,19 @@ fn emit_cleanup(
             format!("converted.{}", retained.source)
         };
         if retained.sequence {
-            let _ = writeln!(
-                output,
-                "{indent}    for handle in &{source} {{ ({gpu}.{}_release)(*handle); }}",
-                retained.dispatch
-            );
+            if retained.nullable {
+                let _ = writeln!(
+                    output,
+                    "{indent}    for handle in &{source} {{ if !handle.is_null() {{ ({gpu}.{}_release)(*handle); }} }}",
+                    retained.dispatch
+                );
+            } else {
+                let _ = writeln!(
+                    output,
+                    "{indent}    for handle in &{source} {{ ({gpu}.{}_release)(*handle); }}",
+                    retained.dispatch
+                );
+            }
         } else if retained.nullable {
             let _ = writeln!(
                 output,

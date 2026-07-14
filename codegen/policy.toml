@@ -14,9 +14,10 @@
 # and preserve their zero C form when absent. `zero` accounts for C-only fields.
 # Nested `[[descriptor.strings]]` entries classify WebIDL nullability for every
 # joined string member. Policy also records name maps, skips with reasons,
-# native handles and handle sequences, flattened unions, typed chains,
-# handle-or-enum unions, retained wrapper captures, precisely-scoped
-# required-member defaults, and reasoned IDL-only enum-value skips. Member skips
+# native handles, nullable handle arguments, nullable-element handle sequences,
+# flattened unions, typed chains, handle-or-enum unions, retained wrapper
+# captures, precisely-scoped required-member defaults, and reasoned IDL-only
+# enum-value skips. Member skips
 # may reject present values instead of silently ignoring them. Policy is checked
 # both ways: unknown, duplicate, dead, disagreeing, and unpoliced entries all
 # fail generation.
@@ -570,6 +571,7 @@ path = "compute_pass_set_pipeline"
 interface = "GPUComputePassEncoder"
 member = "setBindGroup"
 path = "compute_pass_set_bind_group"
+nullable_handle_arguments = ["bindGroup"]
 
 [[lifecycle.methods]]
 interface = "GPUComputePassEncoder"
@@ -623,6 +625,7 @@ path = "render_pass_set_index_buffer"
 interface = "GPURenderPassEncoder"
 member = "setBindGroup"
 path = "render_pass_set_bind_group"
+nullable_handle_arguments = ["bindGroup"]
 
 [[lifecycle.methods]]
 interface = "GPURenderPassEncoder"
@@ -724,6 +727,7 @@ reason = "GPURenderCommandsMixin reuses the render-command body with bundle-spec
 interface = "GPURenderBundleEncoder"
 member = "setBindGroup"
 path = "render_pass_set_bind_group"
+nullable_handle_arguments = ["bindGroup"]
 reason = "GPUBindingCommandsMixin reuses the binding-command body with bundle-specific dispatch"
 
 [[lifecycle.methods]]
@@ -1220,6 +1224,7 @@ nullable = false
 [[descriptor.handle_sequences]]
 member = "bindGroupLayouts"
 helper = "bind_group_layout_handle"
+nullable_elements = true
 
 [[descriptor]]
 dictionary = "GPUShaderModuleDescriptor"

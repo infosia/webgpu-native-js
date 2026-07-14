@@ -1559,6 +1559,7 @@ struct MockGpuState {
     texture_view_descriptors: Vec<RecordedTextureViewDescriptor>,
     null_texture_view_descriptors: usize,
     query_set_descriptors: Vec<RecordedQuerySetDescriptor>,
+    pipeline_layout_descriptors: Vec<Vec<WGPUBindGroupLayout>>,
     render_bundle_encoder_descriptors: Vec<RecordedRenderBundleEncoderDescriptor>,
     pipeline_constants: Vec<(&'static str, RecordedConstants)>,
     query_sets: BTreeMap<WGPUQuerySet, RecordedQuerySetDescriptor>,
@@ -2350,10 +2351,25 @@ unsafe fn device_create_bind_group_layout(
 
 unsafe fn device_create_pipeline_layout(
     _device: WGPUDevice,
-    _descriptor: *const WGPUPipelineLayoutDescriptor,
+    descriptor: *const WGPUPipelineLayoutDescriptor,
 ) -> WGPUPipelineLayout {
     GPU_STATE.with(|state| {
         let mut state = state.borrow_mut();
+        let layouts = unsafe { descriptor.as_ref() }.map_or_else(Vec::new, |descriptor| {
+            if descriptor.bindGroupLayoutCount == 0 || descriptor.bindGroupLayouts.is_null() {
+                Vec::new()
+            } else {
+                // SAFETY: the binding supplies this many readable handles for the native call.
+                unsafe {
+                    std::slice::from_raw_parts(
+                        descriptor.bindGroupLayouts,
+                        descriptor.bindGroupLayoutCount,
+                    )
+                }
+                .to_vec()
+            }
+        });
+        state.pipeline_layout_descriptors.push(layouts);
         state.next += 1;
         fake_handle(4000 + state.next)
     })
@@ -5715,6 +5731,130 @@ mod tests {
             };
             assert_eq!(layouts, [first_handle, second_handle]);
         });
+    }
+
+    #[test]
+    fn pipeline_layout_nullable_slots_accept_null_undefined_and_sparse_holes() {
+        let rt = runtime();
+        let cx = rt.context();
+        let layout_handle = fake_handle(53);
+        let layout = Engine::new_instance(
+            cx,
+            crate::GPU_BIND_GROUP_LAYOUT_CLASS,
+            Box::new(BindGroupLayoutPayload {
+                label: Mutex::new(String::new()),
+                layout: layout_handle,
+                parent_pipeline: None,
+            }),
+        )
+        .expect("layout");
+
+        for values in [
+            rt.set_like(&[rt.null(), layout, rt.undefined()]),
+            rt.sparse_array(3, &[(1, layout)]),
+        ] {
+            let arena = Arena::new();
+            let desc = descriptor(&rt, &[("bindGroupLayouts", values)]);
+            let converted = convert_pipeline_layout_descriptor::<Engine>(cx, desc, &arena)
+                .expect("nullable bind-group-layout slots");
+            let layouts = unsafe {
+                std::slice::from_raw_parts(
+                    converted.bindGroupLayouts,
+                    converted.bindGroupLayoutCount,
+                )
+            };
+            assert_eq!(layouts, [ptr::null_mut(), layout_handle, ptr::null_mut()]);
+        }
+    }
+
+    #[test]
+    fn pipeline_layout_partial_conversion_leaks_no_addref_or_arena_allocation() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let layout = Engine::new_instance(
+            cx,
+            crate::GPU_BIND_GROUP_LAYOUT_CLASS,
+            Box::new(BindGroupLayoutPayload {
+                label: Mutex::new(String::new()),
+                layout: fake_handle(54),
+                parent_pipeline: None,
+            }),
+        )
+        .expect("layout");
+        let layouts = rt.set_like(&[layout, rt.number(1.0)]);
+        let desc = descriptor(&rt, &[("bindGroupLayouts", layouts)]);
+        let arena = Arena::new();
+
+        assert_eq!(
+            convert_pipeline_layout_descriptor::<Engine>(cx, desc, &arena)
+                .expect_err("the second element must fail"),
+            "TypeError: GPUBindGroupLayout is required"
+        );
+        assert_eq!(arena.allocations.borrow().len(), 0);
+        assert_eq!(
+            crate::device_create_pipeline_layout::<Engine>(cx, device, &[desc])
+                .expect_err("create must propagate element conversion failure"),
+            "TypeError: GPUBindGroupLayout is required"
+        );
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            assert!(state.pipeline_layout_descriptors.is_empty());
+            assert_eq!(state.bind_group_layout_add_refs, 0);
+            assert_eq!(state.bind_group_layout_releases, 0);
+        });
+        release_device_held_values(&rt, cx, device);
+    }
+
+    #[test]
+    fn pipeline_layout_null_slots_reach_abi_and_retain_no_wrapper_handle() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let layout_handle = fake_handle(55);
+        let bind_group_layout = Engine::new_instance(
+            cx,
+            crate::GPU_BIND_GROUP_LAYOUT_CLASS,
+            Box::new(BindGroupLayoutPayload {
+                label: Mutex::new(String::new()),
+                layout: layout_handle,
+                parent_pipeline: None,
+            }),
+        )
+        .expect("bind group layout");
+        let layouts = rt.set_like(&[rt.null(), bind_group_layout, rt.undefined()]);
+        let desc = descriptor(&rt, &[("bindGroupLayouts", layouts)]);
+
+        let pipeline_layout = crate::device_create_pipeline_layout::<Engine>(cx, device, &[desc])
+            .expect("pipeline layout with empty slots");
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(
+                state.pipeline_layout_descriptors,
+                [vec![ptr::null_mut(), layout_handle, ptr::null_mut()]]
+            );
+            assert_eq!(state.bind_group_layout_add_refs, 0);
+        });
+
+        let payload = Engine::payload(cx, pipeline_layout, crate::GPU_PIPELINE_LAYOUT_CLASS)
+            .and_then(|payload| payload.downcast_ref::<PipelineLayoutPayload>())
+            .expect("pipeline layout payload");
+        crate::finalize_pipeline_layout(
+            Box::new(PipelineLayoutPayload {
+                label: Mutex::new(String::new()),
+                layout: payload.layout,
+            }),
+            &rt.env,
+        );
+        assert_eq!(rt.queue().drain().expect("pipeline layout release"), 1);
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.bind_group_layout_releases, 0);
+            assert_eq!(state.pipeline_layout_releases, 1);
+        });
+        release_device_held_values(&rt, cx, device);
     }
 
     #[test]
@@ -11352,10 +11492,14 @@ mod tests {
             .expect_err("bad dynamic offset"),
             "TypeError: dynamicOffsets"
         );
+        crate::compute_pass_set_bind_group::<Engine>(cx, pass, &[rt.number(4.0), rt.null()])
+            .expect("null bind group");
+        crate::compute_pass_set_bind_group::<Engine>(cx, pass, &[rt.number(7.0), rt.undefined()])
+            .expect("undefined bind group");
         assert_eq!(
-            crate::compute_pass_set_bind_group::<Engine>(cx, pass, &[rt.number(4.0), rt.null()],)
-                .expect_err("null bind group remains rejected"),
-            "TypeError: GPUBindGroup is required"
+            crate::compute_pass_set_bind_group::<Engine>(cx, pass, &[rt.number(10.0)])
+                .expect_err("missing bind group remains rejected"),
+            "TypeError: bindGroup"
         );
         let typed_array_bytes = [64_u32, 128, 256, 512]
             .into_iter()
@@ -11388,6 +11532,30 @@ mod tests {
             ],
         )
         .expect("Uint32Array window overload");
+        crate::compute_pass_set_bind_group::<Engine>(
+            cx,
+            pass,
+            &[
+                rt.number(8.0),
+                rt.null(),
+                typed_array,
+                rt.number(0.0),
+                rt.number(0.0),
+            ],
+        )
+        .expect("Uint32Array window overload with null bind group");
+        crate::compute_pass_set_bind_group::<Engine>(
+            cx,
+            pass,
+            &[
+                rt.number(9.0),
+                rt.undefined(),
+                typed_array,
+                rt.number(0.0),
+                rt.number(0.0),
+            ],
+        )
+        .expect("Uint32Array window overload with undefined bind group");
         assert_eq!(
             crate::compute_pass_set_bind_group::<Engine>(
                 cx,
@@ -11414,7 +11582,7 @@ mod tests {
             }
             assert_eq!(
                 state.recording_calls.get("compute_set_bind_group"),
-                Some(&3)
+                Some(&7)
             );
             assert_eq!(
                 state.compute_bind_group_calls,
@@ -11435,10 +11603,38 @@ mod tests {
                     },
                     RecordedBindGroupCall {
                         encoder: native_pass,
+                        index: 4,
+                        bind_group: ptr::null_mut(),
+                        offsets: Vec::new(),
+                        offsets_were_null: true,
+                    },
+                    RecordedBindGroupCall {
+                        encoder: native_pass,
+                        index: 7,
+                        bind_group: ptr::null_mut(),
+                        offsets: Vec::new(),
+                        offsets_were_null: true,
+                    },
+                    RecordedBindGroupCall {
+                        encoder: native_pass,
                         index: 5,
                         bind_group: native_bind_group,
                         offsets: vec![256, 512],
                         offsets_were_null: false,
+                    },
+                    RecordedBindGroupCall {
+                        encoder: native_pass,
+                        index: 8,
+                        bind_group: ptr::null_mut(),
+                        offsets: Vec::new(),
+                        offsets_were_null: true,
+                    },
+                    RecordedBindGroupCall {
+                        encoder: native_pass,
+                        index: 9,
+                        bind_group: ptr::null_mut(),
+                        offsets: Vec::new(),
+                        offsets_were_null: true,
                     },
                 ]
             );
@@ -12099,11 +12295,10 @@ mod tests {
             .expect_err("bad dynamic offset"),
             "TypeError: dynamicOffsets"
         );
-        assert_eq!(
-            crate::render_pass_set_bind_group::<Engine>(cx, pass, &[rt.number(3.0), rt.null()],)
-                .expect_err("null bind group remains rejected"),
-            "TypeError: GPUBindGroup is required"
-        );
+        crate::render_pass_set_bind_group::<Engine>(cx, pass, &[rt.number(3.0), rt.null()])
+            .expect("null bind group");
+        crate::render_pass_set_bind_group::<Engine>(cx, pass, &[rt.number(4.0), rt.undefined()])
+            .expect("undefined bind group");
         let blend_sequence = rt.set_like(&[
             rt.number(0.125),
             rt.number(0.25),
@@ -12254,7 +12449,7 @@ mod tests {
                 ("render_set_pipeline", 1),
                 ("render_set_vertex_buffer", 2),
                 ("render_set_index_buffer", 2),
-                ("render_set_bind_group", 2),
+                ("render_set_bind_group", 4),
                 ("set_viewport", 1),
                 ("set_scissor_rect", 1),
                 ("draw", 1),
@@ -12283,6 +12478,20 @@ mod tests {
                         bind_group: native_bind_group,
                         offsets: vec![1024, 2048],
                         offsets_were_null: false,
+                    },
+                    RecordedBindGroupCall {
+                        encoder: native_pass,
+                        index: 3,
+                        bind_group: ptr::null_mut(),
+                        offsets: Vec::new(),
+                        offsets_were_null: true,
+                    },
+                    RecordedBindGroupCall {
+                        encoder: native_pass,
+                        index: 4,
+                        bind_group: ptr::null_mut(),
+                        offsets: Vec::new(),
+                        offsets_were_null: true,
                     },
                 ]
             );
@@ -12474,6 +12683,18 @@ mod tests {
             ],
         )
         .expect("shared bind-group body with dynamic offsets");
+        crate::render_pass_set_bind_group::<Engine>(
+            cx,
+            bundle_encoder,
+            &[rt.number(4.0), rt.null()],
+        )
+        .expect("shared bind-group body with null slot");
+        crate::render_pass_set_bind_group::<Engine>(
+            cx,
+            bundle_encoder,
+            &[rt.number(5.0), rt.undefined()],
+        )
+        .expect("shared bind-group body with undefined slot");
         crate::render_pass_draw::<Engine>(cx, bundle_encoder, &[rt.number(3.0)])
             .expect("shared draw body");
         crate::render_pass_draw_indexed::<Engine>(cx, bundle_encoder, &[rt.number(3.0)])
@@ -12604,7 +12825,7 @@ mod tests {
             ] {
                 assert_eq!(state.recording_calls.get(name), Some(&1), "{name}");
             }
-            assert_eq!(state.recording_calls.get("bundle_set_bind_group"), Some(&2));
+            assert_eq!(state.recording_calls.get("bundle_set_bind_group"), Some(&4));
             assert_eq!(
                 state.bundle_bind_group_calls,
                 [
@@ -12621,6 +12842,20 @@ mod tests {
                         bind_group: native_bind_group,
                         offsets: vec![256, 768],
                         offsets_were_null: false,
+                    },
+                    RecordedBindGroupCall {
+                        encoder: native_bundle_encoder,
+                        index: 4,
+                        bind_group: ptr::null_mut(),
+                        offsets: Vec::new(),
+                        offsets_were_null: true,
+                    },
+                    RecordedBindGroupCall {
+                        encoder: native_bundle_encoder,
+                        index: 5,
+                        bind_group: ptr::null_mut(),
+                        offsets: Vec::new(),
+                        offsets_were_null: true,
                     },
                 ]
             );

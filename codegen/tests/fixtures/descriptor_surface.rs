@@ -100,7 +100,11 @@ pub(super) fn convert_pipeline_layout_descriptor<E: JsEngine + 'static>(
     let bind_group_layouts = {
         // B8: conversion extracts handles only; create paths own retention.
         let converted = convert_sequence::<E, _>(cx, bind_group_layouts_value, "bindGroupLayouts", |item| {
-            bind_group_layout_handle::<E>(cx, item)
+            if E::is_null(cx, item) || E::is_undefined(cx, item) {
+                Ok(ptr::null_mut())
+            } else {
+                bind_group_layout_handle::<E>(cx, item)
+            }
         })?;
         arena.alloc_slice(converted)
     };

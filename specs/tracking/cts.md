@@ -887,3 +887,46 @@ same shape as the missing interface object above.
 
 `operation-dawn.txt` gains `buffers` and `rendering`. The curated yawgpu suite is
 unchanged at 23,321 / 0.
+
+## Phase B-10 (2026-07-14) — null bind-group slots; a deviation's exit condition arrived
+
+`codegen-deltas.md` recorded:
+
+> **`sequence<GPUBindGroupLayout?>` element nullability is dropped**: a null element
+> (valid WebGPU: an empty bind group slot) raises a TypeError instead.
+> **Clear-early-error until null-slot support is actually needed.**
+
+It became needed. `api,operation,command_buffer,programmable,state_tracking` calls
+`setBindGroup(index, null)` and was 8 pass / 10 fail; the three `createPipelineLayout`
+null-BGL cases were being carried as expectations.
+
+The IDL makes `null` legal at **three** sites:
+
+```
+undefined setBindGroup(GPUIndex32 index, GPUBindGroup? bindGroup, ...);   // both overloads
+required sequence<GPUBindGroupLayout?> bindGroupLayouts;                   // nullable ELEMENT
+```
+
+The C ABI represents an empty slot as a **NULL handle**. Null slots are now
+implemented at all three sites; a null slot retains nothing.
+
+`createPipelineLayout` 11/3 → **14/0**. `state_tracking` 8/10 → **18/0**. The three
+expectations are retired: the curated suite's expected-fail count drops 16 → 13, and
+it stands at **23,324 / 0**.
+
+### `api,operation,command_buffer` — the rest of the screen
+
+| Sub-family | Dawn |
+|---|---|
+| `image_copy` | 2,580/0 |
+| `queries` | 258/6 |
+| `copyBufferToBuffer` | 4/0 (after the overload fix) |
+| `render` | 9/0 |
+| `basic` | 3/0 |
+| `clearBuffer` | 1/0 |
+| `programmable,state_tracking` | 18/0 (after this fix) |
+| `programmable,immediate` | fails — **immediate data is unimplemented** (recorded) |
+| `copyTextureToTexture` | timed out at 7,200 s; needs splitting |
+
+Two items remain open: `queries:timestampQuery:many_query_sets` (6 cases, 64 query
+sets, one becomes invalid — untriaged), and `copyTextureToTexture`'s runtime.

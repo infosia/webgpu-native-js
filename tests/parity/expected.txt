@@ -123,6 +123,7 @@ string:empty:0
 string:absent:0
 required:entries:TypeError:entries
 required:bindGroupLayouts:TypeError:bindGroupLayouts
+pipelineLayout:null-slot:ok
 required:binding:TypeError:binding
 required:layout:TypeError:layout
 error:GPUValidationError:true,true
@@ -192,9 +193,10 @@ renderBundle:chain:null
 setBindGroup:compute-offsets:TypeError
 setBindGroup:u32array-window:RangeError
 setBindGroup:u32array-type:TypeError
-setBindGroup:null-bindGroup:TypeError
+setBindGroup:compute-null:ok
 indirect:dispatchWorkgroupsIndirect:TypeError
 setBindGroup:render-offsets:TypeError
+setBindGroup:render-null:ok
 dynamicState:blend-stencil:ok
 dynamicState:blend-length:TypeError
 dynamicState:stencil-range:TypeError

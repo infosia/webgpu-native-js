@@ -479,6 +479,9 @@ pub(crate) struct MethodMappingPolicy {
     pub(crate) path: String,
     pub(crate) length: Option<u8>,
     pub(crate) reason: Option<String>,
+    /// Required nullable interface arguments converted to native null handles.
+    #[serde(default)]
+    pub(crate) nullable_handle_arguments: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -587,8 +590,9 @@ pub(crate) struct DescriptorEntry {
     pub(crate) skips: Vec<SkipPolicy>,
     #[serde(default)]
     pub(crate) handles: Vec<HandlePolicy>,
+    /// Native-handle sequences and their element-nullability policy.
     #[serde(default)]
-    pub(crate) handle_sequences: Vec<HandlePolicy>,
+    pub(crate) handle_sequences: Vec<HandleSequencePolicy>,
     #[serde(default)]
     pub(crate) union_flatten: Vec<UnionFlattenPolicy>,
     #[serde(default)]
@@ -645,6 +649,19 @@ pub(crate) struct HandlePolicy {
     pub(crate) helper: String,
     #[serde(default)]
     pub(crate) accept_texture: bool,
+}
+
+/// Policy for a sequence whose elements convert to native object handles.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct HandleSequencePolicy {
+    /// Descriptor member containing the sequence.
+    pub(crate) member: String,
+    /// Core handle-extraction helper used for non-null elements.
+    pub(crate) helper: String,
+    /// Whether `null` and `undefined` elements become null native handles.
+    #[serde(default)]
+    pub(crate) nullable_elements: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2666,5 +2683,28 @@ mod tests {
             c_function_name("device", "create_bind_group_layout"),
             "wgpuDeviceCreateBindGroupLayout"
         );
+    }
+
+    #[test]
+    fn nullable_handle_policies_deserialize_and_reject_unknown_fields() {
+        let mapping: MethodMappingPolicy = toml::from_str(
+            "interface = \"GPUPass\"\nmember = \"set\"\npath = \"set\"\nnullable_handle_arguments = [\"group\"]",
+        )
+        .expect("nullable handle-argument policy");
+        assert_eq!(mapping.nullable_handle_arguments, ["group"]);
+
+        let entry: HandleSequencePolicy = toml::from_str(
+            "member = \"layouts\"\nhelper = \"layout_handle\"\nnullable_elements = true",
+        )
+        .expect("nullable handle-sequence policy");
+        assert_eq!(entry.member, "layouts");
+        assert_eq!(entry.helper, "layout_handle");
+        assert!(entry.nullable_elements);
+
+        let error = toml::from_str::<HandleSequencePolicy>(
+            "member = \"layouts\"\nhelper = \"layout_handle\"\nunknown = true",
+        )
+        .expect_err("unknown policy fields must fail");
+        assert!(error.to_string().contains("unknown field"));
     }
 }

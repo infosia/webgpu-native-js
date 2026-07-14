@@ -273,6 +273,35 @@ fn lifecycle_method_policy_is_checked_in_both_directions() {
 }
 
 #[test]
+fn nullable_handle_argument_policy_matches_webidl_and_c_abi() {
+    let (idl, yaml, policy) = pinned_inputs();
+    generate_core_with_policy(&idl, &yaml, &policy).expect("nullable handle argument policy");
+
+    let nonnullable_idl = idl.replace("GPUBindGroup? bindGroup", "GPUBindGroup bindGroup");
+    let error = generate_core_with_policy(&nonnullable_idl, &yaml, &policy)
+        .expect_err("non-nullable WebIDL arguments must disagree with policy");
+    assert!(error
+        .to_string()
+        .contains("required nullable WebIDL argument"));
+
+    let nonnullable_c = yaml.replace(
+        "            type: object.bind_group\n            optional: true",
+        "            type: object.bind_group",
+    );
+    let error = generate_core_with_policy(&idl, &nonnullable_c, &policy)
+        .expect_err("non-nullable C arguments must disagree with policy");
+    assert!(error.to_string().contains("disagrees with C-ABI"));
+
+    let unknown_argument = policy.replace(
+        "nullable_handle_arguments = [\"bindGroup\"]",
+        "nullable_handle_arguments = [\"notBindGroup\"]",
+    );
+    let error = generate_core_with_policy(&idl, &yaml, &unknown_argument)
+        .expect_err("unknown nullable handle arguments must fail");
+    assert!(error.to_string().contains("notBindGroup"));
+}
+
+#[test]
 fn generated_lifecycle_covers_every_selected_class_and_retention_set() {
     let (idl, yaml, policy) = pinned_inputs();
     let emitted =
@@ -597,6 +626,33 @@ fn new_descriptor_policy_kinds_reject_missing_and_dead_entries() {
             .expect_err("policy must fail");
         assert!(error.to_string().contains(needle), "{error}");
     }
+}
+
+#[test]
+fn nullable_handle_sequence_policy_matches_webidl_and_emission() {
+    let (idl, yaml, policy) = pinned_inputs();
+    let emitted =
+        generate_conversions_with_policy(&idl, &yaml, &policy).expect("nullable handle sequence");
+    assert!(emitted.contains(
+        "if E::is_null(cx, item) || E::is_undefined(cx, item) {\n                Ok(ptr::null_mut())"
+    ));
+
+    let nonnullable_idl = idl.replace(
+        "sequence<GPUBindGroupLayout?> bindGroupLayouts",
+        "sequence<GPUBindGroupLayout> bindGroupLayouts",
+    );
+    let error = generate_conversions_with_policy(&nonnullable_idl, &yaml, &policy)
+        .expect_err("non-nullable sequence elements must disagree with policy");
+    assert!(error
+        .to_string()
+        .contains("handle sequence element nullability disagreement"));
+
+    let unmarked = policy.replace("nullable_elements = true\n", "");
+    let error = generate_conversions_with_policy(&idl, &yaml, &unmarked)
+        .expect_err("nullable sequence elements require explicit policy");
+    assert!(error
+        .to_string()
+        .contains("handle sequence element nullability disagreement"));
 }
 
 #[test]

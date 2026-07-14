@@ -7304,12 +7304,7 @@ pub fn compute_pass_set_bind_group<E: JsEngine + 'static>(
             .ok_or_else(|| E::type_error(cx, "index"))?,
         "index",
     )?;
-    let bind_group = bind_group_handle::<E>(
-        cx,
-        args.get(1)
-            .copied()
-            .ok_or_else(|| E::type_error(cx, "bindGroup"))?,
-    )?;
+    let bind_group = nullable_bind_group_argument::<E>(cx, args)?;
     let dynamic_offsets = convert_dynamic_offsets::<E>(cx, args)?;
     unsafe {
         (E::environment(cx).gpu().compute_pass_encoder_set_bind_group)(
@@ -7503,7 +7498,7 @@ pub fn render_pass_set_bind_group<E: JsEngine + 'static>(
         return Ok(E::undefined(cx));
     };
     let index = enforce_u32::<E>(cx, required_argument::<E>(cx, args, 0, "index")?, "index")?;
-    let bind_group = bind_group_handle::<E>(cx, required_argument::<E>(cx, args, 1, "bindGroup")?)?;
+    let bind_group = nullable_bind_group_argument::<E>(cx, args)?;
     let dynamic_offsets = convert_dynamic_offsets::<E>(cx, args)?;
     unsafe {
         encoder.set_bind_group(
@@ -9015,6 +9010,18 @@ fn required_argument<E: JsEngine>(
     args.get(index)
         .copied()
         .ok_or_else(|| E::type_error(cx, name))
+}
+
+fn nullable_bind_group_argument<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    args: &[E::Value],
+) -> Result<WGPUBindGroup, E::Error> {
+    let value = required_argument::<E>(cx, args, 1, "bindGroup")?;
+    if E::is_null(cx, value) || E::is_undefined(cx, value) {
+        Ok(ptr::null_mut())
+    } else {
+        bind_group_handle::<E>(cx, value)
+    }
 }
 
 fn device_handle<E: JsEngine + 'static>(
