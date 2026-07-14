@@ -233,7 +233,7 @@
   class MessageEvent extends EventBase {
     constructor(type, init = {}) {
       super(type);
-      this.data = init.data ?? null;
+      this.data = Object.prototype.hasOwnProperty.call(init, "data") ? init.data : null;
       __shimLog("MessageEvent");
     }
   }
@@ -266,9 +266,107 @@
       return true;
     }
   }
+
+  const mappedArrayBuffers = new WeakSet();
+  const bufferPrototype = globalThis.GPUBuffer && globalThis.GPUBuffer.prototype;
+  if (bufferPrototype) {
+    const descriptor = Object.getOwnPropertyDescriptor(bufferPrototype, "getMappedRange");
+    if (descriptor && typeof descriptor.value === "function") {
+      const original = descriptor.value;
+      Object.defineProperty(bufferPrototype, "getMappedRange", {
+        ...descriptor,
+        value: function getMappedRange() {
+          const range = original.apply(this, arguments);
+          mappedArrayBuffers.add(range);
+          return range;
+        },
+      });
+    }
+  }
+
+  const arrayBufferSlice = ArrayBuffer.prototype.slice;
+  const dataCloneError = message => new DOMExceptionBase(message, "DataCloneError");
+  const isDetachedArrayBuffer = value => {
+    try {
+      new Uint8Array(value);
+      return false;
+    } catch (error) {
+      return error instanceof TypeError;
+    }
+  };
+  const cloneMessage = (value, transferred) => {
+    if (value instanceof ArrayBuffer) {
+      return transferred.get(value) ?? arrayBufferSlice.call(value, 0);
+    }
+    if (value === null || typeof value !== "object") return value;
+    throw dataCloneError("MessageChannel cannot clone this value");
+  };
+  class MessagePort {
+    constructor() {
+      this.onmessage = null;
+      this.__listeners = [];
+      this.__peer = null;
+    }
+    addEventListener(type, callback) {
+      if (String(type) !== "message" || callback === null || callback === undefined) return;
+      if (!this.__listeners.includes(callback)) this.__listeners.push(callback);
+    }
+    removeEventListener(type, callback) {
+      if (String(type) !== "message") return;
+      this.__listeners = this.__listeners.filter(listener => listener !== callback);
+    }
+    postMessage(value, transferList = []) {
+      __shimLog("MessagePort.postMessage");
+      const transfers = Array.from(transferList);
+      if (value !== null && typeof value === "object" && !(value instanceof ArrayBuffer)) {
+        throw dataCloneError("MessageChannel cannot clone this value");
+      }
+      const seen = new Set();
+      for (const transfer of transfers) {
+        if (!(transfer instanceof ArrayBuffer)) {
+          throw dataCloneError("transfer list item is not an ArrayBuffer");
+        }
+        if (seen.has(transfer)) throw dataCloneError("duplicate transferable");
+        seen.add(transfer);
+        if (isDetachedArrayBuffer(transfer)) {
+          throw dataCloneError("ArrayBuffer is detached");
+        }
+        if (mappedArrayBuffers.has(transfer)) {
+          throw new TypeError("mapped ArrayBuffer is not transferable");
+        }
+      }
+      const transferred = new Map();
+      for (const transfer of transfers) {
+        transferred.set(transfer, __transfer_array_buffer(transfer));
+      }
+      const message = cloneMessage(value, transferred);
+      setTimeout(() => this.__peer.__dispatchMessage(message), 0);
+    }
+    __dispatchMessage(data) {
+      const event = new MessageEvent("message", { data });
+      event.target = this;
+      event.currentTarget = this;
+      for (const listener of [...this.__listeners]) {
+        if (typeof listener === "function") listener.call(this, event);
+        else listener.handleEvent(event);
+      }
+      if (typeof this.onmessage === "function") this.onmessage.call(this, event);
+    }
+  }
+  class MessageChannel {
+    constructor() {
+      __shimLog("MessageChannel");
+      this.port1 = new MessagePort();
+      this.port2 = new MessagePort();
+      this.port1.__peer = this.port2;
+      this.port2.__peer = this.port1;
+    }
+  }
   globalThis.Event = EventBase;
   globalThis.MessageEvent = MessageEvent;
   globalThis.EventTarget = EventTargetBase;
+  globalThis.MessagePort = MessagePort;
+  globalThis.MessageChannel = MessageChannel;
 
   globalThis.navigator = { gpu: globalThis.gpu };
   globalThis.self = globalThis;

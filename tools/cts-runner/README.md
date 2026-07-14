@@ -40,11 +40,13 @@ and its standalone built-output layout.
 The runner installs only headless shims: `navigator.gpu`, monotonic
 `performance.now()`, `queueMicrotask`, a guarded synthetic
 `Error.prototype.stack`, console output, host-drained timers, UTF-8
-`TextEncoder`/`TextDecoder`, `DOMException`, `EventTarget`/`MessageEvent`, and
-the `self` alias. Each used shim is emitted as a `shim:` diagnostic. Timers are
-kept in a JavaScript min-heap; while module evaluation is pending, the host
-checks due timers before each WebGPU/microtask tick. Canvas, the DOM, and fetch
-are intentionally absent.
+`TextEncoder`/`TextDecoder`, `DOMException`, `EventTarget`/`MessageEvent`,
+`MessageChannel`/`MessagePort`, and the `self` alias. Each used shim is emitted
+as a `shim:` diagnostic. Timers are kept in a JavaScript min-heap; while module
+evaluation is pending, the host checks due timers before each WebGPU/microtask
+tick. Canvas, the DOM, and fetch are intentionally absent.
+`MessagePort.postMessage` moves transferred `ArrayBuffer` storage through Boa's
+detach operation; transfer is not implemented as a copy.
 
 For GC/ownership debugging, set `CTS_RUNNER_GC_EVERY` to a positive case count.
 The runner calls Boa's collector after each multiple of that many reported

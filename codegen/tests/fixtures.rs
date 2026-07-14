@@ -174,6 +174,39 @@ fn full_pinned_inputs_parse_and_subset_join_offline() {
 }
 
 #[test]
+fn full_pinned_overload_inventory_is_explicit() {
+    let (idl, yaml, _policy) = pinned_inputs();
+    let report = join_inputs(&idl, &yaml).expect("full pinned join");
+    let mut overloads = report
+        .interfaces
+        .iter()
+        .filter_map(|interface| {
+            let interface_name = interface.idl_name.as_deref()?;
+            Some(
+                interface
+                    .members
+                    .iter()
+                    .filter(|member| member.idl.len() > 1)
+                    .map(move |member| {
+                        format!("{interface_name}.{}:{}", member.member, member.idl.len())
+                    }),
+            )
+        })
+        .flatten()
+        .collect::<Vec<_>>();
+    overloads.sort();
+    assert_eq!(
+        overloads,
+        [
+            "GPUCommandEncoder.copyBufferToBuffer:2",
+            "GPUComputePassEncoder.setBindGroup:2",
+            "GPURenderBundleEncoder.setBindGroup:2",
+            "GPURenderPassEncoder.setBindGroup:2",
+        ]
+    );
+}
+
+#[test]
 fn full_pinned_surface_matches_committed_artifact() {
     // This snapshot is the complete OUT_DIR artifact (dispatch plus conversions).
     // To regenerate it and the focused dispatch-macro shape snapshot, run:
@@ -271,6 +304,7 @@ fn generated_lifecycle_covers_every_selected_class_and_retention_set() {
         "pipeline_error_class",
         "compilation_info_class",
         "compilation_message_class",
+        "external_texture_class",
     ];
     assert_eq!(
         emitted.matches("_class<E: JsEngine + 'static>").count(),
@@ -317,6 +351,21 @@ fn generated_lifecycle_covers_every_selected_class_and_retention_set() {
     assert!(emitted.contains(
         "MethodSpec { name: \"setStencilReference\", length: 1, call: render_pass_set_stencil_reference::<E> }"
     ));
+    assert!(emitted.contains(
+        "MethodSpec { name: \"copyBufferToBuffer\", length: 2, call: command_encoder_copy_buffer_to_buffer::<E> }"
+    ));
+    let external_texture_class = emitted
+        .split("pub(super) fn external_texture_class")
+        .nth(1)
+        .and_then(|tail| tail.split("pub(super) fn device_class").next())
+        .expect("external-texture class section");
+    assert!(external_texture_class.contains("name: \"GPUExternalTexture\""));
+    assert!(external_texture_class.contains("constructor: None"));
+    assert!(external_texture_class.contains(
+        "PropertySpec { name: \"label\", get: Some(external_texture_label_get::<E>), set: Some(external_texture_label_set::<E>) }"
+    ));
+    assert!(external_texture_class.contains("methods: &[]"));
+    assert!(external_texture_class.contains("finalizer: finalize_external_texture"));
     for method in [
         "MethodSpec { name: \"pushDebugGroup\", length: 1, call: debug_commands_push_debug_group::<E> }",
         "MethodSpec { name: \"popDebugGroup\", length: 0, call: debug_commands_pop_debug_group::<E> }",

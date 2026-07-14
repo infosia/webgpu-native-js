@@ -16,3 +16,13 @@ webgpu:api,operation,render_pipeline,*
 webgpu:api,operation,resource_init,*
 webgpu:api,operation,memory_sync,*
 webgpu:api,operation,storage_texture,*
+
+# Added 2026-07-14 after the binding fixes below.
+# buffers: mappedAtCreation OOM is a RangeError, and device.destroy() detaches
+#   outstanding mapped ranges (a soundness bug: script held a live ArrayBuffer over
+#   freed GPU memory).
+# rendering: GPUExternalTexture's interface object was missing. 390 cases in
+#   3d_texture_slices — nothing to do with external textures — failed on a shared
+#   helper's `texture instanceof GPUExternalTexture` brand check.
+webgpu:api,operation,buffers,*
+webgpu:api,operation,rendering,*

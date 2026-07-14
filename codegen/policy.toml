@@ -285,6 +285,7 @@ extra_class_interfaces = [
   "GPUPipelineError",
   "GPUCompilationInfo",
   "GPUCompilationMessage",
+  "GPUExternalTexture",
 ]
 readonly_value_interfaces = ["GPUCompilationInfo", "GPUCompilationMessage"]
 
@@ -444,6 +445,12 @@ interface = "GPUCompilationMessage"
 member = "length"
 get = "compilation_message_length_get"
 
+[[lifecycle.properties]]
+interface = "GPUExternalTexture"
+member = "label"
+get = "external_texture_label_get"
+set = "external_texture_label_set"
+
 [[lifecycle.methods]]
 interface = "GPUBuffer"
 member = "destroy"
@@ -498,8 +505,6 @@ path = "queue_on_submitted_work_done"
 interface = "GPUCommandEncoder"
 member = "copyBufferToBuffer"
 path = "command_encoder_copy_buffer_to_buffer"
-length = 5
-reason = "preserved quirk: the shipped class table reports the legacy five-argument overload length"
 
 [[lifecycle.methods]]
 interface = "GPUCommandEncoder"

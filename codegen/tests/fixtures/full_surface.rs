@@ -5308,6 +5308,19 @@ pub(super) fn compilation_message_class<E: JsEngine + 'static>() -> &'static Cla
     })
 }
 
+pub(super) fn external_texture_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
+    class_spec_once::<E, _>(GPU_EXTERNAL_TEXTURE_CLASS, || ClassSpec {
+        name: "GPUExternalTexture",
+        id: GPU_EXTERNAL_TEXTURE_CLASS,
+        constructor: None,
+        properties: Box::leak(Box::new([
+            PropertySpec { name: "label", get: Some(external_texture_label_get::<E>), set: Some(external_texture_label_set::<E>) },
+        ])),
+        methods: &[],
+        finalizer: finalize_external_texture,
+    })
+}
+
 pub(super) fn device_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
     class_spec_once::<E, _>(GPU_DEVICE_CLASS, || ClassSpec {
         name: "GPUDevice",
@@ -5545,7 +5558,7 @@ pub(super) fn command_encoder_class<E: JsEngine + 'static>() -> &'static ClassSp
             PropertySpec { name: "label", get: Some(command_encoder_label_get::<E>), set: Some(command_encoder_label_set::<E>) },
         ])),
         methods: Box::leak(Box::new([
-            MethodSpec { name: "copyBufferToBuffer", length: 5, call: command_encoder_copy_buffer_to_buffer::<E> },
+            MethodSpec { name: "copyBufferToBuffer", length: 2, call: command_encoder_copy_buffer_to_buffer::<E> },
             MethodSpec { name: "clearBuffer", length: 1, call: command_encoder_clear_buffer::<E> },
             MethodSpec { name: "resolveQuerySet", length: 5, call: command_encoder_resolve_query_set::<E> },
             MethodSpec { name: "pushDebugGroup", length: 1, call: debug_commands_push_debug_group::<E> },
@@ -5678,6 +5691,7 @@ pub(super) fn register_generated_classes<E: JsEngine + 'static>(
     let _ = E::register_class(cx, pipeline_error_class::<E>())?;
     let _ = E::register_class(cx, compilation_info_class::<E>())?;
     let _ = E::register_class(cx, compilation_message_class::<E>())?;
+    let _ = E::register_class(cx, external_texture_class::<E>())?;
     let _ = E::register_class(cx, device_class::<E>())?;
     let _ = E::register_class(cx, buffer_class::<E>())?;
     let _ = E::register_class(cx, texture_class::<E>())?;

@@ -800,3 +800,90 @@ same shape as the `depthSlice` sentinel collision: a distinction the C ABI canno
 express, which therefore belongs to the binding.
 
 Cost: the `GPUShaderModule` wrapper retains its source string for the module's lifetime.
+
+## Phase B-9 (2026-07-14) — four more binding bugs from the execution families
+
+### `device.destroy()` did not detach outstanding mapped ranges
+
+`api,operation,buffers,map_detach:while_mapped`, subcase `deviceDestroy=true`:
+*"ArrayBuffer should be detached"*.
+
+The binding detached on `buffer.unmap()` and on `buffer.destroy()` — those subcases
+passed. `device.destroy()` did not. After it, the GPU memory is gone and script is
+left holding a **live ArrayBuffer over freed memory**. This is a soundness bug, not a
+conformance one.
+
+Fixed: the device holds a registry of `Weak<Mutex<BufferState>>`, and `destroy()`
+drives the same detach-and-verify path invariant 11 already requires of `unmap()`. The
+registry is weak, so it does not extend any buffer's lifetime; `BufferState::drop`
+deregisters. Cost: one weak entry per live buffer.
+
+### `mappedAtCreation` OOM must be a `RangeError`, not an `OperationError`
+
+`api,operation,buffers,map_oom:mappedAtCreation`. The CTS states the rule in its own
+description: a very large `mappedAtCreation` buffer *"should throw a RangeError only,
+because such a large allocation cannot be created when we initialize an active buffer
+mapping"*. The failure is the **ArrayBuffer** allocation — a JS-side limit — not a GPU
+out-of-memory condition. A huge buffer **without** `mappedAtCreation` stays a GPU
+allocation failure and is unchanged.
+
+### `GPUExternalTexture` had no interface object, and it cost 390 unrelated tests
+
+`api,operation,rendering` was 1,843 / 390 on Dawn. **Every one of the 390 was in
+`3d_texture_slices`** — a family with nothing to do with external textures — and every
+one died on:
+
+```
+ReferenceError: GPUExternalTexture is not defined
+```
+
+A shared CTS helper discriminates with a brand check:
+
+```js
+texture instanceof GPUExternalTexture ? texture : texture.createView(viewDescriptor)
+```
+
+`GPUExternalTexture` is in the pinned IDL, and WebIDL gives **every exposed interface**
+an interface object. The binding's inventory simply omitted it. Installing it claims
+nothing: `importExternalTexture` stays out of subset, so no script can obtain an
+instance, and `x instanceof GPUExternalTexture` correctly returns `false` — which is
+exactly what the helper needs to take the non-external path. Now **2,233 / 0**.
+
+**A missing interface object is invisible to every validation test.** It surfaces only
+when some unrelated helper brand-checks it. The inventory was audited as a result:
+
+| Interface | Interface object | Reason |
+|---|---|---|
+| `GPUCanvasContext` | absent | Out of subset (the host owns the surface). The CTS references it in 9 files, all canvas/web-platform. |
+| `WGSLLanguageFeatures` | absent | Out of subset; the CTS never brand-checks it. |
+| `GPUSupportedFeatures` | absent | **A consequence of a recorded deviation, not a separate gap.** `features` is exposed as a real JS `Set` (`codegen-deltas.md`), so an interface object would have no instances — a hollow shell. The CTS never brand-checks it. |
+
+### `copyBufferToBuffer` had one of its two IDL overloads, and made `size` required
+
+`api,operation,command_buffer,copyBufferToBuffer:single:newSig=true`:
+`TypeError: size`, on a call with `copySize` omitted.
+
+The pinned IDL declares **two** overloads (`webgpu.idl:975`):
+
+```
+copyBufferToBuffer(GPUBuffer source, GPUBuffer destination, optional GPUSize64 size);
+copyBufferToBuffer(GPUBuffer source, GPUSize64 sourceOffset,
+                   GPUBuffer destination, GPUSize64 destinationOffset,
+                   optional GPUSize64 size);
+```
+
+The binding implemented **only the 5-argument form**, and treated `size` as
+**required** in it. Both halves were wrong: the 3-argument overload did not exist, and
+`size` is `optional` in both. Overload resolution now selects on the type of argument
+1 (a `GPUBuffer` → the 3-arg form; a number → the 5-arg form), and an omitted `size`
+defaults to the remainder of the source buffer. Now **4/0**.
+
+**An IDL overload collapsed to one arm is invisible to every validation test** — the
+same shape as the missing interface object above.
+
+### `getCompilationInfo()` — see Phase B-8
+
+### Suite
+
+`operation-dawn.txt` gains `buffers` and `rendering`. The curated yawgpu suite is
+unchanged at 23,321 / 0.

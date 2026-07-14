@@ -593,6 +593,22 @@ impl Runtime {
             .map_err(|error| Error::Exception(js_error_string(error, context)))
     }
 
+    /// Registers a global function that transfers one `ArrayBuffer`.
+    ///
+    /// The function returns a new `ArrayBuffer` owning the bytes and detaches
+    /// the argument. Non-`ArrayBuffer` and already-detached arguments throw.
+    pub fn register_arraybuffer_transfer(&self, name: &str) -> Result<()> {
+        // SAFETY: no other Boa operation overlaps this host-facing call.
+        let context = unsafe { &mut *self.raw_context() };
+        context
+            .register_global_builtin_callable(
+                JsString::from(name),
+                1,
+                NativeFunction::from_fn_ptr(arraybuffer_transfer_callback),
+            )
+            .map_err(|error| Error::Exception(js_error_string(error, context)))
+    }
+
     /// Calls a named function on `globalThis` with primitive host arguments.
     ///
     /// Thenable return values are rejected because this call-in contract is
@@ -978,6 +994,21 @@ fn host_function_callback(
             .with_message("Rust callback panicked")
             .into()),
     }
+}
+
+fn arraybuffer_transfer_callback(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut BoaContext,
+) -> JsResult<JsValue> {
+    let undefined = JsValue::undefined();
+    let value = args.first().unwrap_or(&undefined);
+    let object = value
+        .as_object()
+        .ok_or_else(|| JsNativeError::typ().with_message("value is not an ArrayBuffer"))?;
+    let buffer = JsArrayBuffer::from_object(object.clone())?;
+    let bytes = buffer.detach(&JsValue::undefined())?;
+    JsArrayBuffer::from_byte_block(bytes, context).map(Into::into)
 }
 
 fn module_resolution_probes(base: &Path) -> [PathBuf; 4] {
@@ -2372,6 +2403,28 @@ mod tests {
             "hostString() === 'text' && hostNumber() === 3.5 && hostTrue() === true && hostNull() === null && hostUndefined() === undefined",
             "host-results.js",
         ));
+    }
+
+    #[test]
+    fn registered_arraybuffer_transfer_detaches_and_validates_its_argument() {
+        let runtime = Runtime::new().expect("Boa runtime");
+        runtime
+            .register_arraybuffer_transfer("transferArrayBuffer")
+            .expect("register transfer");
+        assert!(eval_bool(
+            &runtime,
+            r#"
+            const source = new ArrayBuffer(4);
+            new Uint8Array(source).set([1, 2, 3, 4]);
+            const product = transferArrayBuffer(source);
+            source.byteLength === 0 && new Uint8Array(product).join(",") === "1,2,3,4"
+            "#,
+            "arraybuffer-transfer.js",
+        ));
+        let error = runtime
+            .eval("transferArrayBuffer({})", "arraybuffer-transfer-error.js")
+            .expect_err("non-ArrayBuffer must throw");
+        assert!(error.to_string().contains("ArrayBuffer"), "{error}");
     }
 
     #[test]

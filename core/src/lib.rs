@@ -91,6 +91,7 @@ const DOM_EXCEPTION_CLASS: ClassId = ClassId(32);
 const GPU_PIPELINE_ERROR_CLASS: ClassId = ClassId(33);
 const GPU_COMPILATION_INFO_CLASS: ClassId = ClassId(34);
 const GPU_COMPILATION_MESSAGE_CLASS: ClassId = ClassId(35);
+const GPU_EXTERNAL_TEXTURE_CLASS: ClassId = ClassId(36);
 const WEBIDL_U32_MAX: u64 = u32::MAX as u64;
 const WGPU_DEPTH_CLEAR_VALUE_UNDEFINED: f32 = f32::NAN;
 
@@ -1513,6 +1514,7 @@ pub struct DevicePayload<E: JsEngine + 'static> {
     limits: HeldValue<E>,
     adapter_info: HeldValue<E>,
     events: Arc<DeviceEventState<E>>,
+    buffers: Arc<DeviceBufferRegistry<E>>,
 }
 
 fn promise_operation<E: JsEngine>(
@@ -1554,6 +1556,7 @@ impl<E: JsEngine + 'static> DevicePayload<E> {
             limits: HeldValue::empty(),
             adapter_info: HeldValue::empty(),
             events,
+            buffers: Arc::new(DeviceBufferRegistry::new()),
         }
     }
 
@@ -1879,10 +1882,66 @@ unsafe impl<E: JsEngine + 'static> Send for DeviceEventState<E> {}
 unsafe impl<E: JsEngine + 'static> Sync for DeviceEventState<E> {}
 
 // SAFETY: `DevicePayload` stores an adopted `WGPUDevice`, cached engine values,
-// and synchronized event state. A finalizer only copies the native handle into
-// `ReleaseRequest::Device` and passes opaque values to adapter release closures;
+// synchronized event state, and weak references to mutex-protected buffer
+// states. A finalizer only copies the native handle into `ReleaseRequest::Device`,
+// drops weak references, and passes opaque values to adapter release closures;
 // native release and all engine access run on the creating `tick()` thread.
 unsafe impl<E: JsEngine + 'static> Send for DevicePayload<E> {}
+
+struct DeviceBufferRegistryInner<E: JsEngine> {
+    next_id: u64,
+    states: BTreeMap<u64, Weak<Mutex<BufferState<E>>>>,
+}
+
+struct DeviceBufferRegistry<E: JsEngine> {
+    inner: Mutex<DeviceBufferRegistryInner<E>>,
+}
+
+impl<E: JsEngine> DeviceBufferRegistry<E> {
+    fn new() -> Self {
+        Self {
+            inner: Mutex::new(DeviceBufferRegistryInner {
+                next_id: 1,
+                states: BTreeMap::new(),
+            }),
+        }
+    }
+
+    fn reserve_id(&self) -> Option<u64> {
+        let mut inner = self.inner.lock().ok()?;
+        let id = inner.next_id;
+        inner.next_id = inner.next_id.checked_add(1)?;
+        Some(id)
+    }
+
+    fn register(&self, id: u64, state: &Arc<Mutex<BufferState<E>>>) -> bool {
+        let Ok(mut inner) = self.inner.lock() else {
+            return false;
+        };
+        inner.states.insert(id, Arc::downgrade(state));
+        true
+    }
+
+    fn unregister(&self, id: u64) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.states.remove(&id);
+        }
+    }
+
+    fn live_states(&self) -> Option<Vec<Arc<Mutex<BufferState<E>>>>> {
+        let mut inner = self.inner.lock().ok()?;
+        let mut states = Vec::with_capacity(inner.states.len());
+        inner.states.retain(|_, state| {
+            if let Some(state) = state.upgrade() {
+                states.push(state);
+                true
+            } else {
+                false
+            }
+        });
+        Some(states)
+    }
+}
 
 struct HeldValue<E: JsEngine> {
     value: Mutex<Option<E::Value>>,
@@ -2024,6 +2083,8 @@ pub fn release_payload_values<E: JsEngine + 'static>(
 pub struct BufferState<E: JsEngine> {
     buffer: WGPUBuffer,
     parent_device: WGPUDevice,
+    registry_id: u64,
+    registry: Weak<DeviceBufferRegistry<E>>,
     size: u64,
     usage: u64,
     label: String,
@@ -2035,6 +2096,14 @@ pub struct BufferState<E: JsEngine> {
     map_mode: WGPUMapMode,
     error_sink: Arc<dyn DeviceErrorSink>,
     ranges: Vec<MappedRange<E>>,
+}
+
+impl<E: JsEngine> Drop for BufferState<E> {
+    fn drop(&mut self) {
+        if let Some(registry) = self.registry.upgrade() {
+            registry.unregister(self.registry_id);
+        }
+    }
 }
 
 impl<E: JsEngine> BufferState<E> {
@@ -3708,6 +3777,29 @@ pub fn device_illegal_constructor<E: JsEngine + 'static>(
     Err(E::type_error(cx, "GPUDevice is not constructible"))
 }
 
+fn external_texture_label_get<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    _this: E::Value,
+) -> Result<E::Value, E::Error> {
+    Err(E::type_error(
+        cx,
+        "GPUExternalTexture.label called on an incompatible object",
+    ))
+}
+
+fn external_texture_label_set<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    _this: E::Value,
+    _value: E::Value,
+) -> Result<(), E::Error> {
+    Err(E::type_error(
+        cx,
+        "GPUExternalTexture.label called on an incompatible object",
+    ))
+}
+
+fn finalize_external_texture(_payload: Box<dyn Any + Send>, _env: &Environment) {}
+
 /// Finalizes a `GPUUncapturedErrorEvent`; held values are released by the adapter.
 pub fn finalize_uncaptured_error_event(_payload: Box<dyn Any + Send>, _env: &Environment) {}
 
@@ -4334,6 +4426,12 @@ pub fn device_create_buffer<E: JsEngine + 'static>(
             "mappedAtCreation buffer size must be a multiple of 4",
         ));
     }
+    if converted.mapped_at_creation && converted.size > u64::from(u32::MAX) {
+        return Err(E::range_error(
+            cx,
+            "mappedAtCreation buffer size exceeds the ArrayBuffer limit",
+        ));
+    }
     let env = E::environment(cx);
     let gpu = env.gpu();
     let native = WGPUBufferDescriptor {
@@ -4348,17 +4446,29 @@ pub fn device_create_buffer<E: JsEngine + 'static>(
     // Only wgpuDeviceCreateBuffer is contractually nullable; the other createXxx
     // null checks in this file are defensive against backend failures.
     if buffer.is_null() {
+        return Err(if converted.mapped_at_creation {
+            E::range_error(cx, "mappedAtCreation buffer allocation failed")
+        } else {
+            E::operation_error(cx, "wgpuDeviceCreateBuffer returned null")
+        });
+    }
+    let Some(registry_id) = device_payload.buffers.reserve_id() else {
+        unsafe {
+            (gpu.buffer_release)(buffer);
+        }
         return Err(E::operation_error(
             cx,
-            "wgpuDeviceCreateBuffer returned null",
+            "GPUDevice buffer registry is unavailable",
         ));
-    }
+    };
     unsafe {
         (gpu.device_add_ref)(device_payload.device);
     }
-    let state = BufferState {
+    let state = Arc::new(Mutex::new(BufferState {
         buffer,
         parent_device: device_payload.device,
+        registry_id,
+        registry: Arc::downgrade(&device_payload.buffers),
         size: converted.size,
         usage: converted.usage,
         label: converted.label,
@@ -4374,14 +4484,18 @@ pub fn device_create_buffer<E: JsEngine + 'static>(
         },
         error_sink: Arc::clone(&device_payload.events) as Arc<dyn DeviceErrorSink>,
         ranges: Vec::new(),
-    };
-    match E::new_instance(
-        cx,
-        GPU_BUFFER_CLASS,
-        Box::new(BufferPayload::<E> {
-            state: Arc::new(Mutex::new(state)),
-        }),
-    ) {
+    }));
+    if !device_payload.buffers.register(registry_id, &state) {
+        unsafe {
+            (gpu.buffer_release)(buffer);
+            (gpu.device_release)(device_payload.device);
+        }
+        return Err(E::operation_error(
+            cx,
+            "GPUDevice buffer registry is unavailable",
+        ));
+    }
+    match E::new_instance(cx, GPU_BUFFER_CLASS, Box::new(BufferPayload::<E> { state })) {
         Ok(value) => Ok(value),
         Err(error) => {
             unsafe {
@@ -4455,7 +4569,37 @@ pub fn device_destroy<E: JsEngine + 'static>(
     _args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
     let payload = device_wrapper_payload::<E>(cx, this)?;
-    if !payload.destroyed.swap(true, Ordering::AcqRel) {
+    if !payload.destroyed.load(Ordering::Acquire) {
+        let states = payload
+            .buffers
+            .live_states()
+            .ok_or_else(|| E::operation_error(cx, "GPUDevice buffer registry is poisoned"))?;
+        let mut locked_states = Vec::with_capacity(states.len());
+        for state in &states {
+            locked_states.push(
+                state
+                    .lock()
+                    .map_err(|_| E::operation_error(cx, "GPUBuffer state is poisoned"))?,
+            );
+        }
+        let mut first_error = None;
+        for state in &mut locked_states {
+            if let Err(error) = detach_all_ranges::<E>(cx, state, false) {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+        for state in &mut locked_states {
+            state.canceling_map = state.pending_map.take();
+            state.mapped = false;
+            state.map_mode = 0;
+        }
+        drop(locked_states);
+        payload.destroyed.store(true, Ordering::Release);
         payload.events.mark_lost();
         unsafe {
             (E::environment(cx).gpu().device_destroy)(payload.device);
@@ -6464,39 +6608,41 @@ pub fn command_encoder_copy_buffer_to_buffer<E: JsEngine + 'static>(
     let Some(encoder) = live_command_encoder::<E>(cx, this)? else {
         return Ok(E::undefined(cx));
     };
-    let src = buffer_handle::<E>(
-        cx,
-        args.first()
-            .copied()
-            .ok_or_else(|| E::type_error(cx, "source"))?,
-    )?;
-    let src_offset = enforce_u64::<E>(
-        cx,
-        args.get(1)
-            .copied()
-            .ok_or_else(|| E::type_error(cx, "sourceOffset"))?,
-        "sourceOffset",
-    )?;
-    let dst = buffer_handle::<E>(
-        cx,
-        args.get(2)
-            .copied()
-            .ok_or_else(|| E::type_error(cx, "destination"))?,
-    )?;
-    let dst_offset = enforce_u64::<E>(
-        cx,
-        args.get(3)
-            .copied()
-            .ok_or_else(|| E::type_error(cx, "destinationOffset"))?,
-        "destinationOffset",
-    )?;
-    let size = enforce_u64::<E>(
-        cx,
-        args.get(4)
-            .copied()
-            .ok_or_else(|| E::type_error(cx, "size"))?,
-        "size",
-    )?;
+    let source = required_argument::<E>(cx, args, 0, "source")?;
+    let (src, source_size) = buffer_handle_and_size::<E>(cx, source)?;
+    let (src_offset, dst, dst_offset, size_value) = if args.len() <= 3 {
+        let destination = required_argument::<E>(cx, args, 1, "destination")?;
+        (
+            0,
+            buffer_handle::<E>(cx, destination)?,
+            0,
+            args.get(2).copied(),
+        )
+    } else {
+        let source_offset = enforce_u64::<E>(
+            cx,
+            required_argument::<E>(cx, args, 1, "sourceOffset")?,
+            "sourceOffset",
+        )?;
+        let destination =
+            buffer_handle::<E>(cx, required_argument::<E>(cx, args, 2, "destination")?)?;
+        let destination_offset = enforce_u64::<E>(
+            cx,
+            required_argument::<E>(cx, args, 3, "destinationOffset")?,
+            "destinationOffset",
+        )?;
+        (
+            source_offset,
+            destination,
+            destination_offset,
+            args.get(4).copied(),
+        )
+    };
+    // WebGPU defaults an omitted size to source.size - sourceOffset. If the
+    // offset is out of range, unsigned underflow preserves a value that the
+    // backend rejects through normal WebGPU validation.
+    let default_size = source_size.wrapping_sub(src_offset);
+    let size = optional_gpu_size64_to_u64::<E>(cx, size_value, "size", default_size)?;
     unsafe {
         (E::environment(cx)
             .gpu()
@@ -8897,6 +9043,22 @@ fn buffer_handle<E: JsEngine + 'static>(
     E::payload(cx, value, GPU_BUFFER_CLASS)
         .and_then(|payload| payload.downcast_ref::<BufferPayload<E>>())
         .and_then(|payload| payload.state.lock().ok().map(|state| state.buffer))
+        .ok_or_else(|| E::type_error(cx, "GPUBuffer is required"))
+}
+
+fn buffer_handle_and_size<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    value: E::Value,
+) -> Result<(WGPUBuffer, u64), E::Error> {
+    E::payload(cx, value, GPU_BUFFER_CLASS)
+        .and_then(|payload| payload.downcast_ref::<BufferPayload<E>>())
+        .and_then(|payload| {
+            payload
+                .state
+                .lock()
+                .ok()
+                .map(|state| (state.buffer, state.size))
+        })
         .ok_or_else(|| E::type_error(cx, "GPUBuffer is required"))
 }
 

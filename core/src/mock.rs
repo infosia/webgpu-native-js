@@ -1584,6 +1584,7 @@ struct MockGpuState {
     blend_constant_calls: Vec<(WGPURenderPassEncoder, [f64; 4])>,
     stencil_reference_calls: Vec<(WGPURenderPassEncoder, u32)>,
     clear_buffer_calls: Vec<(WGPUCommandEncoder, WGPUBuffer, u64, u64)>,
+    copy_buffer_to_buffer_calls: Vec<(WGPUCommandEncoder, WGPUBuffer, u64, WGPUBuffer, u64, u64)>,
     resolve_query_set_calls: Vec<(WGPUCommandEncoder, WGPUQuerySet, u32, u32, WGPUBuffer, u64)>,
     debug_calls: Vec<(&'static str, usize, Option<Vec<u8>>)>,
     vertex_buffer_ranges: Vec<(u64, u64)>,
@@ -2876,7 +2877,7 @@ unsafe fn command_encoder_release(_encoder: WGPUCommandEncoder) {
 }
 
 unsafe fn command_encoder_copy_buffer_to_buffer(
-    _encoder: WGPUCommandEncoder,
+    encoder: WGPUCommandEncoder,
     source: WGPUBuffer,
     source_offset: u64,
     destination: WGPUBuffer,
@@ -2885,6 +2886,14 @@ unsafe fn command_encoder_copy_buffer_to_buffer(
 ) {
     GPU_STATE.with(|state| {
         let mut state = state.borrow_mut();
+        state.copy_buffer_to_buffer_calls.push((
+            encoder,
+            source,
+            source_offset,
+            destination,
+            destination_offset,
+            size,
+        ));
         let Some(src) = state.buffers.get(&source).cloned() else {
             return;
         };
@@ -3699,7 +3708,7 @@ mod tests {
         let cx = rt.context();
         let _gpu = crate::wrap_gpu::<Engine>(cx, fake_handle(40_001)).expect("wrap GPU");
 
-        assert_eq!(rt.classes.borrow().len(), 35);
+        assert_eq!(rt.classes.borrow().len(), 36);
         let global = Engine::global(cx);
         let render_pass = Engine::get_property(cx, global, "GPURenderPassEncoder")
             .expect("render-pass interface object");
@@ -3750,6 +3759,28 @@ mod tests {
                 .expect_err("interface construction")
                 .contains("Illegal constructor"));
         }
+
+        let external_texture = Engine::get_property(cx, global, "GPUExternalTexture")
+            .expect("external-texture interface object");
+        let external_texture_prototype =
+            Engine::get_property(cx, external_texture, "prototype").expect("prototype");
+        let external_texture_names = Engine::own_property_names(cx, external_texture_prototype)
+            .expect("prototype properties");
+        assert_eq!(external_texture_names, ["label".to_owned()]);
+        let label_key = (rt.canonical(external_texture_prototype), "label".to_owned());
+        assert!(rt.accessor_getters.borrow().contains_key(&label_key));
+        assert!(rt.accessor_setters.borrow().contains_key(&label_key));
+        for error in [
+            Engine::call(cx, external_texture, Engine::undefined(cx), &[])
+                .expect_err("calling must fail"),
+            Engine::construct(cx, external_texture, &[]).expect_err("constructing must fail"),
+        ] {
+            assert!(error.contains("TypeError"), "{error}");
+            assert!(error.contains("Illegal constructor"), "{error}");
+        }
+        let ordinary_texture =
+            Engine::new_instance(cx, crate::GPU_TEXTURE_CLASS, Box::new(())).expect("texture");
+        assert!(!rt.instance_of(ordinary_texture, external_texture));
 
         let supported_limits = Engine::get_property(cx, global, "GPUSupportedLimits")
             .expect("supported-limits interface object");
@@ -3978,7 +4009,7 @@ mod tests {
         let cx = rt.context();
         let _device =
             unsafe { wrap_device::<Engine>(cx, fake_handle(40_002)) }.expect("adopt native device");
-        assert_eq!(rt.classes.borrow().len(), 35);
+        assert_eq!(rt.classes.borrow().len(), 36);
         let global = Engine::global(cx);
         assert!(Engine::is_callable(
             cx,
@@ -8327,6 +8358,29 @@ mod tests {
     }
 
     #[test]
+    fn null_mapped_at_creation_buffer_is_a_range_error() {
+        reset_gpu();
+        set_null_create_buffer(true);
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let desc = descriptor(
+            &rt,
+            &[
+                ("size", rt.number(16.0)),
+                ("usage", rt.number(8.0)),
+                ("mappedAtCreation", rt.bool(true)),
+            ],
+        );
+
+        assert_eq!(
+            device_create_buffer::<Engine>(cx, device, &[desc])
+                .expect_err("mapped null native buffer must fail"),
+            "RangeError: mappedAtCreation buffer allocation failed"
+        );
+    }
+
+    #[test]
     fn mapped_at_creation_non_multiple_of_four_throws_range_error_before_native_call() {
         reset_gpu();
         let rt = runtime();
@@ -8344,6 +8398,29 @@ mod tests {
         assert_eq!(
             device_create_buffer::<Engine>(cx, device, &[desc]).expect_err("size 2 must fail"),
             "RangeError: mappedAtCreation buffer size must be a multiple of 4"
+        );
+        GPU_STATE.with(|state| assert!(state.borrow().descriptors.is_empty()));
+    }
+
+    #[test]
+    fn mapped_at_creation_above_arraybuffer_limit_throws_before_native_call() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let desc = descriptor(
+            &rt,
+            &[
+                ("size", rt.number(4_294_967_296.0)),
+                ("usage", rt.number(8.0)),
+                ("mappedAtCreation", rt.bool(true)),
+            ],
+        );
+
+        assert_eq!(
+            device_create_buffer::<Engine>(cx, device, &[desc])
+                .expect_err("mapped buffer above the ArrayBuffer limit must fail"),
+            "RangeError: mappedAtCreation buffer size exceeds the ArrayBuffer limit"
         );
         GPU_STATE.with(|state| assert!(state.borrow().descriptors.is_empty()));
     }
@@ -8587,6 +8664,62 @@ mod tests {
             .expect("drain destroyed-buffer rejection");
         assert_rejection(&rt, promise, "OperationError", "GPUBuffer is destroyed");
         assert_validation_scope_error(&rt, cx, device, "GPUBuffer is destroyed");
+        release_device_held_values(&rt, cx, device);
+    }
+
+    #[test]
+    fn device_destroy_detaches_live_buffer_ranges_without_retaining_the_wrapper() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let desc = descriptor(
+            &rt,
+            &[
+                ("size", rt.number(4.0)),
+                ("usage", rt.number(2.0)),
+                ("mappedAtCreation", rt.bool(true)),
+            ],
+        );
+        let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("buffer");
+        let buffer_payload = Engine::payload(cx, buffer, crate::GPU_BUFFER_CLASS)
+            .and_then(|payload| payload.downcast_ref::<BufferPayload<Engine>>())
+            .expect("buffer payload");
+        assert_eq!(Arc::strong_count(buffer_payload.state()), 1);
+        let range = buffer_get_mapped_range::<Engine>(cx, buffer, &[]).expect("range");
+
+        device_destroy::<Engine>(cx, device, &[]).expect("destroy device");
+
+        assert_eq!(Engine::arraybuffer_len(cx, range), Some(0));
+        assert!(!buffer_payload.state().lock().expect("state").mapped);
+        GPU_STATE.with(|state| assert_eq!(state.borrow().device_destroys, 1));
+        release_device_held_values(&rt, cx, device);
+    }
+
+    #[test]
+    fn device_destroy_does_not_destroy_native_device_after_failed_detach() {
+        reset_gpu();
+        let rt = runtime();
+        rt.set_detach_noop(true);
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let desc = descriptor(
+            &rt,
+            &[
+                ("size", rt.number(4.0)),
+                ("usage", rt.number(2.0)),
+                ("mappedAtCreation", rt.bool(true)),
+            ],
+        );
+        let buffer = device_create_buffer::<Engine>(cx, device, &[desc]).expect("buffer");
+        let range = buffer_get_mapped_range::<Engine>(cx, buffer, &[]).expect("range");
+
+        let error = device_destroy::<Engine>(cx, device, &[])
+            .expect_err("failed detach must stop device destruction");
+
+        assert_eq!(error, "OperationError: mapped range detach failed");
+        assert_eq!(Engine::arraybuffer_len(cx, range), Some(4));
+        GPU_STATE.with(|state| assert_eq!(state.borrow().device_destroys, 0));
         release_device_held_values(&rt, cx, device);
     }
 
@@ -11588,6 +11721,90 @@ mod tests {
 
         GPU_STATE.with(|state| {
             assert_eq!(state.borrow().debug_calls.len(), calls_before_ended_checks);
+        });
+        release_device_held_values(&rt, cx, device);
+    }
+
+    #[test]
+    fn command_encoder_copy_buffer_to_buffer_resolves_overloads_and_defaults_sizes() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let buffer = |size| {
+            device_create_buffer::<Engine>(
+                cx,
+                device,
+                &[descriptor(
+                    &rt,
+                    &[("size", rt.number(size)), ("usage", rt.number(12.0))],
+                )],
+            )
+            .expect("buffer")
+        };
+        let source = buffer(12.0);
+        let destination = buffer(12.0);
+        let empty_source = buffer(0.0);
+        let empty_destination = buffer(0.0);
+        let native_source = crate::buffer_handle::<Engine>(cx, source).expect("source handle");
+        let native_destination =
+            crate::buffer_handle::<Engine>(cx, destination).expect("destination handle");
+        let native_empty_source =
+            crate::buffer_handle::<Engine>(cx, empty_source).expect("empty source handle");
+        let native_empty_destination = crate::buffer_handle::<Engine>(cx, empty_destination)
+            .expect("empty destination handle");
+        let encoder = device_create_command_encoder::<Engine>(cx, device, &[]).expect("encoder");
+        let native_encoder = crate::live_command_encoder::<Engine>(cx, encoder)
+            .expect("encoder state")
+            .expect("live encoder");
+
+        crate::command_encoder_copy_buffer_to_buffer::<Engine>(
+            cx,
+            encoder,
+            &[source, destination, rt.number(4.0)],
+        )
+        .expect("short overload with explicit size");
+        crate::command_encoder_copy_buffer_to_buffer::<Engine>(cx, encoder, &[source, destination])
+            .expect("short overload with default size");
+        crate::command_encoder_copy_buffer_to_buffer::<Engine>(
+            cx,
+            encoder,
+            &[source, rt.number(4.0), destination, rt.number(2.0)],
+        )
+        .expect("long overload with default size");
+        crate::command_encoder_copy_buffer_to_buffer::<Engine>(
+            cx,
+            encoder,
+            &[empty_source, empty_destination],
+        )
+        .expect("zero-sized short overload with default size");
+        assert_eq!(
+            crate::command_encoder_copy_buffer_to_buffer::<Engine>(
+                cx,
+                encoder,
+                &[source, rt.number(0.0), destination],
+            )
+            .expect_err("three arguments cannot select the long overload"),
+            "TypeError: GPUBuffer is required"
+        );
+
+        GPU_STATE.with(|state| {
+            assert_eq!(
+                state.borrow().copy_buffer_to_buffer_calls,
+                [
+                    (native_encoder, native_source, 0, native_destination, 0, 4,),
+                    (native_encoder, native_source, 0, native_destination, 0, 12,),
+                    (native_encoder, native_source, 4, native_destination, 2, 8,),
+                    (
+                        native_encoder,
+                        native_empty_source,
+                        0,
+                        native_empty_destination,
+                        0,
+                        0,
+                    ),
+                ]
+            );
         });
         release_device_held_values(&rt, cx, device);
     }

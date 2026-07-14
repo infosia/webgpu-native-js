@@ -309,6 +309,9 @@ fn run(config: &Config, instance: wgpu::WGPUInstance) -> Result<RunOutput, Strin
             Ok(())
         })
         .map_err(|error| format!("could not register __log_shim: {error:?}"))?;
+    runtime
+        .register_arraybuffer_transfer("__transfer_array_buffer")
+        .map_err(|error| format!("could not register ArrayBuffer transfer: {error:?}"))?;
 
     for (alias, relative_path) in CTS_MODULE_ALIASES {
         runtime

@@ -249,6 +249,9 @@ mod tests {
         runtime
             .register_host_function_with_result("__perf_now", |_| Ok(HostValue::Number(0.0)))
             .expect("register clock");
+        runtime
+            .register_arraybuffer_transfer("__transfer_array_buffer")
+            .expect("register ArrayBuffer transfer");
         eval_drop(
             &runtime,
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/shims.js")),
@@ -349,6 +352,9 @@ mod tests {
         runtime
             .register_host_function_with_result("__perf_now", |_| Ok(HostValue::Number(0.0)))
             .expect("register clock");
+        runtime
+            .register_arraybuffer_transfer("__transfer_array_buffer")
+            .expect("register ArrayBuffer transfer");
         eval_drop(
             &runtime,
             "const NativeSet = Set; globalThis.trackedSets = []; globalThis.Set = class extends NativeSet { constructor(...args) { super(...args); trackedSets.push(this); } };",
@@ -363,6 +369,97 @@ mod tests {
             &runtime,
             "const id = setTimeout(() => {}, 0); clearTimeout(id); if (trackedSets[1].size !== 1) throw new Error('missing cancellation entry'); __runDueTimers(0); if (trackedSets[1].size !== 0) throw new Error('stale cancellation entry');",
             "cancelled-timer-cleanup.js",
+        );
+    }
+
+    #[test]
+    fn message_channel_transfers_and_delivers_asynchronously() {
+        let runtime = shim_runtime();
+        eval_drop(
+            &runtime,
+            r#"
+            const channel = new MessageChannel();
+            const source = new ArrayBuffer(4);
+            new Uint8Array(source).set([1, 2, 3, 4]);
+            let calls = [];
+            channel.port2.addEventListener("message", event => calls.push("listener:" + event.data.byteLength));
+            channel.port2.onmessage = event => calls.push("handler:" + new Uint8Array(event.data).join(","));
+            channel.port1.postMessage(source, [source]);
+            if (source.byteLength !== 0) throw new Error("sender was not detached");
+            if (calls.length !== 0) throw new Error("delivery was synchronous");
+            __runDueTimers(Infinity);
+            if (calls.join("|") !== "listener:4|handler:1,2,3,4") throw new Error(calls.join("|"));
+            "#,
+            "message-channel-transfer.js",
+        );
+    }
+
+    #[test]
+    fn message_channel_copies_without_a_transfer_list() {
+        let runtime = shim_runtime();
+        eval_drop(
+            &runtime,
+            r#"
+            const channel = new MessageChannel();
+            const source = new ArrayBuffer(2);
+            new Uint8Array(source).set([5, 6]);
+            let received;
+            channel.port2.onmessage = event => { received = event.data; };
+            channel.port1.postMessage(source);
+            __runDueTimers(Infinity);
+            new Uint8Array(received)[0] = 9;
+            if (source.byteLength !== 2 || new Uint8Array(source)[0] !== 5) {
+              throw new Error("message was not copied");
+            }
+            "#,
+            "message-channel-copy.js",
+        );
+    }
+
+    #[test]
+    fn message_channel_rejects_live_mapped_and_detached_arraybuffers() {
+        let runtime = Runtime::new().expect("bare Boa runtime");
+        runtime
+            .register_host_function("print", |_| Ok(()))
+            .expect("register print");
+        runtime
+            .register_host_function("__log_shim", |_| Ok(()))
+            .expect("register shim logger");
+        runtime
+            .register_host_function_with_result("__perf_now", |_| Ok(HostValue::Number(0.0)))
+            .expect("register clock");
+        runtime
+            .register_arraybuffer_transfer("__transfer_array_buffer")
+            .expect("register ArrayBuffer transfer");
+        eval_drop(
+            &runtime,
+            "globalThis.GPUBuffer = class GPUBuffer { getMappedRange() { return new ArrayBuffer(4); } };",
+            "fake-buffer.js",
+        );
+        eval_drop(
+            &runtime,
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/shims.js")),
+            "cts-runner-shims-test.js",
+        );
+        eval_drop(
+            &runtime,
+            r#"
+            const channel = new MessageChannel();
+            const mapped = new GPUBuffer().getMappedRange();
+            let mappedError;
+            try { channel.port1.postMessage(mapped, [mapped]); } catch (error) { mappedError = error; }
+            if (!(mappedError instanceof TypeError) || mapped.byteLength !== 4) {
+              throw new Error("mapped ArrayBuffer transfer was not rejected");
+            }
+            const detached = new ArrayBuffer(1);
+            __transfer_array_buffer(detached);
+            let detachedError;
+            try { channel.port1.postMessage(detached, [detached]); } catch (error) { detachedError = error; }
+            if (!detachedError || detachedError.name !== "DataCloneError") {
+              throw new Error("detached ArrayBuffer did not produce DataCloneError");
+            }
+            "#,
+            "message-channel-rejections.js",
         );
     }
 
