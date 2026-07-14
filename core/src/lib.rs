@@ -2816,6 +2816,27 @@ impl LiveRenderCommands {
         }
     }
 
+    unsafe fn set_immediates(self, gpu: GpuDispatch, offset: u32, data: &[u8]) {
+        match self {
+            Self::Pass(pass) => unsafe {
+                (gpu.render_pass_encoder_set_immediates)(
+                    pass,
+                    offset,
+                    data.as_ptr().cast(),
+                    data.len(),
+                )
+            },
+            Self::Bundle(bundle) => unsafe {
+                (gpu.render_bundle_encoder_set_immediates)(
+                    bundle,
+                    offset,
+                    data.as_ptr().cast(),
+                    data.len(),
+                )
+            },
+        }
+    }
+
     unsafe fn draw(
         self,
         gpu: GpuDispatch,
@@ -6422,6 +6443,11 @@ struct ConvertedBufferSource {
     bytes_per_element: u64,
 }
 
+struct ConvertedImmediates {
+    range_offset: u32,
+    bytes: Vec<u8>,
+}
+
 fn convert_buffer_source<E: JsEngine>(
     cx: E::Context<'_>,
     value: E::Value,
@@ -6488,6 +6514,72 @@ fn convert_buffer_source<E: JsEngine>(
         byte_offset,
         byte_length,
         bytes_per_element,
+    })
+}
+
+fn convert_immediates<E: JsEngine>(
+    cx: E::Context<'_>,
+    args: &[E::Value],
+) -> Result<ConvertedImmediates, E::Error> {
+    let range_offset = enforce_u32::<E>(
+        cx,
+        required_argument::<E>(cx, args, 0, "rangeOffset")?,
+        "rangeOffset",
+    )?;
+    let source = convert_buffer_source::<E>(cx, required_argument::<E>(cx, args, 1, "data")?)?;
+    let data_offset = optional_gpu_size64_to_u64::<E>(cx, args.get(2).copied(), "dataOffset", 0)?;
+    let byte_offset = data_offset
+        .checked_mul(source.bytes_per_element)
+        .ok_or_else(|| E::operation_error(cx, "dataOffset is outside the source range"))?;
+    if byte_offset > source.byte_length {
+        return Err(E::operation_error(
+            cx,
+            "dataOffset is outside the source range",
+        ));
+    }
+    let byte_size = match args.get(3).copied() {
+        Some(value) if !E::is_undefined(cx, value) => {
+            let data_size = optional_gpu_size64_to_u64::<E>(cx, Some(value), "dataSize", 0)?;
+            data_size
+                .checked_mul(source.bytes_per_element)
+                .ok_or_else(|| E::operation_error(cx, "dataSize is outside the source range"))?
+        }
+        _ => source.byte_length - byte_offset,
+    };
+    let relative_end = byte_offset
+        .checked_add(byte_size)
+        .ok_or_else(|| E::operation_error(cx, "dataSize is outside the source range"))?;
+    if relative_end > source.byte_length {
+        return Err(E::operation_error(
+            cx,
+            "dataSize is outside the source range",
+        ));
+    }
+    if byte_size % 4 != 0 {
+        return Err(E::operation_error(
+            cx,
+            "setImmediates size must be a multiple of 4 bytes",
+        ));
+    }
+    let start = source
+        .byte_offset
+        .checked_add(byte_offset)
+        .ok_or_else(|| E::operation_error(cx, "dataOffset is outside the source range"))?;
+    let end = start
+        .checked_add(byte_size)
+        .ok_or_else(|| E::operation_error(cx, "dataSize is outside the source range"))?;
+    let start = usize::try_from(start)
+        .map_err(|_| E::operation_error(cx, "dataOffset is outside the source range"))?;
+    let end = usize::try_from(end)
+        .map_err(|_| E::operation_error(cx, "dataSize is outside the source range"))?;
+    let bytes = source
+        .bytes
+        .get(start..end)
+        .ok_or_else(|| E::operation_error(cx, "dataSize is outside the source range"))?
+        .to_vec();
+    Ok(ConvertedImmediates {
+        range_offset,
+        bytes,
     })
 }
 
@@ -7322,6 +7414,27 @@ pub fn compute_pass_set_bind_group<E: JsEngine + 'static>(
     Ok(E::undefined(cx))
 }
 
+/// Implements `GPUComputePassEncoder.setImmediates`.
+pub fn compute_pass_set_immediates<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let Some(pass) = live_compute_pass::<E>(cx, this)? else {
+        return Ok(E::undefined(cx));
+    };
+    let converted = convert_immediates::<E>(cx, args)?;
+    unsafe {
+        (E::environment(cx).gpu().compute_pass_encoder_set_immediates)(
+            pass,
+            converted.range_offset,
+            converted.bytes.as_ptr().cast(),
+            converted.bytes.len(),
+        );
+    }
+    Ok(E::undefined(cx))
+}
+
 /// Implements `GPUComputePassEncoder.dispatchWorkgroups`.
 pub fn compute_pass_dispatch_workgroups<E: JsEngine + 'static>(
     cx: E::Context<'_>,
@@ -7506,6 +7619,26 @@ pub fn render_pass_set_bind_group<E: JsEngine + 'static>(
             index,
             bind_group,
             &dynamic_offsets,
+        )
+    };
+    Ok(E::undefined(cx))
+}
+
+/// Implements the shared `GPUBindingCommandsMixin.setImmediates` body.
+pub fn render_pass_set_immediates<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    let Some(encoder) = live_render_commands::<E>(cx, this)? else {
+        return Ok(E::undefined(cx));
+    };
+    let converted = convert_immediates::<E>(cx, args)?;
+    unsafe {
+        encoder.set_immediates(
+            E::environment(cx).gpu(),
+            converted.range_offset,
+            &converted.bytes,
         )
     };
     Ok(E::undefined(cx))

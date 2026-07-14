@@ -952,3 +952,46 @@ three single-case tests.
 
 Runtime, not correctness, is now the constraint on this family. Screening at
 sub-family granularity is the working method for `command_buffer`.
+
+---
+
+## Block 17 — immediate data (`setImmediates`), 2026-07-15
+
+`GPUBindingCommandsMixin.setImmediates` was the last unimplemented WebIDL operation
+in the command-encoding subset. Implemented; spec and rules in
+`specs/blocks/17-immediate-data.md`.
+
+**Results.**
+
+| Family | yawgpu | Dawn |
+|---|---|---|
+| `api,validation,encoding,cmds,setImmediates` | 378/0 | 378/0 |
+| `api,validation,encoding,programmable,pipeline_immediate` | 180/0 | 180/0 |
+| `api,validation,encoding,encoder_open_state` | 50/0 (no regression) | — |
+| `api,operation,command_buffer,programmable,immediate` | 0/87 | **87/0** |
+
+The two validation families joined `validation-core.txt`; the operation family joined
+`operation-dawn.txt`.
+
+**Triage of the 87 yawgpu failures.** Every one is a readback mismatch, and the run
+raises no binding-side exception (zero `OperationError` / `TypeError` / validation
+errors across 87 cases). The Noop backend executes nothing, so the immediate values
+never reach the shader. Dawn runs the identical binding to 87/0. Backend gap by
+construction — the same class as every other family in `operation-dawn.txt`.
+
+**Scope note that made the triage possible.** The spec algorithm splits into a content
+timeline (`OperationError` on bad `dataOffset`/`dataSize`/alignment — the binding's job)
+and a device timeline (`rangeOffset % 4`, `rangeOffset + size ≤ maxImmediateSize` — the
+backend's job). The binding implements the first and forwards `rangeOffset` verbatim.
+A unit test pins the forwarding, so a binding-side check cannot be reintroduced
+silently. Rule: the binding never pre-empts a device-timeline check — doing so would
+convert a validation error into a JS exception and break `error_scope` semantics.
+
+**Prior record corrected.** `codegen-deltas.md` listed
+`WGPUPipelineLayoutDescriptor.immediateSize` as C-only surface "emitted 0". It is a
+WebIDL dictionary member (`webgpu.idl` line 614) and the generated converter reads it
+with `enforce_u32`. Entry removed.
+
+**Still open, recorded not skipped.** `GPU.wgslLanguageFeatures` is unimplemented. It is
+one of the five disjuncts of the CTS's `supportsImmediateData`; the other four already
+hold, so it gates nothing here.

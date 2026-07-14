@@ -24,7 +24,13 @@ generator's report; this file is the committed, reviewable index.
 `wgpuBufferGetConstMappedRange` (block 02 → A29), `wgpuBufferRead/WriteMappedRange`,
 `wgpuDeviceHasFeature`, `wgpuDeviceGetLostFuture`, `wgpuCommandEncoderWriteTimestamp`;
 enum sentinels `Undefined` / `BindingNotUsed` (emitted only for absent optionals);
-`WGPUShaderSourceSPIRV`; `WGPUPipelineLayoutDescriptor.immediateSize` (emitted 0).
+`WGPUShaderSourceSPIRV`.
+
+Correction: `WGPUPipelineLayoutDescriptor.immediateSize` was incorrectly listed
+as C-only surface emitted as 0. `webgpu.idl` declares `immediateSize` at line 614,
+and generated `convert_pipeline_layout_descriptor` reads it with `enforce_u32`.
+The corrected claim is that `immediateSize` is a generated WebIDL dictionary
+member with a default of 0.
 
 ## Recorded behavioural divergences from strict WebIDL (deferred, with rationale)
 

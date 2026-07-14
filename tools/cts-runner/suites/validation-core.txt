@@ -34,6 +34,14 @@ webgpu:api,validation,encoding,cmds,render,setPipeline:*
 webgpu:api,validation,encoding,cmds,render,state_tracking:*
 webgpu:api,validation,encoding,cmds,setBindGroup:*
 webgpu:api,validation,encoding,cmds,clearBuffer:*
+
+# Block 17 (2026-07-15), immediate data. Both pass on yawgpu and on Dawn:
+# setImmediates 378/0, pipeline_immediate 180/0. The content-timeline OperationError
+# checks are the binding's; the rangeOffset alignment and maxImmediateSize bound are
+# device-timeline validation and are raised by the backend, never pre-empted here.
+webgpu:api,validation,encoding,cmds,setImmediates:*
+webgpu:api,validation,encoding,programmable,pipeline_immediate:*
+
 webgpu:api,validation,encoding,cmds,debug:*
 webgpu:api,validation,encoding,cmds,index_access:*
 webgpu:api,validation,encoding,queries,resolveQuerySet:*

@@ -200,6 +200,7 @@ members = [
   "label",
   "setPipeline",
   "setBindGroup",
+  "setImmediates",
   "dispatchWorkgroups",
   "dispatchWorkgroupsIndirect",
   "pushDebugGroup",
@@ -216,6 +217,7 @@ members = [
   "setVertexBuffer",
   "setIndexBuffer",
   "setBindGroup",
+  "setImmediates",
   "draw",
   "drawIndexed",
   "drawIndirect",
@@ -241,6 +243,7 @@ members = [
   "setVertexBuffer",
   "setIndexBuffer",
   "setBindGroup",
+  "setImmediates",
   "draw",
   "drawIndexed",
   "drawIndirect",
@@ -575,6 +578,11 @@ nullable_handle_arguments = ["bindGroup"]
 
 [[lifecycle.methods]]
 interface = "GPUComputePassEncoder"
+member = "setImmediates"
+path = "compute_pass_set_immediates"
+
+[[lifecycle.methods]]
+interface = "GPUComputePassEncoder"
 member = "dispatchWorkgroups"
 path = "compute_pass_dispatch_workgroups"
 
@@ -626,6 +634,11 @@ interface = "GPURenderPassEncoder"
 member = "setBindGroup"
 path = "render_pass_set_bind_group"
 nullable_handle_arguments = ["bindGroup"]
+
+[[lifecycle.methods]]
+interface = "GPURenderPassEncoder"
+member = "setImmediates"
+path = "render_pass_set_immediates"
 
 [[lifecycle.methods]]
 interface = "GPURenderPassEncoder"
@@ -729,6 +742,12 @@ member = "setBindGroup"
 path = "render_pass_set_bind_group"
 nullable_handle_arguments = ["bindGroup"]
 reason = "GPUBindingCommandsMixin reuses the binding-command body with bundle-specific dispatch"
+
+[[lifecycle.methods]]
+interface = "GPURenderBundleEncoder"
+member = "setImmediates"
+path = "render_pass_set_immediates"
+reason = "GPUBindingCommandsMixin shares one render-commands body across the render pass and bundle encoders"
 
 [[lifecycle.methods]]
 interface = "GPURenderBundleEncoder"

@@ -1765,6 +1765,11 @@
             computePass.setPipeline(computePipeline);
             computePass.setBindGroup(0, computeBindGroup, []);
             computePass.setBindGroup(0, computeBindGroup, new Uint32Array([]), 0, 0);
+            computePass.setImmediates(0, new Uint32Array([10, 20]), 1, 1);
+            var immediateSizeError = caught(function () {
+                computePass.setImmediates(0, new Uint8Array([1, 2, 3]));
+            });
+            log("setImmediates:content-size:" + immediateSizeError.name);
             var computeOffsetsError = caught(function () {
                 computePass.setBindGroup(0, computeBindGroup, [0, -1]);
             });
@@ -1819,6 +1824,8 @@
             renderPass.setPipeline(renderPipeline);
             renderPass.setBindGroup(0, renderBindGroup, []);
             renderPass.setBindGroup(0, renderBindGroup, new Uint32Array([]), 0, 0);
+            var immediateBytes = new Uint8Array([0, 1, 2, 3, 4, 5, 6, 7]).buffer;
+            renderPass.setImmediates(0, new DataView(immediateBytes), 0, 4);
             var renderOffsetsError = caught(function () {
                 renderPass.setBindGroup(0, renderBindGroup, [0, 4294967296]);
             });
@@ -1855,6 +1862,8 @@
             bundleEncoder.setPipeline(renderPipeline);
             bundleEncoder.setBindGroup(0, renderBindGroup, []);
             bundleEncoder.setBindGroup(0, renderBindGroup, new Uint32Array([]), 0, 0);
+            bundleEncoder.setImmediates(0, immediateBytes, 4, 4);
+            log("setImmediates:all-encoders:ok");
             var bundleOffsetsError = caught(function () {
                 bundleEncoder.setBindGroup(0, renderBindGroup, [1.5]);
             });

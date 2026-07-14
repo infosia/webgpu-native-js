@@ -1582,6 +1582,9 @@ struct MockGpuState {
     compute_bind_group_calls: Vec<RecordedBindGroupCall<WGPUComputePassEncoder>>,
     render_bind_group_calls: Vec<RecordedBindGroupCall<WGPURenderPassEncoder>>,
     bundle_bind_group_calls: Vec<RecordedBindGroupCall<WGPURenderBundleEncoder>>,
+    compute_immediate_calls: Vec<RecordedImmediateCall<WGPUComputePassEncoder>>,
+    render_immediate_calls: Vec<RecordedImmediateCall<WGPURenderPassEncoder>>,
+    bundle_immediate_calls: Vec<RecordedImmediateCall<WGPURenderBundleEncoder>>,
     blend_constant_calls: Vec<(WGPURenderPassEncoder, [f64; 4])>,
     stencil_reference_calls: Vec<(WGPURenderPassEncoder, u32)>,
     clear_buffer_calls: Vec<(WGPUCommandEncoder, WGPUBuffer, u64, u64)>,
@@ -1626,6 +1629,14 @@ struct RecordedBindGroupCall<H> {
     bind_group: WGPUBindGroup,
     offsets: Vec<u32>,
     offsets_were_null: bool,
+}
+
+#[derive(Debug, PartialEq)]
+struct RecordedImmediateCall<H> {
+    encoder: H,
+    offset: u32,
+    bytes: Vec<u8>,
+    size: usize,
 }
 
 type RecordedConstants = Vec<(Vec<u8>, f64)>;
@@ -3142,6 +3153,15 @@ unsafe fn recorded_dynamic_offsets(offset_count: usize, offsets: *const u32) -> 
     unsafe { std::slice::from_raw_parts(offsets, offset_count) }.to_vec()
 }
 
+unsafe fn recorded_immediate_bytes(data: *const std::ffi::c_void, size: usize) -> Vec<u8> {
+    if size == 0 {
+        return Vec::new();
+    }
+    assert!(!data.is_null());
+    // SAFETY: the binding provides size readable bytes for this call.
+    unsafe { std::slice::from_raw_parts(data.cast::<u8>(), size) }.to_vec()
+}
+
 unsafe fn compute_pass_encoder_set_bind_group(
     pass: WGPUComputePassEncoder,
     index: u32,
@@ -3162,6 +3182,24 @@ unsafe fn compute_pass_encoder_set_bind_group(
             offsets: recorded_dynamic_offsets(offset_count, offsets),
             offsets_were_null: offsets.is_null(),
         });
+    });
+}
+unsafe fn compute_pass_encoder_set_immediates(
+    pass: WGPUComputePassEncoder,
+    offset: u32,
+    data: *const std::ffi::c_void,
+    size: usize,
+) {
+    GPU_STATE.with(|state| {
+        state
+            .borrow_mut()
+            .compute_immediate_calls
+            .push(RecordedImmediateCall {
+                encoder: pass,
+                offset,
+                bytes: recorded_immediate_bytes(data, size),
+                size,
+            });
     });
 }
 unsafe fn compute_pass_encoder_dispatch_workgroups(
@@ -3275,6 +3313,24 @@ unsafe fn render_pass_encoder_set_bind_group(
             offsets: recorded_dynamic_offsets(offset_count, offsets),
             offsets_were_null: offsets.is_null(),
         });
+    });
+}
+unsafe fn render_pass_encoder_set_immediates(
+    pass: WGPURenderPassEncoder,
+    offset: u32,
+    data: *const std::ffi::c_void,
+    size: usize,
+) {
+    GPU_STATE.with(|state| {
+        state
+            .borrow_mut()
+            .render_immediate_calls
+            .push(RecordedImmediateCall {
+                encoder: pass,
+                offset,
+                bytes: recorded_immediate_bytes(data, size),
+                size,
+            });
     });
 }
 unsafe fn render_pass_encoder_set_blend_constant(
@@ -3512,6 +3568,24 @@ unsafe fn render_bundle_encoder_set_bind_group(
             offsets: recorded_dynamic_offsets(offset_count, offsets),
             offsets_were_null: offsets.is_null(),
         });
+    });
+}
+unsafe fn render_bundle_encoder_set_immediates(
+    encoder: WGPURenderBundleEncoder,
+    offset: u32,
+    data: *const std::ffi::c_void,
+    size: usize,
+) {
+    GPU_STATE.with(|state| {
+        state
+            .borrow_mut()
+            .bundle_immediate_calls
+            .push(RecordedImmediateCall {
+                encoder,
+                offset,
+                bytes: recorded_immediate_bytes(data, size),
+                size,
+            });
     });
 }
 unsafe fn render_bundle_encoder_draw(
@@ -4104,6 +4178,26 @@ mod tests {
             ("byteLength", rt.number(byte_length)),
             ("constructor", constructor),
         ])
+    }
+
+    fn immediate_compute_pass(cx: Context<'_>, device: Value) -> Value {
+        let encoder =
+            device_create_command_encoder::<Engine>(cx, device, &[]).expect("command encoder");
+        crate::command_encoder_begin_compute_pass::<Engine>(cx, encoder, &[]).expect("compute pass")
+    }
+
+    fn immediate_render_pass(rt: &Runtime, cx: Context<'_>, device: Value) -> Value {
+        let encoder =
+            device_create_command_encoder::<Engine>(cx, device, &[]).expect("command encoder");
+        let pass_descriptor = descriptor(rt, &[("colorAttachments", rt.set_like(&[]))]);
+        crate::command_encoder_begin_render_pass::<Engine>(cx, encoder, &[pass_descriptor])
+            .expect("render pass")
+    }
+
+    fn immediate_bundle_encoder(rt: &Runtime, cx: Context<'_>, device: Value) -> Value {
+        let bundle_descriptor = descriptor(rt, &[("colorFormats", rt.set_like(&[]))]);
+        crate::device_create_render_bundle_encoder::<Engine>(cx, device, &[bundle_descriptor])
+            .expect("render bundle encoder")
     }
 
     #[test]
@@ -6335,6 +6429,347 @@ mod tests {
             .expect_err("unaligned size must throw"),
             "OperationError: writeBuffer size must be a multiple of 4 bytes"
         );
+        release_device_held_values(&rt, cx, device);
+    }
+
+    #[test]
+    fn immediate_01_happy_path_records_each_encoder_kind() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let compute = immediate_compute_pass(cx, device);
+        let render = immediate_render_pass(&rt, cx, device);
+        let bundle = immediate_bundle_encoder(&rt, cx, device);
+        let data =
+            Engine::new_arraybuffer_copy(cx, &[1, 2, 3, 4, 5, 6, 7, 8]).expect("arraybuffer");
+
+        crate::compute_pass_set_immediates::<Engine>(cx, compute, &[rt.number(4.0), data])
+            .expect("compute immediates");
+        crate::render_pass_set_immediates::<Engine>(cx, render, &[rt.number(8.0), data])
+            .expect("render pass immediates");
+        crate::render_pass_set_immediates::<Engine>(cx, bundle, &[rt.number(12.0), data])
+            .expect("render bundle immediates");
+
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.compute_immediate_calls.len(), 1);
+            assert_eq!(state.compute_immediate_calls[0].offset, 4);
+            assert_eq!(
+                state.compute_immediate_calls[0].bytes,
+                [1, 2, 3, 4, 5, 6, 7, 8]
+            );
+            assert_eq!(state.compute_immediate_calls[0].size, 8);
+            assert_eq!(state.render_immediate_calls.len(), 1);
+            assert_eq!(state.render_immediate_calls[0].offset, 8);
+            assert_eq!(
+                state.render_immediate_calls[0].bytes,
+                [1, 2, 3, 4, 5, 6, 7, 8]
+            );
+            assert_eq!(state.render_immediate_calls[0].size, 8);
+            assert_eq!(state.bundle_immediate_calls.len(), 1);
+            assert_eq!(state.bundle_immediate_calls[0].offset, 12);
+            assert_eq!(
+                state.bundle_immediate_calls[0].bytes,
+                [1, 2, 3, 4, 5, 6, 7, 8]
+            );
+            assert_eq!(state.bundle_immediate_calls[0].size, 8);
+        });
+        release_device_held_values(&rt, cx, device);
+    }
+
+    #[test]
+    fn immediate_02_uint32array_offsets_and_sizes_use_elements() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let pass = immediate_compute_pass(cx, device);
+        let backing = Engine::new_arraybuffer_copy(
+            cx,
+            &[0, 1, 2, 3, 10, 11, 12, 13, 20, 21, 22, 23, 30, 31, 32, 33],
+        )
+        .expect("arraybuffer");
+        let data = array_buffer_view(&rt, backing, 0.0, 16.0, Some(4.0));
+
+        crate::compute_pass_set_immediates::<Engine>(
+            cx,
+            pass,
+            &[rt.number(0.0), data, rt.number(1.0), rt.number(2.0)],
+        )
+        .expect("Uint32Array immediates");
+
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.compute_immediate_calls.len(), 1);
+            assert_eq!(
+                state.compute_immediate_calls[0].bytes,
+                [10, 11, 12, 13, 20, 21, 22, 23]
+            );
+            assert_eq!(state.compute_immediate_calls[0].size, 8);
+        });
+        release_device_held_values(&rt, cx, device);
+    }
+
+    #[test]
+    fn immediate_03_dataview_and_arraybuffer_offsets_and_sizes_use_bytes() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let pass = immediate_compute_pass(cx, device);
+        let backing = Engine::new_arraybuffer_copy(cx, &[90, 1, 2, 3, 4, 5, 6, 7, 8, 91])
+            .expect("arraybuffer");
+        let data_view = array_buffer_view(&rt, backing, 1.0, 8.0, None);
+        let array_buffer = Engine::new_arraybuffer_copy(cx, &[10, 11, 12, 13, 20, 21, 22, 23])
+            .expect("arraybuffer");
+
+        crate::compute_pass_set_immediates::<Engine>(
+            cx,
+            pass,
+            &[rt.number(0.0), data_view, rt.number(2.0), rt.number(4.0)],
+        )
+        .expect("DataView immediates");
+        crate::compute_pass_set_immediates::<Engine>(
+            cx,
+            pass,
+            &[rt.number(4.0), array_buffer, rt.number(4.0), rt.number(4.0)],
+        )
+        .expect("ArrayBuffer immediates");
+
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.compute_immediate_calls.len(), 2);
+            assert_eq!(state.compute_immediate_calls[0].bytes, [3, 4, 5, 6]);
+            assert_eq!(state.compute_immediate_calls[0].size, 4);
+            assert_eq!(state.compute_immediate_calls[1].bytes, [20, 21, 22, 23]);
+            assert_eq!(state.compute_immediate_calls[1].size, 4);
+        });
+        release_device_held_values(&rt, cx, device);
+    }
+
+    #[test]
+    fn immediate_04_typed_array_view_window_is_honored() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let pass = immediate_compute_pass(cx, device);
+        let backing =
+            Engine::new_arraybuffer_copy(cx, &[90, 91, 1, 2, 3, 4, 92, 93]).expect("arraybuffer");
+        let data = array_buffer_view(&rt, backing, 2.0, 4.0, Some(1.0));
+
+        crate::compute_pass_set_immediates::<Engine>(cx, pass, &[rt.number(0.0), data])
+            .expect("view-window immediates");
+
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.compute_immediate_calls.len(), 1);
+            assert_eq!(state.compute_immediate_calls[0].bytes, [1, 2, 3, 4]);
+            assert_eq!(state.compute_immediate_calls[0].size, 4);
+        });
+        release_device_held_values(&rt, cx, device);
+    }
+
+    #[test]
+    fn immediate_05_omitted_data_size_uses_remaining_elements() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let pass = immediate_compute_pass(cx, device);
+        let backing =
+            Engine::new_arraybuffer_copy(cx, &[0, 1, 2, 3, 10, 11, 12, 13, 20, 21, 22, 23])
+                .expect("arraybuffer");
+        let data = array_buffer_view(&rt, backing, 0.0, 12.0, Some(4.0));
+
+        crate::compute_pass_set_immediates::<Engine>(
+            cx,
+            pass,
+            &[rt.number(0.0), data, rt.number(1.0)],
+        )
+        .expect("remaining immediates");
+
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.compute_immediate_calls.len(), 1);
+            assert_eq!(
+                state.compute_immediate_calls[0].bytes,
+                [10, 11, 12, 13, 20, 21, 22, 23]
+            );
+            assert_eq!(state.compute_immediate_calls[0].size, 8);
+        });
+        release_device_held_values(&rt, cx, device);
+    }
+
+    #[test]
+    fn immediate_06_unaligned_content_size_is_operation_error() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let pass = immediate_compute_pass(cx, device);
+        let data = Engine::new_arraybuffer_copy(cx, &[0; 8]).expect("arraybuffer");
+
+        let error = crate::compute_pass_set_immediates::<Engine>(
+            cx,
+            pass,
+            &[rt.number(0.0), data, rt.number(0.0), rt.number(2.0)],
+        )
+        .expect_err("unaligned content size must fail");
+
+        assert_eq!(
+            error,
+            "OperationError: setImmediates size must be a multiple of 4 bytes"
+        );
+        GPU_STATE.with(|state| assert!(state.borrow().compute_immediate_calls.is_empty()));
+        release_device_held_values(&rt, cx, device);
+    }
+
+    #[test]
+    fn immediate_07_data_offset_past_element_count_is_operation_error() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let pass = immediate_compute_pass(cx, device);
+        let backing = Engine::new_arraybuffer_copy(cx, &[0; 8]).expect("arraybuffer");
+        let data = array_buffer_view(&rt, backing, 0.0, 8.0, Some(4.0));
+
+        let error = crate::compute_pass_set_immediates::<Engine>(
+            cx,
+            pass,
+            &[rt.number(0.0), data, rt.number(3.0)],
+        )
+        .expect_err("dataOffset past element count must fail");
+
+        assert_eq!(
+            error,
+            "OperationError: dataOffset is outside the source range"
+        );
+        GPU_STATE.with(|state| assert!(state.borrow().compute_immediate_calls.is_empty()));
+        release_device_held_values(&rt, cx, device);
+    }
+
+    #[test]
+    fn immediate_08_data_range_past_element_count_is_operation_error() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let pass = immediate_compute_pass(cx, device);
+        let backing = Engine::new_arraybuffer_copy(cx, &[0; 8]).expect("arraybuffer");
+        let data = array_buffer_view(&rt, backing, 0.0, 8.0, Some(4.0));
+
+        let error = crate::compute_pass_set_immediates::<Engine>(
+            cx,
+            pass,
+            &[rt.number(0.0), data, rt.number(1.0), rt.number(2.0)],
+        )
+        .expect_err("data range past element count must fail");
+
+        assert_eq!(
+            error,
+            "OperationError: dataSize is outside the source range"
+        );
+        GPU_STATE.with(|state| assert!(state.borrow().compute_immediate_calls.is_empty()));
+        release_device_held_values(&rt, cx, device);
+    }
+
+    #[test]
+    fn immediate_09_non_buffer_source_is_type_error() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let pass = immediate_compute_pass(cx, device);
+
+        let error = crate::compute_pass_set_immediates::<Engine>(
+            cx,
+            pass,
+            &[rt.number(0.0), rt.object(&[])],
+        )
+        .expect_err("non-buffer source must fail");
+
+        assert_eq!(
+            error,
+            "TypeError: data must be an ArrayBuffer or ArrayBufferView (or pass data.buffer)"
+        );
+        GPU_STATE.with(|state| assert!(state.borrow().compute_immediate_calls.is_empty()));
+        release_device_held_values(&rt, cx, device);
+    }
+
+    #[test]
+    fn immediate_10_zero_element_count_reaches_native_call() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let pass = immediate_compute_pass(cx, device);
+        let backing = Engine::new_arraybuffer_copy(cx, &[]).expect("arraybuffer");
+        let data = array_buffer_view(&rt, backing, 0.0, 0.0, Some(4.0));
+
+        crate::compute_pass_set_immediates::<Engine>(
+            cx,
+            pass,
+            &[rt.number(0.0), data, rt.number(0.0), rt.number(0.0)],
+        )
+        .expect("zero-size immediates");
+
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.compute_immediate_calls.len(), 1);
+            assert!(state.compute_immediate_calls[0].bytes.is_empty());
+            assert_eq!(state.compute_immediate_calls[0].size, 0);
+        });
+        release_device_held_values(&rt, cx, device);
+    }
+
+    #[test]
+    fn immediate_11_ended_encoder_returns_undefined_without_native_call() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let pass = immediate_compute_pass(cx, device);
+        crate::compute_pass_end::<Engine>(cx, pass, &[]).expect("end compute pass");
+
+        let result = crate::compute_pass_set_immediates::<Engine>(cx, pass, &[])
+            .expect("ended encoder call returns normally");
+
+        assert_eq!(result, rt.undefined());
+        GPU_STATE.with(|state| assert!(state.borrow().compute_immediate_calls.is_empty()));
+        release_device_held_values(&rt, cx, device);
+    }
+
+    #[test]
+    fn immediate_12_range_offset_validation_is_forwarded_to_backend() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let pass = immediate_compute_pass(cx, device);
+        let data = Engine::new_arraybuffer_copy(cx, &[1, 2, 3, 4]).expect("arraybuffer");
+
+        crate::compute_pass_set_immediates::<Engine>(cx, pass, &[rt.number(3.0), data])
+            .expect("unaligned rangeOffset reaches backend");
+        crate::compute_pass_set_immediates::<Engine>(
+            cx,
+            pass,
+            &[rt.number(f64::from(u32::MAX)), data],
+        )
+        .expect("huge rangeOffset reaches backend");
+
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.compute_immediate_calls.len(), 2);
+            assert_eq!(state.compute_immediate_calls[0].offset, 3);
+            assert_eq!(state.compute_immediate_calls[0].bytes, [1, 2, 3, 4]);
+            assert_eq!(state.compute_immediate_calls[0].size, 4);
+            assert_eq!(state.compute_immediate_calls[1].offset, u32::MAX);
+            assert_eq!(state.compute_immediate_calls[1].bytes, [1, 2, 3, 4]);
+            assert_eq!(state.compute_immediate_calls[1].size, 4);
+        });
         release_device_held_values(&rt, cx, device);
     }
 
@@ -12599,6 +13034,7 @@ mod tests {
                 "setVertexBuffer",
                 "setIndexBuffer",
                 "setBindGroup",
+                "setImmediates",
                 "draw",
                 "drawIndexed",
                 "drawIndirect",

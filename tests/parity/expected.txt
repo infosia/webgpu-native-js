@@ -190,6 +190,7 @@ renderBundle:use-after-finish:GPUValidationError:returned
 renderBundle:type-confusion:TypeError:GPURenderBundle is required
 renderBundle:sparse-colorFormats:null
 renderBundle:chain:null
+setImmediates:content-size:OperationError
 setBindGroup:compute-offsets:TypeError
 setBindGroup:u32array-window:RangeError
 setBindGroup:u32array-type:TypeError
@@ -202,6 +203,7 @@ dynamicState:blend-length:TypeError
 dynamicState:stencil-range:TypeError
 indirect:drawIndirect:TypeError
 indirect:drawIndexedIndirect:TypeError
+setImmediates:all-encoders:ok
 setBindGroup:bundle-offsets:TypeError
 indirect:bundle.drawIndirect:TypeError
 indirect:bundle.drawIndexedIndirect:TypeError
