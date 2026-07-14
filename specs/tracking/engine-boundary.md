@@ -1724,3 +1724,92 @@ registered host function: `print({})` would throw instead of receiving
 Options: retain string coercion for non-primitives; reject all non-primitives; or
 split host-function argument conversion from call-in return conversion. No
 behaviour changes until that API-wide choice is made.
+
+## B10 — Boa overflows the platform default thread stack in debug builds (2026-07-14)
+
+**Question.** A smoke run of the examples found `example-compute` aborting with
+`STATUS_STACK_OVERFLOW` (`0xc00000fd`) on Windows. Logic bug, or stack size?
+
+**Evidence.** Stack size, and the recursion is bounded:
+
+| Run | Result |
+|---|---|
+| debug, Noop | `STATUS_STACK_OVERFLOW` |
+| debug, Vulkan | `STATUS_STACK_OVERFLOW` |
+| release, Vulkan | `result: 2, 4, 6, 8, 10, 12, 14, 16`, exit 0 |
+| debug + `-C link-arg=/STACK:8388608`, Vulkan | `result: 2, 4, 6, 8, 10, 12, 14, 16`, exit 0 |
+
+An 8 MiB stack completes the same work the 1 MiB stack died on, so the
+recursion is deep, not infinite. Backend-independent. `example-triangle` and
+`example-bounce` do **not** overflow in debug against Vulkan — their scripts do
+not nest promises as deeply as `compute.js` does.
+
+**Corrected claim.** Block 11's 2026-07-11 record — "default (Noop) compute
+prints the un-doubled input and exits 0" — was measured under quickjs-ng and is
+now false. Boa's interpreter recurses over the JS call graph; quickjs-ng's does
+not. The engine swap (2026-07-12) gated the test suite, which passes; the
+examples are in no gate (block 11 → X1) and were not re-run.
+
+**Rule.** The host runs the engine on a thread whose stack size it chose. This
+is a host obligation on every target, not a Windows dev-build artifact: iOS
+secondary threads default to 512 KiB and Android native threads to 1 MiB. The
+binding cannot do it for the host — the host owns its threads (invariant 6).
+Written up as block 14 → B10 and block 11 → X12.
+
+**Note on the shape of the fix.** A committed `.cargo/config.toml` carrying
+`/STACK` is not available: `/.cargo/` is gitignored under the no-local-paths
+rule, and it would fix only MSVC. Stack sizing is done in code.
+
+## Handoff — examples/compute stack, and the release-queue clippy gate
+
+```
+## Task: examples + spikes — size the JS thread's stack; restore the clippy gate off macOS
+
+Phase: maintenance (post block 15)
+Goal: (1) example-compute survives a debug build on every platform;
+      (2) `cargo clippy --workspace --all-targets -- -D warnings` is green off macOS.
+
+Inputs to read:
+- specs/blocks/11-examples.md  (X1, X4, X11, X12)
+- specs/blocks/14-boa-engine.md  (B10)
+- specs/reference/workflow.md, CLAUDE.md
+
+Produce:
+- examples/compute/src/main.rs
+- examples/compute/README.md   (state the host obligation from X12)
+- spikes/release-queue/src/lib.rs
+
+Task 1 — examples/compute (block 11 → X12).
+  Move ALL of create_instance() + run() + wgpuInstanceRelease() into a thread
+  spawned with std::thread::Builder::new().stack_size(<N>), and have main()
+  join it and map its bool to the ExitCode. Creating the instance inside the
+  thread is the point: no WGPU handle then crosses a thread boundary, so NO
+  `unsafe impl Send` and no usize-smuggling is needed (CLAUDE.md conventions
+  forbid the latter outright). Name the stack size as a documented const with a
+  comment citing B10. Do NOT change compute.js, and do NOT touch the windowed
+  examples — they are main-thread-bound by winit and do not overflow.
+
+Task 2 — spikes/release-queue (clippy).
+  These items are constructed/called ONLY from #[cfg(target_os = "macos")] JSC
+  code, so off macOS they are dead and -D warnings fails the gate:
+    ReleaseLog::record_finalizer, ReleaseLog::record_panic,
+    struct FinalizerPayload + its impl (incl. finalize),
+    struct OrderingObservation + gc_count + total_finalizer_count (in tests).
+  Gate them with #[cfg(target_os = "macos")] to match their only call sites.
+  Do NOT silence this with #[allow(dead_code)]: CLAUDE.md treats a blanket
+  allow as a silenced review, and the items genuinely are macOS-only.
+  Do NOT change any spike behaviour or finding.
+
+Out of scope: real GPU, native surface, core/ or adapter changes, spec edits,
+commits, the windowed examples, compute.js.
+
+Acceptance criteria:
+- [ ] `cargo run -p example-compute` (DEBUG, no RUSTFLAGS) exits 0
+- [ ] `cargo clippy --workspace --all-targets -- -D warnings` exits 0
+- [ ] `cargo test --workspace` exits 0
+- [ ] no `unsafe impl Send`/`Sync` added; no handle smuggled as usize
+- [ ] no #[allow] added on a correctness lint
+- [ ] no local or sibling filesystem paths in any committed file
+
+Report back: files changed, and the exit code of each of the three gates.
+```

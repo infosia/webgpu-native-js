@@ -134,6 +134,30 @@ example under the same selection prints the doubled sequence on a real GPU;
 `--verify` passes wherever the backend advertises `CopySrc` and fails with
 the clear early error where it does not.
 
+**X12 — a host runs the JS engine on a thread whose stack size it chose, and
+the examples show it.** Boa's interpreter recurses, and in debug builds its
+frames overflow MSVC's 1 MiB default main-thread stack (block 14 → B10;
+measured 2026-07-14). The ship targets are no roomier — iOS secondary threads
+default to 512 KiB, Android native threads to 1 MiB — so this is a **host
+obligation on every platform**, not a Windows dev-build workaround.
+
+`examples/compute` is headless and therefore spawns its JS thread with an
+explicit `stack_size`, and creates the instance, runs the script, ticks, and
+releases the instance **inside** that thread: no WebGPU handle crosses a thread
+boundary, so no `unsafe impl Send` is needed and the `tick()` thread is the
+only thread that ever touches the objects (invariant 4).
+
+`examples/triangle` and `examples/bounce` cannot do this — winit's event loop
+is main-thread-only on macOS — and neither overflows today (verified in debug
+against Vulkan, 2026-07-14). They are left on the main thread, and the
+constraint is stated in their READMEs rather than worked around. **This is a
+known asymmetry, not an oversight:** a windowed host that outgrows the main
+thread's stack must raise it at link time, which is a host build setting and
+cannot be committed here (`/.cargo/` is gitignored by the no-local-paths rule).
+
+**A committed `.cargo/config.toml` is not available as a fix** for anything in
+this repository, for that reason. Fixes to stack sizing live in code.
+
 **Verified on Windows, 2026-07-11 (planner, real GPU via Vulkan):** compute
 prints `result: 2, 4, 6, 8, 10, 12, 14, 16` (exit 0); the triangle window's
 center pixel screen-captures as `145,120,113` — byte-identical to the macOS
@@ -143,3 +167,19 @@ held: default (Noop) compute prints the un-doubled input and exits 0;
 `--verify` against yawgpu fails with the CopySrc message; an unknown
 `YAWGPU_BACKEND` value fails naming the accepted ones; the full workspace
 test suite stays green.
+
+**Correction (2026-07-14).** One claim in that record no longer holds: "default
+(Noop) compute prints the un-doubled input and exits 0". It was true when
+written and is now false. The debug binary aborts with `STATUS_STACK_OVERFLOW`
+before reaching the print, on Noop and on Vulkan alike. The engine swap
+(quickjs-ng → Boa, 2026-07-12) is the cause; the evidence and the general rule
+are in block 14 → B10, and X12 is the fix. The 2026-07-11 measurement was taken
+against a different engine and was never re-run afterwards — the engine swap's
+gates covered the test suite, which passes, and not the examples, which are not
+part of any gate (X1).
+
+**Re-verified on Windows, 2026-07-14 (planner, real GPU via Vulkan), release:**
+compute prints `result: 2, 4, 6, 8, 10, 12, 14, 16` (exit 0); the triangle
+renders its gradient triangle over the `4,6,20` clear color; bounce renders its
+eight sprites and they change position between captures, so the per-frame
+call-in (block 15) is live.

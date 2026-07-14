@@ -231,6 +231,7 @@ impl ReleaseLog {
         self.panic_count.load(Ordering::SeqCst)
     }
 
+    #[cfg(target_os = "macos")]
     fn record_finalizer(&self, kind: &'static str) {
         self.finalizer_count.fetch_add(1, Ordering::SeqCst);
         self.releases_seen_in_finalizer
@@ -262,6 +263,7 @@ impl ReleaseLog {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn record_panic(&self) {
         self.panic_count.fetch_add(1, Ordering::SeqCst);
     }
@@ -426,6 +428,7 @@ fn synthetic_release(payload: ReleasePayload, log: Arc<ReleaseLog>) {
     log.record_release("Synthetic");
 }
 
+#[cfg(target_os = "macos")]
 struct FinalizerPayload {
     queue: Arc<ReleaseQueue>,
     request: ReleaseRequest,
@@ -435,6 +438,7 @@ struct FinalizerPayload {
     panic_after_enqueue: bool,
 }
 
+#[cfg(target_os = "macos")]
 impl FinalizerPayload {
     fn finalize(&self) {
         self.log.record_finalizer(self.kind);
@@ -620,6 +624,7 @@ mod tests {
         drained
     }
 
+    #[cfg(target_os = "macos")]
     #[derive(Debug)]
     struct OrderingObservation {
         gc_finalizers: Vec<&'static str>,
@@ -627,6 +632,7 @@ mod tests {
         drains: Vec<&'static str>,
     }
 
+    #[cfg(target_os = "macos")]
     impl OrderingObservation {
         fn gc_count(&self) -> usize {
             self.gc_finalizers.len()

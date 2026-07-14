@@ -9,6 +9,15 @@ use webgpu_native_js_ffi::native as wgpu;
 const COMPUTE_SOURCE: &str = include_str!("../compute.js");
 const DEADLINE: Duration = Duration::from_secs(10);
 
+/// Stack size of the thread that runs the JS engine.
+///
+/// Boa's interpreter recurses over the JS call graph, and in an unoptimized
+/// build its frames exhaust the platform default: MSVC gives the main thread
+/// 1 MiB, iOS gives secondary threads 512 KiB, and Android gives native threads
+/// 1 MiB. `compute.js` overflows all three in a debug build (block 14 -> B10),
+/// so the host — which owns its threads — picks the size (block 11 -> X12).
+const ENGINE_STACK_SIZE: usize = 8 * 1024 * 1024;
+
 fn host_value_text(value: &HostValue) -> String {
     match value {
         HostValue::String(value) => value.clone(),
@@ -164,7 +173,10 @@ fn run(instance: wgpu::WGPUInstance) -> boa_adapter::Result<bool> {
     Ok(ok.get())
 }
 
-fn main() -> ExitCode {
+/// Creates the instance, runs the script, and releases the instance — all on the
+/// engine thread. Keeping the instance's whole lifetime here means no WebGPU
+/// handle ever crosses a thread boundary, so nothing needs `unsafe impl Send`.
+fn run_on_engine_thread() -> ExitCode {
     let instance = match create_instance() {
         Ok(instance) => instance,
         Err(error) => {
@@ -180,6 +192,29 @@ fn main() -> ExitCode {
         Ok(false) => ExitCode::FAILURE,
         Err(error) => {
             eprintln!("compute example failed: {error:?}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn main() -> ExitCode {
+    let engine_thread = std::thread::Builder::new()
+        .name("webgpu-js-engine".to_owned())
+        .stack_size(ENGINE_STACK_SIZE)
+        .spawn(run_on_engine_thread);
+
+    let engine_thread = match engine_thread {
+        Ok(engine_thread) => engine_thread,
+        Err(error) => {
+            eprintln!("compute example could not spawn the JS engine thread: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    match engine_thread.join() {
+        Ok(exit) => exit,
+        Err(_) => {
+            eprintln!("compute example failed: the JS engine thread panicked");
             ExitCode::FAILURE
         }
     }

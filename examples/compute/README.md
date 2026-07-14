@@ -6,6 +6,20 @@ JavaScript. The script runs a WGSL compute kernel that doubles eight `u32`
 values, copies them to a readable buffer, maps it asynchronously, and reports
 the result through a host-registered `print` function.
 
+## The engine thread
+
+The example spawns a thread with an explicit `stack_size` and runs the engine on
+it. This is a host obligation, not example scaffolding: Boa's interpreter
+recurses over the JS call graph, and in a debug build its frames exhaust the
+platform default stack — 1 MiB for the MSVC main thread, 512 KiB for iOS
+secondary threads, 1 MiB for Android native threads. `compute.js` overflows a
+default-sized stack in debug builds. A host must therefore run the engine on a
+thread whose stack size it chose; the binding cannot do this for it, because the
+host owns its threads.
+
+The instance is created, used, and released inside that same thread, so no
+WebGPU handle crosses a thread boundary.
+
 Set the backend library directory and run the workspace package:
 
 ```sh

@@ -34,6 +34,29 @@ decisions taken **after** Phase 2's numbers, not assumptions baked in here.
 | Native classes | `trait Class: NativeObject` | Class registration + payload storage. |
 | GC | tracing, **thread-local** (`thread_local!`, `Rc`, `NonNull`); `Trace`/`Finalize` | Finalizers run on the **owning thread**, so JSC's "finalizer on an arbitrary GC thread" hazard is gone, and collection can be forced, so JSC's "never finalizes before context teardown" hazard (invariant 7) is gone too. The release queue stays anyway — it is engine-generic and costs nothing. |
 | Build | `default = ["float16", "xsum"]`; `intl` is **opt-in** | No ICU pulled in by default. |
+| Stack | recursive interpreter; frame size scales with optimization level | **Boa needs a bigger thread stack than the platform default in debug builds.** The host must size the stack of whatever thread runs the engine — see B10. |
+
+**B10 — the engine thread needs an explicitly sized stack; the platform default
+is not enough.** Boa evaluates recursively, and in an unoptimized build its
+frames are large enough to exhaust **MSVC's 1 MiB default main-thread stack**.
+Measured 2026-07-14 on Windows: `example-compute` in debug dies with
+`STATUS_STACK_OVERFLOW` (`0xc00000fd`) while evaluating `compute.js`, whose
+promise chain nests four `.then` levels; the same binary in release passes, and
+the same debug binary linked with `/STACK:8388608` passes. Backend-independent
+(reproduced on Noop and on Vulkan).
+
+This is a **regression introduced by the engine swap**, not a latent example
+bug: block 11 records the same debug example exiting 0 on 2026-07-11, under
+quickjs-ng, whose interpreter is not recursive over the JS call graph.
+
+Consequence, and it is not Windows-only: the ship targets have small thread
+stacks too (iOS secondary threads default to 512 KiB, Android native threads to
+1 MiB). **A host must run the engine on a thread whose stack size it chose.**
+The binding does not and cannot do this for the host — the host owns its
+threads (invariant 6) — so the requirement is documented here, stated in the
+user-facing docs, and **modelled by the examples** (block 11 → X12). Release
+builds fit in 1 MiB today; that is a margin, not a guarantee, and it is not a
+reason to leave debug builds broken.
 
 ## The central design problem, and the answer
 
