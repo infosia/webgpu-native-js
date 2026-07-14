@@ -1186,6 +1186,76 @@
         });
     }
 
+    function runCompilationInfo() {
+        var validModule = device.createShaderModule({
+            code: "@compute @workgroup_size(1) fn main() {}"
+        });
+        var invalidModule = device.createShaderModule({
+            code: "this is not valid WGSL"
+        });
+        var unicodeSource =
+            "/* é😀 */ @compute @workgroup_size(1) fn main() { let x = missing; }";
+        var unicodeModule = device.createShaderModule({ code: unicodeSource });
+        function utf8Length(value) {
+            var length = 0;
+            for (var index = 0; index < value.length; ++index) {
+                var unit = value.charCodeAt(index);
+                if (unit <= 0x7f) {
+                    length += 1;
+                } else if (unit <= 0x7ff) {
+                    length += 2;
+                } else if (unit >= 0xd800 && unit <= 0xdbff && index + 1 < value.length) {
+                    length += 4;
+                    index += 1;
+                } else {
+                    length += 3;
+                }
+            }
+            return length;
+        }
+        return validModule.getCompilationInfo().then(function (info) {
+            log("compilationInfo:valid:" + Array.isArray(info.messages) + ":" +
+                Object.isFrozen(info.messages) + ":" + info.messages.length + ":" +
+                (info instanceof GPUCompilationInfo) + ":" +
+                (info.messages === info.messages));
+            var infoCall = caught(function () { GPUCompilationInfo(); });
+            var infoConstruct = caught(function () { new GPUCompilationInfo(); });
+            var messageCall = caught(function () { GPUCompilationMessage(); });
+            var messageConstruct = caught(function () { new GPUCompilationMessage(); });
+            log("compilationInfo:interfaces:" + infoCall.name + "," +
+                infoConstruct.name + "," + messageCall.name + "," +
+                messageConstruct.name);
+            return invalidModule.getCompilationInfo();
+        }).then(function (info) {
+            var message = info.messages[0];
+            if (!message || ["error", "warning", "info"].indexOf(message.type) === -1) {
+                throw new Error("invalid shader did not produce a compilation message");
+            }
+            log("compilationInfo:diagnostic:" + message.type + ":" +
+                message.lineNum + ":" + message.linePos + ":" +
+                (message instanceof GPUCompilationMessage));
+            return unicodeModule.getCompilationInfo();
+        }).then(function (info) {
+            var utf16Offset = unicodeSource.indexOf("missing");
+            var utf8Offset = utf8Length(unicodeSource.slice(0, utf16Offset));
+            var converted = false;
+            var positions = [];
+            for (var index = 0; index < info.messages.length; ++index) {
+                var message = info.messages[index];
+                positions.push(message.lineNum + "," + message.linePos + "," +
+                    message.offset + "," + message.length);
+                converted = converted || (message.offset === utf16Offset &&
+                    message.lineNum === 1 &&
+                    message.linePos === utf16Offset + 1 &&
+                    message.length === "missing".length &&
+                    unicodeSource.slice(message.offset, message.offset + message.length) ===
+                        "missing");
+            }
+            log("compilationInfo:utf16:" + (utf8Offset !== utf16Offset) + ":" + converted + ":" +
+                positions.join(";"));
+        });
+    }
+
     function runQuerySets() {
         parityQuerySet = device.createQuerySet({
             type: "occlusion",
@@ -1225,6 +1295,8 @@
             return validationScope("bind-group-family", runBindGroups);
         }).then(function () {
             return validationScope("pipelines", runRenderPipelines);
+        }).then(function () {
+            return runCompilationInfo();
         }).then(function () {
             return validationScope("querySet", runQuerySets);
         }).then(function () {

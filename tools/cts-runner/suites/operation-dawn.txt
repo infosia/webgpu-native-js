@@ -1,0 +1,18 @@
+# Execution-result families. These verify what the GPU actually COMPUTED — buffer
+# contents after a dispatch, pixels after a draw, memory visibility across passes.
+#
+# They require a real backend and are DAWN-ONLY BY CONSTRUCTION. yawgpu's Noop
+# backend executes nothing, so every case fails with "Array had unexpected
+# contents"; that is not a binding bug and no expectation can express it.
+#
+# Run: cts-runner built --no-default-features --features backend-dawn, against a
+# local Dawn. Gated, real GPU, never CI. See CLAUDE.md -> "The oracle protocol".
+#
+# Screened 2026-07-14 on Dawn, all green:
+webgpu:api,operation,compute,*
+webgpu:api,operation,sampling,*
+webgpu:api,operation,render_pass,*
+webgpu:api,operation,render_pipeline,*
+webgpu:api,operation,resource_init,*
+webgpu:api,operation,memory_sync,*
+webgpu:api,operation,storage_texture,*

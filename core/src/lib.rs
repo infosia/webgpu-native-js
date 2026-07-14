@@ -89,6 +89,8 @@ const EVENT_CLASS: ClassId = ClassId(30);
 const GPU_UNCAPTURED_ERROR_EVENT_CLASS: ClassId = ClassId(31);
 const DOM_EXCEPTION_CLASS: ClassId = ClassId(32);
 const GPU_PIPELINE_ERROR_CLASS: ClassId = ClassId(33);
+const GPU_COMPILATION_INFO_CLASS: ClassId = ClassId(34);
+const GPU_COMPILATION_MESSAGE_CLASS: ClassId = ClassId(35);
 const WEBIDL_U32_MAX: u64 = u32::MAX as u64;
 const WGPU_DEPTH_CLEAR_VALUE_UNDEFINED: f32 = f32::NAN;
 
@@ -637,6 +639,10 @@ enum SettlementRequest<E: JsEngine + 'static> {
         queue: Arc<ReleaseQueue>,
         gpu: GpuDispatch,
     },
+    CompilationInfo {
+        deferred: Deferred<E>,
+        messages: Vec<OwnedCompilationMessage>,
+    },
     Success {
         deferred: Deferred<E>,
     },
@@ -909,6 +915,11 @@ impl<E: JsEngine + 'static> SettlementRequest<E> {
                     }
                 })
             }
+            Self::CompilationInfo { deferred, messages } => {
+                let value = new_compilation_info::<E>(cx, messages)
+                    .map_err(|error| E::error_value_from_error(cx, error));
+                SettlementOutcome::Deferred((deferred, value))
+            }
             Self::Success { deferred } => {
                 SettlementOutcome::Deferred((deferred, Ok(E::undefined(cx))))
             }
@@ -1120,6 +1131,7 @@ impl SettlementQueue {
                 match *request {
                     SettlementRequest::Adapter { deferred, .. }
                     | SettlementRequest::Device { deferred, .. }
+                    | SettlementRequest::CompilationInfo { deferred, .. }
                     | SettlementRequest::Success { deferred }
                     | SettlementRequest::Error { deferred, .. }
                     | SettlementRequest::PopErrorScope { deferred, .. } => {
@@ -1999,6 +2011,11 @@ pub fn release_payload_values<E: JsEngine + 'static>(
             .unwrap_or_default();
         for callback in entries.into_iter().filter_map(|entry| entry.callback) {
             release(callback);
+        }
+    }
+    if let Some(info) = payload.downcast_ref::<CompilationInfoPayload<E>>() {
+        if let Some(messages) = info.messages.take() {
+            release(messages);
         }
     }
 }
@@ -3109,6 +3126,156 @@ fn gpu_device_lost_info_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> 
         finalizer: |_payload, _env| {},
     })
 }
+
+struct OwnedCompilationMessage {
+    message: String,
+    type_: &'static str,
+    line_num: u64,
+    line_pos: u64,
+    offset: u64,
+    length: u64,
+}
+
+struct CompilationInfoPayload<E: JsEngine> {
+    messages: HeldValue<E>,
+}
+
+struct CompilationMessagePayload {
+    message: String,
+    type_: &'static str,
+    line_num: u64,
+    line_pos: u64,
+    offset: u64,
+    length: u64,
+}
+
+fn new_compilation_info<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    messages: Vec<OwnedCompilationMessage>,
+) -> Result<E::Value, E::Error> {
+    let values = messages
+        .into_iter()
+        .map(|message| {
+            E::new_instance(
+                cx,
+                GPU_COMPILATION_MESSAGE_CLASS,
+                Box::new(CompilationMessagePayload {
+                    message: message.message,
+                    type_: message.type_,
+                    line_num: message.line_num,
+                    line_pos: message.line_pos,
+                    offset: message.offset,
+                    length: message.length,
+                }),
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let global = E::global(cx);
+    let array = E::construct(cx, E::get_property(cx, global, "Array")?, &values)?;
+    let object = E::get_property(cx, global, "Object")?;
+    let freeze = E::get_property(cx, object, "freeze")?;
+    let frozen = E::call(cx, freeze, object, &[array])?;
+    let info = E::new_instance(
+        cx,
+        GPU_COMPILATION_INFO_CLASS,
+        Box::new(CompilationInfoPayload::<E> {
+            messages: HeldValue::empty(),
+        }),
+    )?;
+    let payload = E::payload(cx, info, GPU_COMPILATION_INFO_CLASS)
+        .and_then(|payload| payload.downcast_ref::<CompilationInfoPayload<E>>())
+        .ok_or_else(|| E::operation_error(cx, "GPUCompilationInfo payload is unavailable"))?;
+    payload.messages.set(E::duplicate_value(cx, frozen));
+    Ok(info)
+}
+
+fn compilation_info_messages_get<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+) -> Result<E::Value, E::Error> {
+    let messages = E::payload(cx, this, GPU_COMPILATION_INFO_CLASS)
+        .and_then(|payload| payload.downcast_ref::<CompilationInfoPayload<E>>())
+        .and_then(|payload| payload.messages.get())
+        .ok_or_else(|| {
+            E::type_error(
+                cx,
+                "GPUCompilationInfo.messages called on an incompatible object",
+            )
+        })?;
+    Ok(E::return_held_value(cx, messages))
+}
+
+fn compilation_message_payload<'a, E: JsEngine + 'static>(
+    cx: E::Context<'a>,
+    this: E::Value,
+) -> Result<&'a CompilationMessagePayload, E::Error> {
+    E::payload(cx, this, GPU_COMPILATION_MESSAGE_CLASS)
+        .and_then(|payload| payload.downcast_ref::<CompilationMessagePayload>())
+        .ok_or_else(|| {
+            E::type_error(
+                cx,
+                "GPUCompilationMessage getter called on an incompatible object",
+            )
+        })
+}
+
+fn compilation_message_message_get<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+) -> Result<E::Value, E::Error> {
+    E::string(cx, &compilation_message_payload::<E>(cx, this)?.message)
+}
+
+fn compilation_message_type_get<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+) -> Result<E::Value, E::Error> {
+    E::string(cx, compilation_message_payload::<E>(cx, this)?.type_)
+}
+
+fn compilation_message_line_num_get<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+) -> Result<E::Value, E::Error> {
+    E::number(
+        cx,
+        compilation_message_payload::<E>(cx, this)?.line_num as f64,
+    )
+}
+
+fn compilation_message_line_pos_get<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+) -> Result<E::Value, E::Error> {
+    E::number(
+        cx,
+        compilation_message_payload::<E>(cx, this)?.line_pos as f64,
+    )
+}
+
+fn compilation_message_offset_get<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+) -> Result<E::Value, E::Error> {
+    E::number(
+        cx,
+        compilation_message_payload::<E>(cx, this)?.offset as f64,
+    )
+}
+
+fn compilation_message_length_get<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+) -> Result<E::Value, E::Error> {
+    E::number(
+        cx,
+        compilation_message_payload::<E>(cx, this)?.length as f64,
+    )
+}
+
+fn finalize_compilation_info(_payload: Box<dyn Any + Send>, _env: &Environment) {}
+
+fn finalize_compilation_message(_payload: Box<dyn Any + Send>, _env: &Environment) {}
 
 fn new_gpu_error<E: JsEngine + 'static>(
     cx: E::Context<'_>,
@@ -4585,6 +4752,48 @@ pub fn device_create_render_pipeline_async<E: JsEngine + 'static>(
                 ptr::from_ref(&converted.native),
                 info,
             );
+        }
+        Ok(())
+    })
+}
+
+/// Implements `GPUShaderModule.getCompilationInfo`.
+pub fn shader_module_get_compilation_info<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    _args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    promise_operation::<E>(cx, |deferred| {
+        let (module, source) = E::payload(cx, this, GPU_SHADER_MODULE_CLASS)
+            .and_then(|payload| payload.downcast_ref::<ShaderModulePayload>())
+            .map(|payload| (payload.module, Arc::clone(&payload.source)))
+            .ok_or_else(|| {
+                E::type_error(
+                    cx,
+                    "GPUShaderModule.getCompilationInfo called on an incompatible object",
+                )
+            })?;
+        let mut request = Box::new(CompilationInfoRequest::<E> {
+            deferred: deferred.take(),
+            settlements: Arc::clone(E::environment(cx).settlements()),
+            source,
+            _registration: None,
+        });
+        request._registration = Some(E::register_deferred(
+            cx,
+            NonNull::from(&mut request.deferred),
+        ));
+        let info = WGPUCompilationInfoCallbackInfo {
+            nextInChain: ptr::null_mut(),
+            mode: WGPUCallbackMode_WGPUCallbackMode_AllowProcessEvents,
+            callback: Some(compilation_info_callback::<E>),
+            userdata1: Box::into_raw(request).cast(),
+            userdata2: ptr::null_mut(),
+        };
+        // SAFETY: `module` is owned by the live wrapper, and callback userdata
+        // remains allocated until the callback reclaims it.
+        unsafe {
+            (E::environment(cx).gpu().shader_module_get_compilation_info)(module, info);
         }
         Ok(())
     })
@@ -7646,6 +7855,13 @@ struct QueueWorkDoneRequest<E: JsEngine + 'static> {
     _registration: Option<E::DeferredRegistration>,
 }
 
+struct CompilationInfoRequest<E: JsEngine + 'static> {
+    deferred: Option<Deferred<E>>,
+    settlements: Arc<SettlementQueue>,
+    source: Arc<str>,
+    _registration: Option<E::DeferredRegistration>,
+}
+
 struct PopErrorScopeRequest<E: JsEngine + 'static> {
     deferred: Option<Deferred<E>>,
     settlements: Arc<SettlementQueue>,
@@ -7691,6 +7907,23 @@ unsafe fn string_view_to_owned(view: WGPUStringView) -> String {
     unsafe { std::str::from_utf8_unchecked(bytes) }.to_owned()
 }
 
+unsafe fn shader_module_source_to_owned(chain: *const WGPUChainedStruct) -> String {
+    // SAFETY: the caller guarantees that `chain`, when non-null, points to a
+    // live descriptor chain for the duration of this copy.
+    let Some(chain) = (unsafe { chain.as_ref() }) else {
+        return String::new();
+    };
+    if chain.sType != WGPUSType_WGPUSType_ShaderSourceWGSL {
+        return String::new();
+    }
+    // SAFETY: `sType` identifies a `WGPUShaderSourceWGSL`, whose `chain` is its
+    // first field, and the caller keeps the complete object live for this copy.
+    let source = unsafe { &*ptr::from_ref(chain).cast::<WGPUShaderSourceWGSL>() };
+    // SAFETY: descriptor conversion created `code` from an arena-backed valid
+    // UTF-8 string which remains live for the duration of this copy.
+    unsafe { string_view_to_owned(source.code) }
+}
+
 unsafe fn callback_message(message: WGPUStringView, fallback: &'static str) -> String {
     let backend = unsafe { callback_string(message) };
     if backend.is_empty() {
@@ -7713,6 +7946,119 @@ unsafe fn callback_string(message: WGPUStringView) -> String {
         })
         .into_owned()
     }
+}
+
+fn clamp_utf8_byte_offset(source: &str, offset: u64) -> usize {
+    let mut offset = usize::try_from(offset)
+        .unwrap_or(usize::MAX)
+        .min(source.len());
+    while !source.is_char_boundary(offset) {
+        offset = offset.saturating_sub(1);
+    }
+    offset
+}
+
+fn utf16_code_units(value: &str) -> u64 {
+    u64::try_from(value.encode_utf16().count()).unwrap_or(u64::MAX)
+}
+
+fn wgsl_line_range(source: &str, line_num: u64) -> (usize, usize) {
+    let target = line_num.max(1);
+    let mut current = 1_u64;
+    let mut start = 0_usize;
+    let mut chars = source.char_indices().peekable();
+    while let Some((index, character)) = chars.next() {
+        let break_end = match character {
+            '\r' => {
+                if chars.peek().is_some_and(|(_, next)| *next == '\n') {
+                    let (next_index, next) = chars.next().unwrap_or((index, '\r'));
+                    next_index.saturating_add(next.len_utf8())
+                } else {
+                    index.saturating_add(character.len_utf8())
+                }
+            }
+            '\n' | '\u{000b}' | '\u{000c}' | '\u{0085}' | '\u{2028}' | '\u{2029}' => {
+                index.saturating_add(character.len_utf8())
+            }
+            _ => continue,
+        };
+        if current == target {
+            return (start, index);
+        }
+        current = current.saturating_add(1);
+        start = break_end.min(source.len());
+    }
+    (start, source.len())
+}
+
+fn utf16_line_position(source: &str, line_num: u64, line_pos: u64) -> u64 {
+    if line_num == 0 || line_pos == 0 {
+        return 0;
+    }
+    let (start, end) = wgsl_line_range(source, line_num);
+    let relative = usize::try_from(line_pos.saturating_sub(1))
+        .unwrap_or(usize::MAX)
+        .min(end.saturating_sub(start));
+    let mut absolute = start.saturating_add(relative).min(end);
+    while !source.is_char_boundary(absolute) {
+        absolute = absolute.saturating_sub(1).max(start);
+    }
+    utf16_code_units(&source[start..absolute]).saturating_add(1)
+}
+
+fn utf16_message_span(source: &str, offset: u64, length: u64) -> (u64, u64) {
+    let start = clamp_utf8_byte_offset(source, offset);
+    let end = clamp_utf8_byte_offset(source, offset.saturating_add(length));
+    let utf16_offset = utf16_code_units(&source[..start]);
+    let utf16_length = if end < start {
+        0
+    } else {
+        utf16_code_units(&source[start..end])
+    };
+    (utf16_offset, utf16_length)
+}
+
+fn copy_compilation_messages(
+    info: &WGPUCompilationInfo,
+    source: &str,
+) -> std::result::Result<Vec<OwnedCompilationMessage>, String> {
+    if info.messageCount == 0 {
+        return Ok(Vec::new());
+    }
+    if info.messages.is_null() {
+        return Err("getCompilationInfo returned a null message list".to_owned());
+    }
+    // SAFETY: the callback contract supplies `messageCount` live elements for
+    // the callback duration, and this function copies every field before return.
+    let messages = unsafe { std::slice::from_raw_parts(info.messages, info.messageCount) };
+    messages
+        .iter()
+        .map(|message| {
+            let type_ = if message.type_
+                == WGPUCompilationMessageType_WGPUCompilationMessageType_Error
+            {
+                "error"
+            } else if message.type_ == WGPUCompilationMessageType_WGPUCompilationMessageType_Warning
+            {
+                "warning"
+            } else if message.type_ == WGPUCompilationMessageType_WGPUCompilationMessageType_Info {
+                "info"
+            } else {
+                return Err("getCompilationInfo returned an unknown message type".to_owned());
+            };
+            let (offset, length) = utf16_message_span(source, message.offset, message.length);
+            Ok(OwnedCompilationMessage {
+                // SAFETY: the output string is live for the callback duration
+                // and `callback_string` copies it into an owned `String`.
+                message: unsafe { callback_string(message.message) },
+                type_,
+                line_num: message.lineNum,
+                line_pos: utf16_line_position(source, message.lineNum, message.linePos),
+                offset,
+                length,
+            })
+        })
+        .collect()
 }
 
 fn enqueue_compute_pipeline_release(
@@ -7947,6 +8293,56 @@ unsafe extern "C" fn create_render_pipeline_callback<E: JsEngine + 'static>(
             label: request.label,
             queue: Arc::clone(&request.release_queue),
             gpu: request.gpu,
+        };
+        let _ = request.settlements.enqueue::<E>(settlement);
+    }));
+}
+
+unsafe extern "C" fn compilation_info_callback<E: JsEngine + 'static>(
+    status: WGPUCompilationInfoRequestStatus,
+    compilation_info: *const WGPUCompilationInfo,
+    userdata1: *mut c_void,
+    _userdata2: *mut c_void,
+) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let Some(raw) = NonNull::new(userdata1.cast::<CompilationInfoRequest<E>>()) else {
+            return;
+        };
+        // SAFETY: userdata1 was created by `Box::into_raw` for this callback and
+        // this callback consumes it exactly once.
+        let mut request = unsafe { Box::from_raw(raw.as_ptr()) };
+        let Some(deferred) = request.deferred.take() else {
+            return;
+        };
+        let settlement = if status
+            == WGPUCompilationInfoRequestStatus_WGPUCompilationInfoRequestStatus_Success
+        {
+            // SAFETY: a successful callback supplies a callback-borrowed info
+            // pointer. The following copy completes before this callback returns.
+            let copied = unsafe { compilation_info.as_ref() }
+                .ok_or_else(|| "getCompilationInfo returned null".to_owned())
+                .and_then(|info| copy_compilation_messages(info, &request.source));
+            match copied {
+                Ok(messages) => SettlementRequest::CompilationInfo { deferred, messages },
+                Err(message) => SettlementRequest::Error {
+                    deferred,
+                    name: "OperationError",
+                    message,
+                },
+            }
+        } else {
+            let message = if status
+                == WGPUCompilationInfoRequestStatus_WGPUCompilationInfoRequestStatus_CallbackCancelled
+            {
+                "getCompilationInfo callback cancelled"
+            } else {
+                "getCompilationInfo failed"
+            };
+            SettlementRequest::Error {
+                deferred,
+                name: "OperationError",
+                message: message.to_owned(),
+            }
         };
         let _ = request.settlements.enqueue::<E>(settlement);
     }));

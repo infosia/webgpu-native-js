@@ -27,6 +27,7 @@ struct StandardInterface<'a> {
     label: bool,
     stateful_encoder: bool,
     destroyable: bool,
+    source_retaining: bool,
     retained: Vec<RetainedHandle>,
 }
 
@@ -362,6 +363,7 @@ fn validate_lifecycle(
         if quirk.kind != "null_descriptor_when_omitted"
             && quirk.kind != "stateful_encoder_payload"
             && quirk.kind != "destroyable_resource_payload"
+            && quirk.kind != "retain_shader_source"
         {
             return Err(CodegenError::Policy(format!(
                 "unknown lifecycle quirk {}.{}",
@@ -476,6 +478,10 @@ fn standard_interfaces<'a>(
             destroyable: lifecycle.quirks.iter().any(|entry| {
                 entry.interface == *name && entry.kind == "destroyable_resource_payload"
             }),
+            source_retaining: lifecycle
+                .quirks
+                .iter()
+                .any(|entry| entry.interface == *name && entry.kind == "retain_shader_source"),
             retained,
         });
     }
@@ -847,6 +853,9 @@ fn emit_payloads(output: &mut String, standards: &[StandardInterface<'_>]) {
         if standard.label {
             output.push_str("    pub(super) label: Mutex<String>,\n");
         }
+        if standard.source_retaining {
+            output.push_str("    pub(super) source: Arc<str>,\n");
+        }
         if interface == "GPUTexture" {
             output.push_str("    pub(super) dimension: WGPUTextureDimension,\n");
             output.push_str("    pub(super) depth_or_array_layers: u32,\n");
@@ -1042,6 +1051,16 @@ fn emit_create(output: &mut String, standard: &StandardInterface<'_>) -> Result<
             );
         }
     }
+    if standard.source_retaining {
+        output.push_str(
+            "    // SAFETY: descriptor conversion created an arena-owned `WGPUShaderSourceWGSL`\n",
+        );
+        output.push_str("    // chain that remains live until this create call returns.\n");
+        let _ = writeln!(
+            output,
+            "    let source = unsafe {{ shader_module_source_to_owned({native_expr}.nextInChain) }};"
+        );
+    }
     if standard.interface.idl_name.as_deref() == Some("GPUTexture") {
         output.push_str("    let dimension = native.dimension;\n");
         output.push_str("    let depth_or_array_layers = native.size.depthOrArrayLayers;\n");
@@ -1175,6 +1194,9 @@ fn emit_create(output: &mut String, standard: &StandardInterface<'_>) -> Result<
     }
     if standard.label {
         output.push_str("        label: Mutex::new(label),\n");
+    }
+    if standard.source_retaining {
+        output.push_str("        source: source.into(),\n");
     }
     if standard.interface.idl_name.as_deref() == Some("GPUTexture") {
         output.push_str("        dimension,\n");

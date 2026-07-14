@@ -145,7 +145,7 @@ members = ["label", "writeBuffer", "writeTexture", "submit", "onSubmittedWorkDon
 
 [[subset]]
 interface = "GPUShaderModule"
-members = ["label"]
+members = ["getCompilationInfo", "label"]
 
 [[subset]]
 interface = "GPUSampler"
@@ -278,7 +278,15 @@ standard_interfaces = [
   "GPUCommandEncoder",
   "GPURenderBundleEncoder",
 ]
-extra_class_interfaces = ["GPU", "GPUAdapter", "GPUUncapturedErrorEvent", "GPUPipelineError"]
+extra_class_interfaces = [
+  "GPU",
+  "GPUAdapter",
+  "GPUUncapturedErrorEvent",
+  "GPUPipelineError",
+  "GPUCompilationInfo",
+  "GPUCompilationMessage",
+]
+readonly_value_interfaces = ["GPUCompilationInfo", "GPUCompilationMessage"]
 
 [[lifecycle.constructors]]
 interface = "GPUUncapturedErrorEvent"
@@ -338,6 +346,12 @@ path = "device_create_render_pipeline_async"
 reason = "the async callback settles through the engine-thread settlement queue"
 
 [[lifecycle.methods]]
+interface = "GPUShaderModule"
+member = "getCompilationInfo"
+path = "shader_module_get_compilation_info"
+reason = "the async callback copies callback-borrowed output before engine-thread settlement"
+
+[[lifecycle.methods]]
 interface = "GPUDevice"
 member = "destroy"
 path = "device_destroy"
@@ -394,6 +408,41 @@ get = "gpu_pipeline_error_message_get"
 interface = "GPUPipelineError"
 member = "reason"
 get = "gpu_pipeline_error_reason_get"
+
+[[lifecycle.properties]]
+interface = "GPUCompilationInfo"
+member = "messages"
+get = "compilation_info_messages_get"
+
+[[lifecycle.properties]]
+interface = "GPUCompilationMessage"
+member = "message"
+get = "compilation_message_message_get"
+
+[[lifecycle.properties]]
+interface = "GPUCompilationMessage"
+member = "type"
+get = "compilation_message_type_get"
+
+[[lifecycle.properties]]
+interface = "GPUCompilationMessage"
+member = "lineNum"
+get = "compilation_message_line_num_get"
+
+[[lifecycle.properties]]
+interface = "GPUCompilationMessage"
+member = "linePos"
+get = "compilation_message_line_pos_get"
+
+[[lifecycle.properties]]
+interface = "GPUCompilationMessage"
+member = "offset"
+get = "compilation_message_offset_get"
+
+[[lifecycle.properties]]
+interface = "GPUCompilationMessage"
+member = "length"
+get = "compilation_message_length_get"
 
 [[lifecycle.methods]]
 interface = "GPUBuffer"
@@ -846,6 +895,11 @@ reason = "T2/R14 keeps destroy idempotent while finalization remains a distinct 
 interface = "GPUQuerySet"
 kind = "destroyable_resource_payload"
 reason = "R14 keeps destroy idempotent while finalization remains a distinct release"
+
+[[lifecycle.quirks]]
+interface = "GPUShaderModule"
+kind = "retain_shader_source"
+reason = "getCompilationInfo converts C ABI UTF-8 byte locations to WebGPU UTF-16 code-unit locations"
 
 [[name_map]]
 idl = "GPUExtent3DDict"

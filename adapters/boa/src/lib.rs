@@ -1870,6 +1870,52 @@ mod tests {
     static MODULE_DEVICE_TEST_LOCK: Mutex<()> = Mutex::new(());
     static MODULE_DEVICE_ADD_REFS: AtomicUsize = AtomicUsize::new(0);
     static MODULE_DEVICE_RELEASES: AtomicUsize = AtomicUsize::new(0);
+    static PARITY_COMPILATION_INFO_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe fn parity_shader_module_get_compilation_info(
+        _module: wgpu::WGPUShaderModule,
+        info: wgpu::WGPUCompilationInfoCallbackInfo,
+    ) -> wgpu::WGPUFuture {
+        let call = PARITY_COMPILATION_INFO_CALLS.fetch_add(1, Ordering::Relaxed);
+        let anchored = call >= 2;
+        let text = b"parity diagnostic";
+        let message = wgpu::WGPUCompilationMessage {
+            nextInChain: ptr::null_mut(),
+            message: wgpu::WGPUStringView {
+                data: text.as_ptr().cast(),
+                length: text.len(),
+            },
+            type_: wgpu::WGPUCompilationMessageType_WGPUCompilationMessageType_Error,
+            lineNum: u64::from(anchored),
+            linePos: if anchored { 62 } else { 0 },
+            offset: if anchored { 61 } else { 0 },
+            length: if anchored { 7 } else { 0 },
+        };
+        let compilation_info = wgpu::WGPUCompilationInfo {
+            nextInChain: ptr::null_mut(),
+            messageCount: usize::from(call != 0),
+            messages: if call == 0 {
+                ptr::null()
+            } else {
+                ptr::from_ref(&message)
+            },
+        };
+        if let Some(callback) = info.callback {
+            // SAFETY: the callback-borrowed info, message, and static message
+            // text remain live until this synchronous callback returns.
+            unsafe {
+                callback(
+                    wgpu::WGPUCompilationInfoRequestStatus_WGPUCompilationInfoRequestStatus_Success,
+                    ptr::from_ref(&compilation_info),
+                    info.userdata1,
+                    info.userdata2,
+                )
+            };
+        }
+        wgpu::WGPUFuture {
+            id: 90_000_u64.saturating_add(u64::try_from(call).unwrap_or(u64::MAX)),
+        }
+    }
 
     // SAFETY: the callback treats the test handle as opaque and never
     // dereferences it; the caller supplies the non-null sentinel value.
@@ -3307,7 +3353,10 @@ mod tests {
         const EXPECTED: &str = include_str!("../../../tests/parity/expected.txt");
 
         let setup = native_setup();
-        let runtime = Runtime::new().expect("Boa runtime");
+        PARITY_COMPILATION_INFO_CALLS.store(0, Ordering::Relaxed);
+        let mut dispatch = gpu_dispatch();
+        dispatch.shader_module_get_compilation_info = parity_shader_module_get_compilation_info;
+        let runtime = Runtime::new_with_dispatch(dispatch).expect("Boa runtime");
         // SAFETY: setup owns live device and instance references for the full
         // lifetime of the runtime and its wrappers.
         let device = unsafe { runtime.wrap_device(setup.device) }.expect("wrap device");

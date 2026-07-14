@@ -17,8 +17,10 @@ use crate::{
 use crate::{
     WGPUBindGroup, WGPUBindGroupDescriptor, WGPUBindGroupLayout, WGPUBindGroupLayoutDescriptor,
     WGPUCommandBuffer, WGPUCommandBufferDescriptor, WGPUCommandEncoder,
-    WGPUCommandEncoderDescriptor, WGPUComputePassDescriptor, WGPUComputePassEncoder,
-    WGPUComputePipeline, WGPUComputePipelineDescriptor, WGPUCreateComputePipelineAsyncCallbackInfo,
+    WGPUCommandEncoderDescriptor, WGPUCompilationInfo, WGPUCompilationInfoCallbackInfo,
+    WGPUCompilationInfoRequestStatus, WGPUCompilationMessage, WGPUCompilationMessageType,
+    WGPUComputePassDescriptor, WGPUComputePassEncoder, WGPUComputePipeline,
+    WGPUComputePipelineDescriptor, WGPUCreateComputePipelineAsyncCallbackInfo,
     WGPUCreateRenderPipelineAsyncCallbackInfo, WGPUDeviceLostCallbackInfo, WGPUErrorFilter,
     WGPUErrorType, WGPUExtent3D, WGPUFuture, WGPUIndexFormat, WGPUPipelineLayout,
     WGPUPipelineLayoutDescriptor, WGPUPopErrorScopeCallbackInfo, WGPUPopErrorScopeStatus,
@@ -60,6 +62,7 @@ pub struct Runtime {
     function_objects: RefCell<BTreeSet<Value>>,
     function_names: RefCell<BTreeMap<Value, Value>>,
     function_lengths: RefCell<BTreeMap<Value, Value>>,
+    frozen_objects: RefCell<BTreeSet<Value>>,
     accessor_getters: RefCell<BTreeMap<(Value, String), Value>>,
     accessor_setters: RefCell<BTreeMap<(Value, String), Value>>,
     to_string_tags: RefCell<BTreeMap<Value, Value>>,
@@ -107,6 +110,8 @@ impl Runtime {
         let global = Value(6);
         let error = Value(7);
         let symbol_to_string_tag = Value(8);
+        let freeze = Value(9);
+        let object = Value(10);
         let mut symbol_properties = BTreeMap::new();
         symbol_properties.insert("iterator".to_owned(), symbol_iterator);
         symbol_properties.insert("toStringTag".to_owned(), symbol_to_string_tag);
@@ -116,6 +121,9 @@ impl Runtime {
         global_properties.insert("Set".to_owned(), set_constructor);
         global_properties.insert("Boolean".to_owned(), boolean);
         global_properties.insert("Error".to_owned(), error);
+        global_properties.insert("Object".to_owned(), object);
+        let mut object_properties = BTreeMap::new();
+        object_properties.insert("freeze".to_owned(), freeze);
         Self {
             env: Environment::new(gpu, Arc::new(ReleaseQueue::new())),
             values: RefCell::new(vec![
@@ -128,6 +136,8 @@ impl Runtime {
                 MockValue::Object(global_properties),
                 MockValue::Callable(MockCallable::IntrinsicError),
                 MockValue::SymbolToStringTag,
+                MockValue::Callable(MockCallable::Freeze),
+                MockValue::Object(object_properties),
             ]),
             global,
             symbol_iterator,
@@ -136,6 +146,7 @@ impl Runtime {
             function_objects: RefCell::new(BTreeSet::new()),
             function_names: RefCell::new(BTreeMap::new()),
             function_lengths: RefCell::new(BTreeMap::new()),
+            frozen_objects: RefCell::new(BTreeSet::new()),
             accessor_getters: RefCell::new(BTreeMap::new()),
             accessor_setters: RefCell::new(BTreeMap::new()),
             to_string_tags: RefCell::new(BTreeMap::new()),
@@ -607,6 +618,7 @@ enum MockCallable {
     Boolean,
     Interface(ClassId),
     IntrinsicError,
+    Freeze,
 }
 
 #[derive(Clone, Copy)]
@@ -968,6 +980,14 @@ impl JsEngine for MockEngine {
             ),
             MockValue::Callable(MockCallable::IntrinsicError) => {
                 return Err("TypeError: mock Error is not callable".to_owned());
+            }
+            MockValue::Callable(MockCallable::Freeze) => {
+                let value = args
+                    .first()
+                    .copied()
+                    .ok_or_else(|| "TypeError: Object.freeze requires a value".to_owned())?;
+                cx.runtime.frozen_objects.borrow_mut().insert(value);
+                value
             }
             MockValue::Callable(MockCallable::Interface(class)) => {
                 let _ = class;
@@ -1552,6 +1572,7 @@ struct MockGpuState {
     pushed_error_filters: Vec<WGPUErrorFilter>,
     next_pop_error: Option<MockPopError>,
     next_pipeline_async_error: Option<(crate::WGPUCreatePipelineAsyncStatus, String)>,
+    next_compilation_info: Option<MockCompilationInfo>,
     device_lost_callback: Option<WGPUDeviceLostCallbackInfo>,
     uncaptured_error_callback: Option<WGPUUncapturedErrorCallbackInfo>,
     requested_features: Vec<Vec<crate::WGPUFeatureName>>,
@@ -1580,6 +1601,20 @@ struct MockPopError {
     status: WGPUPopErrorScopeStatus,
     type_: WGPUErrorType,
     message: String,
+}
+
+struct MockCompilationInfo {
+    status: WGPUCompilationInfoRequestStatus,
+    messages: Vec<MockCompilationMessage>,
+}
+
+struct MockCompilationMessage {
+    message: String,
+    type_: WGPUCompilationMessageType,
+    line_num: u64,
+    line_pos: u64,
+    offset: u64,
+    length: u64,
 }
 
 #[derive(Debug, PartialEq)]
@@ -2041,6 +2076,62 @@ unsafe fn device_create_shader_module(
         state.next += 1;
         fake_handle(2000 + state.next)
     })
+}
+
+unsafe fn shader_module_get_compilation_info(
+    _module: WGPUShaderModule,
+    info: WGPUCompilationInfoCallbackInfo,
+) -> WGPUFuture {
+    assert_eq!(
+        info.mode,
+        crate::WGPUCallbackMode_WGPUCallbackMode_AllowProcessEvents
+    );
+    let result = GPU_STATE.with(|state| {
+        state
+            .borrow_mut()
+            .next_compilation_info
+            .take()
+            .unwrap_or(MockCompilationInfo {
+                status:
+                    crate::WGPUCompilationInfoRequestStatus_WGPUCompilationInfoRequestStatus_Success,
+                messages: Vec::new(),
+            })
+    });
+    let native_messages = result
+        .messages
+        .iter()
+        .map(|message| WGPUCompilationMessage {
+            nextInChain: ptr::null_mut(),
+            message: WGPUStringView::from_bytes(message.message.as_bytes()),
+            type_: message.type_,
+            lineNum: message.line_num,
+            linePos: message.line_pos,
+            offset: message.offset,
+            length: message.length,
+        })
+        .collect::<Vec<_>>();
+    let compilation_info = WGPUCompilationInfo {
+        nextInChain: ptr::null_mut(),
+        messageCount: native_messages.len(),
+        messages: if native_messages.is_empty() {
+            ptr::null()
+        } else {
+            native_messages.as_ptr()
+        },
+    };
+    if let Some(callback) = info.callback {
+        let output = if result.status
+            == crate::WGPUCompilationInfoRequestStatus_WGPUCompilationInfoRequestStatus_Success
+        {
+            ptr::from_ref(&compilation_info)
+        } else {
+            ptr::null()
+        };
+        // SAFETY: all callback-borrowed structs and strings remain live until
+        // the callback returns.
+        unsafe { callback(result.status, output, info.userdata1, info.userdata2) };
+    }
+    WGPUFuture { id: 52 }
 }
 
 unsafe fn device_create_sampler(
@@ -3505,7 +3596,10 @@ mod tests {
         adapter_request_device, buffer_destroy, buffer_get_mapped_range, buffer_label_get,
         buffer_label_set, buffer_map_async, buffer_size_get, buffer_unmap, buffer_usage_get,
         command_encoder_clear_buffer, command_encoder_finish, command_encoder_resolve_query_set,
-        convert_bind_group_descriptor, convert_bind_group_entry,
+        compilation_info_messages_get, compilation_message_length_get,
+        compilation_message_line_num_get, compilation_message_line_pos_get,
+        compilation_message_message_get, compilation_message_offset_get,
+        compilation_message_type_get, convert_bind_group_descriptor, convert_bind_group_entry,
         convert_bind_group_layout_descriptor, convert_blend_component,
         convert_buffer_binding_layout, convert_buffer_descriptor, convert_color_dict,
         convert_color_target_state, convert_command_buffer_descriptor,
@@ -3524,17 +3618,18 @@ mod tests {
         convert_texture_view_descriptor, convert_vertex_attribute, convert_vertex_buffer_layout,
         device_create_bind_group, device_create_buffer, device_create_command_encoder,
         device_create_compute_pipeline, device_create_query_set, device_create_render_pipeline,
-        device_create_sampler, device_create_texture, device_destroy, device_lost_get,
-        device_lost_info_message_get, device_lost_info_reason_get, device_on_uncaptured_error_get,
-        device_on_uncaptured_error_set, device_pop_error_scope, device_push_error_scope,
-        device_queue_get, finalize_bind_group, finalize_buffer, finalize_compute_pipeline,
-        finalize_device, finalize_query_set, finalize_queue, finalize_render_pipeline,
-        finalize_sampler, finalize_texture, finalize_texture_view, gpu_request_adapter,
-        queue_on_submitted_work_done, queue_submit, queue_work_done_callback, queue_write_buffer,
-        queue_write_texture, request_adapter_callback, request_device_callback,
-        texture_depth_or_array_layers_get, texture_dimension_get, texture_format_get,
-        texture_height_get, texture_mip_level_count_get, texture_sample_count_get,
-        texture_usage_get, texture_width_get, wrap_device, AdapterPayload, AdapterRequest,
+        device_create_sampler, device_create_shader_module, device_create_texture, device_destroy,
+        device_lost_get, device_lost_info_message_get, device_lost_info_reason_get,
+        device_on_uncaptured_error_get, device_on_uncaptured_error_set, device_pop_error_scope,
+        device_push_error_scope, device_queue_get, finalize_bind_group, finalize_buffer,
+        finalize_compute_pipeline, finalize_device, finalize_query_set, finalize_queue,
+        finalize_render_pipeline, finalize_sampler, finalize_texture, finalize_texture_view,
+        gpu_request_adapter, queue_on_submitted_work_done, queue_submit, queue_work_done_callback,
+        queue_write_buffer, queue_write_texture, request_adapter_callback, request_device_callback,
+        shader_module_get_compilation_info, texture_depth_or_array_layers_get,
+        texture_dimension_get, texture_format_get, texture_height_get, texture_mip_level_count_get,
+        texture_sample_count_get, texture_usage_get, texture_width_get, utf16_line_position,
+        utf16_message_span, wgsl_line_range, wrap_device, AdapterPayload, AdapterRequest,
         BindGroupLayoutPayload, BindGroupPayload, BufferPayload, ComputePipelinePayload,
         DeviceEventState, DevicePayload, DeviceRequest, ErrorPayload, JsEngine, PendingNative,
         PendingNativeHandle, PipelineLayoutPayload, QuerySetPayload, QueueError, QueuePayload,
@@ -3604,7 +3699,7 @@ mod tests {
         let cx = rt.context();
         let _gpu = crate::wrap_gpu::<Engine>(cx, fake_handle(40_001)).expect("wrap GPU");
 
-        assert_eq!(rt.classes.borrow().len(), 33);
+        assert_eq!(rt.classes.borrow().len(), 35);
         let global = Engine::global(cx);
         let render_pass = Engine::get_property(cx, global, "GPURenderPassEncoder")
             .expect("render-pass interface object");
@@ -3623,6 +3718,38 @@ mod tests {
         let constructor =
             Engine::get_property(cx, prototype, "constructor").expect("prototype constructor");
         assert!(Engine::same_value(cx, constructor, render_pass));
+
+        for (name, properties) in [
+            ("GPUCompilationInfo", &["messages"][..]),
+            (
+                "GPUCompilationMessage",
+                &["message", "type", "lineNum", "linePos", "offset", "length"][..],
+            ),
+        ] {
+            let interface = Engine::get_property(cx, global, name).expect("interface object");
+            let prototype = Engine::get_property(cx, interface, "prototype").expect("prototype");
+            let names = Engine::own_property_names(cx, prototype).expect("prototype properties");
+            for property in properties {
+                assert!(
+                    names.contains(&(*property).to_owned()),
+                    "missing {name}.{property}"
+                );
+                let key = (rt.canonical(prototype), (*property).to_owned());
+                assert!(rt.accessor_getters.borrow().contains_key(&key));
+                assert!(!rt.accessor_setters.borrow().contains_key(&key));
+            }
+            assert!(!names.contains(&"constructor".to_owned()));
+            let symbol = Engine::get_property(cx, global, "Symbol").expect("Symbol");
+            let tag_key = Engine::get_property(cx, symbol, "toStringTag").expect("toStringTag");
+            let tag = Engine::get_property_value(cx, prototype, tag_key).expect("prototype tag");
+            assert!(matches!(rt.get(tag), MockValue::String(value) if value == name));
+            assert!(Engine::call(cx, interface, Engine::undefined(cx), &[])
+                .expect_err("interface call")
+                .contains("Illegal constructor"));
+            assert!(Engine::construct(cx, interface, &[])
+                .expect_err("interface construction")
+                .contains("Illegal constructor"));
+        }
 
         let supported_limits = Engine::get_property(cx, global, "GPUSupportedLimits")
             .expect("supported-limits interface object");
@@ -3851,7 +3978,7 @@ mod tests {
         let cx = rt.context();
         let _device =
             unsafe { wrap_device::<Engine>(cx, fake_handle(40_002)) }.expect("adopt native device");
-        assert_eq!(rt.classes.borrow().len(), 33);
+        assert_eq!(rt.classes.borrow().len(), 35);
         let global = Engine::global(cx);
         assert!(Engine::is_callable(
             cx,
@@ -3907,6 +4034,7 @@ mod tests {
             Box::new(ShaderModulePayload {
                 label: Mutex::new(String::new()),
                 module: fake_handle(handle),
+                source: "".into(),
             }),
         )
         .expect("shader module")
@@ -4717,6 +4845,7 @@ mod tests {
             Box::new(ShaderModulePayload {
                 label: Mutex::new(String::new()),
                 module: fake_handle(42),
+                source: "".into(),
             }),
         )
         .expect("module");
@@ -5172,6 +5301,7 @@ mod tests {
             Box::new(ShaderModulePayload {
                 label: Mutex::new(String::new()),
                 module: fake_handle(42),
+                source: "".into(),
             }),
         )
         .expect("shader module");
@@ -5229,6 +5359,7 @@ mod tests {
             Box::new(ShaderModulePayload {
                 label: Mutex::new(String::new()),
                 module: fake_handle(42),
+                source: "".into(),
             }),
         )
         .expect("shader module");
@@ -5253,6 +5384,7 @@ mod tests {
             Box::new(ShaderModulePayload {
                 label: Mutex::new(String::new()),
                 module: fake_handle(42),
+                source: "".into(),
             }),
         )
         .expect("shader module");
@@ -6558,6 +6690,7 @@ mod tests {
             Box::new(ShaderModulePayload {
                 label: Mutex::new(String::new()),
                 module: fake_handle(42),
+                source: "".into(),
             }),
         )
         .expect("module");
@@ -8272,6 +8405,152 @@ mod tests {
         let map =
             buffer_map_async::<Engine>(cx, buffer, &[]).expect("mapAsync must return a promise");
         assert_rejection(&rt, map, "TypeError", "GPUMapModeFlags is required");
+    }
+
+    #[test]
+    fn shader_module_compilation_info_settles_on_tick_with_owned_frozen_messages() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let source = "é😀 marker😀";
+        // SAFETY: the mock device handle is non-null and remains live for the test.
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let module = device_create_shader_module::<Engine>(
+            cx,
+            device,
+            &[descriptor(&rt, &[("code", rt.string(source))])],
+        )
+        .expect("shader module");
+        GPU_STATE.with(|state| {
+            state.borrow_mut().next_compilation_info = Some(MockCompilationInfo {
+                status:
+                    crate::WGPUCompilationInfoRequestStatus_WGPUCompilationInfoRequestStatus_Success,
+                messages: vec![MockCompilationMessage {
+                    message: "mock diagnostic".to_owned(),
+                    type_: crate::WGPUCompilationMessageType_WGPUCompilationMessageType_Warning,
+                    line_num: 1,
+                    line_pos: 8,
+                    offset: 7,
+                    length: 10,
+                }],
+            });
+        });
+
+        let promise = shader_module_get_compilation_info::<Engine>(cx, module, &[])
+            .expect("getCompilationInfo promise");
+        assert_eq!(rt.promise_result(promise), None);
+        // SAFETY: the mock instance is non-null and used only by the mock dispatch.
+        unsafe { crate::tick::<Engine>(cx, fake_handle(50_001)) }.expect("settlement tick");
+        let info = rt
+            .promise_result(promise)
+            .expect("settled promise")
+            .expect("compilation info");
+        let messages = compilation_info_messages_get::<Engine>(cx, info).expect("messages");
+        let repeated = compilation_info_messages_get::<Engine>(cx, info).expect("messages again");
+        assert!(Engine::same_value(cx, messages, repeated));
+        assert!(
+            rt.frozen_objects.borrow().contains(&rt.canonical(messages)),
+            "messages must be frozen"
+        );
+        let MockValue::Iterable { values, .. } = rt.get(messages) else {
+            panic!("messages must be an array");
+        };
+        assert_eq!(values.len(), 1);
+        let message = values[0];
+        assert!(matches!(
+            rt.get(compilation_message_message_get::<Engine>(cx, message).expect("message")),
+            MockValue::String(value) if value == "mock diagnostic"
+        ));
+        assert!(matches!(
+            rt.get(compilation_message_type_get::<Engine>(cx, message).expect("type")),
+            MockValue::String(value) if value == "warning"
+        ));
+        for (value, expected) in [
+            (
+                compilation_message_line_num_get::<Engine>(cx, message).expect("lineNum"),
+                1.0,
+            ),
+            (
+                compilation_message_line_pos_get::<Engine>(cx, message).expect("linePos"),
+                5.0,
+            ),
+            (
+                compilation_message_offset_get::<Engine>(cx, message).expect("offset"),
+                4.0,
+            ),
+            (
+                compilation_message_length_get::<Engine>(cx, message).expect("length"),
+                8.0,
+            ),
+        ] {
+            assert!(matches!(rt.get(value), MockValue::Number(actual) if actual == expected));
+        }
+    }
+
+    #[test]
+    fn compilation_locations_clamp_bad_utf8_offsets_and_follow_wgsl_line_breaks() {
+        let lines = "é\r\n😀\u{000b}x\u{000c}y\u{0085}z\u{2028}w\u{2029}q";
+        for (line_num, expected) in [
+            (1, "é"),
+            (2, "😀"),
+            (3, "x"),
+            (4, "y"),
+            (5, "z"),
+            (6, "w"),
+            (7, "q"),
+            (u64::MAX, "q"),
+        ] {
+            let (start, end) = wgsl_line_range(lines, line_num);
+            assert_eq!(&lines[start..end], expected);
+        }
+        assert_eq!(utf16_line_position(lines, 2, 5), 3);
+        assert_eq!(utf16_line_position(lines, 2, 3), 1);
+        assert_eq!(utf16_line_position(lines, 0, 9), 0);
+
+        let source = "aé😀b";
+        assert_eq!(utf16_message_span(source, 2, 5), (1, 3));
+        assert_eq!(utf16_message_span(source, u64::MAX, u64::MAX), (5, 0));
+    }
+
+    #[test]
+    fn shader_module_compilation_info_rejects_callback_and_receiver_errors() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let incompatible = shader_module_get_compilation_info::<Engine>(cx, rt.undefined(), &[])
+            .expect("receiver rejection promise");
+        assert_rejection(
+            &rt,
+            incompatible,
+            "TypeError",
+            "GPUShaderModule.getCompilationInfo called on an incompatible object",
+        );
+
+        // SAFETY: the mock device handle is non-null and remains live for the test.
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let module = device_create_shader_module::<Engine>(
+            cx,
+            device,
+            &[descriptor(&rt, &[("code", rt.string("invalid"))])],
+        )
+        .expect("shader module");
+        GPU_STATE.with(|state| {
+            state.borrow_mut().next_compilation_info = Some(MockCompilationInfo {
+                status: crate::WGPUCompilationInfoRequestStatus_WGPUCompilationInfoRequestStatus_CallbackCancelled,
+                messages: Vec::new(),
+            });
+        });
+        let promise = shader_module_get_compilation_info::<Engine>(cx, module, &[])
+            .expect("callback rejection promise");
+        assert_eq!(rt.promise_result(promise), None);
+        // SAFETY: the mock instance is non-null and used only by the mock dispatch.
+        unsafe { crate::tick::<Engine>(cx, fake_handle(50_002)) }.expect("settlement tick");
+        assert_rejection(
+            &rt,
+            promise,
+            "OperationError",
+            "getCompilationInfo callback cancelled",
+        );
     }
 
     #[test]

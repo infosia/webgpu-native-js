@@ -70,6 +70,7 @@ macro_rules! for_each_gpu_dispatch_entry {
             (queue_on_submitted_work_done, wgpuQueueOnSubmittedWorkDone, unsafe fn(queue: $crate::WGPUQueue, callback_info: $crate::WGPUQueueWorkDoneCallbackInfo) -> $crate::WGPUFuture),
             (shader_module_add_ref, wgpuShaderModuleAddRef, unsafe fn(shader_module: $crate::WGPUShaderModule)),
             (shader_module_release, wgpuShaderModuleRelease, unsafe fn(shader_module: $crate::WGPUShaderModule)),
+            (shader_module_get_compilation_info, wgpuShaderModuleGetCompilationInfo, unsafe fn(shader_module: $crate::WGPUShaderModule, callback_info: $crate::WGPUCompilationInfoCallbackInfo) -> $crate::WGPUFuture),
             (shader_module_set_label, wgpuShaderModuleSetLabel, unsafe fn(shader_module: $crate::WGPUShaderModule, label: $crate::WGPUStringView)),
             (sampler_add_ref, wgpuSamplerAddRef, unsafe fn(sampler: $crate::WGPUSampler)),
             (sampler_release, wgpuSamplerRelease, unsafe fn(sampler: $crate::WGPUSampler)),

@@ -3391,7 +3391,7 @@ mod tests {
     use std::ptr;
     use std::rc::Rc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     use super::{
@@ -3399,6 +3399,54 @@ mod tests {
         JSObjectGetArrayBufferBytesPtr, JSValueRef, JSValueToObject, Runtime, Scope,
     };
     use webgpu_native_js_core::JsEngine;
+
+    static PARITY_COMPILATION_INFO_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static PARITY_COMPILATION_INFO_LOCK: Mutex<()> = Mutex::new(());
+
+    unsafe fn parity_shader_module_get_compilation_info(
+        _module: wgpu::WGPUShaderModule,
+        info: wgpu::WGPUCompilationInfoCallbackInfo,
+    ) -> wgpu::WGPUFuture {
+        let call = PARITY_COMPILATION_INFO_CALLS.fetch_add(1, Ordering::Relaxed);
+        let anchored = call >= 2;
+        let text = b"parity diagnostic";
+        let message = wgpu::WGPUCompilationMessage {
+            nextInChain: ptr::null_mut(),
+            message: wgpu::WGPUStringView {
+                data: text.as_ptr().cast(),
+                length: text.len(),
+            },
+            type_: wgpu::WGPUCompilationMessageType_WGPUCompilationMessageType_Error,
+            lineNum: u64::from(anchored),
+            linePos: if anchored { 62 } else { 0 },
+            offset: if anchored { 61 } else { 0 },
+            length: if anchored { 7 } else { 0 },
+        };
+        let compilation_info = wgpu::WGPUCompilationInfo {
+            nextInChain: ptr::null_mut(),
+            messageCount: usize::from(call != 0),
+            messages: if call == 0 {
+                ptr::null()
+            } else {
+                ptr::from_ref(&message)
+            },
+        };
+        if let Some(callback) = info.callback {
+            // SAFETY: the callback-borrowed info, message, and static message
+            // text remain live until this synchronous callback returns.
+            unsafe {
+                callback(
+                    wgpu::WGPUCompilationInfoRequestStatus_WGPUCompilationInfoRequestStatus_Success,
+                    ptr::from_ref(&compilation_info),
+                    info.userdata1,
+                    info.userdata2,
+                )
+            };
+        }
+        wgpu::WGPUFuture {
+            id: 90_000_u64.saturating_add(u64::try_from(call).unwrap_or(u64::MAX)),
+        }
+    }
 
     struct AdapterRequestState {
         status: Cell<wgpu::WGPURequestAdapterStatus>,
@@ -4286,11 +4334,18 @@ mod tests {
         const SCRIPT: &str = include_str!("../../../tests/parity/parity.js");
         const EXPECTED: &str = include_str!("../../../tests/parity/expected.txt");
 
+        let _guard = PARITY_COMPILATION_INFO_LOCK
+            .lock()
+            .expect("parity compilation-info lock");
         let setup = native_setup();
+        PARITY_COMPILATION_INFO_CALLS.store(0, Ordering::Relaxed);
+        let mut dispatch = super::gpu_dispatch();
+        dispatch.shader_module_get_compilation_info = parity_shader_module_get_compilation_info;
         let runtime = if force_bigint_fallback {
-            Runtime::new_forcing_bigint_fallback().expect("JSC fallback runtime")
+            Runtime::new_with_dispatch_and_bigint_mode(dispatch, true)
+                .expect("JSC fallback runtime")
         } else {
-            Runtime::new().expect("JSC runtime")
+            Runtime::new_with_dispatch(dispatch).expect("JSC runtime")
         };
         assert_eq!(
             runtime.state.bigint_predicate.is_none(),

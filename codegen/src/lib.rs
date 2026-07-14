@@ -447,6 +447,8 @@ pub(crate) struct LifecyclePolicy {
     #[serde(default)]
     pub(crate) extra_class_interfaces: Vec<String>,
     #[serde(default)]
+    pub(crate) readonly_value_interfaces: Vec<String>,
+    #[serde(default)]
     pub(crate) constructors: Vec<ConstructorMappingPolicy>,
     #[serde(default)]
     pub(crate) methods: Vec<MethodMappingPolicy>,
@@ -1324,6 +1326,59 @@ fn validate_policy(
                         "dead lifecycle mapping {interface}.{member}"
                     )));
                 }
+            }
+        }
+        let mut readonly_values = BTreeSet::new();
+        for interface in &lifecycle.readonly_value_interfaces {
+            if !readonly_values.insert(interface.as_str()) {
+                return Err(CodegenError::Policy(format!(
+                    "duplicate readonly value interface {interface}"
+                )));
+            }
+            if !extras.contains(interface.as_str()) {
+                return Err(CodegenError::Policy(format!(
+                    "readonly value interface {interface} is not an extra class interface"
+                )));
+            }
+            let members = index.effective_members(interface);
+            if members
+                .iter()
+                .any(|member| member.kind != IdlMemberKind::Attribute)
+            {
+                return Err(CodegenError::Policy(format!(
+                    "readonly value interface {interface} contains an operation"
+                )));
+            }
+            let attributes: BTreeSet<_> =
+                members.iter().map(|member| member.name.as_str()).collect();
+            let mappings: BTreeSet<_> = lifecycle
+                .properties
+                .iter()
+                .filter(|mapping| mapping.interface == *interface)
+                .map(|mapping| mapping.member.as_str())
+                .collect();
+            if mappings != attributes {
+                return Err(CodegenError::Policy(format!(
+                    "readonly value interface {interface} must map every WebIDL attribute; expected {attributes:?}, got {mappings:?}"
+                )));
+            }
+            if lifecycle
+                .properties
+                .iter()
+                .any(|mapping| mapping.interface == *interface && mapping.set.is_some())
+            {
+                return Err(CodegenError::Policy(format!(
+                    "readonly value interface {interface} cannot map a setter"
+                )));
+            }
+            if lifecycle
+                .constructors
+                .iter()
+                .any(|constructor| constructor.interface == *interface)
+            {
+                return Err(CodegenError::Policy(format!(
+                    "readonly value interface {interface} cannot map a constructor"
+                )));
             }
         }
         if let Some(mapping) = lifecycle.methods.iter().find(|mapping| {

@@ -107,3 +107,8 @@ webgpu:api,operation,labels:*
 webgpu:api,operation,queue,*
 webgpu:api,operation,onSubmittedWorkDone:*
 webgpu:api,operation,device,*
+
+# Phase B-8 (2026-07-14). getCompilationInfo() landed — the only method the IDL puts
+# on GPUShaderModule, and it did not exist. Compilation info needs no execution, so
+# unlike the other api,operation families this one runs on Noop.
+webgpu:api,operation,shader_module,*

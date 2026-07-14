@@ -133,6 +133,8 @@ pub struct GpuDispatch {
     pub shader_module_add_ref: unsafe fn(WGPUShaderModule),
     /// `wgpuShaderModuleRelease`.
     pub shader_module_release: unsafe fn(WGPUShaderModule),
+    /// `wgpuShaderModuleGetCompilationInfo`.
+    pub shader_module_get_compilation_info: unsafe fn(WGPUShaderModule, WGPUCompilationInfoCallbackInfo) -> WGPUFuture,
     /// `wgpuShaderModuleSetLabel`.
     pub shader_module_set_label: unsafe fn(WGPUShaderModule, WGPUStringView),
     /// `wgpuSamplerAddRef`.
@@ -387,6 +389,7 @@ macro_rules! for_each_gpu_dispatch_entry {
             (queue_on_submitted_work_done, wgpuQueueOnSubmittedWorkDone, unsafe fn(queue: $crate::WGPUQueue, callback_info: $crate::WGPUQueueWorkDoneCallbackInfo) -> $crate::WGPUFuture),
             (shader_module_add_ref, wgpuShaderModuleAddRef, unsafe fn(shader_module: $crate::WGPUShaderModule)),
             (shader_module_release, wgpuShaderModuleRelease, unsafe fn(shader_module: $crate::WGPUShaderModule)),
+            (shader_module_get_compilation_info, wgpuShaderModuleGetCompilationInfo, unsafe fn(shader_module: $crate::WGPUShaderModule, callback_info: $crate::WGPUCompilationInfoCallbackInfo) -> $crate::WGPUFuture),
             (shader_module_set_label, wgpuShaderModuleSetLabel, unsafe fn(shader_module: $crate::WGPUShaderModule, label: $crate::WGPUStringView)),
             (sampler_add_ref, wgpuSamplerAddRef, unsafe fn(sampler: $crate::WGPUSampler)),
             (sampler_release, wgpuSamplerRelease, unsafe fn(sampler: $crate::WGPUSampler)),
@@ -3791,6 +3794,7 @@ pub(super) fn feature_name_to_str(value: WGPUFeatureName) -> Option<&'static str
 pub struct ShaderModulePayload {
     pub(super) module: WGPUShaderModule,
     pub(super) label: Mutex<String>,
+    pub(super) source: Arc<str>,
 }
 
 // SAFETY: a JSC finalizer may move `ShaderModulePayload`'s Box to an arbitrary thread.
@@ -4185,6 +4189,9 @@ pub fn device_create_shader_module<E: JsEngine + 'static>(
     let descriptor = args.first().copied().ok_or_else(|| E::type_error(cx, "GPUShaderModuleDescriptor"))?;
     let native = convert_shader_module_descriptor::<E>(cx, descriptor, &arena)?;
     let label = unsafe { string_view_to_owned(native.label) };
+    // SAFETY: descriptor conversion created an arena-owned `WGPUShaderSourceWGSL`
+    // chain that remains live until this create call returns.
+    let source = unsafe { shader_module_source_to_owned(native.nextInChain) };
     let module = unsafe { (E::environment(cx).gpu().device_create_shader_module)(device, ptr::from_ref(&native)) };
     if module.is_null() {
         return Err(E::operation_error(cx, "wgpuDeviceCreateShaderModule returned null"));
@@ -4198,6 +4205,7 @@ pub fn device_create_shader_module<E: JsEngine + 'static>(
     match E::new_instance(cx, GPU_SHADER_MODULE_CLASS, Box::new(ShaderModulePayload {
         module,
         label: Mutex::new(label),
+        source: source.into(),
     })) {
         Ok(value) => Ok(value),
         Err(error) => {
@@ -5269,6 +5277,37 @@ pub(super) fn pipeline_error_class<E: JsEngine + 'static>() -> &'static ClassSpe
     })
 }
 
+pub(super) fn compilation_info_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
+    class_spec_once::<E, _>(GPU_COMPILATION_INFO_CLASS, || ClassSpec {
+        name: "GPUCompilationInfo",
+        id: GPU_COMPILATION_INFO_CLASS,
+        constructor: None,
+        properties: Box::leak(Box::new([
+            PropertySpec { name: "messages", get: Some(compilation_info_messages_get::<E>), set: None },
+        ])),
+        methods: &[],
+        finalizer: finalize_compilation_info,
+    })
+}
+
+pub(super) fn compilation_message_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
+    class_spec_once::<E, _>(GPU_COMPILATION_MESSAGE_CLASS, || ClassSpec {
+        name: "GPUCompilationMessage",
+        id: GPU_COMPILATION_MESSAGE_CLASS,
+        constructor: None,
+        properties: Box::leak(Box::new([
+            PropertySpec { name: "message", get: Some(compilation_message_message_get::<E>), set: None },
+            PropertySpec { name: "type", get: Some(compilation_message_type_get::<E>), set: None },
+            PropertySpec { name: "lineNum", get: Some(compilation_message_line_num_get::<E>), set: None },
+            PropertySpec { name: "linePos", get: Some(compilation_message_line_pos_get::<E>), set: None },
+            PropertySpec { name: "offset", get: Some(compilation_message_offset_get::<E>), set: None },
+            PropertySpec { name: "length", get: Some(compilation_message_length_get::<E>), set: None },
+        ])),
+        methods: &[],
+        finalizer: finalize_compilation_message,
+    })
+}
+
 pub(super) fn device_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
     class_spec_once::<E, _>(GPU_DEVICE_CLASS, || ClassSpec {
         name: "GPUDevice",
@@ -5391,7 +5430,9 @@ pub(super) fn shader_module_class<E: JsEngine + 'static>() -> &'static ClassSpec
         properties: Box::leak(Box::new([
             PropertySpec { name: "label", get: Some(shader_module_label_get::<E>), set: Some(shader_module_label_set::<E>) },
         ])),
-        methods: &[],
+        methods: Box::leak(Box::new([
+            MethodSpec { name: "getCompilationInfo", length: 0, call: shader_module_get_compilation_info::<E> },
+        ])),
         finalizer: finalize_shader_module,
     })
 }
@@ -5635,6 +5676,8 @@ pub(super) fn register_generated_classes<E: JsEngine + 'static>(
     let _ = E::register_class(cx, adapter_class::<E>())?;
     let _ = E::register_class(cx, uncaptured_error_event_class::<E>())?;
     let _ = E::register_class(cx, pipeline_error_class::<E>())?;
+    let _ = E::register_class(cx, compilation_info_class::<E>())?;
+    let _ = E::register_class(cx, compilation_message_class::<E>())?;
     let _ = E::register_class(cx, device_class::<E>())?;
     let _ = E::register_class(cx, buffer_class::<E>())?;
     let _ = E::register_class(cx, texture_class::<E>())?;

@@ -77,6 +77,10 @@ renderPipeline:nullable-holes:ok
 pipelineAsync:compute,render:ok
 pipelineAsync:rejection:GPUPipelineError:validation:true
 scope:pipelines:GPUValidationError
+compilationInfo:valid:true:true:0:true:true
+compilationInfo:interfaces:TypeError,TypeError,TypeError,TypeError
+compilationInfo:diagnostic:error:0:0:true
+compilationInfo:utf16:true:true:1,59,58,7
 querySet:create:ok
 querySet:type:occlusion
 querySet:count:4

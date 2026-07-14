@@ -737,3 +737,66 @@ pointing straight at them. The loop works.
 
 Suite grows **23,253 → 23,305 cases** (the green `api,operation` families join),
 exit 0, 0 fail on yawgpu.
+
+## Phase B-8 (2026-07-14) — the execution-result families, and a missing method
+
+### The suite splits in two, and the reason is structural
+
+`api,operation` families verify what the GPU actually **computed** — buffer contents
+after a dispatch, pixels after a draw, memory visibility across passes. yawgpu's Noop
+backend executes nothing, so every such case fails with `Array had unexpected
+contents`. That is not a binding bug, and no expectation can express it: the whole
+family is meaningless without a real backend.
+
+Measured, same families on both backends:
+
+| Family | Dawn | yawgpu Noop |
+|---|---|---|
+| `storage_texture` | 765/0 | **0/765** |
+| `memory_sync` | 725/0 | 250/475 |
+| `resource_init` | 426/0 | 143/283 |
+| `render_pipeline` | 184/0 | 11/173 |
+| `render_pass` | 182/0 | 46/136 |
+| `sampling` | 74/0 | **0/73** |
+| `compute` | 7/0 | **0/7** |
+
+So there are now two suites:
+
+- `suites/validation-core.txt` — runs on **yawgpu**, exit 0, the standing gate.
+  **23,321 cases**, 0 fail.
+- `suites/operation-dawn.txt` — runs on **Dawn only**, gated and real-GPU.
+  **2,363 cases**, 0 fail. Execution-result families live here by construction.
+
+`api,operation,shader_module` is the exception and stays in the main suite: compilation
+info needs no execution, so it passes on Noop (16/0 on both).
+
+### `GPUShaderModule.getCompilationInfo()` did not exist
+
+`api,operation,shader_module` was **0 pass / 16 fail** on Dawn, every case dying on
+`TypeError: not a callable function` at `await shaderModule.getCompilationInfo()`.
+
+It is the **only** method the IDL puts on `GPUShaderModule` (`webgpu.idl:619`), and the
+binding did not have it. Implemented with `GPUCompilationInfo` and
+`GPUCompilationMessage`, through the existing async-settlement machinery
+(`AllowProcessEvents`, invariant 2) and the policy-driven class emission. Now **16/0**.
+
+### The two pins disagree on units, and the binding owns the conversion
+
+`webgpu.h`, `WGPUCompilationMessage`:
+
+> *Offset in **UTF-8 code units (bytes)** from the beginning of the shader code.*
+> *Length in **UTF-8 code units (bytes)** of the span the message corresponds to.*
+
+The WebGPU spec, `GPUCompilationMessage`:
+
+> `linePos` — the offset, **in UTF-16 code units**, from the beginning of line `lineNum`.
+
+The CTS catches it precisely: `Got message.linePos 33, expected 19`, and a cross-check
+that `lineNum`/`linePos` and `offset` point at the same place.
+
+**The backend cannot do this conversion** — it does not know the JS string encoding —
+so the binding does, from the shader source the module was created from. This is the
+same shape as the `depthSlice` sentinel collision: a distinction the C ABI cannot
+express, which therefore belongs to the binding.
+
+Cost: the `GPUShaderModule` wrapper retains its source string for the module's lifetime.

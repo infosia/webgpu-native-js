@@ -200,7 +200,7 @@ fn generated_dispatch_macro_matches_focused_shape_fixture() {
     let expected =
         fs::read_to_string(fixtures().join("dispatch_surface.rs")).expect("dispatch snapshot");
     assert_eq!(dispatch_macro_surface(&emitted), expected);
-    assert_eq!(expected.matches(", unsafe fn(").count(), 156);
+    assert_eq!(expected.matches(", unsafe fn(").count(), 157);
 }
 
 #[test]
@@ -269,6 +269,8 @@ fn generated_lifecycle_covers_every_selected_class_and_retention_set() {
         "command_buffer_class",
         "uncaptured_error_event_class",
         "pipeline_error_class",
+        "compilation_info_class",
+        "compilation_message_class",
     ];
     assert_eq!(
         emitted.matches("_class<E: JsEngine + 'static>").count(),
@@ -352,6 +354,12 @@ fn generated_lifecycle_covers_every_selected_class_and_retention_set() {
         "pub struct ComputePipelinePayload {\n    pub(super) pipeline: WGPUComputePipeline,\n    pub(super) module: WGPUShaderModule,\n    pub(super) layout: WGPUPipelineLayout,\n    pub(super) label: Mutex<String>,\n}"
     ));
     assert!(emitted.contains(
+        "pub struct ShaderModulePayload {\n    pub(super) module: WGPUShaderModule,\n    pub(super) label: Mutex<String>,\n    pub(super) source: Arc<str>,\n}"
+    ));
+    assert!(emitted
+        .contains("let source = unsafe { shader_module_source_to_owned(native.nextInChain) };"));
+    assert!(emitted.contains("source: source.into(),"));
+    assert!(emitted.contains(
         "pub struct RenderPipelinePayload {\n    pub(super) render_pipeline: WGPURenderPipeline,\n    pub(super) vertex_module: WGPUShaderModule,\n    pub(super) fragment_module: WGPUShaderModule,\n    pub(super) layout: WGPUPipelineLayout,\n    pub(super) label: Mutex<String>,\n}"
     ));
     assert!(emitted.contains(
@@ -360,6 +368,46 @@ fn generated_lifecycle_covers_every_selected_class_and_retention_set() {
     assert!(emitted.contains(
         "pub struct TextureViewPayload {\n    pub(super) texture_view: WGPUTextureView,\n    pub(super) texture: WGPUTexture,\n    pub(super) label: Mutex<String>,\n    pub(super) dimension: WGPUTextureViewDimension,\n    pub(super) mip_depth: u32,\n}"
     ));
+}
+
+#[test]
+fn readonly_value_interfaces_cover_their_webidl_attributes() {
+    let (idl, yaml, policy) = pinned_inputs();
+    let emitted =
+        generate_lifecycle_with_policy(&idl, &yaml, &policy).expect("readonly value interfaces");
+    let info = emitted
+        .split("pub(super) fn compilation_info_class")
+        .nth(1)
+        .and_then(|tail| tail.split("pub(super) fn compilation_message_class").next())
+        .expect("compilation-info class");
+    assert!(info.contains("constructor: None"));
+    assert!(info.contains("PropertySpec { name: \"messages\""));
+
+    let message = emitted
+        .split("pub(super) fn compilation_message_class")
+        .nth(1)
+        .and_then(|tail| tail.split("pub(super) fn device_class").next())
+        .expect("compilation-message class");
+    assert!(message.contains("constructor: None"));
+    for property in ["message", "type", "lineNum", "linePos", "offset", "length"] {
+        assert!(
+            message.contains(&format!("PropertySpec {{ name: \"{property}\"")),
+            "missing {property}"
+        );
+    }
+
+    let missing = policy.replace(
+        "[[lifecycle.properties]]\ninterface = \"GPUCompilationInfo\"\nmember = \"messages\"\nget = \"compilation_info_messages_get\"\n\n",
+        "",
+    );
+    let error = generate_lifecycle_with_policy(&idl, &yaml, &missing)
+        .expect_err("missing readonly attribute mapping");
+    assert!(
+        error
+            .to_string()
+            .contains("must map every WebIDL attribute"),
+        "{error}"
+    );
 }
 
 #[test]
