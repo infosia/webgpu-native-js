@@ -8,6 +8,14 @@ webgpu:api,validation,buffer,create:createBuffer_invalid_and_oom:*
 # Texture creation groups that run cleanly on yawgpu Noop.
 webgpu:api,validation,createTexture:zero_size_and_usage:*
 
+# TransientAttachment (0x20) validation, D14. yawgpu implemented the rules
+# (yawgpu 1a2a879); re-measured 2026-07-15, each family 0 fail on yawgpu and
+# matches Dawn. Moved out of Dawn-only arbitration into the curated suite.
+webgpu:api,validation,createTexture:texture_usage:*
+webgpu:api,validation,createTexture:depthOrArrayLayers_and_mipLevelCount_for_transient_attachments:*
+webgpu:api,validation,createTexture:transient_viewFormats:*
+webgpu:api,validation,render_pass,render_pass_descriptor:color_attachments,loadOp_storeOp:*
+
 # Layout and sampler descriptor conversion.
 webgpu:api,validation,createBindGroupLayout:*
 webgpu:api,validation,createSampler:*

@@ -11,12 +11,6 @@ unittests:loaders_and_trees:end2end: fail # asserts real .spec.js frames in the 
 unittests:floating_point:determinantInterval:trait="f32" fail # Boa numeric gap, pre-existing (block 14 B7)
 unittests:floating_point:determinantInterval:trait="f16" fail # Boa numeric gap, pre-existing (block 14 B7)
 
-# yawgpu backend validation gap: the binding delivers the requested view usage to
-# the C descriptor (pinned by a mock regression test), but the backend does not
-# validate a usage subset. Parked for Dawn arbitration; never worked around in
-# the binding.
-webgpu:api,validation,createView:texture_view_usage_of_multiple_usages:usage1=16;usage2=32 fail # backend validation gap, not a binding gap
-
 # yawgpu Noop backend cannot produce out-of-memory. The CTS provokes OOM by
 # creating a 256 GiB texture (rgba32float at max dimensions); Noop allocates it
 # without failing, so no GPUOutOfMemoryError is raised. A backend limitation, not
