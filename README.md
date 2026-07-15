@@ -48,27 +48,27 @@ and tested; the API surface is still filling out (see
   JavaScriptCore as macOS, Android the same Boa as Windows, and Boa↔JavaScriptCore
   parity is verified — so a result on the desktop box you can debug predicts the
   phone you cannot, and a bug cannot hide on the platform you can least reach.
-  This is why a JIT-less engine was chosen, and the same parity run enforces it.
+  Portable, predictable behavior is the point of the engine choice, and the same
+  parity run enforces it.
 - **Embeds in-process as a library, not a runtime.** No browser and no Node on
   any platform — the engine links directly into the application and shares its
   address space. On Apple platforms it uses the system JavaScriptCore, so nothing
-  is bundled: no binary-size cost, no App Store bundled-engine question, and
-  in-process scripting where a bundled JIT engine could not legally run.
-  Elsewhere, Boa compiles in — a pure-Rust, JIT-less engine that needs no C
-  toolchain or separate VM, so what ships is a static library, not a browser or a
-  runtime process.
+  is bundled: no binary-size cost and no App Store bundled-engine question.
+  Elsewhere, Boa compiles in — a pure-Rust engine that needs no C toolchain or
+  separate VM, so what ships is a static library, not a browser or a runtime
+  process.
 - **JS is the scripting layer, not the render hot path.** Initialization,
   resource and pipeline definition, and application logic run in JS; per-frame
-  draw submission stays in the native host. This scoping is permanent and is
-  what keeps a JIT-less embedded engine viable.
+  draw submission stays in the native host. This scoping is permanent: the engine
+  authors and configures the frame, it does not run inside it.
 
 ## Compared to the alternatives
 
 - **vs. embedding a browser or WebView** — no browser process and no IPC hop;
   the script calls the GPU in the host's own address space, and the host keeps
   frame control.
-- **vs. Node.js and a WebGPU binding** — no Node runtime and no V8 JIT; a
-  JIT-less engine that links into the application and runs on iOS.
+- **vs. Node.js and a WebGPU binding** — no Node runtime and no separate
+  JavaScript VM to ship; the engine links into the application itself.
 - **vs. a non-WebGPU scripting language (Lua and similar)** — the GPU API and
   WGSL your team already knows from the web, rather than a bespoke native binding
   to design, learn, and maintain.
@@ -117,7 +117,7 @@ and tested; the API surface is still filling out (see
 
 | Tier | Engine | Notes |
 |---|---|---|
-| **1 — Supported, all platforms** | [Boa](https://github.com/boa-dev/boa) (MIT/Unlicense, exact crates.io pin) | Primary cross-platform engine. Pure Rust, JIT-less, and portable; it needs no C toolchain or engine-specific `bindgen`, and cross-compiles with an ordinary Cargo target build. |
+| **1 — Supported, all platforms** | [Boa](https://github.com/boa-dev/boa) (MIT/Unlicense, exact crates.io pin) | Primary cross-platform engine. Pure Rust and portable; it needs no C toolchain or engine-specific `bindgen`, and cross-compiles with an ordinary Cargo target build. |
 | **1 — Supported (Apple platforms)** | JavaScriptCore | Default-on (`jsc` feature; compiles to an empty crate off Apple platforms). **macOS and iOS** — dynamically linked system framework, so there is no bundled engine and no binary-size cost, and the App Store bundled-engine question does not arise. macOS is fully tested on every run; iOS compiles, with on-device verification deferred to mobile bring-up. Added as the engine-boundary validator; it found five core defects before code generation could multiply them. |
 
 Cross-engine parity is asserted, not assumed: one conformance script
@@ -171,8 +171,8 @@ that C ABI as WebGPU-shaped JavaScript.
 | **Development / testing** | Windows, macOS |
 
 Behavioral parity across all four is a first-class concern: desktop test
-results are only useful if they predict mobile behavior, which is the entire
-reason a JIT-less engine was chosen. Mobile bring-up is deliberately deferred
+results are only useful if they predict mobile behavior, which is why
+portability drove the engine choice. Mobile bring-up is deliberately deferred
 until the API surface is filled out on desktop.
 
 ## The host contract
