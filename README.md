@@ -11,54 +11,52 @@ and tested; the API surface is still filling out (see
 
 ## What makes it different
 
-- **Write standard WebGPU, in the API your team already knows.** Scripts use
-  the same `GPUDevice`/`GPUBuffer`/`GPUQueue` objects and WGSL shaders as the web
-  platform, so shaders, pipeline setup, and prototypes carry across. The one
-  deliberate change is scoping: the host owns the GPU and drives the frame, so
-  the surface is WebGPU as an authoring API, not a browser sandbox.
-- **The host owns the GPU.** The primary entry point is *handle adoption* —
-  `wrap_device(WGPUDevice)` — not `navigator.gpu.requestAdapter()`. The host
-  has already chosen its instance, adapter, and device before any script runs.
-  (`requestAdapter`/`requestDevice` exist too, so the async path is real.)
-- **Mix and match engine and backend.** The JS engine (Boa or JavaScriptCore)
-  and the GPU backend (yawgpu, wgpu-native, or Dawn) are independent, link-time
-  choices — the same script and the same binding run on any of them, because the
-  binding has no per-engine or per-backend code paths (one engine-agnostic
-  conversion core; every GPU call crosses the canonical `webgpu.h` C ABI). The
-  freedom is safe to use because the behavior is *verified* identical, not
-  assumed: the parity script
-  ([`tests/parity/parity.js`](tests/parity/parity.js)) asserts **byte-identical
-  output** ([`expected.txt`](tests/parity/expected.txt)) across both engines on
-  every run, and reproduces it on Dawn in gated real-GPU runs. Swapping a backend
-  or engine is a build-flag decision, not a re-test-everything one.
-- **What you test on desktop is what ships on device.** iOS runs the same
-  JavaScriptCore as macOS, Android the same Boa as Windows, and Boa↔JavaScriptCore
-  parity is verified — so a result on the desktop box you can debug predicts the
-  phone you cannot, and a bug cannot hide on the platform you can least reach.
-  Portable, predictable behavior is the point of the engine choice, and the same
-  parity run enforces it.
-- **Embeds in-process as a library, not a runtime.** No browser and no Node on
-  any platform — the engine links directly into the application and shares its
-  address space. On Apple platforms it uses the system JavaScriptCore, so nothing
-  is bundled: no binary-size cost and no App Store bundled-engine question.
-  Elsewhere, Boa compiles in — a pure-Rust engine that needs no C toolchain or
-  separate VM, so what ships is a static library, not a browser or a runtime
-  process.
+- **Standard WebGPU JavaScript API.** Scripts use the same
+  `GPUDevice`/`GPUBuffer`/`GPUQueue` objects and WGSL shaders as the web platform.
+  The surface is generated from the WebGPU WebIDL, so shaders and resource and
+  pipeline setup transfer without change. The one deliberate difference is scope:
+  the host owns the GPU and drives the frame, so this is WebGPU as an authoring
+  API, not a browser sandbox.
+- **Handle adoption is the primary entry point.** The host adopts an existing
+  device — `wrap_device(WGPUDevice)` — rather than creating one through
+  `navigator.gpu.requestAdapter()`. The host has already chosen its instance,
+  adapter, and device before any script runs. `requestAdapter`/`requestDevice`
+  are also implemented, for the async path.
+- **Engine and backend are independent link-time choices.** The JS engine (Boa
+  or JavaScriptCore) and the GPU backend (yawgpu, wgpu-native, or Dawn) are
+  selected at build time. The binding has no per-engine or per-backend code
+  paths: one engine-agnostic conversion core, and every GPU call crosses the
+  canonical `webgpu.h` C ABI. Cross-configuration behavior is verified rather
+  than assumed — the parity script
+  ([`tests/parity/parity.js`](tests/parity/parity.js)) asserts byte-identical
+  output ([`expected.txt`](tests/parity/expected.txt)) across both engines on
+  every test run, and is reproduced on Dawn in gated real-GPU runs.
+- **The desktop and device configurations run the same engine.** iOS uses the
+  same JavaScriptCore as macOS, and Android the same Boa as Windows, and
+  Boa↔JavaScriptCore parity is verified by that same parity run. Desktop test
+  results are therefore predictive of mobile behavior, which is why the engine
+  choice prioritized portability.
+- **Links in-process as a library.** No browser and no Node.js on any platform;
+  the engine links directly into the application and shares its address space. On
+  Apple platforms it links the system JavaScriptCore, so nothing is bundled — no
+  added binary size and no App Store bundled-engine question. Elsewhere Boa
+  compiles in, a pure-Rust engine that needs no C toolchain or separate VM, so
+  the output is a static library rather than a runtime process.
 - **JS is the scripting layer, not the render hot path.** Initialization,
   resource and pipeline definition, and application logic run in JS; per-frame
-  draw submission stays in the native host. This scoping is permanent: the engine
+  draw submission stays in the native host. This scope is fixed: the engine
   authors and configures the frame, it does not run inside it.
 
 ## Compared to the alternatives
 
 - **vs. embedding a browser or WebView** — no browser process and no IPC hop;
-  the script calls the GPU in the host's own address space, and the host keeps
+  the script calls the GPU in the host's address space, and the host retains
   frame control.
-- **vs. Node.js and a WebGPU binding** — no Node runtime and no separate
-  JavaScript VM to ship; the engine links into the application itself.
-- **vs. a non-WebGPU scripting language (Lua and similar)** — the GPU API and
-  WGSL your team already knows from the web, rather than a bespoke native binding
-  to design, learn, and maintain.
+- **vs. Node.js and a WebGPU binding** — no Node.js runtime and no separate
+  JavaScript VM to ship; the engine links into the application.
+- **vs. a non-WebGPU scripting language (Lua and similar)** — the GPU API is the
+  standard WebGPU one and shaders are WGSL, rather than a native binding to
+  design and maintain.
 
 ## Architecture
 
