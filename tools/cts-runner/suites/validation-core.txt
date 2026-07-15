@@ -158,3 +158,10 @@ webgpu:api,operation,shader_module,*
 # TypeError instead of rejecting with OperationError, and value==UINT32_MAX collided
 # with WGPU_LIMIT_U32_UNDEFINED and was silently accepted. Now 171/0 on both.
 webgpu:api,operation,adapter,requestDevice:*
+
+# adapter,info: 3/1. The one failure (adapter_info) asserts browser-layer
+# anti-fingerprinting normalization of GPUAdapterInfo.device; native webgpu.h returns
+# the raw device name and Dawn fails identically ('Apple M2' vs yawgpu's 'yawgpu Noop
+# Adapter'). Out of scope (invariant 8); carried as an expectation. See backend-deltas
+# D17. The other three cases (SameObject, instanceof, device.adapterInfo) pass.
+webgpu:api,operation,adapter,info:*

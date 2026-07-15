@@ -22,6 +22,13 @@ webgpu:api,validation,createBindGroup:external_texture,* fail # external texture
 # Handed off to yawgpu. Remove when yawgpu validates the rule.
 webgpu:api,validation,render_pass,resolve:resolve_attachment:resolveTargetUsage=48 fail # D16: transient resolve target not validated
 
+# D17: adapter_info asserts browser-layer anti-fingerprinting normalization of
+# GPUAdapterInfo.device (regex /^$|^[a-z0-9]+(-[a-z0-9]+)*$/). Native webgpu.h returns
+# the raw device name; Dawn fails identically ('Apple M2'), yawgpu shows 'yawgpu Noop
+# Adapter'. Binding cleared (maps C device verbatim; oracle agrees). Out of scope per
+# invariant 8. See backend-deltas.md D17.
+webgpu:api,operation,adapter,info:adapter_info fail # D17: browser-normalized adapter identifiers, out of scope
+
 # yawgpu Noop backend cannot produce out-of-memory. The CTS provokes OOM by
 # creating a 256 GiB texture (rgba32float at max dimensions); Noop allocates it
 # without failing, so no GPUOutOfMemoryError is raised. A backend limitation, not

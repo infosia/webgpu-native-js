@@ -581,3 +581,37 @@ D14 landed. Binding cleared by the same evidence as D14 — the 0x20 bit crosses
 ABI intact (`wgpuTextureGetUsage` reads back 48). The one case is carried in
 `expectations.txt`; `render_pass,resolve:*` is otherwise in the curated suite. Filed
 to yawgpu's `HANDOFF.md` (Finding 3).
+
+---
+
+## D17 — CTS asserts browser-normalized adapter identifiers; native webgpu.h returns raw device names
+
+**Status: CATALOGUED (spec-layer mismatch, not a backend or binding bug). Found
+2026-07-15 (CTS B-11).**
+
+`api,operation,adapter,info:adapter_info` requires `GPUAdapterInfo.vendor`,
+`.architecture`, and `.device` to match
+`/^$|^[a-z0-9]+(-[a-z0-9]+)*$/` (empty, or lowercase-alphanumeric hyphen segments) —
+the WebGPU spec's anti-fingerprinting normalization, applied by a browser's binding
+layer. It fails on **both backends, identically**, only on `.device`:
+
+| Backend | `.device` value |
+|---|---|
+| yawgpu | `yawgpu Noop Adapter` |
+| Dawn (oracle) | `Apple M2` |
+
+`.vendor` and `.architecture` pass (empty or already normalized).
+
+**Binding cleared, and the oracle agrees.** The binding maps C `WGPUAdapterInfo.device`
+to JS `.device` verbatim (`core/src/lib.rs`, `adapter_info` payload). `wgpuAdapterGetInfo`
+returns the real device name at the C ABI; the normalization the CTS expects happens in
+a browser's binding layer (Blink), not in Dawn's C ABI. The binding and Dawn produce the
+same shape and fail the same way — so this is not a binding bug (they agree) and not a
+yawgpu-specific gap (Dawn fails too). No yawgpu handoff.
+
+**Out of scope, deliberately.** Anti-fingerprinting is a browser-sandbox concern; this
+binding is first-party (invariant 8). Correct normalization needs a curated device→bucket
+mapping table, which a browser maintains and a mechanical transform cannot reproduce.
+`api,operation,adapter,info:adapter_info` is carried as an expected-fail with this reason;
+the other three cases in the family (SameObject, instanceof, device.adapterInfo) pass and
+are in the curated suite.
