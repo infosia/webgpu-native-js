@@ -123,6 +123,15 @@ webgpu:api,validation,shader_module,*
 webgpu:api,validation,non_filterable_texture:*
 webgpu:idl,constructable:*
 
+# Phase B-13 (2026-07-15). IDL/JS-semantics and WGSL compile-validation that run on
+# yawgpu Noop (WGSL is validated by Tint at createShaderModule, no execution needed).
+# idl,constants,flags 28/0; idl,javascript 83/11 (the 11 are out-of-subset features,
+# carried as expectations); shader,validation,types 1533/0; const_assert 18/0.
+webgpu:idl,constants,flags:*
+webgpu:idl,javascript:*
+webgpu:shader,validation,types,*
+webgpu:shader,validation,const_assert,*
+
 # Phase B-7 growth (2026-07-13). Error-routing fixes: submitting a consumed
 # command buffer is a validation error (not a JS exception); a lost device
 # surfaces no errors at all (spec: "no errors are generated from a device which

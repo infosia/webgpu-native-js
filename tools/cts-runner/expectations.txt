@@ -29,6 +29,23 @@ webgpu:api,validation,render_pass,resolve:resolve_attachment:resolveTargetUsage=
 # invariant 8. See backend-deltas.md D17.
 webgpu:api,operation,adapter,info:adapter_info fail # D17: browser-normalized adapter identifiers, out of scope
 
+# idl,javascript: 11 out-of-subset features. GPU.wgslLanguageFeatures is
+# unimplemented (block 17), GPUDevice.importExternalTexture is external-texture
+# surface (out of subset), and GPUDevice-as-EventTarget / CustomEvent are DOM APIs
+# absent in a native host (the binding delivers uncaptured errors via
+# onuncapturederror, not addEventListener). The other 83 cases pass.
+webgpu:idl,javascript:obj,for_in:type="gpu" fail # wgslLanguageFeatures unimplemented
+webgpu:idl,javascript:getter_replacement:type="gpu" fail # wgslLanguageFeatures unimplemented
+webgpu:idl,javascript:readonly_properties:type="gpu" fail # wgslLanguageFeatures unimplemented
+webgpu:idl,javascript:sameObject:type="gpu" fail # wgslLanguageFeatures unimplemented
+webgpu:idl,javascript:setlike,set:type="wgslLanguageFeatures" fail # wgslLanguageFeatures unimplemented
+webgpu:idl,javascript:setlike,spread:type="wgslLanguageFeatures" fail # wgslLanguageFeatures unimplemented
+webgpu:idl,javascript:obj,for_in:type="device" fail # importExternalTexture out of subset
+webgpu:idl,javascript:method_replacement:type="device" fail # importExternalTexture out of subset
+webgpu:idl,javascript:device,EventTarget:test="canPassCustomEventThroughDevice" fail # EventTarget/CustomEvent is DOM, out of subset
+webgpu:idl,javascript:device,EventTarget:test="patchingEventTargetAffectsDevice" fail # EventTarget is DOM, out of subset
+webgpu:idl,javascript:device,addEventListener:test="EventListener" fail # addEventListener is DOM, out of subset
+
 # uncapturederror OOM cases: the Noop backend never OOMs, so the expected uncaptured
 # out-of-memory error never fires and expectUncapturedError is left outstanding. Same root
 # as the error_scope OOM cases below; Dawn skips these two. Verify OOM on a real backend.

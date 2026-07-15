@@ -1103,3 +1103,33 @@ expectations). Dawn 5/0 with those two skipped.
   (the query matches nothing). Nothing to run.
 - `api,validation,gpu_external_texture_expiration` — external textures out of subset.
 - `api,validation,state,device_lost,destroy` — device_lost stays out (Boa GC abort, catalogued).
+
+---
+
+## B-13 — IDL/JS semantics and WGSL compile-validation (2026-07-15)
+
+WGSL validation runs on yawgpu Noop: Tint validates at `createShaderModule`, no
+execution needed. Screened the shader-validation and idl families.
+
+**Added to `validation-core.txt`:**
+- `idl,constants,flags` 28/0.
+- `idl,javascript` 83/11. The 11 failures are out-of-subset features, carried as
+  exact-id expectations: `GPU.wgslLanguageFeatures` (unimplemented, block 17),
+  `GPUDevice.importExternalTexture` (external-texture surface), and GPUDevice as an
+  `EventTarget` / `CustomEvent` (DOM APIs absent in a native host — the binding
+  delivers uncaptured errors via `onuncapturederror`, not `addEventListener`).
+- `shader,validation,types` 1533/0, `shader,validation,const_assert` 18/0.
+
+**Not added — Tint validation conformance is the backend's domain, not the
+binding's.** `shader,validation,{parse,decl,functions,shader_io}` pass in bulk
+(~7,400 cases) but carry 82 failures, and Dawn produces the **identical** failure
+counts (parse 3287/11, decl 1020/4, functions 315/24, shader_io 2571/43). Identical
+on both backends places the cause outside the binding: the CTS pin expects WGSL
+validation errors (pointer-parameter restrictions, subgroup builtins, uniform layout
+constraints, `requires` directives for now-core features) that the Tint in both
+backends does not produce — a CTS-vs-Tint version/feature skew. The binding
+faithfully surfaces whatever `compilationInfo` Tint returns, which the clean families
+above and `api,validation,shader_module` already exercise. Per CLAUDE.md, backend
+conformance (including Tint's WGSL validation) is owned by `webgpu-native-cts`; these
+families are not curated into the binding suite, and their 82 upstream-skew failures
+are not carried as binding expectations.
