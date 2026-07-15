@@ -151,3 +151,10 @@ webgpu:api,operation,device,*
 # on GPUShaderModule, and it did not exist. Compilation info needs no execution, so
 # unlike the other api,operation families this one runs on Noop.
 webgpu:api,operation,shader_module,*
+
+# Phase B-11 (2026-07-15). requiredLimits conversion fixed: values are coerced as
+# GPUSize64 (u64) per WebIDL, not at the C u32 field width. This closed 38 failures
+# that were identical on yawgpu and Dawn (a binding bug) — over-u32 values threw a
+# TypeError instead of rejecting with OperationError, and value==UINT32_MAX collided
+# with WGPU_LIMIT_U32_UNDEFINED and was silently accepted. Now 171/0 on both.
+webgpu:api,operation,adapter,requestDevice:*

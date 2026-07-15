@@ -10609,6 +10609,232 @@ mod tests {
             .expect("requestDevice resolved")
     }
 
+    fn request_device_with_required_limit(
+        rt: &Runtime,
+        cx: Context<'_>,
+        adapter: Value,
+        name: &str,
+        value: Value,
+    ) -> Value {
+        let limits = descriptor(rt, &[(name, value)]);
+        let request = descriptor(rt, &[("requiredLimits", limits)]);
+        adapter_request_device::<Engine>(cx, adapter, &[request]).expect("requestDevice promise")
+    }
+
+    #[test]
+    fn request_device_rejects_u32_limit_above_native_width_with_operation_error() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let adapter = Engine::new_instance(
+            cx,
+            crate::GPU_ADAPTER_CLASS,
+            Box::new(AdapterPayload::<Engine>::new(fake_handle(705))),
+        )
+        .expect("adapter");
+
+        let promise = request_device_with_required_limit(
+            &rt,
+            cx,
+            adapter,
+            "maxTextureDimension1D",
+            rt.number(4_294_967_296.0),
+        );
+        assert_rejection(
+            &rt,
+            promise,
+            "OperationError",
+            "required limit maxTextureDimension1D is not supported by the adapter",
+        );
+        assert!(GPU_STATE.with(|state| state.borrow().requested_limits.is_empty()));
+    }
+
+    #[test]
+    fn request_device_rejects_u32_undefined_sentinel_with_operation_error() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let adapter = Engine::new_instance(
+            cx,
+            crate::GPU_ADAPTER_CLASS,
+            Box::new(AdapterPayload::<Engine>::new(fake_handle(706))),
+        )
+        .expect("adapter");
+
+        let promise = request_device_with_required_limit(
+            &rt,
+            cx,
+            adapter,
+            "maxTextureDimension1D",
+            rt.number(4_294_967_295.0),
+        );
+        assert_rejection(
+            &rt,
+            promise,
+            "OperationError",
+            "required limit maxTextureDimension1D is not supported by the adapter",
+        );
+        assert!(GPU_STATE.with(|state| state.borrow().requested_limits.is_empty()));
+    }
+
+    #[test]
+    fn request_device_writes_supported_u32_limit_and_resolves() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let adapter = Engine::new_instance(
+            cx,
+            crate::GPU_ADAPTER_CLASS,
+            Box::new(AdapterPayload::<Engine>::new(fake_handle(707))),
+        )
+        .expect("adapter");
+
+        let promise = request_device_with_required_limit(
+            &rt,
+            cx,
+            adapter,
+            "maxTextureDimension1D",
+            rt.number(1.0),
+        );
+        unsafe { crate::tick::<Engine>(cx, fake_handle(708)) }.expect("requestDevice tick");
+        rt.promise_result(promise)
+            .expect("promise must settle")
+            .expect("promise must resolve");
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            let (limits, _) = state
+                .requested_limits
+                .last()
+                .expect("limits request")
+                .as_ref()
+                .expect("limits pointer");
+            assert_eq!(limits.maxTextureDimension1D, 1);
+        });
+    }
+
+    #[test]
+    fn request_device_rejects_negative_required_limit_with_type_error() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let adapter = Engine::new_instance(
+            cx,
+            crate::GPU_ADAPTER_CLASS,
+            Box::new(AdapterPayload::<Engine>::new(fake_handle(709))),
+        )
+        .expect("adapter");
+
+        let promise = request_device_with_required_limit(
+            &rt,
+            cx,
+            adapter,
+            "maxTextureDimension1D",
+            rt.number(-1.0),
+        );
+        assert_rejection(&rt, promise, "TypeError", "required limit");
+        assert!(GPU_STATE.with(|state| state.borrow().requested_limits.is_empty()));
+    }
+
+    #[test]
+    fn request_device_rejects_required_limit_above_max_safe_integer_with_type_error() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let adapter = Engine::new_instance(
+            cx,
+            crate::GPU_ADAPTER_CLASS,
+            Box::new(AdapterPayload::<Engine>::new(fake_handle(712))),
+        )
+        .expect("adapter");
+
+        let promise = request_device_with_required_limit(
+            &rt,
+            cx,
+            adapter,
+            "maxTextureDimension1D",
+            rt.number(9_007_199_254_740_992.0),
+        );
+        assert_rejection(&rt, promise, "TypeError", "required limit");
+        assert!(GPU_STATE.with(|state| state.borrow().requested_limits.is_empty()));
+    }
+
+    #[test]
+    fn request_device_truncates_fractional_alignment_before_operation_error() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let adapter = Engine::new_instance(
+            cx,
+            crate::GPU_ADAPTER_CLASS,
+            Box::new(AdapterPayload::<Engine>::new(fake_handle(713))),
+        )
+        .expect("adapter");
+
+        let promise = request_device_with_required_limit(
+            &rt,
+            cx,
+            adapter,
+            "minUniformBufferOffsetAlignment",
+            rt.number(0.25),
+        );
+        assert_rejection(
+            &rt,
+            promise,
+            "OperationError",
+            "required limit minUniformBufferOffsetAlignment is not supported by the adapter",
+        );
+        assert!(GPU_STATE.with(|state| state.borrow().requested_limits.is_empty()));
+    }
+
+    #[test]
+    fn request_device_uses_inverse_better_direction_for_alignment_limits() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let adapter = Engine::new_instance(
+            cx,
+            crate::GPU_ADAPTER_CLASS,
+            Box::new(AdapterPayload::<Engine>::new(fake_handle(710))),
+        )
+        .expect("adapter");
+
+        let too_good = request_device_with_required_limit(
+            &rt,
+            cx,
+            adapter,
+            "minUniformBufferOffsetAlignment",
+            rt.number(255.0),
+        );
+        assert_rejection(
+            &rt,
+            too_good,
+            "OperationError",
+            "required limit minUniformBufferOffsetAlignment is not supported by the adapter",
+        );
+
+        let supported = request_device_with_required_limit(
+            &rt,
+            cx,
+            adapter,
+            "minStorageBufferOffsetAlignment",
+            rt.number(20.0),
+        );
+        unsafe { crate::tick::<Engine>(cx, fake_handle(711)) }.expect("requestDevice tick");
+        rt.promise_result(supported)
+            .expect("promise must settle")
+            .expect("promise must resolve");
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            let (limits, _) = state
+                .requested_limits
+                .last()
+                .expect("limits request")
+                .as_ref()
+                .expect("limits pointer");
+            assert_eq!(limits.minStorageBufferOffsetAlignment, 20);
+        });
+    }
+
     #[test]
     fn c7_own_names_and_request_device_features_limits_reach_native() {
         reset_gpu();
@@ -10637,8 +10863,8 @@ mod tests {
         let required_limits = descriptor(
             &rt,
             &[
-                ("maxBufferSize", rt.number(4096.0)),
-                ("maxTextureDimension2D", rt.number(2048.0)),
+                ("maxBufferSize", rt.number(21.0)),
+                ("maxTextureDimension2D", rt.number(2.0)),
                 ("maxBindGroups", rt.undefined()),
                 ("maxStorageBuffersInVertexStage", rt.number(7.0)),
             ],
@@ -10672,8 +10898,8 @@ mod tests {
                 .expect("limits request")
                 .as_ref()
                 .expect("limits pointer");
-            assert_eq!(limits.maxBufferSize, 4096);
-            assert_eq!(limits.maxTextureDimension2D, 2048);
+            assert_eq!(limits.maxBufferSize, 21);
+            assert_eq!(limits.maxTextureDimension2D, 2);
             assert_eq!(limits.maxBindGroups, crate::WGPU_LIMIT_U32_UNDEFINED);
             assert_eq!(
                 limits.maxUniformBufferBindingSize,

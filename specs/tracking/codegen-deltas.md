@@ -38,8 +38,13 @@ member with a default of 0.
   `[EnforceRange] unsigned long long` caps at 2^53−1, and rejects fractional
   values where the spec truncates. Inherited block 01 → R8 semantics with named
   tests; the C ABI accepts the full width, and a stricter cap would reject
-  sizes the backend supports. Revisit if the upstream CTS is ever run.
-  (Found by the Phase 4 review, emission lens item 7.)
+  sizes the backend supports. (Found by the Phase 4 review, emission lens item 7.)
+  **Update 2026-07-15 (B-11):** the `requiredLimits` path no longer uses the
+  deviating `enforce_u64` — running the upstream CTS `adapter,requestDevice`
+  family showed `GPUSize64` there must reject `>2^53−1` and truncate fractionals
+  per WebIDL. A dedicated `enforce_required_limit_value` applies the faithful
+  semantics for that path only; the shared `enforce_u64` keeps the R8 deviation
+  for buffer offsets/sizes, where no CTS family yet contradicts it.
 - **Dictionary property read order** is required-first, then declaration order —
   not WebIDL's lexicographic order. Observable only via getter side effects;
   trusted scripts (invariant 8). (Emission lens item 8.)

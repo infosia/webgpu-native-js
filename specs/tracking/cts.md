@@ -1039,3 +1039,14 @@ OperationError** rather than throwing synchronously or narrowing into the sentin
 Only the surviving valid limits are written to `WGPULimits`. A `GPUSize64` limit that
 exceeds its C field's capacity is by definition better than any supported value, so it
 is an OperationError, never a TypeError.
+
+**Fixed 2026-07-15.** `requiredLimits` values are now coerced as `GPUSize64`
+(`enforce_required_limit_value`: reject `<0` or `>2^53−1` with TypeError, truncate
+fractionals) and validated against the adapter's supported limits before narrowing to
+the C field — maxima reject when `requested > supported`, the two `*OffsetAlignment`
+limits when `requested < supported`, and any value that cannot be a defined u32
+(`>= UINT32_MAX`) rejects as unrepresentable. All violations reject the requestDevice
+Promise with an OperationError; the sentinel collision is gone. `adapter,requestDevice`
+now 171/0 on yawgpu Noop and 171/0 on Dawn (was 133/38 on both). Added to
+`validation-core.txt`. Fix in `core/src/lib.rs` only; no new `JsEngine` trait method,
+no engine-adapter change. `adapter,info` (3/1) is a separate, untouched issue.

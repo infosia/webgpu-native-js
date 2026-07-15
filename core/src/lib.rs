@@ -2353,110 +2353,341 @@ fn is_known_required_limit(name: &str) -> bool {
     )
 }
 
-fn convert_required_limits<E: JsEngine>(
+fn coerce_required_limits<E: JsEngine>(
     cx: E::Context<'_>,
     value: E::Value,
     names: &[String],
-) -> Result<(WGPULimits, WGPUCompatibilityModeLimits), E::Error> {
-    let (mut limits, mut compatibility) = initial_limits();
+) -> Result<Vec<(String, u64)>, E::Error> {
+    let mut requested = Vec::with_capacity(names.len());
     for name in names {
         let value = E::get_property(cx, value, name)?;
-        if E::is_undefined(cx, value) {
-            continue;
+        if !E::is_undefined(cx, value) {
+            requested.push((
+                name.clone(),
+                enforce_required_limit_value::<E>(cx, value, "required limit")?,
+            ));
         }
-        macro_rules! set_u32 {
-            ($target:expr) => {
-                $target = enforce_u32::<E>(cx, value, "required limit")?
-            };
+    }
+    Ok(requested)
+}
+
+/// Coerces a `requiredLimits` value per WebIDL `GPUSize64` as encoded by the CTS.
+///
+/// Values outside JavaScript's safe integer range are rejected and fractional
+/// values are truncated toward zero.
+fn enforce_required_limit_value<E: JsEngine>(
+    cx: E::Context<'_>,
+    value: E::Value,
+    name: &'static str,
+) -> Result<u64, E::Error> {
+    let number = E::to_f64(cx, value)?;
+    if !(0.0..=9_007_199_254_740_991.0).contains(&number) {
+        return Err(E::type_error(cx, name));
+    }
+    Ok(number.trunc() as u64)
+}
+
+#[derive(Clone, Copy)]
+enum RequiredLimitDirection {
+    Maximum,
+    MinimumAlignment,
+}
+
+fn validate_required_limit<E: JsEngine>(
+    cx: E::Context<'_>,
+    name: &str,
+    requested: u64,
+    supported: u64,
+    direction: RequiredLimitDirection,
+) -> Result<(), E::Error> {
+    let is_better = match direction {
+        RequiredLimitDirection::Maximum => requested > supported,
+        RequiredLimitDirection::MinimumAlignment => requested < supported,
+    };
+    if is_better {
+        return Err(E::operation_error(
+            cx,
+            &format!("required limit {name} is not supported by the adapter"),
+        ));
+    }
+    Ok(())
+}
+
+fn required_limit_u32<E: JsEngine>(
+    cx: E::Context<'_>,
+    name: &str,
+    value: u64,
+) -> Result<u32, E::Error> {
+    if value >= u64::from(WGPU_LIMIT_U32_UNDEFINED) {
+        return Err(E::operation_error(
+            cx,
+            &format!("required limit {name} is not representable by the native API"),
+        ));
+    }
+    u32::try_from(value).map_err(|_| {
+        E::operation_error(
+            cx,
+            &format!("required limit {name} is not representable by the native API"),
+        )
+    })
+}
+
+fn convert_required_limits<E: JsEngine>(
+    cx: E::Context<'_>,
+    requested: &[(String, u64)],
+    supported_limits: &WGPULimits,
+    supported_compatibility: &WGPUCompatibilityModeLimits,
+) -> Result<(WGPULimits, WGPUCompatibilityModeLimits), E::Error> {
+    let (mut limits, mut compatibility) = initial_limits();
+    for (name, requested) in requested {
+        macro_rules! set_max_u32 {
+            ($target:expr, $supported:expr) => {{
+                validate_required_limit::<E>(
+                    cx,
+                    name,
+                    *requested,
+                    u64::from($supported),
+                    RequiredLimitDirection::Maximum,
+                )?;
+                $target = required_limit_u32::<E>(cx, name, *requested)?;
+            }};
         }
-        macro_rules! set_u64 {
-            ($target:expr) => {
-                $target = enforce_u64::<E>(cx, value, "required limit")?
-            };
+        macro_rules! set_min_alignment_u32 {
+            ($target:expr, $supported:expr) => {{
+                validate_required_limit::<E>(
+                    cx,
+                    name,
+                    *requested,
+                    u64::from($supported),
+                    RequiredLimitDirection::MinimumAlignment,
+                )?;
+                $target = required_limit_u32::<E>(cx, name, *requested)?;
+            }};
+        }
+        macro_rules! set_max_u64 {
+            ($target:expr, $supported:expr) => {{
+                validate_required_limit::<E>(
+                    cx,
+                    name,
+                    *requested,
+                    $supported,
+                    RequiredLimitDirection::Maximum,
+                )?;
+                $target = *requested;
+            }};
         }
         match name.as_str() {
-            "maxTextureDimension1D" => set_u32!(limits.maxTextureDimension1D),
-            "maxTextureDimension2D" => set_u32!(limits.maxTextureDimension2D),
-            "maxTextureDimension3D" => set_u32!(limits.maxTextureDimension3D),
-            "maxTextureArrayLayers" => set_u32!(limits.maxTextureArrayLayers),
-            "maxBindGroups" => set_u32!(limits.maxBindGroups),
-            "maxBindGroupsPlusVertexBuffers" => {
-                set_u32!(limits.maxBindGroupsPlusVertexBuffers)
+            "maxTextureDimension1D" => set_max_u32!(
+                limits.maxTextureDimension1D,
+                supported_limits.maxTextureDimension1D
+            ),
+            "maxTextureDimension2D" => set_max_u32!(
+                limits.maxTextureDimension2D,
+                supported_limits.maxTextureDimension2D
+            ),
+            "maxTextureDimension3D" => set_max_u32!(
+                limits.maxTextureDimension3D,
+                supported_limits.maxTextureDimension3D
+            ),
+            "maxTextureArrayLayers" => set_max_u32!(
+                limits.maxTextureArrayLayers,
+                supported_limits.maxTextureArrayLayers
+            ),
+            "maxBindGroups" => {
+                set_max_u32!(limits.maxBindGroups, supported_limits.maxBindGroups)
             }
-            "maxImmediateSize" => set_u32!(limits.maxImmediateSize),
-            "maxBindingsPerBindGroup" => set_u32!(limits.maxBindingsPerBindGroup),
+            "maxBindGroupsPlusVertexBuffers" => {
+                set_max_u32!(
+                    limits.maxBindGroupsPlusVertexBuffers,
+                    supported_limits.maxBindGroupsPlusVertexBuffers
+                )
+            }
+            "maxImmediateSize" => {
+                set_max_u32!(limits.maxImmediateSize, supported_limits.maxImmediateSize)
+            }
+            "maxBindingsPerBindGroup" => {
+                set_max_u32!(
+                    limits.maxBindingsPerBindGroup,
+                    supported_limits.maxBindingsPerBindGroup
+                )
+            }
             "maxDynamicUniformBuffersPerPipelineLayout" => {
-                set_u32!(limits.maxDynamicUniformBuffersPerPipelineLayout)
+                set_max_u32!(
+                    limits.maxDynamicUniformBuffersPerPipelineLayout,
+                    supported_limits.maxDynamicUniformBuffersPerPipelineLayout
+                )
             }
             "maxDynamicStorageBuffersPerPipelineLayout" => {
-                set_u32!(limits.maxDynamicStorageBuffersPerPipelineLayout)
+                set_max_u32!(
+                    limits.maxDynamicStorageBuffersPerPipelineLayout,
+                    supported_limits.maxDynamicStorageBuffersPerPipelineLayout
+                )
             }
             "maxSampledTexturesPerShaderStage" => {
-                set_u32!(limits.maxSampledTexturesPerShaderStage)
+                set_max_u32!(
+                    limits.maxSampledTexturesPerShaderStage,
+                    supported_limits.maxSampledTexturesPerShaderStage
+                )
             }
-            "maxSamplersPerShaderStage" => set_u32!(limits.maxSamplersPerShaderStage),
+            "maxSamplersPerShaderStage" => {
+                set_max_u32!(
+                    limits.maxSamplersPerShaderStage,
+                    supported_limits.maxSamplersPerShaderStage
+                )
+            }
             "maxStorageBuffersPerShaderStage" => {
-                set_u32!(limits.maxStorageBuffersPerShaderStage)
+                set_max_u32!(
+                    limits.maxStorageBuffersPerShaderStage,
+                    supported_limits.maxStorageBuffersPerShaderStage
+                )
             }
             "maxStorageBuffersInVertexStage" => {
-                set_u32!(compatibility.maxStorageBuffersInVertexStage)
+                set_max_u32!(
+                    compatibility.maxStorageBuffersInVertexStage,
+                    supported_compatibility.maxStorageBuffersInVertexStage
+                )
             }
             "maxStorageBuffersInFragmentStage" => {
-                set_u32!(compatibility.maxStorageBuffersInFragmentStage)
+                set_max_u32!(
+                    compatibility.maxStorageBuffersInFragmentStage,
+                    supported_compatibility.maxStorageBuffersInFragmentStage
+                )
             }
             "maxStorageTexturesPerShaderStage" => {
-                set_u32!(limits.maxStorageTexturesPerShaderStage)
+                set_max_u32!(
+                    limits.maxStorageTexturesPerShaderStage,
+                    supported_limits.maxStorageTexturesPerShaderStage
+                )
             }
             "maxStorageTexturesInVertexStage" => {
-                set_u32!(compatibility.maxStorageTexturesInVertexStage)
+                set_max_u32!(
+                    compatibility.maxStorageTexturesInVertexStage,
+                    supported_compatibility.maxStorageTexturesInVertexStage
+                )
             }
             "maxStorageTexturesInFragmentStage" => {
-                set_u32!(compatibility.maxStorageTexturesInFragmentStage)
+                set_max_u32!(
+                    compatibility.maxStorageTexturesInFragmentStage,
+                    supported_compatibility.maxStorageTexturesInFragmentStage
+                )
             }
             "maxUniformBuffersPerShaderStage" => {
-                set_u32!(limits.maxUniformBuffersPerShaderStage)
+                set_max_u32!(
+                    limits.maxUniformBuffersPerShaderStage,
+                    supported_limits.maxUniformBuffersPerShaderStage
+                )
             }
-            "maxUniformBufferBindingSize" => set_u64!(limits.maxUniformBufferBindingSize),
-            "maxStorageBufferBindingSize" => set_u64!(limits.maxStorageBufferBindingSize),
+            "maxUniformBufferBindingSize" => {
+                set_max_u64!(
+                    limits.maxUniformBufferBindingSize,
+                    supported_limits.maxUniformBufferBindingSize
+                )
+            }
+            "maxStorageBufferBindingSize" => {
+                set_max_u64!(
+                    limits.maxStorageBufferBindingSize,
+                    supported_limits.maxStorageBufferBindingSize
+                )
+            }
             "minUniformBufferOffsetAlignment" => {
-                set_u32!(limits.minUniformBufferOffsetAlignment)
+                set_min_alignment_u32!(
+                    limits.minUniformBufferOffsetAlignment,
+                    supported_limits.minUniformBufferOffsetAlignment
+                )
             }
             "minStorageBufferOffsetAlignment" => {
-                set_u32!(limits.minStorageBufferOffsetAlignment)
+                set_min_alignment_u32!(
+                    limits.minStorageBufferOffsetAlignment,
+                    supported_limits.minStorageBufferOffsetAlignment
+                )
             }
-            "maxVertexBuffers" => set_u32!(limits.maxVertexBuffers),
-            "maxBufferSize" => set_u64!(limits.maxBufferSize),
-            "maxVertexAttributes" => set_u32!(limits.maxVertexAttributes),
-            "maxVertexBufferArrayStride" => set_u32!(limits.maxVertexBufferArrayStride),
+            "maxVertexBuffers" => {
+                set_max_u32!(limits.maxVertexBuffers, supported_limits.maxVertexBuffers)
+            }
+            "maxBufferSize" => {
+                set_max_u64!(limits.maxBufferSize, supported_limits.maxBufferSize)
+            }
+            "maxVertexAttributes" => {
+                set_max_u32!(
+                    limits.maxVertexAttributes,
+                    supported_limits.maxVertexAttributes
+                )
+            }
+            "maxVertexBufferArrayStride" => {
+                set_max_u32!(
+                    limits.maxVertexBufferArrayStride,
+                    supported_limits.maxVertexBufferArrayStride
+                )
+            }
             "maxInterStageShaderVariables" => {
-                set_u32!(limits.maxInterStageShaderVariables)
+                set_max_u32!(
+                    limits.maxInterStageShaderVariables,
+                    supported_limits.maxInterStageShaderVariables
+                )
             }
-            "maxColorAttachments" => set_u32!(limits.maxColorAttachments),
+            "maxColorAttachments" => {
+                set_max_u32!(
+                    limits.maxColorAttachments,
+                    supported_limits.maxColorAttachments
+                )
+            }
             "maxColorAttachmentBytesPerSample" => {
-                set_u32!(limits.maxColorAttachmentBytesPerSample)
+                set_max_u32!(
+                    limits.maxColorAttachmentBytesPerSample,
+                    supported_limits.maxColorAttachmentBytesPerSample
+                )
             }
             "maxComputeWorkgroupStorageSize" => {
-                set_u32!(limits.maxComputeWorkgroupStorageSize)
+                set_max_u32!(
+                    limits.maxComputeWorkgroupStorageSize,
+                    supported_limits.maxComputeWorkgroupStorageSize
+                )
             }
             "maxComputeInvocationsPerWorkgroup" => {
-                set_u32!(limits.maxComputeInvocationsPerWorkgroup)
+                set_max_u32!(
+                    limits.maxComputeInvocationsPerWorkgroup,
+                    supported_limits.maxComputeInvocationsPerWorkgroup
+                )
             }
-            "maxComputeWorkgroupSizeX" => set_u32!(limits.maxComputeWorkgroupSizeX),
-            "maxComputeWorkgroupSizeY" => set_u32!(limits.maxComputeWorkgroupSizeY),
-            "maxComputeWorkgroupSizeZ" => set_u32!(limits.maxComputeWorkgroupSizeZ),
+            "maxComputeWorkgroupSizeX" => {
+                set_max_u32!(
+                    limits.maxComputeWorkgroupSizeX,
+                    supported_limits.maxComputeWorkgroupSizeX
+                )
+            }
+            "maxComputeWorkgroupSizeY" => {
+                set_max_u32!(
+                    limits.maxComputeWorkgroupSizeY,
+                    supported_limits.maxComputeWorkgroupSizeY
+                )
+            }
+            "maxComputeWorkgroupSizeZ" => {
+                set_max_u32!(
+                    limits.maxComputeWorkgroupSizeZ,
+                    supported_limits.maxComputeWorkgroupSizeZ
+                )
+            }
             "maxComputeWorkgroupsPerDimension" => {
-                set_u32!(limits.maxComputeWorkgroupsPerDimension)
+                set_max_u32!(
+                    limits.maxComputeWorkgroupsPerDimension,
+                    supported_limits.maxComputeWorkgroupsPerDimension
+                )
             }
-            _ => unreachable!("required-limit names are validated before conversion"),
+            _ => {
+                return Err(E::operation_error(
+                    cx,
+                    &format!("unknown required limit: {name}"),
+                ));
+            }
         }
     }
     Ok((limits, compatibility))
 }
 
-fn new_supported_limits<E: JsEngine + 'static>(
+fn query_supported_limits<E: JsEngine>(
     cx: E::Context<'_>,
     source: LimitsSource,
-) -> Result<E::Value, E::Error> {
+) -> Result<(WGPULimits, WGPUCompatibilityModeLimits), E::Error> {
     let (mut limits, mut compatibility) = initial_limits();
     limits.nextInChain = ptr::from_mut(&mut compatibility.chain);
     let gpu = E::environment(cx).gpu();
@@ -2477,6 +2708,14 @@ fn new_supported_limits<E: JsEngine + 'static>(
     }
     limits.nextInChain = ptr::null_mut();
     compatibility.chain.next = ptr::null_mut();
+    Ok((limits, compatibility))
+}
+
+fn new_supported_limits<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    source: LimitsSource,
+) -> Result<E::Value, E::Error> {
+    let (limits, compatibility) = query_supported_limits::<E>(cx, source)?;
     let _ = E::register_class(cx, supported_limits_class::<E>())?;
     E::new_instance(
         cx,
@@ -4723,17 +4962,29 @@ fn adapter_request_device_inner<E: JsEngine + 'static>(
         }
         E::own_property_names(cx, required_limits_value)?
     };
-    if let Some(name) = required_limit_names
+    let requested_limits =
+        coerce_required_limits::<E>(cx, required_limits_value, &required_limit_names)?;
+    if let Some((name, _)) = requested_limits
         .iter()
-        .find(|name| !is_known_required_limit(name))
+        .find(|(name, _)| !is_known_required_limit(name))
     {
         return Err(E::operation_error(
             cx,
             &format!("unknown required limit: {name}"),
         ));
     }
-    let (mut required_limits, mut compatibility_limits) =
-        convert_required_limits::<E>(cx, required_limits_value, &required_limit_names)?;
+    let (mut required_limits, mut compatibility_limits) = if requested_limits.is_empty() {
+        initial_limits()
+    } else {
+        let (supported_limits, supported_compatibility) =
+            query_supported_limits::<E>(cx, LimitsSource::Adapter(payload.adapter))?;
+        convert_required_limits::<E>(
+            cx,
+            &requested_limits,
+            &supported_limits,
+            &supported_compatibility,
+        )?
+    };
     required_limits.nextInChain = ptr::from_mut(&mut compatibility_limits.chain);
 
     let arena = Arena::new();
@@ -4743,7 +4994,7 @@ fn adapter_request_device_inner<E: JsEngine + 'static>(
     } else {
         required_features.as_ptr()
     };
-    let required_limits_ptr = if required_limit_names.is_empty() {
+    let required_limits_ptr = if requested_limits.is_empty() {
         ptr::null()
     } else {
         ptr::from_ref(&required_limits)
