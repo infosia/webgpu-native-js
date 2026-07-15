@@ -1150,3 +1150,23 @@ Result 560/36. The 36 failures are all
 backend-independent, the same gap as `createBindGroup:external_texture`). Carried as
 36 exact-id expectations; `compat,*` added to `validation-core.txt`. Curated suite
 28,778/0, 145 expected-fail.
+
+---
+
+## B-15 — shader,execution binding-path sample; scope boundary reached (2026-07-15)
+
+Smoke-tested the binding's shader-execution path on Dawn with diverse WGSL:
+`shader,execution,{zero_init 348, value_init 66, robust_access 486, padding 20,
+memory_layout 749, flow_control,if 8}` — 1,677 cases, 0 fail. The binding's
+shader-module / pipeline / dispatch / readback path holds across initialization,
+robustness, memory-layout, and flow-control variety; no binding bug surfaced. This
+sample joined `operation-dawn.txt` as a Dawn-only regression guard.
+
+**Scope boundary.** The bulk of `shader,execution` (the `expression` subtree, 203
+specs — numerical WGSL builtins and operators) and the deep `shader,validation`
+families (B-13) are Tint conformance, owned by `webgpu-native-cts` per CLAUDE.md, and
+are not curated into the binding suite. `web_platform,*` (canvas, video, ImageBitmap,
+workers) is out of subset (no DOM / no worker runtime in a native host).
+`capability_checks,*` (10,954 cases) stays blocked by the Boa 0.21.1 class-field bug
+(pin unchanged; re-test the repro on the next Boa bump). With those excluded, the
+binding-relevant CTS surface is covered.

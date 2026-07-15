@@ -70,3 +70,15 @@ webgpu:api,operation,adapter,requestAdapter:*
 webgpu:api,operation,texture_view,write:*
 webgpu:api,operation,texture_view,format_reinterpretation:*
 webgpu:api,operation,vertex_state,correctness:*
+
+# Phase B-15 (2026-07-15). shader,execution binding-path sample. These exercise the
+# binding's shader-module / pipeline / dispatch / readback path with diverse WGSL
+# (zero/value init, robust access, memory layout and padding, flow control); each 0
+# fail on Dawn (1,677 cases). The bulk shader,execution,expression subtree (203 specs,
+# numerical WGSL) is Tint conformance, owned by webgpu-native-cts, and is not curated.
+webgpu:shader,execution,zero_init:*
+webgpu:shader,execution,value_init:*
+webgpu:shader,execution,robust_access:*
+webgpu:shader,execution,padding:*
+webgpu:shader,execution,memory_layout:*
+webgpu:shader,execution,flow_control,if:*
