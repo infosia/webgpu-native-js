@@ -165,3 +165,9 @@ webgpu:api,operation,adapter,requestDevice:*
 # Adapter'). Out of scope (invariant 8); carried as an expectation. See backend-deltas
 # D17. The other three cases (SameObject, instanceof, device.adapterInfo) pass.
 webgpu:api,operation,adapter,info:*
+
+# Phase B-12 (2026-07-15). uncapturederror: 3/2 on yawgpu Noop. The 3 non-OOM cases
+# (validation errors delivered to the uncaptured path) pass; the 2 out-of-memory cases
+# cannot fire because Noop never OOMs (same class as error_scope OOM). On Dawn the family
+# is 5/0 with those two skipped. The two OOM cases are carried as expectations.
+webgpu:api,operation,uncapturederror:*

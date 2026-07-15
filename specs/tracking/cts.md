@@ -1078,3 +1078,28 @@ Noop 5/13 — the 5 invalid-featureLevel cases pass (null resolve, no execution)
 real compute dispatch (testAdapter) and are execution-dependent. Family added to
 `operation-dawn.txt`. Fixes in `core/src/lib.rs` only; no new `JsEngine` trait method, no
 engine-adapter change.
+
+---
+
+## B-12 expansion (2026-07-15)
+
+Screened the remaining non-capability_checks uncovered api families.
+
+**Added to `operation-dawn.txt`** (execution-result; yawgpu Noop fails with "unexpected
+contents", each 0 fail on Dawn): `texture_view,write` (266/0, 72 skip),
+`texture_view,format_reinterpretation` (6/0), `vertex_state,correctness` (453/0).
+
+**Added to `validation-core.txt`**: `uncapturederror` — 3/2 on yawgpu Noop (the 3 non-OOM
+cases pass; the 2 out-of-memory cases cannot fire because Noop never OOMs, carried as
+expectations). Dawn 5/0 with those two skipped.
+
+**Not added, catalogued:**
+- `api,operation,texture_view,texture_component_swizzle` (529) — the binding raises
+  `TypeError: swizzle are not supported yet`. Component swizzle is an unimplemented WebGPU
+  feature; out of the current subset. Backend-independent (the binding rejects before any C
+  call). Revisit if the feature is brought into scope.
+- `api,validation,buffer,threading`, `api,validation,encoding,cmds,render_pass`,
+  `api,operation,compute_pipeline,entry_point_name` — register no cases on this CTS pin
+  (the query matches nothing). Nothing to run.
+- `api,validation,gpu_external_texture_expiration` — external textures out of subset.
+- `api,validation,state,device_lost,destroy` — device_lost stays out (Boa GC abort, catalogued).

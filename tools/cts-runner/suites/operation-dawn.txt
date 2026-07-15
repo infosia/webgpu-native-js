@@ -62,3 +62,11 @@ webgpu:api,operation,vertex_state,index_format:*
 # instead of resolving null for no-adapter). Dawn: 15/0, 3 skip (forceFallbackAdapter=true
 # has no Metal fallback -> null -> skip).
 webgpu:api,operation,adapter,requestAdapter:*
+
+# Phase B-12 (2026-07-15). Execution-result families: yawgpu Noop fails every case with
+# "Texture level / Array had unexpected contents"; each verified 0 fail on Dawn.
+# texture_view,write 266/0 (72 skip), format_reinterpretation 6/0, vertex_state,correctness
+# 453/0.
+webgpu:api,operation,texture_view,write:*
+webgpu:api,operation,texture_view,format_reinterpretation:*
+webgpu:api,operation,vertex_state,correctness:*
