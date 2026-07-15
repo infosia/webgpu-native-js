@@ -2,21 +2,14 @@
 
 A **JavaScript scripting layer for native applications**, exposing the standard
 **WebGPU JavaScript API** (`GPUDevice`, `GPUBuffer`, `GPUQueue`, …) inside a
-native host — no browser, no Node.js — over any GPU backend that speaks
-the standard **WebGPU C ABI** ([`webgpu.h`](https://github.com/webgpu-native/webgpu-headers)).
+native host, over any GPU backend that speaks the standard **WebGPU C ABI**
+([`webgpu.h`](https://github.com/webgpu-native/webgpu-headers)).
 
-Any native host that owns a GPU can embed it: game engines, renderers and
-DCC/creative tools, simulation and visualization apps, GPU-compute pipelines.
-
-The host owns the GPU. Scripts author resources, pipelines, and application
-logic in the same WebGPU API they would use on the web; the host hands the
-binding an already-created `WGPUDevice` and pumps one `tick()` per frame.
-
-If your team already knows WebGPU from the web and needs scriptable, moddable
-logic inside a native app — without embedding a browser, running Node, or
-inventing a scripting language — this is that layer. It presents the standard
-WebGPU JavaScript API in-process, over whatever GPU backend and JS engine you
-pick, and holds their behavior identical across the combinations you ship.
+It is for teams that already know WebGPU from the web and need scriptable,
+moddable logic inside a native app — a game engine, renderer, DCC or creative
+tool, simulation, or GPU-compute pipeline — without embedding a browser, running
+Node, or inventing a scripting language. The host owns the GPU and drives the
+frame; scripts author resources, pipelines, and application logic.
 
 This is pre-1.0 and under active development. The design bets below are in place
 and tested; the API surface is still filling out (see
