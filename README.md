@@ -49,11 +49,14 @@ and tested; the API surface is still filling out (see
   parity is verified — so a result on the desktop box you can debug predicts the
   phone you cannot, and a bug cannot hide on the platform you can least reach.
   This is why a JIT-less engine was chosen, and the same parity run enforces it.
-- **Embeds in-process, with no runtime baggage — including on iOS.** No browser,
-  no Node, no bundled JS engine to bloat the binary or raise the App Store
-  bundled-engine question: Boa is pure Rust and JIT-less, and JavaScriptCore
-  links as Apple's system framework. That is in-process scripting on a platform
-  where a bundled JIT engine could not legally run.
+- **Embeds in-process as a library, not a runtime.** No browser and no Node on
+  any platform — the engine links directly into the application and shares its
+  address space. On Apple platforms it uses the system JavaScriptCore, so nothing
+  is bundled: no binary-size cost, no App Store bundled-engine question, and
+  in-process scripting where a bundled JIT engine could not legally run.
+  Elsewhere, Boa compiles in — a pure-Rust, JIT-less engine that needs no C
+  toolchain or separate VM, so what ships is a static library, not a browser or a
+  runtime process.
 - **JS is the scripting layer, not the render hot path.** Initialization,
   resource and pipeline definition, and application logic run in JS; per-frame
   draw submission stays in the native host. This scoping is permanent and is
