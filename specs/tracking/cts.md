@@ -481,6 +481,26 @@ entry as its reason. Revisit if the family becomes load-bearing, or if a Boa
 release fixes it (re-test the repro above against each pin bump — the repro is
 the acceptance test).
 
+**Update (2026-07-15): the bug is already fixed upstream in Boa `main`, but not
+in any release.** Boa PR **#4481** ("Fix property initializer's access to outer
+scope variables", fixing issue #4326) is a two-line change in
+`core/ast/src/scope_analyzer.rs` making `BindingEscapeAnalyzer` visit class-element
+field initializers with `field.scope` — exactly the missing outer-environment this
+note characterizes. Its regression test `property_initializer_reference_escaped_variable`
+runs our shape (a function returning a class whose public/static/private field
+initializers read an outer-scope variable) and asserts the value is read. Boa PR
+**#4662** additionally fixes a private-field false-positive of the same
+`ReferenceError: access of uninitialized binding`. Both are merged to Boa `main` but
+absent from every release tag; the latest release, v0.21.1 (our exact pin), lacks
+them.
+
+**Owner decision (2026-07-15): wait for the next Boa release that includes #4481;
+do not fork and do not git-pin to `main`.** The exact-crates.io-pin rule (block 14)
+holds. When a release lands, bump the pin, re-run the repro (the acceptance test),
+and — if it passes — screen `capability_checks,*` (10,954 cases) and triage into
+binding bug / yawgpu limit gap (Dawn arbitration) / out-of-subset feature. #4481 alone
+covers the public-field pattern the CTS uses; #4662 is a private-field bonus.
+
 ## Phase B-7 (2026-07-13) — error routing, and a non-deterministic Boa crash
 
 ### Four spec-shaped error-routing bugs, all the same class
