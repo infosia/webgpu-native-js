@@ -121,26 +121,20 @@ below).
 
 ## JavaScript delivery
 
-**The first-party CommonJS loader is the default multi-file path.** The host
-supplies `(module id, source)` strings and an entry id to `Runtime::run_modules`;
-the binding assembles one self-contained registry script and evaluates the same
-script under Boa and JavaScriptCore. It needs no filesystem access in the binding,
-no Node runtime, and no build step. Module sources use `require`, `module.exports`,
-and `exports`; ES-module `import` and `export` syntax is not accepted on this path.
+Multi-file game code is delivered through the first-party CommonJS loader: the
+host supplies `(module id, source)` strings and an entry id to
+`Runtime::run_modules`, and the binding assembles one self-contained registry
+script and evaluates the identical script under both engines. It needs no
+filesystem access in the binding, no Node runtime, and no build step. Module
+sources use `require`, `module.exports`, and `exports`. A single pre-assembled
+script can also be run directly with `Runtime::eval`.
 
-esbuild, Rollup, and SWC remain optional build-time paths for ESM, minification,
-and tree-shaking. Runtime ES modules are a **Boa-only development-tooling
-capability** used by the CTS runner; game code that must run on both engines must
-not rely on them. JavaScriptCore's module API is not part of the public Apple SDK,
-and this project does not ship on private API.
-
-**Bundling ESM erases top-level TDZ, so do not rely on it.** An ESM bundler can
-rewrite top-level `let`, `const`, and `class` bindings to `var`. Under real ES
-modules — which is what the Boa development loader runs — reading a binding before
-its initializer throws `ReferenceError`. In the ESM bundle, the same read can
-silently yield `undefined`. Prefer acyclic ESM graphs: a circular import that
-appears to work in the bundle may be reading `undefined` where the module goal
-would have stopped it.
+ES modules are not a runtime feature on the shipping path: JavaScriptCore's module
+API is not part of the public Apple SDK, and this project does not ship on private
+API. (A Boa ES-module loader exists for development tooling — the CTS runner — but
+game code that must run on both engines cannot rely on it.) How you author is your
+own choice; preprocess to CommonJS or to a single script with whatever toolchain
+you prefer — that step is outside the binding.
 
 ## Backends
 
