@@ -9,15 +9,47 @@ generator's report; this file is the committed, reviewable index.
 
 | IDL item | Disposition | Reason |
 |---|---|---|
-| `GPUBindGroupLayoutEntry.externalTexture` | reject-if-present | external textures out of scope |
+| `GPUBindGroupLayoutEntry.externalTexture` | reject-if-present | external textures out of scope — structural, see below |
 | ~~`GPUBindGroupLayoutEntry.sampler` / `.texture` / `.storageTexture`~~ | **shipped in block 09 slice 2 (2026-07-11)** — the "buffer-only" rejections converted to positive tests | historical: rejected 2026-07-10 (slice 2b) until the texture surface existed |
 | `GPUShaderModuleDescriptor.compilationHints` | reject-if-present | recorded deferral (block 03 §7) |
 | `GPUProgrammableStage.constants` | reject-if-present | pipeline constants deferred (block 03 §7); silent drop retired by the Phase 4 review |
 | ~~`GPUComputePassDescriptor.timestampWrites` / `GPURenderPassDescriptor.timestampWrites`~~ | **RETIRED 2026-07-12 — both IDL dictionaries emit through the shared `WGPUPassTimestampWrites` C struct** | historical: rejected until `requiredFeatures` plumbing made timestamp-query devices testable |
 | ~~`GPURenderPassDescriptor.maxDrawCount`~~ | **RETIRED 2026-07-12 — emitted through `WGPURenderPassMaxDrawCount` only when present** | historical: rejected while optional extension-chain emission was unavailable |
-| `GPUDevice.importExternalTexture`; `GPUQueue.copyExternalImageToTexture` | not in subset | external-texture surface out of scope; join-report mismatch entries |
+| `GPUDevice.importExternalTexture`; `GPUQueue.copyExternalImageToTexture` | not in subset | external-texture surface out of scope — structural, see below |
 | `GPUDevice.lost`, `.onuncapturederror` | ~~not in subset~~ **shipped in Phase 6 (P6b)** | see the Phase 6 additions below |
 | `GPUAutoLayoutMode.auto` (as an enum value) | enum_value_skip | the C ABI represents auto layout as a null pipeline-layout handle |
+
+## External textures — permanently out of scope, for two structural reasons
+
+Recorded 2026-07-15 so this is not re-litigated. External-texture *creation* is not
+a deferred feature; it cannot be bound in this project by construction.
+
+1. **The JS source does not exist in a native host.** `GPUExternalTextureDescriptor`
+   is `required (HTMLVideoElement or VideoFrame) source` (`webgpu.idl`). Both are DOM
+   / media objects; there is no DOM in a native host, so the required source is
+   unconstructible. `GPUQueue.copyExternalImageToTexture` has the same problem (its
+   source is a DOM image).
+
+2. **The canonical C ABI does not define creation.** `webgpu.h` states creation of
+   `WGPUExternalTexture` is *"extremely implementation-dependent and not defined in
+   this header"*; the only external-texture procs are `SetLabel`, `AddRef`,
+   `Release`. There is no `wgpuDeviceImportExternalTexture`, and **neither yawgpu nor
+   Dawn exports one** (0 symbols in both, verified). Each backend creates external
+   textures through its own private API, from video or planes, differently — which is
+   why external-texture support varies by backend: the standard leaves it undefined.
+
+Consequence: binding `importExternalTexture` would require calling per-backend private
+APIs, re-coupling to a specific backend and violating principle 2
+(bind only to canonical `webgpu.h`). The header does define the *binding* structs
+(`WGPUExternalTextureBindingLayout` / `WGPUExternalTextureBindingEntry`) to use an
+already-created external texture in a bind group, but since creation is not bindable,
+that surface is unusable end-to-end from JS. The binding therefore rejects the whole
+external-texture surface with a clear error.
+
+This is the shared reason behind the external-texture CTS failures catalogued as
+expectations across `api,validation,createBindGroup:external_texture`,
+`idl,javascript` (`importExternalTexture`), and
+`compat,api,validation,pipeline_creation,texture_sampler_combos` (`numExternal>=1`).
 
 ## C-only surface (expected non-findings per G1)
 
