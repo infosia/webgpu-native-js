@@ -12,32 +12,63 @@ The host owns the GPU. Scripts author resources, pipelines, and application
 logic in the same WebGPU API they would use on the web; the host hands the
 binding an already-created `WGPUDevice` and pumps one `tick()` per frame.
 
+If your team already knows WebGPU from the web and needs scriptable, moddable
+logic inside a native app — without embedding a browser, running Node, or
+inventing a scripting language — this is that layer. It presents the standard
+WebGPU JavaScript API in-process, over whatever GPU backend and JS engine you
+pick, and holds their behavior identical across the combinations you ship.
+
+This is pre-1.0 and under active development. The design bets below are in place
+and tested; the API surface is still filling out (see
+[Current API surface](#current-api-surface)) and mobile bring-up is ahead.
+
 ## What makes it different
 
-- **JS is the scripting layer, not the render hot path.** Initialization,
-  resource and pipeline definition, and application logic run in JS. Per-frame
-  draw submission stays in the native host. This scoping is permanent and is
-  what keeps a JIT-less embedded engine viable.
+- **Write standard WebGPU, in the API your team already knows.** Scripts use
+  the same `GPUDevice`/`GPUBuffer`/`GPUQueue` objects and WGSL shaders as the web
+  platform, so shaders, pipeline setup, and prototypes carry across. The one
+  deliberate change is scoping: the host owns the GPU and drives the frame, so
+  the surface is WebGPU as an authoring API, not a browser sandbox.
 - **The host owns the GPU.** The primary entry point is *handle adoption* —
   `wrap_device(WGPUDevice)` — not `navigator.gpu.requestAdapter()`. The host
   has already chosen its instance, adapter, and device before any script runs.
   (`requestAdapter`/`requestDevice` exist too, so the async path is real.)
-- **One conversion layer, N engines.** All descriptor conversion, validation,
-  promise plumbing, and lifetime management is written **once** in an
-  engine-agnostic core against a `trait JsEngine` with associated types, and
-  monomorphized per engine — no `dyn` dispatch on the conversion path, and no
-  per-engine conversion code. Wiring the second engine (JavaScriptCore)
-  required **zero changes to core logic**; that gate is enforced per phase.
-- **Backend-swappable by construction.** Every GPU call crosses the canonical
-  `webgpu.h` C ABI through `bindgen`-generated bindings. The binding never
-  touches a backend's native API, so yawgpu, wgpu-native, and Dawn are
-  link-time choices, not code paths.
-- **Engine-parity is a tested claim, not a goal.** The same conformance script
-  ([`tests/parity/parity.js`](tests/parity/parity.js)) runs under Boa and
-  JavaScriptCore and must produce **byte-identical output**
-  ([`tests/parity/expected.txt`](tests/parity/expected.txt)), asserted by one
-  test in each adapter. Promise settlement ordering, label conversion, mapping
-  round-trips, sequence conversion, and error shapes are all in that script.
+- **Mix and match engine and backend.** The JS engine (Boa or JavaScriptCore)
+  and the GPU backend (yawgpu, wgpu-native, or Dawn) are independent, link-time
+  choices — the same script and the same binding run on any of them, because the
+  binding has no per-engine or per-backend code paths (one engine-agnostic
+  conversion core; every GPU call crosses the canonical `webgpu.h` C ABI). The
+  freedom is safe to use because the behavior is *verified* identical, not
+  assumed: the parity script
+  ([`tests/parity/parity.js`](tests/parity/parity.js)) asserts **byte-identical
+  output** ([`expected.txt`](tests/parity/expected.txt)) across both engines on
+  every run, and reproduces it on Dawn in gated real-GPU runs. Swapping a backend
+  or engine is a build-flag decision, not a re-test-everything one.
+- **What you test on desktop is what ships on device.** iOS runs the same
+  JavaScriptCore as macOS, Android the same Boa as Windows, and Boa↔JavaScriptCore
+  parity is verified — so a result on the desktop box you can debug predicts the
+  phone you cannot, and a bug cannot hide on the platform you can least reach.
+  This is why a JIT-less engine was chosen, and the same parity run enforces it.
+- **Embeds in-process, with no runtime baggage — including on iOS.** No browser,
+  no Node, no bundled JS engine to bloat the binary or raise the App Store
+  bundled-engine question: Boa is pure Rust and JIT-less, and JavaScriptCore
+  links as Apple's system framework. That is in-process scripting on a platform
+  where a bundled JIT engine could not legally run.
+- **JS is the scripting layer, not the render hot path.** Initialization,
+  resource and pipeline definition, and application logic run in JS; per-frame
+  draw submission stays in the native host. This scoping is permanent and is
+  what keeps a JIT-less embedded engine viable.
+
+## Compared to the alternatives
+
+- **vs. embedding a browser or WebView** — no browser process and no IPC hop;
+  the script calls the GPU in the host's own address space, and the host keeps
+  frame control.
+- **vs. Node.js and a WebGPU binding** — no Node runtime and no V8 JIT; a
+  JIT-less engine that links into the application and runs on iOS.
+- **vs. a non-WebGPU scripting language (Lua and similar)** — the GPU API and
+  WGSL your team already knows from the web, rather than a bespoke native binding
+  to design, learn, and maintain.
 
 ## Architecture
 
