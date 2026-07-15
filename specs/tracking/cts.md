@@ -1133,3 +1133,20 @@ above and `api,validation,shader_module` already exercise. Per CLAUDE.md, backen
 conformance (including Tint's WGSL validation) is owned by `webgpu-native-cts`; these
 families are not curated into the binding suite, and their 82 upstream-skew failures
 are not carried as binding expectations.
+
+---
+
+## B-14 — compatibility-mode validation (2026-07-15)
+
+`compat,*` runs in core mode: the cts-runner leaves `globalTestConfig.compatibility`
+unset, so `isCompatibility` is false and the compat tests assert that operations only
+restricted in compatibility mode do **not** error on a core device. This confirms the
+binding does not apply compat-only restrictions when not in compat mode.
+
+Result 560/36. The 36 failures are all
+`compat,api,validation,pipeline_creation,texture_sampler_combos` cases with
+`numExternal>=1` — external-texture bindings, out of subset (the binding raises
+"externalTexture bindings are not supported yet" before any backend call, so this is
+backend-independent, the same gap as `createBindGroup:external_texture`). Carried as
+36 exact-id expectations; `compat,*` added to `validation-core.txt`. Curated suite
+28,778/0, 145 expected-fail.

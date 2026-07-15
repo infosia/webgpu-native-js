@@ -29,6 +29,47 @@ webgpu:api,validation,render_pass,resolve:resolve_attachment:resolveTargetUsage=
 # invariant 8. See backend-deltas.md D17.
 webgpu:api,operation,adapter,info:adapter_info fail # D17: browser-normalized adapter identifiers, out of scope
 
+# compat pipeline_creation,texture_sampler_combos with numExternal>=1 use external
+# texture bindings, which are out of subset (the binding raises "externalTexture
+# bindings are not supported yet" before any backend call). The other 560 compat
+# cases pass: compat-mode restrictions are correctly not applied in core mode.
+webgpu:compat,api,validation,pipeline_creation:texture_sampler_combos:pass=false;numCombos="max-3";numNonSampled="0";numExternal=1;useSame=false;stages="compute";async=false fail # externalTexture out of subset
+webgpu:compat,api,validation,pipeline_creation:texture_sampler_combos:pass=false;numCombos="max-3";numNonSampled="0";numExternal=1;useSame=false;stages="compute";async=true fail # externalTexture out of subset
+webgpu:compat,api,validation,pipeline_creation:texture_sampler_combos:pass=false;numCombos="max-3";numNonSampled="0";numExternal=1;useSame=false;stages="fragment";async=false fail # externalTexture out of subset
+webgpu:compat,api,validation,pipeline_creation:texture_sampler_combos:pass=false;numCombos="max-3";numNonSampled="0";numExternal=1;useSame=false;stages="fragment";async=true fail # externalTexture out of subset
+webgpu:compat,api,validation,pipeline_creation:texture_sampler_combos:pass=false;numCombos="max-3";numNonSampled="0";numExternal=1;useSame=false;stages="vertex";async=false fail # externalTexture out of subset
+webgpu:compat,api,validation,pipeline_creation:texture_sampler_combos:pass=false;numCombos="max-3";numNonSampled="0";numExternal=1;useSame=false;stages="vertex";async=true fail # externalTexture out of subset
+webgpu:compat,api,validation,pipeline_creation:texture_sampler_combos:pass=false;numCombos="max-6";numNonSampled="0";numExternal=2;useSame=true;stages="compute";async=false fail # externalTexture out of subset
+webgpu:compat,api,validation,pipeline_creation:texture_sampler_combos:pass=false;numCombos="max-6";numNonSampled="0";numExternal=2;useSame=true;stages="compute";async=true fail # externalTexture out of subset
+webgpu:compat,api,validation,pipeline_creation:texture_sampler_combos:pass=false;numCombos="max-6";numNonSampled="0";numExternal=2;useSame=true;stages="fragment";async=false fail # externalTexture out of subset
+webgpu:compat,api,validation,pipeline_creation:texture_sampler_combos:pass=false;numCombos="max-6";numNonSampled="0";numExternal=2;useSame=true;stages="fragment";async=true fail # externalTexture out of subset
+webgpu:compat,api,validation,pipeline_creation:texture_sampler_combos:pass=false;numCombos="max-6";numNonSampled="0";numExternal=2;useSame=true;stages="vertex";async=false fail # externalTexture out of subset
+webgpu:compat,api,validation,pipeline_creation:texture_sampler_combos:pass=false;numCombos="max-6";numNonSampled="0";numExternal=2;useSame=true;stages="vertex";async=true fail # externalTexture out of subset
+webgpu:compat,api,validation,pipeline_creation:texture_sampler_combos:pass=false;numCombos="max-7";numNonSampled="0";numExternal=2;useSame=false;stages="compute";async=false fail # externalTexture out of subset
+webgpu:compat,api,validation,pipeline_creation:texture_sampler_combos:pass=false;numCombos="max-7";numNonSampled="0";numExternal=2;useSame=false;stages="compute";async=true fail # externalTexture out of subset
+webgpu:compat,api,validation,pipeline_creation:texture_sampler_combos:pass=false;numCombos="max-7";numNonSampled="0";numExternal=2;useSame=false;stages="fragment";async=false fail # externalTexture out of subset
+webgpu:compat,api,validation,pipeline_creation:texture_sampler_combos:pass=false;numCombos="max-7";numNonSampled="0";numExternal=2;useSame=false;stages="fragment";async=true fail # externalTexture out of subset
+webgpu:compat,api,validation,pipeline_creation:texture_sampler_combos:pass=false;numCombos="max-7";numNonSampled="0";numExternal=2;useSame=false;stages="vertex";async=false fail # externalTexture out of subset
+webgpu:compat,api,validation,pipeline_creation:texture_sampler_combos:pass=false;numCombos="max-7";numNonSampled="0";numExternal=2;useSame=false;stages="vertex";async=true fail # externalTexture out of subset
+webgpu:compat,api,validation,pipeline_creation:texture_sampler_combos:pass=true;numCombos="max-4";numNonSampled="0";numExternal=1;useSame=false;stages="compute";async=false fail # externalTexture out of subset
+webgpu:compat,api,validation,pipeline_creation:texture_sampler_combos:pass=true;numCombos="max-4";numNonSampled="0";numExternal=1;useSame=false;stages="compute";async=true fail # externalTexture out of subset
+webgpu:compat,api,validation,pipeline_creation:texture_sampler_combos:pass=true;numCombos="max-4";numNonSampled="0";numExternal=1;useSame=false;stages="fragment";async=false fail # externalTexture out of subset
+webgpu:compat,api,validation,pipeline_creation:texture_sampler_combos:pass=true;numCombos="max-4";numNonSampled="0";numExternal=1;useSame=false;stages="fragment";async=true fail # externalTexture out of subset
+webgpu:compat,api,validation,pipeline_creation:texture_sampler_combos:pass=true;numCombos="max-4";numNonSampled="0";numExternal=1;useSame=false;stages="vertex";async=false fail # externalTexture out of subset
+webgpu:compat,api,validation,pipeline_creation:texture_sampler_combos:pass=true;numCombos="max-4";numNonSampled="0";numExternal=1;useSame=false;stages="vertex";async=true fail # externalTexture out of subset
+webgpu:compat,api,validation,pipeline_creation:texture_sampler_combos:pass=true;numCombos="max-7";numNonSampled="0";numExternal=2;useSame=true;stages="compute";async=false fail # externalTexture out of subset
+webgpu:compat,api,validation,pipeline_creation:texture_sampler_combos:pass=true;numCombos="max-7";numNonSampled="0";numExternal=2;useSame=true;stages="compute";async=true fail # externalTexture out of subset
+webgpu:compat,api,validation,pipeline_creation:texture_sampler_combos:pass=true;numCombos="max-7";numNonSampled="0";numExternal=2;useSame=true;stages="fragment";async=false fail # externalTexture out of subset
+webgpu:compat,api,validation,pipeline_creation:texture_sampler_combos:pass=true;numCombos="max-7";numNonSampled="0";numExternal=2;useSame=true;stages="fragment";async=true fail # externalTexture out of subset
+webgpu:compat,api,validation,pipeline_creation:texture_sampler_combos:pass=true;numCombos="max-7";numNonSampled="0";numExternal=2;useSame=true;stages="vertex";async=false fail # externalTexture out of subset
+webgpu:compat,api,validation,pipeline_creation:texture_sampler_combos:pass=true;numCombos="max-7";numNonSampled="0";numExternal=2;useSame=true;stages="vertex";async=true fail # externalTexture out of subset
+webgpu:compat,api,validation,pipeline_creation:texture_sampler_combos:pass=true;numCombos="max-8";numNonSampled="0";numExternal=2;useSame=false;stages="compute";async=false fail # externalTexture out of subset
+webgpu:compat,api,validation,pipeline_creation:texture_sampler_combos:pass=true;numCombos="max-8";numNonSampled="0";numExternal=2;useSame=false;stages="compute";async=true fail # externalTexture out of subset
+webgpu:compat,api,validation,pipeline_creation:texture_sampler_combos:pass=true;numCombos="max-8";numNonSampled="0";numExternal=2;useSame=false;stages="fragment";async=false fail # externalTexture out of subset
+webgpu:compat,api,validation,pipeline_creation:texture_sampler_combos:pass=true;numCombos="max-8";numNonSampled="0";numExternal=2;useSame=false;stages="fragment";async=true fail # externalTexture out of subset
+webgpu:compat,api,validation,pipeline_creation:texture_sampler_combos:pass=true;numCombos="max-8";numNonSampled="0";numExternal=2;useSame=false;stages="vertex";async=false fail # externalTexture out of subset
+webgpu:compat,api,validation,pipeline_creation:texture_sampler_combos:pass=true;numCombos="max-8";numNonSampled="0";numExternal=2;useSame=false;stages="vertex";async=true fail # externalTexture out of subset
+
 # idl,javascript: 11 out-of-subset features. GPU.wgslLanguageFeatures is
 # unimplemented (block 17), GPUDevice.importExternalTexture is external-texture
 # surface (out of subset), and GPUDevice-as-EventTarget / CustomEvent are DOM APIs

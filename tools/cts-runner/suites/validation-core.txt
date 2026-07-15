@@ -132,6 +132,13 @@ webgpu:idl,javascript:*
 webgpu:shader,validation,types,*
 webgpu:shader,validation,const_assert,*
 
+# Phase B-14 (2026-07-15). Compatibility-mode validation, run in core mode
+# (globalTestConfig.compatibility is unset, so isCompatibility is false): confirms the
+# binding does not apply compat-only restrictions when not in compat mode. 560/36 —
+# the 36 failures are pipeline_creation,texture_sampler_combos cases with numExternal>=1
+# (external-texture bindings, out of subset), carried as expectations.
+webgpu:compat,*
+
 # Phase B-7 growth (2026-07-13). Error-routing fixes: submitting a consumed
 # command buffer is a validation error (not a JS exception); a lost device
 # surfaces no errors at all (spec: "no errors are generated from a device which
