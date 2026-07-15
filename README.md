@@ -5,12 +5,6 @@ A **JavaScript scripting layer for native applications**, exposing the standard
 native host, over any GPU backend that speaks the standard **WebGPU C ABI**
 ([`webgpu.h`](https://github.com/webgpu-native/webgpu-headers)).
 
-It is for teams that already know WebGPU from the web and need scriptable,
-moddable logic inside a native app — a game engine, renderer, DCC or creative
-tool, simulation, or GPU-compute pipeline — without embedding a browser, running
-Node, or inventing a scripting language. The host owns the GPU and drives the
-frame; scripts author resources, pipelines, and application logic.
-
 This is pre-1.0 and under active development. The design bets below are in place
 and tested; the API surface is still filling out (see
 [Current API surface](#current-api-surface)) and mobile bring-up is ahead.
