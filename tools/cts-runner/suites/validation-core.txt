@@ -57,6 +57,29 @@ webgpu:api,validation,encoding,encoder_state:*
 webgpu:api,validation,encoding,render_bundle:*
 webgpu:api,validation,createView:*
 
+# Phase B-11 growth (2026-07-15). Screened on yawgpu Noop, clean:
+# pipeline,immediates 4/0, render_pass,attachment_compatibility 62/0,
+# render,dynamic_state 8/0, render,indirect_draw 5/0,
+# render,indirect_multi_draw 0/0 (6 skip: chromium-experimental multi-draw feature),
+# programmable,pipeline_bind_group_compat 200/0.
+webgpu:api,validation,pipeline,immediates:*
+webgpu:api,validation,render_pass,attachment_compatibility:*
+webgpu:api,validation,encoding,cmds,render,dynamic_state:*
+webgpu:api,validation,encoding,cmds,render,indirect_draw:*
+webgpu:api,validation,encoding,cmds,render,indirect_multi_draw:*
+webgpu:api,validation,encoding,programmable,pipeline_bind_group_compat:*
+
+# createBindGroup: 1819/0 apart from the external_texture,* subfamily (82), which
+# throws "externalTexture bindings are not supported yet" — external textures are
+# out of subset. Carried as one prefixed expectation.
+webgpu:api,validation,createBindGroup:*
+
+# render_pass,resolve: 22/0 apart from resolve_attachment:resolveTargetUsage=48
+# (RENDER_ATTACHMENT|TRANSIENT_ATTACHMENT) — yawgpu accepts a transient resolve
+# target that must be rejected (a resolve target is stored, transient cannot be).
+# Dawn passes it (23/0). yawgpu validation gap, D16, handed off. One expectation.
+webgpu:api,validation,render_pass,resolve:*
+
 # timestampWrites landed (2026-07-12): the skip's reason ("timestamp-query
 # feature not yet requested in tests") expired once requiredFeatures/
 # requiredLimits were plumbed. These three families were gated behind it.

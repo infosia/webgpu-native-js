@@ -11,6 +11,17 @@ unittests:loaders_and_trees:end2end: fail # asserts real .spec.js frames in the 
 unittests:floating_point:determinantInterval:trait="f32" fail # Boa numeric gap, pre-existing (block 14 B7)
 unittests:floating_point:determinantInterval:trait="f16" fail # Boa numeric gap, pre-existing (block 14 B7)
 
+# External textures are out of subset (recorded across tracking). The
+# createBindGroup external_texture cases throw "externalTexture bindings are not
+# supported yet"; the rest of createBindGroup passes (1819/0).
+webgpu:api,validation,createBindGroup:external_texture,* fail # external textures out of subset
+
+# yawgpu transient-attachment validation gap, D16 (2026-07-15). A resolve target
+# with TRANSIENT_ATTACHMENT usage must be rejected (a resolve target is stored;
+# transient contents cannot persist). yawgpu accepts it; Dawn rejects it (23/0).
+# Handed off to yawgpu. Remove when yawgpu validates the rule.
+webgpu:api,validation,render_pass,resolve:resolve_attachment:resolveTargetUsage=48 fail # D16: transient resolve target not validated
+
 # yawgpu Noop backend cannot produce out-of-memory. The CTS provokes OOM by
 # creating a 256 GiB texture (rgba32float at max dimensions); Noop allocates it
 # without failing, so no GPUOutOfMemoryError is raised. A backend limitation, not

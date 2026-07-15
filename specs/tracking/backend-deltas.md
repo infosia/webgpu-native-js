@@ -562,3 +562,22 @@ binding only calls `wgpuDeviceCreateQuerySet`.
 
 Recorded as a backend delta. The six cases are carried in `expectations.txt` with this
 reason; they stay out of the Dawn suite's green count rather than being hidden.
+
+---
+
+## D16 — yawgpu does not validate a transient resolve target
+
+**Status: OPEN (yawgpu). Found 2026-07-15 (CTS B-11). Dawn-arbitrated, handed off.**
+
+`api,validation,render_pass,resolve:resolve_attachment:resolveTargetUsage=48` — a
+resolve target created with `RENDER_ATTACHMENT | TRANSIENT_ATTACHMENT` (48) must fail
+validation: a resolve target is written (stored) by the resolve, and a transient
+attachment's contents cannot persist. yawgpu accepts it
+(`Validation succeeded unexpectedly`); Dawn rejects it. Measured on the current CTS
+pin: yawgpu 22/1, Dawn 23/0.
+
+Same class as D14 (transient-attachment rules), surfaced by a different family after
+D14 landed. Binding cleared by the same evidence as D14 — the 0x20 bit crosses the C
+ABI intact (`wgpuTextureGetUsage` reads back 48). The one case is carried in
+`expectations.txt`; `render_pass,resolve:*` is otherwise in the curated suite. Filed
+to yawgpu's `HANDOFF.md` (Finding 3).
