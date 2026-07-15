@@ -995,3 +995,47 @@ with `enforce_u32`. Entry removed.
 **Still open, recorded not skipped.** `GPU.wgslLanguageFeatures` is unimplemented. It is
 one of the five disjuncts of the CTS's `supportsImmediateData`; the other four already
 hold, so it gates nothing here.
+
+---
+
+## B-11 triage — `adapter,requestDevice` requiredLimits (binding bug, open)
+
+`api,operation,adapter,requestDevice` fails 38/133 **identically on yawgpu Noop and
+on Dawn** (measured 2026-07-15). Identical cross-backend behaviour places the defect
+in the binding, not either backend (D11 rule). Not added to any suite; it is an open
+binding bug.
+
+**Failure counts (per backend): 130 + 32 + 1.**
+
+- 130 × `THREW TypeError, instead of OperationError`
+- 32 × `DID NOT REJECT` (all `value=4294967295`)
+- 1 × unknown-limit raised as a synchronous exception instead of a rejection
+
+**Root cause — one.** `convert_required_limits` (`core/src/lib.rs`) coerces each
+`requiredLimits` value at the **C-ABI field width** (`enforce_u32` for the 32-bit
+limits) and writes it straight into `WGPULimits`. Per WebIDL, `requiredLimits` is
+`record<DOMString, (GPUSize64 or undefined)>` — every value is `GPUSize64` (u64),
+regardless of the limit's native width. Two consequences:
+
+1. A valid GPUSize64 value above `u32::MAX` makes `enforce_u32` throw a synchronous
+   `TypeError`. The spec requires the value to be carried as u64, found "better than"
+   the supported limit, and the requestDevice **Promise rejected with an
+   OperationError**. (130 cases: `value=4294967296`, `4294967297`, `9007199254740991`,
+   and fractional-`mul` alignment cases.)
+2. A value of exactly `4294967295` (`UINT32_MAX`) narrows into the u32 field and
+   **collides with `WGPU_LIMIT_U32_UNDEFINED` (`= UINT32_MAX`)**, so the C ABI reads
+   the limit as unset and the over-large request is silently accepted (`DID NOT
+   REJECT`). The spec requires an OperationError. (32 cases.)
+
+`value=4294967294` (`0xFFFFFFFE`, not the sentinel) is rejected correctly on both
+backends — so the backends validate over-supported limits fine; both failure modes
+are the binding narrowing GPUSize64 to the C u32 before the algorithm runs.
+
+**Fix shape (not yet applied).** In the requestDevice path: coerce every
+`requiredLimits` value as `GPUSize64` (u64); validate each against the adapter's
+supported limits (`wgpuAdapterGetLimits`) per the spec's "no better than" rule; on an
+unknown key or a violating value, **reject the requestDevice Promise with an
+OperationError** rather than throwing synchronously or narrowing into the sentinel.
+Only the surviving valid limits are written to `WGPULimits`. A `GPUSize64` limit that
+exceeds its C field's capacity is by definition better than any supported value, so it
+is an OperationError, never a TypeError.
