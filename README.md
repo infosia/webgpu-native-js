@@ -204,7 +204,8 @@ Three rules for script authors:
 
 ## Current API surface
 
-Filled so far (headless-tested end-to-end under both engines):
+The JS-visible surface is generated from WebIDL joined with `webgpu.yml`, and
+headless-tested end-to-end. Present so far:
 
 - `wrap_device` → `GPUDevice`; `GPU.requestAdapter` → `GPUAdapter.requestDevice`
 - `GPUBuffer`: `createBuffer` (incl. `mappedAtCreation`), `mapAsync`,
@@ -222,9 +223,24 @@ Filled so far (headless-tested end-to-end under both engines):
   attributes read through the C getters), `createCommandEncoder`
 - `GPUCommandEncoder`: compute/render passes, buffer and texture copy recording,
   and `finish`; render pass: pipeline/buffer/bind-group state, viewport/scissor,
-  draw/drawIndexed, and `end`;
-  compute pass: `setPipeline`, `setBindGroup`, `dispatchWorkgroups`, `end`;
+  draw/drawIndexed and their indirect forms, occlusion queries, and `end`;
+  compute pass: `setPipeline`, `setBindGroup`, `dispatchWorkgroups`(`Indirect`), `end`;
   single-use command buffers
+- `GPURenderBundleEncoder`: `createRenderBundleEncoder`, the render-command mixin
+  (pipeline/vertex-index buffers/bind groups, draws, debug markers), `finish` →
+  `GPURenderBundle`, and `executeBundles` on a render pass
+- `GPUQuerySet`: `createQuerySet`, `resolveQuerySet`, occlusion queries, and
+  timestamp writes on compute and render passes
+- Immediate data: `setImmediates` on compute/render passes and render bundles,
+  and `GPUPipelineLayoutDescriptor.immediateSize`
+- Errors: `pushErrorScope`/`popErrorScope`, the `GPUError` hierarchy
+  (`GPUValidationError`, `GPUOutOfMemoryError`, `GPUInternalError`),
+  `device.onuncapturederror`, and `device.lost`
+- Introspection: `GPUAdapter`/`GPUDevice` `info`/`features`/`limits`,
+  `getBindGroupLayout`, object `label` round-trips, and
+  `GPUShaderModule.getCompilationInfo`
+- Async pipeline creation: `createComputePipelineAsync`,
+  `createRenderPipelineAsync`
 
 WebIDL semantics are followed: iterator-based `sequence<T>` conversion
 (a `Set` or generator is accepted, an array-like is rejected), `[EnforceRange]`
@@ -298,22 +314,25 @@ separately and never required.
   cannot fail.
 - **Dual-engine parity is asserted byte-for-byte** by the shared conformance
   script, on every test run.
-- The long-term binding oracle is the upstream
-  [WebGPU CTS](https://github.com/gpuweb/cts) itself, which is written in
-  TypeScript and can eventually run inside the engine under test — the same
-  approach `dawn.node` uses, one engine down. Out of scope until codegen
-  lands; the per-conversion unit tests and the parity script carry the load
-  until then.
+- **The upstream [WebGPU CTS](https://github.com/gpuweb/cts) runs against the
+  binding.** A harness executes the TypeScript suite under Boa against yawgpu
+  (headless) and Dawn (the oracle) — the same approach `dawn.node` uses, one
+  engine down. A curated set of tens of thousands of cases passes with zero
+  failures; execution-result families the headless Noop backend cannot run are
+  verified on Dawn, and every catalogued expected-failure carries a reason. The
+  per-conversion unit tests and the byte-identical parity script run underneath
+  it.
 
 ## Status
 
-Working through a phased plan (see `specs/`): the engine boundary, the async
-and mapping machinery, and the API surface above are in place; the
-JavaScriptCore adapter validates the central design bet end-to-end. Next:
-code generation from WebIDL joined with `webgpu.yml` (the same input pairing
-`dawn.node` generates from) landed, as did error scopes, the GPUError
-hierarchy, `onuncapturederror`/`device.lost`, and the texture/render surface.
-Next: mobile bring-up.
+Pre-1.0, working through a phased plan (see `specs/`). In place and tested: the
+engine boundary; the async and mapping machinery; the API surface above; code
+generation from WebIDL joined with `webgpu.yml` (the same input pairing
+`dawn.node` generates from); error scopes and the `GPUError` hierarchy;
+`onuncapturederror` and `device.lost`; the texture/render surface; and immediate
+data. The JavaScriptCore adapter validates the central design bet end-to-end, and
+a WebGPU-CTS harness runs the binding against yawgpu (headless) and Dawn (the
+oracle). Next: mobile bring-up, and continued CTS coverage.
 
 ## License
 
