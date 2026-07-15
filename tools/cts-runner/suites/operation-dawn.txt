@@ -54,3 +54,11 @@ webgpu:api,operation,limits,max_combined_limits:*
 webgpu:api,operation,pipeline,pipeline_layout_created_with_null_bind_group_layout:*
 webgpu:api,operation,pipeline,default_layout:*
 webgpu:api,operation,vertex_state,index_format:*
+
+# requestAdapter (B-11, 2026-07-15). Verifies each adapter by running a real compute
+# dispatch (testAdapter), so most cases are execution-dependent: yawgpu Noop 5/13 (only
+# the invalid-featureLevel cases, which resolve null with no execution, pass). Two binding
+# bugs were fixed first (gpu_request_adapter ignored its descriptor; the callback rejected
+# instead of resolving null for no-adapter). Dawn: 15/0, 3 skip (forceFallbackAdapter=true
+# has no Metal fallback -> null -> skip).
+webgpu:api,operation,adapter,requestAdapter:*

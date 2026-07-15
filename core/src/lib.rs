@@ -607,6 +607,9 @@ enum SettlementRequest<E: JsEngine + 'static> {
         deferred: Deferred<E>,
         native: PendingNative,
     },
+    AdapterUnavailable {
+        deferred: Deferred<E>,
+    },
     Device {
         deferred: Deferred<E>,
         native: PendingNative,
@@ -722,6 +725,9 @@ impl<E: JsEngine + 'static> SettlementRequest<E> {
                         (deferred, Err(E::error_value_from_error(cx, error)))
                     }
                 })
+            }
+            Self::AdapterUnavailable { deferred } => {
+                SettlementOutcome::Deferred((deferred, Ok(E::null(cx))))
             }
             Self::Device {
                 deferred,
@@ -1131,6 +1137,7 @@ impl SettlementQueue {
             if let Ok(request) = request.downcast::<SettlementRequest<E>>() {
                 match *request {
                     SettlementRequest::Adapter { deferred, .. }
+                    | SettlementRequest::AdapterUnavailable { deferred }
                     | SettlementRequest::Device { deferred, .. }
                     | SettlementRequest::CompilationInfo { deferred, .. }
                     | SettlementRequest::Success { deferred }
@@ -4872,7 +4879,7 @@ pub fn device_destroy<E: JsEngine + 'static>(
 pub fn gpu_request_adapter<E: JsEngine + 'static>(
     cx: E::Context<'_>,
     this: E::Value,
-    _args: &[E::Value],
+    args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
     promise_operation::<E>(cx, |deferred| {
         let Some(payload) = E::payload(cx, this, GPU_CLASS)
@@ -4882,6 +4889,45 @@ pub fn gpu_request_adapter<E: JsEngine + 'static>(
                 cx,
                 "GPU.requestAdapter called on an incompatible object",
             ));
+        };
+        let descriptor = args.first().copied().unwrap_or_else(|| E::undefined(cx));
+        let feature_level_value = dictionary_member::<E>(cx, descriptor, "featureLevel")?;
+        let feature_level_arena = Arena::new();
+        let feature_level = if E::is_undefined(cx, feature_level_value) {
+            "core"
+        } else {
+            E::to_str(cx, feature_level_value, &feature_level_arena)?
+        };
+        let power_preference_value = dictionary_member::<E>(cx, descriptor, "powerPreference")?;
+        let power_preference = if E::is_undefined(cx, power_preference_value) {
+            WGPUPowerPreference_WGPUPowerPreference_Undefined
+        } else {
+            convert_request_adapter_power_preference::<E>(cx, power_preference_value)?
+        };
+        let force_fallback_adapter = E::to_bool(
+            cx,
+            dictionary_member::<E>(cx, descriptor, "forceFallbackAdapter")?,
+        );
+        let _xr_compatible =
+            E::to_bool(cx, dictionary_member::<E>(cx, descriptor, "xrCompatible")?);
+        let feature_level = match feature_level {
+            "core" => WGPUFeatureLevel_WGPUFeatureLevel_Core,
+            "compatibility" => WGPUFeatureLevel_WGPUFeatureLevel_Compatibility,
+            _ => {
+                let deferred = deferred.take().ok_or_else(|| {
+                    E::operation_error(cx, "requestAdapter deferred is unavailable")
+                })?;
+                E::settle_deferreds(cx, vec![(deferred, Ok(E::null(cx)))])?;
+                return Ok(());
+            }
+        };
+        let options = WGPURequestAdapterOptions {
+            nextInChain: ptr::null_mut(),
+            featureLevel: feature_level,
+            powerPreference: power_preference,
+            forceFallbackAdapter: u32::from(force_fallback_adapter),
+            backendType: WGPUBackendType_WGPUBackendType_Undefined,
+            compatibleSurface: ptr::null_mut(),
         };
         let mut request = Box::new(AdapterRequest::<E> {
             deferred: deferred.take(),
@@ -4904,12 +4950,24 @@ pub fn gpu_request_adapter<E: JsEngine + 'static>(
         unsafe {
             (E::environment(cx).gpu().instance_request_adapter)(
                 payload.instance,
-                ptr::null(),
+                ptr::from_ref(&options),
                 info,
             );
         }
         Ok(())
     })
+}
+
+fn convert_request_adapter_power_preference<E: JsEngine>(
+    cx: E::Context<'_>,
+    value: E::Value,
+) -> Result<WGPUPowerPreference, E::Error> {
+    let arena = Arena::new();
+    match E::to_str(cx, value, &arena)? {
+        "low-power" => Ok(WGPUPowerPreference_WGPUPowerPreference_LowPower),
+        "high-performance" => Ok(WGPUPowerPreference_WGPUPowerPreference_HighPerformance),
+        _ => Err(E::type_error(cx, "GPUPowerPreference")),
+    }
 }
 
 /// Implements `GPUAdapter.requestDevice`.
@@ -8644,7 +8702,7 @@ fn enqueue_render_pipeline_release(
 unsafe extern "C" fn request_adapter_callback<E: JsEngine + 'static>(
     status: WGPURequestAdapterStatus,
     adapter: WGPUAdapter,
-    message: WGPUStringView,
+    _message: WGPUStringView,
     userdata1: *mut c_void,
     _userdata2: *mut c_void,
 ) {
@@ -8681,11 +8739,7 @@ unsafe extern "C" fn request_adapter_callback<E: JsEngine + 'static>(
                     gpu: request.gpu,
                 });
             }
-            SettlementRequest::Error {
-                deferred,
-                name: "OperationError",
-                message: unsafe { callback_message(message, "requestAdapter failed") },
-            }
+            SettlementRequest::AdapterUnavailable { deferred }
         };
         let _ = request.settlements.enqueue::<E>(settlement);
     }));

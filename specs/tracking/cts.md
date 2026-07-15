@@ -1050,3 +1050,31 @@ Promise with an OperationError; the sentinel collision is gone. `adapter,request
 now 171/0 on yawgpu Noop and 171/0 on Dawn (was 133/38 on both). Added to
 `validation-core.txt`. Fix in `core/src/lib.rs` only; no new `JsEngine` trait method,
 no engine-adapter change. `adapter,info` (3/1) is a separate, untouched issue.
+
+---
+
+## B-11 — requestAdapter processed its descriptor and resolves null (2026-07-15)
+
+`GPU.requestAdapter` had two binding bugs, both backend-independent (failures identical on
+yawgpu Noop and Dawn):
+
+1. **Descriptor ignored.** `gpu_request_adapter` took `_args` unused and passed `ptr::null()`
+   for `WGPURequestAdapterOptions`, so `featureLevel`, `powerPreference`, and
+   `forceFallbackAdapter` were never read. Consequences the CTS caught: an invalid
+   `featureLevel` (a `DOMString`, valid tokens "core"/"compatibility"/undefined) returned the
+   default adapter instead of null (spec: resolve null); `forceFallbackAdapter=true` returned
+   the default non-fallback adapter. Fixed: read the descriptor and pass real options;
+   an invalid featureLevel resolves the Promise with null without calling the C ABI.
+2. **Callback rejected instead of resolving null.** `request_adapter_callback` settled a
+   no-adapter result as an OperationError rejection. `requestAdapter` returns
+   `Promise<GPUAdapter?>` and never rejects — no adapter resolves null. Added a
+   `SettlementRequest::AdapterUnavailable` variant that resolves with `E::null`; used for any
+   non-Success status. `request_device_callback` (Promise<GPUDevice>, non-nullable) keeps
+   rejecting, unchanged.
+
+Results: `api,operation,adapter,requestAdapter` on Dawn 15/0 with 3 skips
+(`forceFallbackAdapter=true` finds no Metal fallback → null → skip); was 10/8 before. yawgpu
+Noop 5/13 — the 5 invalid-featureLevel cases pass (null resolve, no execution), the rest run a
+real compute dispatch (testAdapter) and are execution-dependent. Family added to
+`operation-dawn.txt`. Fixes in `core/src/lib.rs` only; no new `JsEngine` trait method, no
+engine-adapter change.

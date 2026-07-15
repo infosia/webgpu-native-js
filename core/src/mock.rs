@@ -1574,10 +1574,12 @@ struct MockGpuState {
     next_pop_error: Option<MockPopError>,
     next_pipeline_async_error: Option<(crate::WGPUCreatePipelineAsyncStatus, String)>,
     next_compilation_info: Option<MockCompilationInfo>,
+    next_request_adapter_status: Option<crate::WGPURequestAdapterStatus>,
     device_lost_callback: Option<WGPUDeviceLostCallbackInfo>,
     uncaptured_error_callback: Option<WGPUUncapturedErrorCallbackInfo>,
     requested_features: Vec<Vec<crate::WGPUFeatureName>>,
     requested_limits: Vec<Option<(WGPULimits, crate::WGPUCompatibilityModeLimits)>>,
+    requested_adapter_options: Vec<Option<RecordedRequestAdapterOptions>>,
     recording_calls: BTreeMap<&'static str, usize>,
     compute_bind_group_calls: Vec<RecordedBindGroupCall<WGPUComputePassEncoder>>,
     render_bind_group_calls: Vec<RecordedBindGroupCall<WGPURenderPassEncoder>>,
@@ -1714,6 +1716,13 @@ struct RecordedRenderBundleEncoderDescriptor {
     stencil_read_only: u32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RecordedRequestAdapterOptions {
+    feature_level: crate::WGPUFeatureLevel,
+    power_preference: crate::WGPUPowerPreference,
+    force_fallback_adapter: crate::WGPUBool,
+}
+
 /// Resets the mock GPU call log.
 pub fn reset_gpu() {
     GPU_STATE.with(|state| {
@@ -1780,14 +1789,33 @@ unsafe fn device_add_ref(_device: WGPUDevice) {
 
 unsafe fn instance_request_adapter(
     _instance: webgpu_native_js_ffi::native::WGPUInstance,
-    _options: *const webgpu_native_js_ffi::native::WGPURequestAdapterOptions,
+    options: *const webgpu_native_js_ffi::native::WGPURequestAdapterOptions,
     info: WGPURequestAdapterCallbackInfo,
 ) -> webgpu_native_js_ffi::native::WGPUFuture {
+    // SAFETY: the binding keeps its stack options live through this synchronous call.
+    let options = unsafe { options.as_ref() }.map(|options| RecordedRequestAdapterOptions {
+        feature_level: options.featureLevel,
+        power_preference: options.powerPreference,
+        force_fallback_adapter: options.forceFallbackAdapter,
+    });
+    GPU_STATE.with(|state| state.borrow_mut().requested_adapter_options.push(options));
+    let status = GPU_STATE
+        .with(|state| state.borrow_mut().next_request_adapter_status.take())
+        .unwrap_or(
+            webgpu_native_js_ffi::native::WGPURequestAdapterStatus_WGPURequestAdapterStatus_Success,
+        );
+    let adapter = if status
+        == webgpu_native_js_ffi::native::WGPURequestAdapterStatus_WGPURequestAdapterStatus_Success
+    {
+        fake_device().cast::<webgpu_native_js_ffi::native::WGPUAdapterImpl>()
+    } else {
+        ptr::null_mut()
+    };
     if let Some(callback) = info.callback {
         unsafe {
             callback(
-                webgpu_native_js_ffi::native::WGPURequestAdapterStatus_WGPURequestAdapterStatus_Success,
-                fake_device().cast::<webgpu_native_js_ffi::native::WGPUAdapterImpl>(),
+                status,
+                adapter,
                 WGPUStringView::from_bytes(b""),
                 info.userdata1,
                 info.userdata2,
@@ -3789,6 +3817,189 @@ mod tests {
         };
         assert_eq!(actual_name, name);
         assert_eq!(actual_message, message);
+    }
+
+    fn request_adapter_and_tick(
+        rt: &Runtime,
+        cx: Context<'_>,
+        gpu: Value,
+        args: &[Value],
+        instance: crate::WGPUInstance,
+    ) -> Value {
+        let promise = gpu_request_adapter::<Engine>(cx, gpu, args).expect("requestAdapter promise");
+        unsafe { crate::tick::<Engine>(cx, instance) }.expect("requestAdapter tick");
+        rt.promise_result(promise)
+            .expect("requestAdapter must settle")
+            .expect("requestAdapter must resolve")
+    }
+
+    #[test]
+    fn request_adapter_invalid_feature_level_resolves_null_without_native_call() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let instance = fake_handle(39_001);
+        let gpu = crate::wrap_gpu::<Engine>(cx, instance).expect("GPU");
+        let descriptor = descriptor(&rt, &[("featureLevel", rt.string("cor"))]);
+
+        let promise = gpu_request_adapter::<Engine>(cx, gpu, &[descriptor]).expect("promise");
+        let resolved = rt
+            .promise_result(promise)
+            .expect("promise must settle")
+            .expect("promise must resolve");
+        assert!(Engine::is_null(cx, resolved));
+        assert!(GPU_STATE.with(|state| state.borrow().requested_adapter_options.is_empty()));
+    }
+
+    #[test]
+    fn request_adapter_unavailable_status_resolves_null() {
+        reset_gpu();
+        GPU_STATE.with(|state| {
+            state.borrow_mut().next_request_adapter_status =
+                Some(crate::WGPURequestAdapterStatus_WGPURequestAdapterStatus_Unavailable);
+        });
+        let rt = runtime();
+        let cx = rt.context();
+        let instance = fake_handle(39_007);
+        let gpu = crate::wrap_gpu::<Engine>(cx, instance).expect("GPU");
+
+        let resolved = request_adapter_and_tick(&rt, cx, gpu, &[], instance);
+        assert!(Engine::is_null(cx, resolved));
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.requested_adapter_options.len(), 1);
+            assert_eq!(state.adapter_releases, 0);
+        });
+    }
+
+    #[test]
+    fn request_adapter_records_compatibility_feature_level() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let instance = fake_handle(39_002);
+        let gpu = crate::wrap_gpu::<Engine>(cx, instance).expect("GPU");
+        let descriptor = descriptor(&rt, &[("featureLevel", rt.string("compatibility"))]);
+
+        let adapter = request_adapter_and_tick(&rt, cx, gpu, &[descriptor], instance);
+        assert!(Engine::payload(cx, adapter, crate::GPU_ADAPTER_CLASS).is_some());
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            let options = state
+                .requested_adapter_options
+                .last()
+                .copied()
+                .flatten()
+                .expect("requestAdapter options");
+            assert_eq!(
+                options.feature_level,
+                crate::WGPUFeatureLevel_WGPUFeatureLevel_Compatibility
+            );
+        });
+    }
+
+    #[test]
+    fn request_adapter_defaults_feature_level_to_core_and_resolves() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let instance = fake_handle(39_003);
+        let gpu = crate::wrap_gpu::<Engine>(cx, instance).expect("GPU");
+        let undefined = descriptor(&rt, &[("featureLevel", rt.undefined())]);
+        let core = descriptor(&rt, &[("featureLevel", rt.string("core"))]);
+
+        let no_descriptor = gpu_request_adapter::<Engine>(cx, gpu, &[]).expect("default promise");
+        let undefined =
+            gpu_request_adapter::<Engine>(cx, gpu, &[undefined]).expect("undefined promise");
+        let core = gpu_request_adapter::<Engine>(cx, gpu, &[core]).expect("core promise");
+        unsafe { crate::tick::<Engine>(cx, instance) }.expect("requestAdapter tick");
+        for promise in [no_descriptor, undefined, core] {
+            let adapter = rt
+                .promise_result(promise)
+                .expect("requestAdapter must settle")
+                .expect("requestAdapter must resolve");
+            assert!(Engine::payload(cx, adapter, crate::GPU_ADAPTER_CLASS).is_some());
+        }
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.requested_adapter_options.len(), 3);
+            for options in &state.requested_adapter_options {
+                let options = options.as_ref().expect("requestAdapter options");
+                assert_eq!(
+                    options.feature_level,
+                    crate::WGPUFeatureLevel_WGPUFeatureLevel_Core
+                );
+                assert_eq!(
+                    options.power_preference,
+                    crate::WGPUPowerPreference_WGPUPowerPreference_Undefined
+                );
+                assert_eq!(options.force_fallback_adapter, 0);
+            }
+        });
+    }
+
+    #[test]
+    fn request_adapter_records_low_power_preference() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let instance = fake_handle(39_004);
+        let gpu = crate::wrap_gpu::<Engine>(cx, instance).expect("GPU");
+        let descriptor = descriptor(&rt, &[("powerPreference", rt.string("low-power"))]);
+
+        request_adapter_and_tick(&rt, cx, gpu, &[descriptor], instance);
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            let options = state.requested_adapter_options[0].expect("requestAdapter options");
+            assert_eq!(
+                options.power_preference,
+                crate::WGPUPowerPreference_WGPUPowerPreference_LowPower
+            );
+        });
+    }
+
+    #[test]
+    fn request_adapter_rejects_unknown_power_preference_with_type_error() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let instance = fake_handle(39_005);
+        let gpu = crate::wrap_gpu::<Engine>(cx, instance).expect("GPU");
+        let descriptor = descriptor(&rt, &[("powerPreference", rt.string("balanced"))]);
+
+        let promise = gpu_request_adapter::<Engine>(cx, gpu, &[descriptor]).expect("promise");
+        assert_rejection(&rt, promise, "TypeError", "GPUPowerPreference");
+        assert!(GPU_STATE.with(|state| state.borrow().requested_adapter_options.is_empty()));
+    }
+
+    #[test]
+    fn request_adapter_coerces_force_fallback_adapter_with_to_boolean() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let instance = fake_handle(39_006);
+        let gpu = crate::wrap_gpu::<Engine>(cx, instance).expect("GPU");
+        let boolean = descriptor(&rt, &[("forceFallbackAdapter", rt.bool(true))]);
+        let truthy_string = descriptor(&rt, &[("forceFallbackAdapter", rt.string("false"))]);
+
+        let boolean = gpu_request_adapter::<Engine>(cx, gpu, &[boolean]).expect("boolean promise");
+        let truthy_string = gpu_request_adapter::<Engine>(cx, gpu, &[truthy_string])
+            .expect("truthy string promise");
+        unsafe { crate::tick::<Engine>(cx, instance) }.expect("requestAdapter tick");
+        for promise in [boolean, truthy_string] {
+            rt.promise_result(promise)
+                .expect("requestAdapter must settle")
+                .expect("requestAdapter must resolve");
+        }
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.requested_adapter_options.len(), 2);
+            assert!(state.requested_adapter_options.iter().all(|options| {
+                options
+                    .as_ref()
+                    .is_some_and(|options| options.force_fallback_adapter == 1)
+            }));
+        });
     }
 
     #[test]
