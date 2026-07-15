@@ -121,20 +121,26 @@ below).
 
 ## JavaScript delivery
 
-**Game JavaScript is delivered to the runtime as a single script.** Multi-file
-sources must be bundled by the application's build using the ordinary JavaScript
-toolchain, such as esbuild, Rollup, or SWC. Runtime ES modules are a **Boa-only
-development-tooling capability** used by the CTS runner; game code must not rely
-on them. JavaScriptCore's module API is not part of the public Apple SDK, and
-this project does not ship on private API.
+**The first-party CommonJS loader is the default multi-file path.** The host
+supplies `(module id, source)` strings and an entry id to `Runtime::run_modules`;
+the binding assembles one self-contained registry script and evaluates the same
+script under Boa and JavaScriptCore. It needs no filesystem access in the binding,
+no Node runtime, and no build step. Module sources use `require`, `module.exports`,
+and `exports`; ES-module `import` and `export` syntax is not accepted on this path.
 
-**Bundling erases top-level TDZ, so do not rely on it.** A bundler rewrites every
-top-level `let`, `const` and `class` to `var`. Under real ES modules — which is what
-you get while developing against the Boa module loader — reading a binding before
-its initializer throws `ReferenceError`. In the bundle you ship, the same read
-silently yields `undefined`. Prefer acyclic module graphs: a circular import that
-appears to work in the bundle may be reading `undefined` where the module goal would
-have stopped you.
+esbuild, Rollup, and SWC remain optional build-time paths for ESM, minification,
+and tree-shaking. Runtime ES modules are a **Boa-only development-tooling
+capability** used by the CTS runner; game code that must run on both engines must
+not rely on them. JavaScriptCore's module API is not part of the public Apple SDK,
+and this project does not ship on private API.
+
+**Bundling ESM erases top-level TDZ, so do not rely on it.** An ESM bundler can
+rewrite top-level `let`, `const`, and `class` bindings to `var`. Under real ES
+modules — which is what the Boa development loader runs — reading a binding before
+its initializer throws `ReferenceError`. In the ESM bundle, the same read can
+silently yield `undefined`. Prefer acyclic ESM graphs: a circular import that
+appears to work in the bundle may be reading `undefined` where the module goal
+would have stopped it.
 
 ## Backends
 

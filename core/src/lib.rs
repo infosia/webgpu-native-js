@@ -20,6 +20,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 pub use webgpu_native_js_ffi::native::*;
 
+/// CommonJS bootstrap assembly for host-supplied module sources.
+pub mod commonjs;
+
 /// Native pipeline parent retained by a pipeline-derived bind-group layout.
 #[derive(Clone, Copy)]
 pub enum PipelineParent {

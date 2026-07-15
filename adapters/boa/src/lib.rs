@@ -543,6 +543,11 @@ impl Runtime {
             .map_err(|error| Error::Exception(js_error_string(error, context)))
     }
 
+    /// Runs a set of CommonJS modules, returning the entry module's exports.
+    pub fn run_modules(&self, modules: &[(String, String)], entry: &str) -> Result<BoaValue> {
+        self.eval(&core::commonjs::build_bootstrap(modules, entry), entry)
+    }
+
     /// Sets a global property and releases the adapter hold on `value`.
     pub fn set_global_value(&self, name: &str, value: BoaValue) -> Result<()> {
         let js_value = self.arena.get(value);
@@ -2165,6 +2170,20 @@ mod tests {
             .to_std_string_lossy()
     }
 
+    fn run_modules_string(runtime: &Runtime, modules: &[(String, String)], entry: &str) -> String {
+        let value = runtime
+            .run_modules(modules, entry)
+            .expect("run CommonJS modules");
+        let js_value = runtime.arena.get(value);
+        runtime.arena.release(value);
+        // SAFETY: the test is single-threaded and no other Boa call overlaps conversion.
+        let context = unsafe { &mut *runtime.raw_context() };
+        js_value
+            .to_string(context)
+            .expect("stringify CommonJS exports")
+            .to_std_string_lossy()
+    }
+
     fn hold_value_in_module(runtime: &Runtime, files: &TempModules, value: BoaValue) {
         runtime
             .set_global_value("moduleRootCandidate", value)
@@ -2346,6 +2365,142 @@ mod tests {
             .eval("throw new TypeError('eval boom')", "throw.js")
             .expect_err("evaluation must fail");
         assert!(error.to_string().contains("eval boom"));
+    }
+
+    #[test]
+    fn commonjs_entry_requires_another_module() {
+        let runtime = Runtime::new().expect("Boa runtime");
+        let modules = vec![
+            (
+                "main".to_owned(),
+                "module.exports = require(\"value\");".to_owned(),
+            ),
+            (
+                "value".to_owned(),
+                "module.exports = \"round-trip\";".to_owned(),
+            ),
+        ];
+
+        assert_eq!(run_modules_string(&runtime, &modules, "main"), "round-trip");
+    }
+
+    #[test]
+    fn commonjs_resolves_relative_module_ids() {
+        let runtime = Runtime::new().expect("Boa runtime");
+        let modules = vec![
+            (
+                "game/main".to_owned(),
+                "module.exports = require(\"./util\");".to_owned(),
+            ),
+            (
+                "game/util".to_owned(),
+                "module.exports = \"relative\";".to_owned(),
+            ),
+        ];
+
+        assert_eq!(
+            run_modules_string(&runtime, &modules, "game/main"),
+            "relative"
+        );
+    }
+
+    #[test]
+    fn commonjs_resolves_index_js() {
+        let runtime = Runtime::new().expect("Boa runtime");
+        let modules = vec![
+            (
+                "main".to_owned(),
+                "module.exports = require(\"./lib\");".to_owned(),
+            ),
+            (
+                "lib/index.js".to_owned(),
+                "module.exports = \"index\";".to_owned(),
+            ),
+        ];
+
+        assert_eq!(run_modules_string(&runtime, &modules, "main"), "index");
+    }
+
+    #[test]
+    fn commonjs_cycles_observe_partial_exports() {
+        let runtime = Runtime::new().expect("Boa runtime");
+        let modules = vec![
+            (
+                "a".to_owned(),
+                "exports.phase = \"a-partial\"; module.exports = require(\"./b\").observed;"
+                    .to_owned(),
+            ),
+            (
+                "b".to_owned(),
+                "exports.observed = require(\"./a\").phase;".to_owned(),
+            ),
+        ];
+
+        assert_eq!(run_modules_string(&runtime, &modules, "a"), "a-partial");
+    }
+
+    #[test]
+    fn commonjs_cache_runs_each_resolved_module_once() {
+        let runtime = Runtime::new().expect("Boa runtime");
+        let modules = vec![
+            (
+                "main".to_owned(),
+                "require(\"./counter\"); require(\"./counter.js\"); module.exports = String(globalThis.__commonjsRuns);"
+                    .to_owned(),
+            ),
+            (
+                "counter.js".to_owned(),
+                "globalThis.__commonjsRuns = (globalThis.__commonjsRuns || 0) + 1; module.exports = globalThis.__commonjsRuns;"
+                    .to_owned(),
+            ),
+        ];
+
+        assert_eq!(run_modules_string(&runtime, &modules, "main"), "1");
+    }
+
+    #[test]
+    fn commonjs_missing_module_reports_tried_ids() {
+        let runtime = Runtime::new().expect("Boa runtime");
+        let modules = vec![(
+            "main".to_owned(),
+            "module.exports = require(\"nope\");".to_owned(),
+        )];
+
+        let error = runtime
+            .run_modules(&modules, "main")
+            .expect_err("missing CommonJS module must fail");
+        let message = error.to_string();
+        assert!(
+            message.contains("Cannot find module 'nope' from 'main'"),
+            "{message}"
+        );
+        assert!(message.contains("'nope.js'"), "{message}");
+        assert!(message.contains("'nope/index.js'"), "{message}");
+    }
+
+    #[test]
+    fn commonjs_top_level_throw_propagates() {
+        let runtime = Runtime::new().expect("Boa runtime");
+        let modules = vec![(
+            "main".to_owned(),
+            "throw new Error(\"CommonJS top-level boom\");".to_owned(),
+        )];
+
+        let error = runtime
+            .run_modules(&modules, "main")
+            .expect_err("top-level CommonJS throw must fail");
+        assert!(error.to_string().contains("CommonJS top-level boom"));
+    }
+
+    #[test]
+    fn commonjs_rejects_esm_syntax() {
+        let runtime = Runtime::new().expect("Boa runtime");
+        let modules = vec![("main".to_owned(), "export const x = 1;".to_owned())];
+
+        let error = runtime
+            .run_modules(&modules, "main")
+            .expect_err("ESM syntax in CommonJS must fail");
+        assert!(error.to_string().contains("SyntaxError"), "{error}");
     }
 
     #[test]
