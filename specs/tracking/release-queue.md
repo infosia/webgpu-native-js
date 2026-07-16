@@ -139,6 +139,28 @@ rooting are both plausible. The observable fact is enough:
 
 > **Finalizer timing is not controllable through JSC's public C API.**
 
+**Upstream corroboration (added 2026-07-17).** WebKit's own source confirms the
+measurement and supplies the mechanism:
+
+- `Source/JavaScriptCore/API/JSBase.cpp` (WebKit main): `JSGarbageCollect`
+  performs no collection — it calls `vm.heap.reportAbandonedObjectGraph()`, a
+  scheduling hint. Its comment states the previously recommended usage "became
+  a no-op (but the GC will happen when the context group is destroyed)" —
+  matching the observed finalize-at-`JSGlobalContextRelease`.
+- WebKit bug 84476 (2012, r114771): the synchronous `collectAllGarbage()` call
+  was deliberately removed from `JSGarbageCollect`.
+- A synchronous collect exists — `JSSynchronousGarbageCollectForDebugging`,
+  same file — but it is private API: Appcelerator/Hyperloop apps were rejected
+  by App Store review for referencing the symbol (Appcelerator JIRA
+  TIMOB-20373), and NativeScript's ios-runtime linked it for its
+  `collectGarbage()`. The public API is the enforced boundary.
+
+Scope of the claim, restated precisely: JSC's GC does run on its own schedule
+under allocation pressure, and finalizers run when it does. What is
+uncontrollable is *forcing* it: no public call collects synchronously, so
+finalizer timing is unbounded, and a quiet heap may not finalize until context
+teardown (measured above; consistent with the `JSBase.cpp` comment).
+
 ### R4 — consequence for invariant 7 ("GC is a backstop")
 
 This is now evidence, not prudence. Under JSC, a script that forgets `destroy()`
