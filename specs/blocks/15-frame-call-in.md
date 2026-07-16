@@ -308,6 +308,10 @@ withdrawn:
 - The example's `--verify` golden runs on a single engine (examples link
   `boa_adapter`). It needs *intra*-engine reproducibility, which F2's arithmetic
   gives for free. Cross-engine bit-exactness of the example was never required.
+  *(Update 2026-07-17, owner decision: examples gain link-time engine selection
+  — an `engine-jsc` cargo feature selects the JavaScriptCore adapter on Apple
+  platforms; Boa stays the default. The goldens are engine-independent by F2's
+  argument above, so one golden per example serves both engines.)*
 
 So `examples/bounce` owns its simulation inside `bounce.js`, a single plain
 script loaded exactly the way `triangle.js` already is. **F2 still stands** — the

@@ -12,21 +12,26 @@ test = false
 
 [features]
 default = ["backend-yawgpu"]
+engine-jsc = ["dep:javascriptcore-adapter", "javascriptcore-adapter/jsc"]
 backend-yawgpu = [
     "boa-adapter/backend-yawgpu",
+    "javascriptcore-adapter?/backend-yawgpu",
     "webgpu-native-js-ffi/backend-yawgpu",
 ]
 backend-wgpu-native = [
     "boa-adapter/backend-wgpu-native",
+    "javascriptcore-adapter?/backend-wgpu-native",
     "webgpu-native-js-ffi/backend-wgpu-native",
 ]
 backend-dawn = [
     "boa-adapter/backend-dawn",
+    "javascriptcore-adapter?/backend-dawn",
     "webgpu-native-js-ffi/backend-dawn",
 ]
 
 [dependencies]
 boa-adapter = { path = "../../adapters/boa", default-features = false }
+javascriptcore-adapter = { path = "../../adapters/javascriptcore", default-features = false, optional = true }
 raw-window-handle = "0.6"
 webgpu-native-js-ffi = { path = "../../ffi", default-features = false }
 winit = "0.30"

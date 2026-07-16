@@ -28,11 +28,11 @@ the registered host function `signalBundleSwap()`. The host, after that
 `frame()` returns and before encoding the pass, re-borrows the native handle,
 replaces its retention global, and swaps its stored handle. The superseded
 handle is never touched again: its release rides GC and the release queue.
-Under JavaScriptCore a superseded bundle would live until context teardown
+Under JavaScriptCore a superseded bundle lives until context teardown
 (finalizers effectively never run earlier, and `GPURenderBundle` has no
-`destroy()`), which is one reason re-record is rare by design; this example
-links the Boa engine. That one frame spends O(bundle commands) crossings, and
-the verify golden proves it happens exactly once in the run.
+`destroy()`), which is one reason re-record is rare by design. That one frame
+spends O(bundle commands) crossings, and the verify golden proves it happens
+exactly once in the run.
 
 `examples/triangle` shows the static case with zero per-frame JavaScript; this
 example shows the dynamic case — per-frame data through buffer writes, and
@@ -77,3 +77,9 @@ real GPU-capable backend is required because yawgpu's Noop backend cannot
 display a window. yawgpu selects Noop when `YAWGPU_BACKEND` is absent;
 `YAWGPU_BACKEND=metal` selects Metal on macOS and `YAWGPU_BACKEND=vulkan`
 selects Vulkan on Windows. Surface creation supports macOS and Windows.
+
+The engine is a link-time choice: Boa by default, and `--features engine-jsc`
+selects the system JavaScriptCore instead (Apple platforms only; the adapter is
+an empty crate elsewhere, so the feature does not compile off them). The same
+`expected.txt` gates both engines — the simulation is `+`, `-`, `*`, and
+comparison on f64, which any conformant engine reproduces bit-exactly.

@@ -49,3 +49,8 @@ Surface creation supports macOS (an AppKit `NSView` backed by a
 `CAMetalLayer`) and Windows (`WGPUSurfaceSourceWindowsHWND` via the window's
 HWND). Other targets currently return a clear unsupported-surface error after
 creating the window.
+
+The engine is a link-time choice: Boa by default, and `--features engine-jsc`
+selects the system JavaScriptCore instead (Apple platforms only; the adapter is
+an empty crate elsewhere, so the feature does not compile off them). Both
+engines produce the same verify output.

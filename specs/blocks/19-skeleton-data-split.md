@@ -47,8 +47,10 @@ recorded during the block-15 example's review (K9). A tracking entry at exit
 **Out.** Any new `Runtime` API; any change to `core/`, `codegen/`, `ffi/`, or
 either adapter (K7). A general scene-graph or multi-bundle library — this PoC
 exists to inform that block, not to be it. A JSC-linked example (examples link
-`boa_adapter`; recorded in block 15 §5). Host `dt` clamping (timestep policy is
-the host's business, block 15 §2; the stuck-outside-walls behaviour under a
+`boa_adapter`; recorded in block 15 §5). *(Superseded 2026-07-17, owner
+decision: all examples gained an `engine-jsc` cargo feature after this block
+closed — see block 15 §5's dated update.)* Host `dt` clamping (timestep policy
+is the host's business, block 15 §2; the stuck-outside-walls behaviour under a
 multi-second wall-clock `dt` remains a recorded cosmetic limitation of the
 non-verify mode).
 

@@ -624,6 +624,7 @@ name = "example-bounce"
 version = "0.1.0"
 dependencies = [
  "boa-adapter",
+ "javascriptcore-adapter",
  "raw-window-handle",
  "raw-window-metal",
  "webgpu-native-js-ffi",
@@ -635,6 +636,7 @@ name = "example-compute"
 version = "0.1.0"
 dependencies = [
  "boa-adapter",
+ "javascriptcore-adapter",
  "webgpu-native-js-ffi",
 ]
 
@@ -643,6 +645,7 @@ name = "example-triangle"
 version = "0.1.0"
 dependencies = [
  "boa-adapter",
+ "javascriptcore-adapter",
  "raw-window-handle",
  "raw-window-metal",
  "webgpu-native-js-ffi",

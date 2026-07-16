@@ -6,7 +6,10 @@ use std::ptr;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+#[cfg(not(feature = "engine-jsc"))]
 use boa_adapter::{HostValue, Runtime};
+#[cfg(feature = "engine-jsc")]
+use javascriptcore_adapter::{HostValue, Runtime};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use webgpu_native_js_ffi::native as wgpu;
 use winit::application::ApplicationHandler;

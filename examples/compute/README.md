@@ -41,6 +41,13 @@ supported backend. If the environment variable is absent and pkg-config cannot
 locate the selected backend, the existing FFI build error explains which
 dynamic library and variable are required.
 
+The engine is a link-time choice: Boa by default, and `--features engine-jsc`
+selects the system JavaScriptCore instead (Apple platforms only; the adapter is
+an empty crate elsewhere, so the feature does not compile off them). The engine
+thread and its explicit stack size stay in place under both engines — the
+obligation is the host's regardless of engine. Both engines print the same
+result line.
+
 yawgpu never auto-selects a real backend: with `YAWGPU_BACKEND` absent (or set
 to `noop`) the instance is Noop. `YAWGPU_BACKEND=vulkan` (Windows/Linux,
 requires a yawgpu build with the `vulkan` feature) or `YAWGPU_BACKEND=metal`
