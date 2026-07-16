@@ -1,10 +1,10 @@
 globalThis.ready = false;
 
+// Route initialization through the microtask pump and collect failures in `.catch`.
 Promise.resolve()
     .then(function () {
         const N = 8;
         const BODY_FLOATS = 8;
-        const VERIFY_FRAMES = 60;
         const WALL = 0.9;
         const bodies = [
             { x: -0.75, y: -0.65, vx: 0.42, vy: 0.31, r: 1.0, g: 0.25, b: 0.2 },
@@ -17,8 +17,11 @@ Promise.resolve()
             { x: 0.40, y: -0.75, vx: 0.31, vy: 0.46, r: 1.0, g: 0.3, b: 0.65 },
         ];
         const staging = new Float32Array(N * BODY_FLOATS);
+        const indirectArgs = new Uint32Array([6, N, 0, 0]);
         const queue = device.queue;
         let frameCount = 0;
+        let alive = N;
+        let visibilityCountdown = 6;
 
         const shader = device.createShaderModule({
             code: `
@@ -64,12 +67,22 @@ Promise.resolve()
                 fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
                     return vec4f(input.color, 1.0);
                 }
+
+                @fragment
+                fn fragmentMainDim(input: VertexOutput) -> @location(0) vec4f {
+                    return vec4f(input.color * 0.4, 1.0);
+                }
             `,
         });
         const storage = device.createBuffer({
             size: staging.byteLength,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
         });
+        const indirectBuffer = device.createBuffer({
+            size: indirectArgs.byteLength,
+            usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
+        });
+        queue.writeBuffer(indirectBuffer, 0, indirectArgs);
         const bindGroupLayout = device.createBindGroupLayout({
             entries: [{
                 binding: 0,
@@ -84,7 +97,7 @@ Promise.resolve()
         const pipelineLayout = device.createPipelineLayout({
             bindGroupLayouts: [bindGroupLayout],
         });
-        const pipeline = device.createRenderPipeline({
+        const basePipeline = device.createRenderPipeline({
             layout: pipelineLayout,
             vertex: {
                 module: shader,
@@ -97,15 +110,29 @@ Promise.resolve()
             },
             primitive: { topology: "triangle-list" },
         });
+        const variantPipeline = device.createRenderPipeline({
+            layout: pipelineLayout,
+            vertex: {
+                module: shader,
+                entryPoint: "vertexMain",
+            },
+            fragment: {
+                module: shader,
+                entryPoint: "fragmentMainDim",
+                targets: [{ format: globalThis.surfaceFormat }],
+            },
+            primitive: { topology: "triangle-list" },
+        });
         const encoder = device.createRenderBundleEncoder({
             colorFormats: [globalThis.surfaceFormat],
         });
-        encoder.setPipeline(pipeline);
+        encoder.setPipeline(basePipeline);
         encoder.setBindGroup(0, bindGroup);
-        encoder.draw(6, N);
+        encoder.drawIndirect(indirectBuffer, 0);
         globalThis.bounceBundle = encoder.finish();
+        globalThis.bundleGeneration = 1;
 
-        // update reuses fixed objects and one staging array because GC pressure is the significant JIT-less per-frame cost, not arithmetic.
+        // update reuses fixed objects and staging arrays because GC pressure is the significant JIT-less per-frame cost, not arithmetic.
         globalThis.update = function (dt) {
             for (let i = 0; i < N; i += 1) {
                 const body = bodies[i];
@@ -127,9 +154,48 @@ Promise.resolve()
                 staging[offset + 6] = body.b;
                 staging[offset + 7] = 1.0;
             }
-            queue.writeBuffer(storage, 0, staging);
             frameCount += 1;
-            if (globalThis.verify && frameCount === VERIFY_FRAMES) {
+            if (frameCount > 30 && frameCount <= 60) {
+                visibilityCountdown -= 1;
+                if (visibilityCountdown === 0) {
+                    alive -= 1;
+                    visibilityCountdown = 6;
+                }
+            } else if (frameCount > 60 && frameCount <= 90) {
+                visibilityCountdown -= 1;
+                if (visibilityCountdown === 0) {
+                    if (alive < N) {
+                        alive += 1;
+                    }
+                    visibilityCountdown = 6;
+                }
+            }
+            queue.writeBuffer(storage, 0, staging);
+            indirectArgs[1] = alive;
+            queue.writeBuffer(indirectBuffer, 0, indirectArgs);
+
+            if (frameCount === 45) {
+                const replacementEncoder = device.createRenderBundleEncoder({
+                    colorFormats: [globalThis.surfaceFormat],
+                });
+                replacementEncoder.setPipeline(variantPipeline);
+                replacementEncoder.setBindGroup(0, bindGroup);
+                replacementEncoder.drawIndirect(indirectBuffer, 0);
+                globalThis.bounceBundle = replacementEncoder.finish();
+                globalThis.bundleGeneration += 1;
+                signalBundleSwap();
+            }
+
+            if (
+                globalThis.verify
+                && (frameCount === 30
+                    || frameCount === 45
+                    || frameCount === 60
+                    || frameCount === globalThis.VERIFY_FRAMES)
+            ) {
+                print("checkpoint", frameCount, alive, globalThis.bundleGeneration);
+            }
+            if (globalThis.verify && frameCount === globalThis.VERIFY_FRAMES) {
                 for (let i = 0; i < N; i += 1) {
                     const body = bodies[i];
                     print(body.x, body.y);

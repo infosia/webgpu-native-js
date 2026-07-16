@@ -8,7 +8,8 @@ the wrapper alive, then acquires, clears, renders, submits, and presents every
 frame through `webgpu.h`. The host deliberately does not call `eval` or `tick`
 between frames; queued wrapper releases are drained during teardown.
 `examples/bounce` shows the dynamic case: one JavaScript update per frame drives
-multiple bodies while the host still submits one draw call.
+multiple bodies through buffer writes while the host still submits one draw
+call, and structural change (a bundle re-record) is an explicit, counted event.
 
 Build the selected real backend first and point the loader at its library
 directory:

@@ -18,7 +18,7 @@ use winit::window::{Window, WindowId};
 const BOUNCE_SOURCE: &str = include_str!("../bounce.js");
 const EXPECTED_OUTPUT: &str = include_str!("../expected.txt");
 const INIT_DEADLINE: Duration = Duration::from_secs(10);
-const VERIFY_FRAMES: u64 = 60;
+const VERIFY_FRAMES: u64 = 90;
 
 fn host_value_text(value: &HostValue) -> String {
     match value {
@@ -452,6 +452,8 @@ struct Renderer {
     verify: bool,
     last_frame: Instant,
     captured_output: Rc<RefCell<Vec<String>>>,
+    swap_signals: Rc<Cell<u64>>,
+    handled_swaps: u64,
 }
 
 struct InitialNativeHandles {
@@ -504,7 +506,27 @@ impl Renderer {
             unsafe { wgpu::wgpuInstanceRelease(instance) };
             return Err(format!("{error:?}"));
         }
-        let result = Self::new_with_instance(instance, window, runtime, verify, captured_output);
+        let swap_signals = Rc::new(Cell::new(0_u64));
+        let host_swap_signals = Rc::clone(&swap_signals);
+        if let Err(error) = runtime.register_host_function("signalBundleSwap", move |_| {
+            let next = host_swap_signals
+                .get()
+                .checked_add(1)
+                .ok_or_else(|| "bundle swap signal counter overflowed".to_owned())?;
+            host_swap_signals.set(next);
+            Ok(())
+        }) {
+            unsafe { wgpu::wgpuInstanceRelease(instance) };
+            return Err(format!("{error:?}"));
+        }
+        let result = Self::new_with_instance(
+            instance,
+            window,
+            runtime,
+            verify,
+            captured_output,
+            swap_signals,
+        );
         if result.is_err() {
             unsafe { wgpu::wgpuInstanceRelease(instance) };
         }
@@ -517,6 +539,7 @@ impl Renderer {
         runtime: Runtime,
         verify: bool,
         captured_output: Rc<RefCell<Vec<String>>>,
+        swap_signals: Rc<Cell<u64>>,
     ) -> Result<Self, String> {
         let platform_surface = create_surface(instance, window)?;
         let surface = platform_surface.surface;
@@ -558,6 +581,12 @@ impl Renderer {
         runtime
             .set_global_value("verify", js_verify)
             .map_err(|error| format!("{error:?}"))?;
+        let js_frames = runtime
+            .eval(&format!("{VERIFY_FRAMES}"), "verify-frames.js")
+            .map_err(|error| format!("{error:?}"))?;
+        runtime
+            .set_global_value("VERIFY_FRAMES", js_frames)
+            .map_err(|error| format!("{error:?}"))?;
         eval_discard(&runtime, BOUNCE_SOURCE, "bounce.js")?;
 
         let deadline = Instant::now() + INIT_DEADLINE;
@@ -589,6 +618,8 @@ impl Renderer {
                     verify,
                     last_frame: Instant::now(),
                     captured_output,
+                    swap_signals,
+                    handled_swaps: 0,
                 };
                 renderer.configure();
                 std::mem::forget(handles);
@@ -601,10 +632,16 @@ impl Renderer {
                 .clear_global("__bounce_ready_probe")
                 .map_err(|error| format!("{error:?}"))?;
             if Instant::now() >= deadline {
-                return Err(format!(
+                let mut message = format!(
                     "bounce.js did not become ready within {} seconds",
                     INIT_DEADLINE.as_secs()
-                ));
+                );
+                let output = captured_output.borrow();
+                if !output.is_empty() {
+                    message.push_str("; captured script output:\n");
+                    message.push_str(&output.join("\n"));
+                }
+                return Err(message);
             }
             std::thread::sleep(Duration::from_millis(1));
         }
@@ -650,6 +687,35 @@ impl Renderer {
                 .frame(self.instance, "update", &[HostValue::Number(dt)])
         }
         .map_err(|error| format!("update frame failed: {error:?}"))?;
+
+        let signalled_swaps = self.swap_signals.get();
+        if signalled_swaps < self.handled_swaps {
+            return Err("bundle swap signal counter moved backwards".to_owned());
+        }
+        let pending_swaps = signalled_swaps - self.handled_swaps;
+        if pending_swaps > 1 {
+            return Err(format!(
+                "multiple bundle swaps are pending: observed {pending_swaps}"
+            ));
+        }
+        if pending_swaps == 1 {
+            let value = self
+                .runtime
+                .eval("globalThis.bounceBundle", "bounce-swap.js")
+                .map_err(|error| format!("{error:?}"))?;
+            let new_bundle = self.runtime.native_render_bundle(value).ok_or_else(|| {
+                "bundle swap signalled but globalThis.bounceBundle is not a render bundle"
+                    .to_owned()
+            })?;
+            if new_bundle == self.bundle {
+                return Err("bundle swap signalled but the native handle did not change".to_owned());
+            }
+            self.runtime
+                .set_global_value("__hostBorrowedBounceBundle", value)
+                .map_err(|error| format!("{error:?}"))?;
+            self.bundle = new_bundle;
+            self.handled_swaps += 1;
+        }
 
         let mut current = wgpu::WGPUSurfaceTexture {
             nextInChain: ptr::null_mut(),
@@ -758,6 +824,12 @@ impl Renderer {
     }
 
     fn verify_output(&self) -> Result<(), String> {
+        let observed_swaps = self.swap_signals.get();
+        if observed_swaps != 1 {
+            return Err(format!(
+                "expected exactly one bundle swap signal, observed {observed_swaps}"
+            ));
+        }
         let lines = self.captured_output.borrow();
         let actual = if lines.is_empty() {
             String::new()
@@ -770,7 +842,7 @@ impl Renderer {
             ));
         }
         println!(
-            "bounce verification passed: {VERIFY_FRAMES} frames presented; state matched expected.txt"
+            "bounce verification passed: {VERIFY_FRAMES} frames presented; state matched expected.txt; one bundle swap observed"
         );
         Ok(())
     }

@@ -384,6 +384,11 @@ drain (step 6); the sequence exists once. An `async` frame callback is a hard er
 
 Rules and tests: `specs/blocks/15-frame-call-in.md` (F8–F15).
 
+The amortized budget under this contract: a steady-state frame costs one
+`frame()` call plus a constant number of `queue.writeBuffer` calls, and command
+re-recording is an explicit event spent O(bundle commands) once per
+pipeline-composition change, never per frame (block 19).
+
 ### 2.8 Handle import: the primary entry point
 
 Rev 1's Phase 1 vertical slice was `GPU.requestAdapter()` →

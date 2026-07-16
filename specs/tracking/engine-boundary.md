@@ -1813,3 +1813,55 @@ Acceptance criteria:
 
 Report back: files changed, and the exit code of each of the three gates.
 ```
+
+## K11 — Block 19 exit: what the bundle-swap contract required (2026-07-17)
+
+Block 19 (`specs/blocks/19-skeleton-data-split.md`) evolved `examples/bounce`
+into the smallest PoC of the skeleton/data split. This entry records what the
+swap contract cost in `Runtime`-surface terms, for the future scene-graph
+block. K7 held: zero diffs outside `examples/bounce/`, the cross-referenced
+READMEs, plan §2.7's one sentence, and this file.
+
+### (a) The swap contract, end to end
+
+Script side (all existing primitives): a second pipeline created at init; at
+the fixed frame, one `GPURenderBundleEncoder` + `finish()`, assignment to
+`globalThis.bounceBundle`, `globalThis.bundleGeneration += 1`, and a call to
+the registered host function `signalBundleSwap()`.
+
+Host side: a `Rc<Cell<u64>>` signal counter incremented by the host function; a
+swap point in `render()` after `frame()` returns and before surface-texture
+acquisition; re-borrow via `eval("globalThis.bounceBundle")` +
+`native_render_bundle()`; handle-inequality check (error without printing
+pointer values); retention-global replacement
+(`set_global_value("__hostBorrowedBounceBundle", value)`, which drops the
+host's retention of the superseded wrapper); stored-handle swap. The superseded
+native handle is never touched again — its release rides GC and the release
+queue.
+
+Verified: yawgpu Metal and Dawn both pass `--verify` (90 frames, one swap,
+byte-identical golden incl. checkpoints `30 8 1 / 45 6 2 / 60 3 2 / 90 8 2`);
+the corrupted-golden check exits 1. No yawgpu indirect-draw delta (K10's
+contingency unused).
+
+### (b) `Runtime`-surface ergonomics gaps hit
+
+The same three the block-15 example surfaced; block 19 re-hit all of them and
+added none:
+
+1. **Eval-for-effect / value drop.** No method evaluates a script for effect
+   and discards the result safely; the example routes every discard through a
+   set-then-clear global pair (`eval_discard`, `__bounce_ready_probe`).
+2. **Retention-while-borrowed.** `native_render_bundle()` returns a borrowed
+   raw handle whose validity depends on the wrapper staying reachable, and
+   nothing in the API ties the borrow to a retention; the host must maintain a
+   JS global (`__hostBorrowedBounceBundle`) by convention.
+3. **JS→host signalling is by registered function + globals.** The swap event
+   needs a host function plus two script-owned globals; there is no typed
+   event or channel surface. Adequate at this scale; the scene-graph block
+   should decide whether it stays adequate at N bundles.
+
+### (c) Cost observations
+
+None taken. No timing was measured; nothing beyond the crossing counts stated
+in the spec (K3) is claimed.
