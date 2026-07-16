@@ -33,7 +33,8 @@ and tested; the API surface is still filling out (see
   every test run, and is reproduced on Dawn in gated real-GPU runs.
 - **The desktop and device configurations run the same engine.** iOS uses the
   same JavaScriptCore as macOS, and Android the same Boa as Windows, and
-  Boa↔JavaScriptCore parity is verified by that same parity run. Desktop test
+  Boa↔JavaScriptCore parity is verified by that same parity script — both
+  adapters run it and assert the identical expected output. Desktop test
   results are therefore predictive of mobile behavior, which is why the engine
   choice prioritized portability.
 - **Links in-process as a library.** No browser and no Node.js on any platform;
