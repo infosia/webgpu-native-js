@@ -14,9 +14,11 @@ and tested; the API surface is still filling out (see
 - **Standard WebGPU JavaScript API.** Scripts use the same
   `GPUDevice`/`GPUBuffer`/`GPUQueue` objects and WGSL shaders as the web platform.
   The surface is generated from the WebGPU WebIDL, so shaders and resource and
-  pipeline setup transfer without change. The one deliberate difference is scope:
-  the host owns the GPU and drives the frame, so this is WebGPU as an authoring
-  API, not a browser sandbox.
+  pipeline setup transfer without change. The deliberate differences are
+  recorded, not implicit: the scope (the host owns the GPU and drives the frame,
+  so this is WebGPU as an authoring API, not a browser sandbox) and a `destroy()`
+  extension on the retained types the spec leaves without one (a bounded release
+  path for embeddings whose finalizers cannot be forced).
 - **Handle adoption is the primary entry point.** The host adopts an existing
   device — `wrap_device(WGPUDevice)` — rather than creating one through
   `navigator.gpu.requestAdapter()`. The host has already chosen its instance,
@@ -114,8 +116,9 @@ error-class names, method identity, lone-surrogate string handling).
 Two engine facts worth knowing when targeting JavaScriptCore (both measured, both
 recorded in `specs/`): JavaScriptCore's public C API offers **no way to force
 garbage collection to run finalizers** — an unreferenced object is typically
-finalized only at context teardown — and no microtask pump; the binding
-compensates for the latter, but not the former (see the `destroy()` rule
+finalized only at context teardown — and no microtask pump. The binding
+compensates for the missing pump; for the missing collection it cannot, which
+is why every retained object carries `destroy()` (see the `destroy()` rule
 below).
 
 ## JavaScript delivery
@@ -254,13 +257,14 @@ operations do not move texel data, so the headless suite deliberately makes no
 claim about texture bytes; byte-level texture tests require a separately gated
 real GPU.
 
-Buffer mapping is strategy-selected per engine. Both supported engines use
-**copy-in/copy-out**: Boa owns its `ArrayBuffer` allocation, while
-JavaScriptCore's public C API cannot detach external memory and taking a C
-pointer to a script-visible buffer would silently and permanently disable
-detaching it. The dormant zero-copy capability remains in `core/` pending an
-explicit owner decision; no supported engine currently selects it. This is a
-performance difference, not a behavioral one.
+Buffer mapping is **copy-in/copy-out** on both supported engines: Boa owns its
+`ArrayBuffer` allocation, while JavaScriptCore's public C API cannot detach
+external memory and taking a C pointer to a script-visible buffer would
+silently and permanently disable detaching it. A zero-copy strategy existed as
+a dormant abstraction and was deleted by owner decision (2026-07-12); it
+returns only if a zero-copy-capable engine does. This is a performance
+property, not a behavioral one — WebGPU defines mapped contents as becoming
+visible to the GPU at `unmap()`.
 
 ## Building and testing
 
