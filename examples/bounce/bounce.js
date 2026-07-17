@@ -175,6 +175,7 @@ Promise.resolve()
             queue.writeBuffer(indirectBuffer, 0, indirectArgs);
 
             if (frameCount === 45) {
+                const supersededBundle = globalThis.bounceBundle;
                 const replacementEncoder = device.createRenderBundleEncoder({
                     colorFormats: [globalThis.surfaceFormat],
                 });
@@ -184,6 +185,7 @@ Promise.resolve()
                 globalThis.bounceBundle = replacementEncoder.finish();
                 globalThis.bundleGeneration += 1;
                 signalBundleSwap();
+                supersededBundle.destroy();
             }
 
             if (

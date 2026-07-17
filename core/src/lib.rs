@@ -825,7 +825,7 @@ impl<E: JsEngine + 'static> SettlementRequest<E> {
                     cx,
                     GPU_COMPUTE_PIPELINE_CLASS,
                     Box::new(ComputePipelinePayload {
-                        pipeline,
+                        pipeline: Mutex::new(Some(pipeline)),
                         module,
                         layout,
                         label: Mutex::new(label),
@@ -903,7 +903,7 @@ impl<E: JsEngine + 'static> SettlementRequest<E> {
                     cx,
                     GPU_RENDER_PIPELINE_CLASS,
                     Box::new(RenderPipelinePayload {
-                        render_pipeline: pipeline,
+                        render_pipeline: Mutex::new(Some(pipeline)),
                         vertex_module,
                         fragment_module,
                         layout,
@@ -2867,7 +2867,7 @@ unsafe impl Send for RenderPassEncoderPayload {}
 
 /// Payload stored by a reusable `GPURenderBundle` wrapper.
 pub struct RenderBundlePayload {
-    render_bundle: WGPURenderBundle,
+    render_bundle: Mutex<Option<WGPURenderBundle>>,
     invalid: bool,
     label: Mutex<String>,
 }
@@ -2891,7 +2891,7 @@ pub fn native_render_bundle<E: JsEngine + 'static>(
 ) -> Option<WGPURenderBundle> {
     E::payload(cx, value, GPU_RENDER_BUNDLE_CLASS)
         .and_then(|payload| payload.downcast_ref::<RenderBundlePayload>())
-        .map(|payload| payload.render_bundle)
+        .and_then(|payload| payload.render_bundle.lock().ok()?.as_ref().copied())
 }
 
 // SAFETY: the native bundle handle is only copied into the release queue by
@@ -4777,6 +4777,76 @@ pub fn device_create_buffer<E: JsEngine + 'static>(
     }
 }
 
+fn retire_render_bundle(payload: &RenderBundlePayload, env: &Environment) {
+    let render_bundle = {
+        let Ok(mut slot) = payload.render_bundle.lock() else {
+            return;
+        };
+        let Some(render_bundle) = slot.take() else {
+            return;
+        };
+        render_bundle
+    };
+    if payload.invalid || render_bundle.is_null() {
+        return;
+    }
+    let _ = env.queue().enqueue(ReleaseRequest::RenderBundle {
+        render_bundle,
+        gpu: env.gpu(),
+    });
+}
+
+/// Implements the block-20 non-standard `destroy()` extension.
+pub fn extension_destroy<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    this: E::Value,
+    _args: &[E::Value],
+) -> Result<E::Value, E::Error> {
+    if let Some(payload) = E::payload(cx, this, GPU_RENDER_BUNDLE_CLASS)
+        .and_then(|payload| payload.downcast_ref::<RenderBundlePayload>())
+    {
+        retire_render_bundle(payload, E::environment(cx));
+    } else if let Some(payload) = E::payload(cx, this, GPU_BIND_GROUP_CLASS)
+        .and_then(|payload| payload.downcast_ref::<BindGroupPayload>())
+    {
+        retire_bind_group(payload, E::environment(cx));
+    } else if let Some(payload) = E::payload(cx, this, GPU_COMPUTE_PIPELINE_CLASS)
+        .and_then(|payload| payload.downcast_ref::<ComputePipelinePayload>())
+    {
+        retire_compute_pipeline(payload, E::environment(cx));
+    } else if let Some(payload) = E::payload(cx, this, GPU_RENDER_PIPELINE_CLASS)
+        .and_then(|payload| payload.downcast_ref::<RenderPipelinePayload>())
+    {
+        retire_render_pipeline(payload, E::environment(cx));
+    } else if let Some(payload) = E::payload(cx, this, GPU_SAMPLER_CLASS)
+        .and_then(|payload| payload.downcast_ref::<SamplerPayload>())
+    {
+        retire_sampler(payload, E::environment(cx));
+    } else if let Some(payload) = E::payload(cx, this, GPU_SHADER_MODULE_CLASS)
+        .and_then(|payload| payload.downcast_ref::<ShaderModulePayload>())
+    {
+        retire_shader_module(payload, E::environment(cx));
+    } else if let Some(payload) = E::payload(cx, this, GPU_TEXTURE_VIEW_CLASS)
+        .and_then(|payload| payload.downcast_ref::<TextureViewPayload>())
+    {
+        retire_texture_view(payload, E::environment(cx));
+    } else if let Some(payload) = E::payload(cx, this, GPU_BIND_GROUP_LAYOUT_CLASS)
+        .and_then(|payload| payload.downcast_ref::<BindGroupLayoutPayload>())
+    {
+        retire_bind_group_layout(payload, E::environment(cx));
+    } else if let Some(payload) = E::payload(cx, this, GPU_PIPELINE_LAYOUT_CLASS)
+        .and_then(|payload| payload.downcast_ref::<PipelineLayoutPayload>())
+    {
+        retire_pipeline_layout(payload, E::environment(cx));
+    } else {
+        return Err(E::type_error(
+            cx,
+            "destroy called on an incompatible object",
+        ));
+    }
+    Ok(E::undefined(cx))
+}
+
 /// Implements `GPUBuffer.destroy`.
 pub fn buffer_destroy<E: JsEngine + 'static>(
     cx: E::Context<'_>,
@@ -5241,15 +5311,16 @@ pub fn shader_module_get_compilation_info<E: JsEngine + 'static>(
     _args: &[E::Value],
 ) -> Result<E::Value, E::Error> {
     promise_operation::<E>(cx, |deferred| {
-        let (module, source) = E::payload(cx, this, GPU_SHADER_MODULE_CLASS)
+        let payload = E::payload(cx, this, GPU_SHADER_MODULE_CLASS)
             .and_then(|payload| payload.downcast_ref::<ShaderModulePayload>())
-            .map(|payload| (payload.module, Arc::clone(&payload.source)))
             .ok_or_else(|| {
                 E::type_error(
                     cx,
                     "GPUShaderModule.getCompilationInfo called on an incompatible object",
                 )
             })?;
+        let module = handle_or_throw::<E, _>(cx, "GPUShaderModule", &payload.module)?;
+        let source = Arc::clone(&payload.source);
         let mut request = Box::new(CompilationInfoRequest::<E> {
             deferred: deferred.take(),
             settlements: Arc::clone(E::environment(cx).settlements()),
@@ -5785,10 +5856,11 @@ pub fn render_bundle_label_set<E: JsEngine + 'static>(
         .ok_or_else(|| {
             E::type_error(cx, "GPURenderBundle.label called on an incompatible object")
         })?;
-    if !payload.render_bundle.is_null() {
+    let render_bundle = handle_or_throw::<E, _>(cx, "GPURenderBundle", &payload.render_bundle)?;
+    if !render_bundle.is_null() {
         unsafe {
             (E::environment(cx).gpu().render_bundle_set_label)(
-                payload.render_bundle,
+                render_bundle,
                 WGPUStringView::from_bytes(label.as_bytes()),
             );
         }
@@ -6010,7 +6082,8 @@ pub fn compute_pipeline_get_bind_group_layout<E: JsEngine + 'static>(
         .copied()
         .ok_or_else(|| E::type_error(cx, "index"))?;
     let index = enforce_u32::<E>(cx, index, "index")?;
-    new_derived_bind_group_layout::<E>(cx, PipelineParent::Compute(payload.pipeline), index)
+    let pipeline = handle_or_throw::<E, _>(cx, "GPUComputePipeline", &payload.pipeline)?;
+    new_derived_bind_group_layout::<E>(cx, PipelineParent::Compute(pipeline), index)
 }
 
 /// Implements `GPURenderPipeline.getBindGroupLayout`.
@@ -6032,7 +6105,8 @@ pub fn render_pipeline_get_bind_group_layout<E: JsEngine + 'static>(
         .copied()
         .ok_or_else(|| E::type_error(cx, "index"))?;
     let index = enforce_u32::<E>(cx, index, "index")?;
-    new_derived_bind_group_layout::<E>(cx, PipelineParent::Render(payload.render_pipeline), index)
+    let pipeline = handle_or_throw::<E, _>(cx, "GPURenderPipeline", &payload.render_pipeline)?;
+    new_derived_bind_group_layout::<E>(cx, PipelineParent::Render(pipeline), index)
 }
 
 fn new_derived_bind_group_layout<E: JsEngine + 'static>(
@@ -6072,7 +6146,7 @@ fn new_derived_bind_group_layout<E: JsEngine + 'static>(
         cx,
         GPU_BIND_GROUP_LAYOUT_CLASS,
         Box::new(BindGroupLayoutPayload {
-            layout,
+            layout: Mutex::new(Some(layout)),
             parent_pipeline: Some(parent),
             label: Mutex::new(String::new()),
         }),
@@ -7634,7 +7708,7 @@ pub fn render_bundle_encoder_finish<E: JsEngine + 'static>(
             cx,
             GPU_RENDER_BUNDLE_CLASS,
             Box::new(RenderBundlePayload {
-                render_bundle: ptr::null_mut(),
+                render_bundle: Mutex::new(Some(ptr::null_mut())),
                 invalid: true,
                 label: Mutex::new(label),
             }),
@@ -7660,7 +7734,7 @@ pub fn render_bundle_encoder_finish<E: JsEngine + 'static>(
         cx,
         GPU_RENDER_BUNDLE_CLASS,
         Box::new(RenderBundlePayload {
-            render_bundle,
+            render_bundle: Mutex::new(Some(render_bundle)),
             invalid: false,
             label: Mutex::new(label),
         }),
@@ -8309,13 +8383,7 @@ pub fn finalize_render_bundle(payload: Box<dyn Any + Send>, env: &Environment) {
     let Ok(payload) = payload.downcast::<RenderBundlePayload>() else {
         return;
     };
-    if payload.invalid {
-        return;
-    }
-    let _ = env.queue().enqueue(ReleaseRequest::RenderBundle {
-        render_bundle: payload.render_bundle,
-        gpu: env.gpu(),
-    });
+    retire_render_bundle(&payload, env);
 }
 
 /// Finalizes a `GPUComputePassEncoder` payload by enqueuing its release.
@@ -9348,10 +9416,7 @@ fn convert_render_bundle_sequence<E: JsEngine + 'static>(
     value: E::Value,
 ) -> Result<Vec<WGPURenderBundle>, E::Error> {
     convert_sequence::<E, _>(cx, value, "bundles", |item| {
-        E::payload(cx, item, GPU_RENDER_BUNDLE_CLASS)
-            .and_then(|payload| payload.downcast_ref::<RenderBundlePayload>())
-            .map(|payload| payload.render_bundle)
-            .ok_or_else(|| E::type_error(cx, "GPURenderBundle is required"))
+        render_bundle_handle::<E>(cx, item)
     })
 }
 
@@ -9465,6 +9530,19 @@ fn nullable_bind_group_argument<E: JsEngine + 'static>(
     }
 }
 
+fn handle_or_throw<E: JsEngine, T: Copy>(
+    cx: E::Context<'_>,
+    interface: &'static str,
+    slot: &Mutex<Option<T>>,
+) -> Result<T, E::Error> {
+    let slot = slot
+        .lock()
+        .map_err(|_| E::operation_error(cx, &format!("{interface} handle slot is poisoned")))?;
+    slot.as_ref()
+        .copied()
+        .ok_or_else(|| E::operation_error(cx, &format!("{interface} was destroyed")))
+}
+
 fn device_handle<E: JsEngine + 'static>(
     cx: E::Context<'_>,
     value: E::Value,
@@ -9556,10 +9634,10 @@ fn texture_view_handle<E: JsEngine + 'static>(
     cx: E::Context<'_>,
     value: E::Value,
 ) -> Result<WGPUTextureView, E::Error> {
-    E::payload(cx, value, GPU_TEXTURE_VIEW_CLASS)
+    let payload = E::payload(cx, value, GPU_TEXTURE_VIEW_CLASS)
         .and_then(|payload| payload.downcast_ref::<TextureViewPayload>())
-        .map(|payload| payload.texture_view)
-        .ok_or_else(|| E::type_error(cx, "GPUTextureView is required"))
+        .ok_or_else(|| E::type_error(cx, "GPUTextureView is required"))?;
+    handle_or_throw::<E, _>(cx, "GPUTextureView", &payload.texture_view)
 }
 
 fn query_set_handle<E: JsEngine + 'static>(
@@ -9576,60 +9654,80 @@ fn shader_module_handle<E: JsEngine + 'static>(
     cx: E::Context<'_>,
     value: E::Value,
 ) -> Result<WGPUShaderModule, E::Error> {
-    E::payload(cx, value, GPU_SHADER_MODULE_CLASS)
+    let payload = E::payload(cx, value, GPU_SHADER_MODULE_CLASS)
         .and_then(|payload| payload.downcast_ref::<ShaderModulePayload>())
-        .map(|payload| payload.module)
-        .ok_or_else(|| E::type_error(cx, "GPUShaderModule is required"))
+        .ok_or_else(|| E::type_error(cx, "GPUShaderModule is required"))?;
+    handle_or_throw::<E, _>(cx, "GPUShaderModule", &payload.module)
+}
+
+fn sampler_handle<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    value: E::Value,
+) -> Result<WGPUSampler, E::Error> {
+    let payload = E::payload(cx, value, GPU_SAMPLER_CLASS)
+        .and_then(|payload| payload.downcast_ref::<SamplerPayload>())
+        .ok_or_else(|| E::type_error(cx, "GPUSampler is required"))?;
+    handle_or_throw::<E, _>(cx, "GPUSampler", &payload.sampler)
 }
 
 fn bind_group_layout_handle<E: JsEngine + 'static>(
     cx: E::Context<'_>,
     value: E::Value,
 ) -> Result<WGPUBindGroupLayout, E::Error> {
-    E::payload(cx, value, GPU_BIND_GROUP_LAYOUT_CLASS)
+    let payload = E::payload(cx, value, GPU_BIND_GROUP_LAYOUT_CLASS)
         .and_then(|payload| payload.downcast_ref::<BindGroupLayoutPayload>())
-        .map(|payload| payload.layout)
-        .ok_or_else(|| E::type_error(cx, "GPUBindGroupLayout is required"))
+        .ok_or_else(|| E::type_error(cx, "GPUBindGroupLayout is required"))?;
+    handle_or_throw::<E, _>(cx, "GPUBindGroupLayout", &payload.layout)
 }
 
 fn pipeline_layout_handle<E: JsEngine + 'static>(
     cx: E::Context<'_>,
     value: E::Value,
 ) -> Result<WGPUPipelineLayout, E::Error> {
-    E::payload(cx, value, GPU_PIPELINE_LAYOUT_CLASS)
+    let payload = E::payload(cx, value, GPU_PIPELINE_LAYOUT_CLASS)
         .and_then(|payload| payload.downcast_ref::<PipelineLayoutPayload>())
-        .map(|payload| payload.layout)
-        .ok_or_else(|| E::type_error(cx, "GPUPipelineLayout is required"))
+        .ok_or_else(|| E::type_error(cx, "GPUPipelineLayout is required"))?;
+    handle_or_throw::<E, _>(cx, "GPUPipelineLayout", &payload.layout)
 }
 
 fn bind_group_handle<E: JsEngine + 'static>(
     cx: E::Context<'_>,
     value: E::Value,
 ) -> Result<WGPUBindGroup, E::Error> {
-    E::payload(cx, value, GPU_BIND_GROUP_CLASS)
+    let payload = E::payload(cx, value, GPU_BIND_GROUP_CLASS)
         .and_then(|payload| payload.downcast_ref::<BindGroupPayload>())
-        .map(|payload| payload.bind_group)
-        .ok_or_else(|| E::type_error(cx, "GPUBindGroup is required"))
+        .ok_or_else(|| E::type_error(cx, "GPUBindGroup is required"))?;
+    handle_or_throw::<E, _>(cx, "GPUBindGroup", &payload.bind_group)
 }
 
 fn compute_pipeline_handle<E: JsEngine + 'static>(
     cx: E::Context<'_>,
     value: E::Value,
 ) -> Result<WGPUComputePipeline, E::Error> {
-    E::payload(cx, value, GPU_COMPUTE_PIPELINE_CLASS)
+    let payload = E::payload(cx, value, GPU_COMPUTE_PIPELINE_CLASS)
         .and_then(|payload| payload.downcast_ref::<ComputePipelinePayload>())
-        .map(|payload| payload.pipeline)
-        .ok_or_else(|| E::type_error(cx, "GPUComputePipeline is required"))
+        .ok_or_else(|| E::type_error(cx, "GPUComputePipeline is required"))?;
+    handle_or_throw::<E, _>(cx, "GPUComputePipeline", &payload.pipeline)
 }
 
 fn render_pipeline_handle<E: JsEngine + 'static>(
     cx: E::Context<'_>,
     value: E::Value,
 ) -> Result<WGPURenderPipeline, E::Error> {
-    E::payload(cx, value, GPU_RENDER_PIPELINE_CLASS)
+    let payload = E::payload(cx, value, GPU_RENDER_PIPELINE_CLASS)
         .and_then(|payload| payload.downcast_ref::<RenderPipelinePayload>())
-        .map(|payload| payload.render_pipeline)
-        .ok_or_else(|| E::type_error(cx, "GPURenderPipeline is required"))
+        .ok_or_else(|| E::type_error(cx, "GPURenderPipeline is required"))?;
+    handle_or_throw::<E, _>(cx, "GPURenderPipeline", &payload.render_pipeline)
+}
+
+fn render_bundle_handle<E: JsEngine + 'static>(
+    cx: E::Context<'_>,
+    value: E::Value,
+) -> Result<WGPURenderBundle, E::Error> {
+    let payload = E::payload(cx, value, GPU_RENDER_BUNDLE_CLASS)
+        .and_then(|payload| payload.downcast_ref::<RenderBundlePayload>())
+        .ok_or_else(|| E::type_error(cx, "GPURenderBundle is required"))?;
+    handle_or_throw::<E, _>(cx, "GPURenderBundle", &payload.render_bundle)
 }
 
 fn command_buffer_state<E: JsEngine + 'static>(

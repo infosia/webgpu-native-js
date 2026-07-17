@@ -190,6 +190,8 @@ renderBundle:use-after-finish:GPUValidationError:returned
 renderBundle:type-confusion:TypeError:GPURenderBundle is required
 renderBundle:sparse-colorFormats:null
 renderBundle:chain:null
+extensionDestroy:render-bundle:Error:OperationError:GPURenderBundle was destroyed
+extensionDestroy:double:null
 setImmediates:content-size:OperationError
 setBindGroup:compute-offsets:TypeError
 setBindGroup:u32array-window:RangeError
@@ -230,4 +232,5 @@ frame:order:pre,update,post
 frame:async:AsyncCallback
 frame:thenable:AsyncCallback
 frame:missing:NotCallable
+extensionDestroy:bind-group-frame:ok
 frame:throw:Engine:true:1:0

@@ -28,6 +28,53 @@ schema_version = 1
 # generate only the WebIDL-to-C conversion direction.
 reverse_enum = ["GPUFeatureName"]
 
+# Block 20: explicit non-IDL surface. Every member must remain absent from the
+# pinned WebIDL; a collision forces review instead of silently shadowing it.
+[[extension.methods]]
+interface = "GPURenderBundle"
+member = "destroy"
+reason = "block 20 provides bounded native release under JavaScriptCore"
+
+[[extension.methods]]
+interface = "GPUBindGroup"
+member = "destroy"
+reason = "block 20 provides bounded native release under JavaScriptCore"
+
+[[extension.methods]]
+interface = "GPUComputePipeline"
+member = "destroy"
+reason = "block 20 provides bounded native release under JavaScriptCore"
+
+[[extension.methods]]
+interface = "GPURenderPipeline"
+member = "destroy"
+reason = "block 20 provides bounded native release under JavaScriptCore"
+
+[[extension.methods]]
+interface = "GPUSampler"
+member = "destroy"
+reason = "block 20 provides bounded native release under JavaScriptCore"
+
+[[extension.methods]]
+interface = "GPUShaderModule"
+member = "destroy"
+reason = "block 20 provides bounded native release under JavaScriptCore"
+
+[[extension.methods]]
+interface = "GPUTextureView"
+member = "destroy"
+reason = "block 20 provides bounded native release under JavaScriptCore"
+
+[[extension.methods]]
+interface = "GPUBindGroupLayout"
+member = "destroy"
+reason = "block 20 provides bounded native release under JavaScriptCore"
+
+[[extension.methods]]
+interface = "GPUPipelineLayout"
+member = "destroy"
+reason = "block 20 provides bounded native release under JavaScriptCore"
+
 # G13: selected interface members and Release families are derived from the
 # joined subset. These lists account only for the non-obvious boundary: core-
 # cached members, native references retained by wrappers/descriptors, transient

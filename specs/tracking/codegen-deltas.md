@@ -237,3 +237,22 @@ member with a default of 0.
 
 - **`GPUBuffer.mapState`** was absent from the subset; the state machine already
   existed internally. Added.
+
+## Block 20 addition (2026-07-17) — extension members
+
+The generated surface now contains members that are deliberately **not** in
+the pinned WebIDL. `policy.toml`'s `[[extension.methods]]` declares each one
+with a required reason; the generator emits them marked as non-standard in the
+generated doc comment, and the subset⋈IDL join enforces the inverse direction:
+an extension member that **exists** in the pinned IDL fails the build (pinned
+by a codegen unit test using `GPUBuffer.destroy` as the colliding fixture). If
+a future `webgpu.idl` pin adds a same-named member, the generator forces a
+review instead of silently shadowing the spec's semantics.
+
+Current extension members: `destroy` on GPURenderBundle, GPUBindGroup,
+GPUComputePipeline, GPURenderPipeline, GPUSampler, GPUShaderModule,
+GPUTextureView, GPUBindGroupLayout, GPUPipelineLayout. Rationale and semantics:
+`specs/blocks/20-explicit-release.md` (bounded native release under
+JavaScriptCore; `release-queue.md` → R3/R4). Verified not to collide with any
+runnable CTS family: no curated family asserts the absence of extra interface
+members (`idl,exposed` is a browser-only `.html.ts` harness).

@@ -91,6 +91,7 @@ pub struct Runtime {
     construct_history: RefCell<Vec<Vec<Value>>>,
     coercion_unmap: Cell<Option<Value>>,
     iterator_end_pass: Cell<Option<Value>>,
+    destroy_on_call: Cell<Option<Value>>,
     settle_calls: Cell<usize>,
     settlement_batch_sizes: RefCell<Vec<usize>>,
     settlement_attempts: RefCell<BTreeMap<Value, usize>>,
@@ -175,6 +176,7 @@ impl Runtime {
             construct_history: RefCell::new(Vec::new()),
             coercion_unmap: Cell::new(None),
             iterator_end_pass: Cell::new(None),
+            destroy_on_call: Cell::new(None),
             settle_calls: Cell::new(0),
             settlement_batch_sizes: RefCell::new(Vec::new()),
             settlement_attempts: RefCell::new(BTreeMap::new()),
@@ -266,6 +268,37 @@ impl Runtime {
 
     fn end_pass_on_next_iteration(&self, pass: Value) {
         self.iterator_end_pass.set(Some(pass));
+    }
+
+    fn destroy_on_next_call(&self, value: Value) {
+        self.destroy_on_call.set(Some(value));
+    }
+
+    fn finalize_instance(&self, value: Value) {
+        let value = self.canonical(value);
+        let (class, payload) = {
+            let mut values = self.values.borrow_mut();
+            match std::mem::replace(&mut values[value.0], MockValue::Reclaimed) {
+                MockValue::Instance { class, payload } => (class, payload),
+                other => {
+                    values[value.0] = other;
+                    panic!("value is not an instance");
+                }
+            }
+        };
+        let finalizer = self
+            .classes
+            .borrow()
+            .get(&class)
+            .expect("registered class")
+            .spec
+            .finalizer;
+        let raw = std::ptr::from_ref(payload).cast_mut();
+        // SAFETY: `new_instance` created this pointer with `Box::leak`; the
+        // value was replaced above so neither runtime teardown nor an alias
+        // can reclaim the same allocation a second time.
+        let payload = unsafe { Box::from_raw(raw) };
+        finalizer(payload, &self.env);
     }
 
     fn mark_uint32array(&self, value: Value) {
@@ -961,13 +994,17 @@ impl JsEngine for MockEngine {
                 let done = cx.runtime.bool(done);
                 cx.runtime.object(&[("done", done), ("value", value)])
             }
-            MockValue::Callable(MockCallable::Handler) => cx
-                .runtime
-                .call_results
-                .borrow()
-                .get(&f)
-                .copied()
-                .unwrap_or_else(|| cx.runtime.undefined()),
+            MockValue::Callable(MockCallable::Handler) => {
+                if let Some(value) = cx.runtime.destroy_on_call.take() {
+                    crate::extension_destroy::<Self>(cx, value, &[])?;
+                }
+                cx.runtime
+                    .call_results
+                    .borrow()
+                    .get(&f)
+                    .copied()
+                    .unwrap_or_else(|| cx.runtime.undefined())
+            }
             MockValue::Callable(MockCallable::Boolean) => cx.runtime.bool(
                 args.first()
                     .is_some_and(|value| match cx.runtime.get(*value) {
@@ -2886,7 +2923,11 @@ unsafe fn pipeline_layout_release(_layout: WGPUPipelineLayout) {
 }
 unsafe fn bind_group_add_ref(_bind_group: WGPUBindGroup) {}
 unsafe fn bind_group_release(_bind_group: WGPUBindGroup) {
-    GPU_STATE.with(|state| state.borrow_mut().bind_group_releases += 1);
+    GPU_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        state.bind_group_releases += 1;
+        state.native_order.push("bind_group_release");
+    });
 }
 unsafe fn compute_pipeline_add_ref(_pipeline: WGPUComputePipeline) {
     GPU_STATE.with(|state| state.borrow_mut().compute_pipeline_add_refs += 1);
@@ -3773,6 +3814,235 @@ mod tests {
     // webgpu.h; it passes it solely to the enqueue-only event forwarder.
     unsafe impl<T> Send for SendPtr<T> {}
 
+    fn live_handle<T>(handle: T) -> Mutex<Option<T>> {
+        Mutex::new(Some(handle))
+    }
+
+    fn copied_handle<T: Copy>(slot: &Mutex<Option<T>>) -> T {
+        slot.lock()
+            .expect("live handle slot")
+            .as_ref()
+            .copied()
+            .expect("live handle")
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum ExtensionKind {
+        RenderBundle,
+        BindGroup,
+        ComputePipeline,
+        RenderPipeline,
+        Sampler,
+        ShaderModule,
+        TextureView,
+        BindGroupLayout,
+        PipelineLayout,
+    }
+
+    const EXTENSION_KINDS: [ExtensionKind; 9] = [
+        ExtensionKind::RenderBundle,
+        ExtensionKind::BindGroup,
+        ExtensionKind::ComputePipeline,
+        ExtensionKind::RenderPipeline,
+        ExtensionKind::Sampler,
+        ExtensionKind::ShaderModule,
+        ExtensionKind::TextureView,
+        ExtensionKind::BindGroupLayout,
+        ExtensionKind::PipelineLayout,
+    ];
+
+    impl ExtensionKind {
+        fn interface(self) -> &'static str {
+            match self {
+                Self::RenderBundle => "GPURenderBundle",
+                Self::BindGroup => "GPUBindGroup",
+                Self::ComputePipeline => "GPUComputePipeline",
+                Self::RenderPipeline => "GPURenderPipeline",
+                Self::Sampler => "GPUSampler",
+                Self::ShaderModule => "GPUShaderModule",
+                Self::TextureView => "GPUTextureView",
+                Self::BindGroupLayout => "GPUBindGroupLayout",
+                Self::PipelineLayout => "GPUPipelineLayout",
+            }
+        }
+
+        fn main_releases(self, state: &MockGpuState) -> usize {
+            match self {
+                Self::RenderBundle => state.render_bundle_releases,
+                Self::BindGroup => state.bind_group_releases,
+                Self::ComputePipeline => state.compute_pipeline_releases,
+                Self::RenderPipeline => state.render_pipeline_releases,
+                Self::Sampler => state.sampler_releases,
+                Self::ShaderModule => state.shader_module_releases,
+                Self::TextureView => state.texture_view_releases,
+                Self::BindGroupLayout => state.bind_group_layout_releases,
+                Self::PipelineLayout => state.pipeline_layout_releases,
+            }
+        }
+    }
+
+    fn extension_wrapper(_rt: &Runtime, cx: Context<'_>, kind: ExtensionKind) -> Value {
+        match kind {
+            ExtensionKind::RenderBundle => {
+                Engine::register_class(cx, crate::render_bundle_class::<Engine>())
+                    .expect("render bundle class");
+                Engine::new_instance(
+                    cx,
+                    crate::GPU_RENDER_BUNDLE_CLASS,
+                    Box::new(crate::RenderBundlePayload {
+                        render_bundle: live_handle(fake_handle(20_001)),
+                        invalid: false,
+                        label: Mutex::new(String::new()),
+                    }),
+                )
+            }
+            ExtensionKind::BindGroup => {
+                Engine::register_class(cx, crate::bind_group_class::<Engine>())
+                    .expect("bind group class");
+                Engine::new_instance(
+                    cx,
+                    crate::GPU_BIND_GROUP_CLASS,
+                    Box::new(BindGroupPayload {
+                        bind_group: live_handle(fake_handle(20_002)),
+                        layout: fake_handle(20_102),
+                        buffers: vec![fake_handle(20_202)],
+                        samplers: vec![fake_handle(20_302)],
+                        texture_views: vec![fake_handle(20_402)],
+                        created_texture_views: vec![fake_handle(20_502)],
+                        label: Mutex::new(String::new()),
+                    }),
+                )
+            }
+            ExtensionKind::ComputePipeline => {
+                Engine::register_class(cx, crate::compute_pipeline_class::<Engine>())
+                    .expect("compute pipeline class");
+                Engine::new_instance(
+                    cx,
+                    crate::GPU_COMPUTE_PIPELINE_CLASS,
+                    Box::new(ComputePipelinePayload {
+                        pipeline: live_handle(fake_handle(20_003)),
+                        module: fake_handle(20_103),
+                        layout: fake_handle(20_203),
+                        label: Mutex::new(String::new()),
+                    }),
+                )
+            }
+            ExtensionKind::RenderPipeline => {
+                Engine::register_class(cx, crate::render_pipeline_class::<Engine>())
+                    .expect("render pipeline class");
+                Engine::new_instance(
+                    cx,
+                    crate::GPU_RENDER_PIPELINE_CLASS,
+                    Box::new(RenderPipelinePayload {
+                        render_pipeline: live_handle(fake_handle(20_004)),
+                        vertex_module: fake_handle(20_104),
+                        fragment_module: fake_handle(20_204),
+                        layout: fake_handle(20_304),
+                        label: Mutex::new(String::new()),
+                    }),
+                )
+            }
+            ExtensionKind::Sampler => {
+                Engine::register_class(cx, crate::sampler_class::<Engine>())
+                    .expect("sampler class");
+                Engine::new_instance(
+                    cx,
+                    crate::GPU_SAMPLER_CLASS,
+                    Box::new(SamplerPayload {
+                        sampler: live_handle(fake_handle(20_005)),
+                        label: Mutex::new(String::new()),
+                    }),
+                )
+            }
+            ExtensionKind::ShaderModule => {
+                Engine::register_class(cx, crate::shader_module_class::<Engine>())
+                    .expect("shader module class");
+                Engine::new_instance(
+                    cx,
+                    crate::GPU_SHADER_MODULE_CLASS,
+                    Box::new(ShaderModulePayload {
+                        module: live_handle(fake_handle(20_006)),
+                        label: Mutex::new(String::new()),
+                        source: "".into(),
+                    }),
+                )
+            }
+            ExtensionKind::TextureView => {
+                Engine::register_class(cx, crate::texture_view_class::<Engine>())
+                    .expect("texture view class");
+                Engine::new_instance(
+                    cx,
+                    crate::GPU_TEXTURE_VIEW_CLASS,
+                    Box::new(TextureViewPayload {
+                        texture_view: live_handle(fake_handle(20_007)),
+                        texture: fake_handle(20_107),
+                        label: Mutex::new(String::new()),
+                        dimension: crate::WGPUTextureViewDimension_WGPUTextureViewDimension_2D,
+                        mip_depth: 1,
+                    }),
+                )
+            }
+            ExtensionKind::BindGroupLayout => {
+                Engine::register_class(cx, crate::bind_group_layout_class::<Engine>())
+                    .expect("bind group layout class");
+                Engine::new_instance(
+                    cx,
+                    crate::GPU_BIND_GROUP_LAYOUT_CLASS,
+                    Box::new(BindGroupLayoutPayload {
+                        layout: live_handle(fake_handle(20_008)),
+                        parent_pipeline: Some(crate::PipelineParent::Compute(fake_handle(20_108))),
+                        label: Mutex::new(String::new()),
+                    }),
+                )
+            }
+            ExtensionKind::PipelineLayout => {
+                Engine::register_class(cx, crate::pipeline_layout_class::<Engine>())
+                    .expect("pipeline layout class");
+                Engine::new_instance(
+                    cx,
+                    crate::GPU_PIPELINE_LAYOUT_CLASS,
+                    Box::new(PipelineLayoutPayload {
+                        layout: live_handle(fake_handle(20_009)),
+                        label: Mutex::new(String::new()),
+                    }),
+                )
+            }
+        }
+        .unwrap_or_else(|error| panic!("create {} wrapper: {error}", kind.interface()))
+    }
+
+    fn set_extension_label(
+        rt: &Runtime,
+        cx: Context<'_>,
+        kind: ExtensionKind,
+        value: Value,
+    ) -> Result<(), String> {
+        let label = rt.string("after destroy");
+        match kind {
+            ExtensionKind::RenderBundle => {
+                crate::render_bundle_label_set::<Engine>(cx, value, label)
+            }
+            ExtensionKind::BindGroup => crate::bind_group_label_set::<Engine>(cx, value, label),
+            ExtensionKind::ComputePipeline => {
+                crate::compute_pipeline_label_set::<Engine>(cx, value, label)
+            }
+            ExtensionKind::RenderPipeline => {
+                crate::render_pipeline_label_set::<Engine>(cx, value, label)
+            }
+            ExtensionKind::Sampler => crate::sampler_label_set::<Engine>(cx, value, label),
+            ExtensionKind::ShaderModule => {
+                crate::shader_module_label_set::<Engine>(cx, value, label)
+            }
+            ExtensionKind::TextureView => crate::texture_view_label_set::<Engine>(cx, value, label),
+            ExtensionKind::BindGroupLayout => {
+                crate::bind_group_layout_label_set::<Engine>(cx, value, label)
+            }
+            ExtensionKind::PipelineLayout => {
+                crate::pipeline_layout_label_set::<Engine>(cx, value, label)
+            }
+        }
+    }
+
     struct SendPendingNative {
         _native: PendingNative,
     }
@@ -4365,7 +4635,7 @@ mod tests {
             crate::GPU_SHADER_MODULE_CLASS,
             Box::new(ShaderModulePayload {
                 label: Mutex::new(String::new()),
-                module: fake_handle(handle),
+                module: live_handle(fake_handle(handle)),
                 source: "".into(),
             }),
         )
@@ -4657,6 +4927,258 @@ mod tests {
                 ]
             );
         });
+    }
+
+    #[test]
+    fn block20_destroy_is_idempotent_queues_every_parent_and_finalizer_is_a_noop_per_type() {
+        for kind in EXTENSION_KINDS {
+            reset_gpu();
+            let rt = runtime();
+            let cx = rt.context();
+            let wrapper = extension_wrapper(&rt, cx, kind);
+
+            crate::extension_destroy::<Engine>(cx, wrapper, &[]).expect("first destroy");
+            crate::extension_destroy::<Engine>(cx, wrapper, &[]).expect("second destroy");
+            assert_eq!(rt.queue().len(), Ok(1), "{kind:?}");
+
+            rt.finalize_instance(wrapper);
+            assert_eq!(rt.queue().len(), Ok(1), "{kind:?} finalizer");
+            assert_eq!(rt.queue().drain(), Ok(1), "{kind:?} drain");
+            GPU_STATE.with(|state| {
+                let state = state.borrow();
+                assert_eq!(kind.main_releases(&state), 1, "{kind:?} main handle");
+                match kind {
+                    ExtensionKind::BindGroup => {
+                        assert_eq!(state.bind_group_layout_releases, 1);
+                        assert_eq!(state.buffer_releases, 1);
+                        assert_eq!(state.sampler_releases, 1);
+                        assert_eq!(state.texture_view_releases, 2);
+                    }
+                    ExtensionKind::ComputePipeline => {
+                        assert_eq!(state.shader_module_releases, 1);
+                        assert_eq!(state.pipeline_layout_releases, 1);
+                    }
+                    ExtensionKind::RenderPipeline => {
+                        assert_eq!(state.shader_module_releases, 2);
+                        assert_eq!(state.pipeline_layout_releases, 1);
+                    }
+                    ExtensionKind::TextureView => assert_eq!(state.texture_releases, 1),
+                    ExtensionKind::BindGroupLayout => {
+                        assert_eq!(state.compute_pipeline_releases, 1)
+                    }
+                    ExtensionKind::RenderBundle
+                    | ExtensionKind::Sampler
+                    | ExtensionKind::ShaderModule
+                    | ExtensionKind::PipelineLayout => {}
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn block20_native_reaching_member_throws_operation_error_per_type_after_destroy() {
+        for kind in EXTENSION_KINDS {
+            reset_gpu();
+            let rt = runtime();
+            let cx = rt.context();
+            let wrapper = extension_wrapper(&rt, cx, kind);
+            crate::extension_destroy::<Engine>(cx, wrapper, &[]).expect("destroy");
+
+            assert_eq!(
+                set_extension_label(&rt, cx, kind, wrapper).expect_err("use after destroy"),
+                format!("OperationError: {} was destroyed", kind.interface()),
+                "{kind:?}"
+            );
+            rt.finalize_instance(wrapper);
+            assert_eq!(rt.queue().len(), Ok(1), "{kind:?} finalizer");
+            assert_eq!(rt.queue().drain(), Ok(1), "{kind:?} drain");
+        }
+    }
+
+    #[test]
+    fn block20_destroyed_handles_are_rejected_inside_descriptors_and_commands_before_abi() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let live_layout = extension_wrapper(&rt, cx, ExtensionKind::BindGroupLayout);
+        let live_module = extension_wrapper(&rt, cx, ExtensionKind::ShaderModule);
+
+        let sampler = extension_wrapper(&rt, cx, ExtensionKind::Sampler);
+        crate::extension_destroy::<Engine>(cx, sampler, &[]).expect("destroy sampler");
+        let sampler_entry = descriptor(&rt, &[("binding", rt.number(0.0)), ("resource", sampler)]);
+        let sampler_desc = descriptor(
+            &rt,
+            &[
+                ("layout", live_layout),
+                ("entries", rt.set_like(&[sampler_entry])),
+            ],
+        );
+        assert_eq!(
+            convert_bind_group_descriptor::<Engine>(cx, sampler_desc, &Arena::new())
+                .err()
+                .expect("destroyed sampler in descriptor"),
+            "OperationError: GPUSampler was destroyed"
+        );
+
+        let view = extension_wrapper(&rt, cx, ExtensionKind::TextureView);
+        crate::extension_destroy::<Engine>(cx, view, &[]).expect("destroy view");
+        let view_entry = descriptor(&rt, &[("binding", rt.number(0.0)), ("resource", view)]);
+        let view_desc = descriptor(
+            &rt,
+            &[
+                ("layout", live_layout),
+                ("entries", rt.set_like(&[view_entry])),
+            ],
+        );
+        assert_eq!(
+            convert_bind_group_descriptor::<Engine>(cx, view_desc, &Arena::new())
+                .err()
+                .expect("destroyed view in descriptor"),
+            "OperationError: GPUTextureView was destroyed"
+        );
+
+        let bind_group_layout = extension_wrapper(&rt, cx, ExtensionKind::BindGroupLayout);
+        crate::extension_destroy::<Engine>(cx, bind_group_layout, &[])
+            .expect("destroy bind group layout");
+        let bind_group_desc = descriptor(
+            &rt,
+            &[("layout", bind_group_layout), ("entries", rt.set_like(&[]))],
+        );
+        assert_eq!(
+            convert_bind_group_descriptor::<Engine>(cx, bind_group_desc, &Arena::new())
+                .err()
+                .expect("destroyed bind group layout in descriptor"),
+            "OperationError: GPUBindGroupLayout was destroyed"
+        );
+
+        let pipeline_layout = extension_wrapper(&rt, cx, ExtensionKind::PipelineLayout);
+        crate::extension_destroy::<Engine>(cx, pipeline_layout, &[])
+            .expect("destroy pipeline layout");
+        let compute_stage = descriptor(&rt, &[("module", live_module)]);
+        let compute_desc = descriptor(
+            &rt,
+            &[("layout", pipeline_layout), ("compute", compute_stage)],
+        );
+        assert_eq!(
+            convert_compute_pipeline_descriptor::<Engine>(cx, compute_desc, &Arena::new())
+                .err()
+                .expect("destroyed pipeline layout in descriptor"),
+            "OperationError: GPUPipelineLayout was destroyed"
+        );
+
+        let shader_module = extension_wrapper(&rt, cx, ExtensionKind::ShaderModule);
+        crate::extension_destroy::<Engine>(cx, shader_module, &[]).expect("destroy shader module");
+        let compute_stage = descriptor(&rt, &[("module", shader_module)]);
+        let compute_desc = descriptor(
+            &rt,
+            &[("layout", rt.string("auto")), ("compute", compute_stage)],
+        );
+        assert_eq!(
+            convert_compute_pipeline_descriptor::<Engine>(cx, compute_desc, &Arena::new())
+                .err()
+                .expect("destroyed shader module in descriptor"),
+            "OperationError: GPUShaderModule was destroyed"
+        );
+
+        let device = unsafe { wrap_device::<Engine>(cx, fake_device()) }.expect("device");
+        let encoder = device_create_command_encoder::<Engine>(cx, device, &[]).expect("encoder");
+        let compute_pass = crate::command_encoder_begin_compute_pass::<Engine>(cx, encoder, &[])
+            .expect("compute pass");
+        let bind_group = extension_wrapper(&rt, cx, ExtensionKind::BindGroup);
+        crate::extension_destroy::<Engine>(cx, bind_group, &[]).expect("destroy bind group");
+        assert_eq!(
+            crate::compute_pass_set_bind_group::<Engine>(
+                cx,
+                compute_pass,
+                &[rt.number(0.0), bind_group],
+            )
+            .expect_err("destroyed bind group command"),
+            "OperationError: GPUBindGroup was destroyed"
+        );
+        let compute_pipeline = extension_wrapper(&rt, cx, ExtensionKind::ComputePipeline);
+        crate::extension_destroy::<Engine>(cx, compute_pipeline, &[])
+            .expect("destroy compute pipeline");
+        assert_eq!(
+            crate::compute_pass_set_pipeline::<Engine>(cx, compute_pass, &[compute_pipeline])
+                .expect_err("destroyed compute pipeline command"),
+            "OperationError: GPUComputePipeline was destroyed"
+        );
+        crate::compute_pass_end::<Engine>(cx, compute_pass, &[]).expect("end compute pass");
+
+        let pass_desc = descriptor(&rt, &[("colorAttachments", rt.set_like(&[]))]);
+        let render_pass =
+            crate::command_encoder_begin_render_pass::<Engine>(cx, encoder, &[pass_desc])
+                .expect("render pass");
+        let render_pipeline = extension_wrapper(&rt, cx, ExtensionKind::RenderPipeline);
+        crate::extension_destroy::<Engine>(cx, render_pipeline, &[])
+            .expect("destroy render pipeline");
+        assert_eq!(
+            crate::render_pass_set_pipeline::<Engine>(cx, render_pass, &[render_pipeline])
+                .expect_err("destroyed render pipeline command"),
+            "OperationError: GPURenderPipeline was destroyed"
+        );
+        let bundle = extension_wrapper(&rt, cx, ExtensionKind::RenderBundle);
+        crate::extension_destroy::<Engine>(cx, bundle, &[]).expect("destroy bundle");
+        assert_eq!(
+            crate::render_pass_execute_bundles::<Engine>(
+                cx,
+                render_pass,
+                &[rt.set_like(&[bundle])],
+            )
+            .expect_err("destroyed bundle command"),
+            "OperationError: GPURenderBundle was destroyed"
+        );
+
+        for value in [
+            sampler,
+            view,
+            bind_group_layout,
+            pipeline_layout,
+            shader_module,
+            bind_group,
+            compute_pipeline,
+            render_pipeline,
+            bundle,
+        ] {
+            rt.finalize_instance(value);
+        }
+        assert_eq!(rt.queue().len(), Ok(9));
+        assert_eq!(rt.queue().drain(), Ok(9));
+        release_device_held_values(&rt, cx, device);
+    }
+
+    #[test]
+    fn block20_destroy_inside_frame_drains_the_release_in_step_six() {
+        reset_gpu();
+        let rt = runtime();
+        let cx = rt.context();
+        let bind_group = extension_wrapper(&rt, cx, ExtensionKind::BindGroup);
+        let callback = rt.handler();
+        rt.set_global("update", callback);
+        rt.destroy_on_next_call(bind_group);
+
+        let drained =
+            unsafe { crate::frame::<Engine>(cx, fake_handle(99), "update", &[]) }.expect("frame");
+
+        assert_eq!(drained, 1);
+        assert_eq!(rt.queue().len(), Ok(0));
+        GPU_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.bind_group_releases, 1);
+            assert_eq!(
+                state.native_order,
+                [
+                    "process_events",
+                    "microtasks",
+                    "call",
+                    "microtasks",
+                    "bind_group_release",
+                    "buffer_release"
+                ]
+            );
+        });
+        rt.finalize_instance(bind_group);
+        assert_eq!(rt.queue().len(), Ok(0));
     }
 
     #[test]
@@ -5174,7 +5696,7 @@ mod tests {
             crate::GPU_BIND_GROUP_LAYOUT_CLASS,
             Box::new(BindGroupLayoutPayload {
                 label: Mutex::new(String::new()),
-                layout: fake_handle(41),
+                layout: live_handle(fake_handle(41)),
                 parent_pipeline: None,
             }),
         )
@@ -5196,7 +5718,7 @@ mod tests {
             crate::GPU_SHADER_MODULE_CLASS,
             Box::new(ShaderModulePayload {
                 label: Mutex::new(String::new()),
-                module: fake_handle(42),
+                module: live_handle(fake_handle(42)),
                 source: "".into(),
             }),
         )
@@ -5263,7 +5785,7 @@ mod tests {
             .expect("sampler payload");
         finalize_sampler(
             Box::new(SamplerPayload {
-                sampler: payload.sampler,
+                sampler: live_handle(copied_handle(&payload.sampler)),
                 label: Mutex::new("renamed".to_owned()),
             }),
             &rt.env,
@@ -5382,7 +5904,7 @@ mod tests {
                 label: Mutex::new(String::new()),
                 dimension: crate::WGPUTextureViewDimension_WGPUTextureViewDimension_2D,
                 mip_depth: 1,
-                texture_view: view_payload.texture_view,
+                texture_view: live_handle(copied_handle(&view_payload.texture_view)),
                 texture: view_payload.texture,
             }),
             &rt.env,
@@ -5652,7 +6174,7 @@ mod tests {
             crate::GPU_SHADER_MODULE_CLASS,
             Box::new(ShaderModulePayload {
                 label: Mutex::new(String::new()),
-                module: fake_handle(42),
+                module: live_handle(fake_handle(42)),
                 source: "".into(),
             }),
         )
@@ -5710,7 +6232,7 @@ mod tests {
             crate::GPU_SHADER_MODULE_CLASS,
             Box::new(ShaderModulePayload {
                 label: Mutex::new(String::new()),
-                module: fake_handle(42),
+                module: live_handle(fake_handle(42)),
                 source: "".into(),
             }),
         )
@@ -5735,7 +6257,7 @@ mod tests {
             crate::GPU_SHADER_MODULE_CLASS,
             Box::new(ShaderModulePayload {
                 label: Mutex::new(String::new()),
-                module: fake_handle(42),
+                module: live_handle(fake_handle(42)),
                 source: "".into(),
             }),
         )
@@ -5963,7 +6485,7 @@ mod tests {
             crate::GPU_BIND_GROUP_LAYOUT_CLASS,
             Box::new(BindGroupLayoutPayload {
                 label: Mutex::new(String::new()),
-                layout: fake_handle(41),
+                layout: live_handle(fake_handle(41)),
                 parent_pipeline: None,
             }),
         )
@@ -5973,7 +6495,7 @@ mod tests {
             crate::GPU_BIND_GROUP_LAYOUT_CLASS,
             Box::new(BindGroupLayoutPayload {
                 label: Mutex::new(String::new()),
-                layout: fake_handle(42),
+                layout: live_handle(fake_handle(42)),
                 parent_pipeline: None,
             }),
         )
@@ -6005,7 +6527,7 @@ mod tests {
             crate::GPU_BIND_GROUP_LAYOUT_CLASS,
             Box::new(BindGroupLayoutPayload {
                 label: Mutex::new(String::new()),
-                layout: first_handle,
+                layout: live_handle(first_handle),
                 parent_pipeline: None,
             }),
         )
@@ -6015,7 +6537,7 @@ mod tests {
             crate::GPU_BIND_GROUP_LAYOUT_CLASS,
             Box::new(BindGroupLayoutPayload {
                 label: Mutex::new(String::new()),
-                layout: second_handle,
+                layout: live_handle(second_handle),
                 parent_pipeline: None,
             }),
         )
@@ -6048,7 +6570,7 @@ mod tests {
             crate::GPU_BIND_GROUP_LAYOUT_CLASS,
             Box::new(BindGroupLayoutPayload {
                 label: Mutex::new(String::new()),
-                layout: layout_handle,
+                layout: live_handle(layout_handle),
                 parent_pipeline: None,
             }),
         )
@@ -6083,7 +6605,7 @@ mod tests {
             crate::GPU_BIND_GROUP_LAYOUT_CLASS,
             Box::new(BindGroupLayoutPayload {
                 label: Mutex::new(String::new()),
-                layout: fake_handle(54),
+                layout: live_handle(fake_handle(54)),
                 parent_pipeline: None,
             }),
         )
@@ -6124,7 +6646,7 @@ mod tests {
             crate::GPU_BIND_GROUP_LAYOUT_CLASS,
             Box::new(BindGroupLayoutPayload {
                 label: Mutex::new(String::new()),
-                layout: layout_handle,
+                layout: live_handle(layout_handle),
                 parent_pipeline: None,
             }),
         )
@@ -6149,7 +6671,7 @@ mod tests {
         crate::finalize_pipeline_layout(
             Box::new(PipelineLayoutPayload {
                 label: Mutex::new(String::new()),
-                layout: payload.layout,
+                layout: live_handle(copied_handle(&payload.layout)),
             }),
             &rt.env,
         );
@@ -7043,7 +7565,7 @@ mod tests {
             crate::GPU_BIND_GROUP_LAYOUT_CLASS,
             Box::new(BindGroupLayoutPayload {
                 label: Mutex::new(String::new()),
-                layout: fake_handle(77),
+                layout: live_handle(fake_handle(77)),
                 parent_pipeline: None,
             }),
         )
@@ -7084,7 +7606,7 @@ mod tests {
             crate::GPU_BIND_GROUP_LAYOUT_CLASS,
             Box::new(BindGroupLayoutPayload {
                 label: Mutex::new(String::new()),
-                layout: fake_handle(77),
+                layout: live_handle(fake_handle(77)),
                 parent_pipeline: None,
             }),
         )
@@ -7114,7 +7636,7 @@ mod tests {
             crate::GPU_BIND_GROUP_LAYOUT_CLASS,
             Box::new(BindGroupLayoutPayload {
                 label: Mutex::new(String::new()),
-                layout: fake_handle(77),
+                layout: live_handle(fake_handle(77)),
                 parent_pipeline: None,
             }),
         )
@@ -7158,7 +7680,7 @@ mod tests {
             crate::GPU_BIND_GROUP_LAYOUT_CLASS,
             Box::new(BindGroupLayoutPayload {
                 label: Mutex::new(String::new()),
-                layout: fake_handle(77),
+                layout: live_handle(fake_handle(77)),
                 parent_pipeline: None,
             }),
         )
@@ -7184,7 +7706,7 @@ mod tests {
             cx,
             crate::GPU_SAMPLER_CLASS,
             Box::new(SamplerPayload {
-                sampler: sampler_handle,
+                sampler: live_handle(sampler_handle),
                 label: Mutex::new(String::new()),
             }),
         )
@@ -7196,7 +7718,7 @@ mod tests {
                 label: Mutex::new(String::new()),
                 dimension: crate::WGPUTextureViewDimension_WGPUTextureViewDimension_2D,
                 mip_depth: 1,
-                texture_view: view_handle,
+                texture_view: live_handle(view_handle),
                 texture: fake_handle(83),
             }),
         )
@@ -7251,7 +7773,7 @@ mod tests {
             crate::GPU_BIND_GROUP_LAYOUT_CLASS,
             Box::new(BindGroupLayoutPayload {
                 label: Mutex::new(String::new()),
-                layout: fake_handle(841),
+                layout: live_handle(fake_handle(841)),
                 parent_pipeline: None,
             }),
         )
@@ -7297,7 +7819,7 @@ mod tests {
         finalize_bind_group(
             Box::new(BindGroupPayload {
                 label: Mutex::new(String::new()),
-                bind_group: payload.bind_group,
+                bind_group: live_handle(copied_handle(&payload.bind_group)),
                 layout: payload.layout,
                 buffers: payload.buffers.clone(),
                 samplers: payload.samplers.clone(),
@@ -7340,7 +7862,7 @@ mod tests {
             crate::GPU_BIND_GROUP_LAYOUT_CLASS,
             Box::new(BindGroupLayoutPayload {
                 label: Mutex::new(String::new()),
-                layout: fake_handle(77),
+                layout: live_handle(fake_handle(77)),
                 parent_pipeline: None,
             }),
         )
@@ -7376,7 +7898,7 @@ mod tests {
                 crate::GPU_BIND_GROUP_LAYOUT_CLASS,
                 Box::new(BindGroupLayoutPayload {
                     label: Mutex::new(String::new()),
-                    layout: fake_handle(77),
+                    layout: live_handle(fake_handle(77)),
                     parent_pipeline: None,
                 }),
             )
@@ -7419,7 +7941,7 @@ mod tests {
             cx,
             crate::GPU_SAMPLER_CLASS,
             Box::new(SamplerPayload {
-                sampler: fake_handle(78),
+                sampler: live_handle(fake_handle(78)),
                 label: Mutex::new(String::new()),
             }),
         )
@@ -7431,7 +7953,7 @@ mod tests {
                 label: Mutex::new(String::new()),
                 dimension: crate::WGPUTextureViewDimension_WGPUTextureViewDimension_2D,
                 mip_depth: 1,
-                texture_view: fake_handle(79),
+                texture_view: live_handle(fake_handle(79)),
                 texture: fake_handle(80),
             }),
         )
@@ -7441,7 +7963,7 @@ mod tests {
             crate::GPU_BIND_GROUP_LAYOUT_CLASS,
             Box::new(BindGroupLayoutPayload {
                 label: Mutex::new(String::new()),
-                layout: fake_handle(77),
+                layout: live_handle(fake_handle(77)),
                 parent_pipeline: None,
             }),
         )
@@ -7475,7 +7997,7 @@ mod tests {
         finalize_bind_group(
             Box::new(BindGroupPayload {
                 label: Mutex::new(String::new()),
-                bind_group: payload.bind_group,
+                bind_group: live_handle(copied_handle(&payload.bind_group)),
                 layout: payload.layout,
                 buffers: payload.buffers.clone(),
                 samplers: payload.samplers.clone(),
@@ -7506,7 +8028,7 @@ mod tests {
             crate::GPU_SHADER_MODULE_CLASS,
             Box::new(ShaderModulePayload {
                 label: Mutex::new(String::new()),
-                module: fake_handle(42),
+                module: live_handle(fake_handle(42)),
                 source: "".into(),
             }),
         )
@@ -7516,7 +8038,7 @@ mod tests {
             crate::GPU_PIPELINE_LAYOUT_CLASS,
             Box::new(PipelineLayoutPayload {
                 label: Mutex::new(String::new()),
-                layout: fake_handle(43),
+                layout: live_handle(fake_handle(43)),
             }),
         )
         .expect("layout");
@@ -7536,7 +8058,7 @@ mod tests {
         finalize_compute_pipeline(
             Box::new(ComputePipelinePayload {
                 label: Mutex::new(String::new()),
-                pipeline: payload.pipeline,
+                pipeline: live_handle(copied_handle(&payload.pipeline)),
                 module: payload.module,
                 layout: payload.layout,
             }),
@@ -7562,7 +8084,7 @@ mod tests {
             crate::GPU_PIPELINE_LAYOUT_CLASS,
             Box::new(PipelineLayoutPayload {
                 label: Mutex::new(String::new()),
-                layout: fake_handle(73),
+                layout: live_handle(fake_handle(73)),
             }),
         )
         .expect("pipeline layout");
@@ -8134,7 +8656,7 @@ mod tests {
         finalize_render_pipeline(
             Box::new(RenderPipelinePayload {
                 label: Mutex::new(String::new()),
-                render_pipeline: payload.render_pipeline,
+                render_pipeline: live_handle(copied_handle(&payload.render_pipeline)),
                 vertex_module: payload.vertex_module,
                 fragment_module: payload.fragment_module,
                 layout: payload.layout,
@@ -8266,7 +8788,7 @@ mod tests {
             crate::GPU_PIPELINE_LAYOUT_CLASS,
             Box::new(PipelineLayoutPayload {
                 label: Mutex::new(String::new()),
-                layout: fake_handle(103),
+                layout: live_handle(fake_handle(103)),
             }),
         )
         .expect("pipeline layout");
@@ -8296,7 +8818,7 @@ mod tests {
         finalize_render_pipeline(
             Box::new(RenderPipelinePayload {
                 label: Mutex::new(String::new()),
-                render_pipeline: payload.render_pipeline,
+                render_pipeline: live_handle(copied_handle(&payload.render_pipeline)),
                 vertex_module: payload.vertex_module,
                 fragment_module: payload.fragment_module,
                 layout: payload.layout,
@@ -8326,7 +8848,7 @@ mod tests {
             crate::GPU_PIPELINE_LAYOUT_CLASS,
             Box::new(PipelineLayoutPayload {
                 label: Mutex::new(String::new()),
-                layout: fake_handle(204),
+                layout: live_handle(fake_handle(204)),
             }),
         )
         .expect("pipeline layout");
@@ -8381,7 +8903,7 @@ mod tests {
         finalize_compute_pipeline(
             Box::new(ComputePipelinePayload {
                 label: Mutex::new(String::new()),
-                pipeline: compute_payload.pipeline,
+                pipeline: live_handle(copied_handle(&compute_payload.pipeline)),
                 module: compute_payload.module,
                 layout: compute_payload.layout,
             }),
@@ -8393,7 +8915,7 @@ mod tests {
         finalize_render_pipeline(
             Box::new(RenderPipelinePayload {
                 label: Mutex::new(String::new()),
-                render_pipeline: render_payload.render_pipeline,
+                render_pipeline: live_handle(copied_handle(&render_payload.render_pipeline)),
                 vertex_module: render_payload.vertex_module,
                 fragment_module: render_payload.fragment_module,
                 layout: render_payload.layout,
@@ -11769,7 +12291,7 @@ mod tests {
                 label: Mutex::new(String::new()),
                 dimension: crate::WGPUTextureViewDimension_WGPUTextureViewDimension_2D,
                 mip_depth: 1,
-                texture_view: fake_handle(501),
+                texture_view: live_handle(fake_handle(501)),
                 texture: fake_handle(502),
             }),
         )
@@ -12321,7 +12843,7 @@ mod tests {
             crate::GPU_COMPUTE_PIPELINE_CLASS,
             Box::new(ComputePipelinePayload {
                 label: Mutex::new(String::new()),
-                pipeline: fake_handle(690),
+                pipeline: live_handle(fake_handle(690)),
                 module: ptr::null_mut(),
                 layout: ptr::null_mut(),
             }),
@@ -12332,7 +12854,7 @@ mod tests {
             crate::GPU_BIND_GROUP_CLASS,
             Box::new(BindGroupPayload {
                 label: Mutex::new(String::new()),
-                bind_group: fake_handle(691),
+                bind_group: live_handle(fake_handle(691)),
                 layout: ptr::null_mut(),
                 buffers: Vec::new(),
                 samplers: Vec::new(),
@@ -13040,7 +13562,7 @@ mod tests {
                 label: Mutex::new(String::new()),
                 dimension: crate::WGPUTextureViewDimension_WGPUTextureViewDimension_2D,
                 mip_depth: 1,
-                texture_view: fake_handle(701),
+                texture_view: live_handle(fake_handle(701)),
                 texture: fake_handle(702),
             }),
         )
@@ -13085,7 +13607,7 @@ mod tests {
             crate::GPU_RENDER_PIPELINE_CLASS,
             Box::new(RenderPipelinePayload {
                 label: Mutex::new(String::new()),
-                render_pipeline: fake_handle(703),
+                render_pipeline: live_handle(fake_handle(703)),
                 vertex_module: ptr::null_mut(),
                 fragment_module: ptr::null_mut(),
                 layout: ptr::null_mut(),
@@ -13137,7 +13659,7 @@ mod tests {
             crate::GPU_BIND_GROUP_CLASS,
             Box::new(BindGroupPayload {
                 label: Mutex::new(String::new()),
-                bind_group: fake_handle(704),
+                bind_group: live_handle(fake_handle(704)),
                 layout: ptr::null_mut(),
                 buffers: Vec::new(),
                 samplers: Vec::new(),
@@ -13493,7 +14015,7 @@ mod tests {
             crate::GPU_RENDER_PIPELINE_CLASS,
             Box::new(RenderPipelinePayload {
                 label: Mutex::new(String::new()),
-                render_pipeline: fake_handle(14_001),
+                render_pipeline: live_handle(fake_handle(14_001)),
                 vertex_module: ptr::null_mut(),
                 fragment_module: ptr::null_mut(),
                 layout: ptr::null_mut(),
@@ -13515,7 +14037,7 @@ mod tests {
             crate::GPU_BIND_GROUP_CLASS,
             Box::new(BindGroupPayload {
                 label: Mutex::new(String::new()),
-                bind_group: fake_handle(14_002),
+                bind_group: live_handle(fake_handle(14_002)),
                 layout: ptr::null_mut(),
                 buffers: Vec::new(),
                 samplers: Vec::new(),
@@ -13674,12 +14196,12 @@ mod tests {
         );
         let native_bundle = Engine::payload(cx, bundle, crate::GPU_RENDER_BUNDLE_CLASS)
             .and_then(|payload| payload.downcast_ref::<crate::RenderBundlePayload>())
-            .map(|payload| payload.render_bundle)
+            .map(|payload| copied_handle(&payload.render_bundle))
             .expect("native render bundle");
         crate::finalize_render_bundle(
             Box::new(crate::RenderBundlePayload {
                 label: Mutex::new(String::new()),
-                render_bundle: native_bundle,
+                render_bundle: live_handle(native_bundle),
                 invalid: false,
             }),
             &rt.env,
@@ -13764,7 +14286,7 @@ mod tests {
             crate::GPU_RENDER_BUNDLE_CLASS,
             Box::new(crate::RenderBundlePayload {
                 label: Mutex::new(String::new()),
-                render_bundle: fake_handle(15_100),
+                render_bundle: live_handle(fake_handle(15_100)),
                 invalid: false,
             }),
         )
@@ -13999,7 +14521,7 @@ mod tests {
             crate::GPU_COMPUTE_PIPELINE_CLASS,
             Box::new(ComputePipelinePayload {
                 label: Mutex::new(String::new()),
-                pipeline: pipeline_handle,
+                pipeline: live_handle(pipeline_handle),
                 module: fake_handle(901),
                 layout: ptr::null_mut(),
             }),
@@ -14019,7 +14541,7 @@ mod tests {
             crate::finalize_bind_group_layout(
                 Box::new(BindGroupLayoutPayload {
                     label: Mutex::new(String::new()),
-                    layout: payload.layout,
+                    layout: live_handle(copied_handle(&payload.layout)),
                     parent_pipeline: payload.parent_pipeline,
                 }),
                 &rt.env,

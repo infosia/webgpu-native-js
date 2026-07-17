@@ -110,7 +110,11 @@ retention global (`__hostBorrowedBounceBundle`), and swaps its stored handle;
 the superseded handle is never touched again. The superseded wrapper's release
 rides Boa GC and the release queue (frame step 6). Under JSC it would live to
 context teardown — one more reason re-record is rare by design; record this in
-the README's caveat (K12), and note the example is Boa-linked.
+the README's caveat (K12), and note the example is Boa-linked. *(Update
+2026-07-17: block 20 added extension `destroy()`; the example now destroys the
+superseded bundle in the same update, so its release is bounded on both
+engines. The rides-GC path remains the behaviour for scripts that do not call
+it. The engine note is superseded by the examples' `engine-jsc` feature.)*
 
 **K7 — example-only, or stop.** Zero diffs outside `examples/bounce`, the
 READMEs it cross-references, and `specs/tracking/`. If the example cannot be

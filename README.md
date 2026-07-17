@@ -183,7 +183,12 @@ Three rules for script authors:
   On Boa, forgetting `destroy()` means GPU memory waits for a collection.
   **Under JavaScriptCore, `destroy()` is the only bounded path** — the engine
   may not finalize a dropped wrapper until the context itself dies, and
-  neither the host nor the binding can force it.
+  neither the host nor the binding can force it. For that reason every
+  retained object here has `destroy()`: buffers, textures, query sets, and
+  devices by the WebGPU spec, and the other retained types (render bundles,
+  bind groups, pipelines, samplers, shader modules, texture views, layouts) as
+  a recorded non-standard extension with the same shape — idempotent, and any
+  later use throws an `OperationError`.
 - **Do not call `transfer()` on a mapped-range `ArrayBuffer`.** It moves the
   live mapping into a new buffer the binding cannot see or revoke, leaving a
   dangling view after `unmap()`. Recorded limitation; no guard is practical.
@@ -230,6 +235,11 @@ headless-tested end-to-end. Present so far:
   `GPUShaderModule.getCompilationInfo`
 - Async pipeline creation: `createComputePipelineAsync`,
   `createRenderPipelineAsync`
+- Extension: `destroy()` on the nine retained types the spec leaves without
+  one (render bundle, bind group, both pipelines, sampler, shader module,
+  texture view, both layouts) — a bounded release path under JavaScriptCore;
+  non-standard, generated as a declared extension, and collision-checked
+  against the pinned WebIDL (`specs/blocks/20-explicit-release.md`)
 
 WebIDL semantics are followed: iterator-based `sequence<T>` conversion
 (a `Set` or generator is accepted, an array-like is rejected), `[EnforceRange]`

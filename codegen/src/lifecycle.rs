@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use crate::{
-    snake_case, CodegenError, DescriptorEntry, IdlMemberKind, JoinReport, LifecyclePolicy,
-    MemberPair, Policy, SubsetEntry, TypePair,
+    snake_case, CodegenError, DescriptorEntry, ExtensionMethodPolicy, IdlMemberKind, JoinReport,
+    LifecyclePolicy, MemberPair, Policy, SubsetEntry, TypePair,
 };
 
 #[derive(Clone)]
@@ -27,6 +27,7 @@ struct StandardInterface<'a> {
     label: bool,
     stateful_encoder: bool,
     destroyable: bool,
+    extension_destroyable: bool,
     source_retaining: bool,
     retained: Vec<RetainedHandle>,
 }
@@ -61,8 +62,12 @@ pub(super) fn emit_lifecycle(report: &JoinReport, source: &str) -> Result<String
             emit_label_accessors(&mut output, standard);
         }
         emit_native_attribute_accessors(&mut output, report, standard)?;
+        if standard.extension_destroyable {
+            emit_retire(&mut output, standard);
+        }
         emit_finalizer(&mut output, standard);
     }
+    emit_extension_methods(&mut output, &policy);
     emit_class_specs(&mut output, report, &policy, lifecycle, &standards)?;
     emit_class_inventory(&mut output, &policy, lifecycle);
     if output.ends_with("\n\n") {
@@ -577,6 +582,11 @@ fn standard_interfaces<'a>(
             destroyable: lifecycle.quirks.iter().any(|entry| {
                 entry.interface == *name && entry.kind == "destroyable_resource_payload"
             }),
+            extension_destroyable: policy
+                .extension
+                .methods
+                .iter()
+                .any(|entry| entry.interface == *name && entry.member == "destroy"),
             source_retaining: lifecycle
                 .quirks
                 .iter()
@@ -929,11 +939,20 @@ fn emit_payloads(output: &mut String, standards: &[StandardInterface<'_>]) {
             let state = format!("{}State", object_name(interface));
             let _ = writeln!(output, "    pub(super) state: Arc<Mutex<{state}>>,");
         } else {
-            let _ = writeln!(
-                output,
-                "    pub(super) {}: {},",
-                standard.handle_field, standard.handle_type
-            );
+            if standard.extension_destroyable {
+                let _ = writeln!(
+                    output,
+                    "    pub(super) {field}: Mutex<Option<{ty}>>,",
+                    field = standard.handle_field,
+                    ty = standard.handle_type
+                );
+            } else {
+                let _ = writeln!(
+                    output,
+                    "    pub(super) {}: {},",
+                    standard.handle_field, standard.handle_type
+                );
+            }
             for retained in &standard.retained {
                 let type_name = if retained.sequence {
                     format!("Vec<{}>", retained.handle_type)
@@ -1284,7 +1303,15 @@ fn emit_create(output: &mut String, standard: &StandardInterface<'_>) -> Result<
         }
         output.push_str("            error_sink,\n        })),\n");
     } else {
-        let _ = writeln!(output, "        {},", standard.handle_field);
+        if standard.extension_destroyable {
+            let _ = writeln!(
+                output,
+                "        {}: Mutex::new(Some({})),",
+                standard.handle_field, standard.handle_field
+            );
+        } else {
+            let _ = writeln!(output, "        {},", standard.handle_field);
+        }
         for retained in &standard.retained {
             if retained.from_creator {
                 if retained.field == retained.source {
@@ -1401,6 +1428,13 @@ fn emit_label_accessors(output: &mut String, standard: &StandardInterface<'_>) {
     if standard.stateful_encoder {
         let _ = writeln!(output, "    let handle = payload.state.lock().map_err(|_| E::operation_error(cx, \"{interface} state is poisoned\"))?.{};", standard.handle_field);
         let _ = writeln!(output, "    unsafe {{ (E::environment(cx).gpu().{}_set_label)(handle, WGPUStringView::from_bytes(new_label.as_bytes())); }}", snake_case(object));
+    } else if standard.extension_destroyable {
+        let _ = writeln!(
+            output,
+            "    let handle = handle_or_throw::<E, _>(cx, \"{interface}\", &payload.{})?;",
+            standard.handle_field
+        );
+        let _ = writeln!(output, "    unsafe {{ (E::environment(cx).gpu().{}_set_label)(handle, WGPUStringView::from_bytes(new_label.as_bytes())); }}", snake_case(object));
     } else {
         let _ = writeln!(output, "    unsafe {{ (E::environment(cx).gpu().{}_set_label)(payload.{}, WGPUStringView::from_bytes(new_label.as_bytes())); }}", snake_case(object), standard.handle_field);
     }
@@ -1456,11 +1490,23 @@ fn emit_native_attribute_accessors(
             "    let payload = E::payload(cx, this, {}).and_then(|payload| payload.downcast_ref::<{}>()).ok_or_else(|| E::type_error(cx, \"{interface}.{} called on an incompatible object\"))?;",
             standard.class_id, standard.payload, member.member
         );
-        let _ = writeln!(
-            output,
-            "    let native = unsafe {{ (E::environment(cx).gpu().{dispatch})(payload.{}) }};",
-            standard.handle_field
-        );
+        if standard.extension_destroyable {
+            let _ = writeln!(
+                output,
+                "    let handle = handle_or_throw::<E, _>(cx, \"{interface}\", &payload.{})?;",
+                standard.handle_field
+            );
+            let _ = writeln!(
+                output,
+                "    let native = unsafe {{ (E::environment(cx).gpu().{dispatch})(handle) }};"
+            );
+        } else {
+            let _ = writeln!(
+                output,
+                "    let native = unsafe {{ (E::environment(cx).gpu().{dispatch})(payload.{}) }};",
+                standard.handle_field
+            );
+        }
         if let Some(pair) = report.enums.iter().find(|pair| {
             pair.idl_name.as_deref() == Some(idl.type_name.as_str())
                 && pair.c_name.as_deref() == Some(c.type_name.as_str())
@@ -1494,6 +1540,73 @@ fn emit_native_attribute_accessors(
     Ok(())
 }
 
+fn emit_retire(output: &mut String, standard: &StandardInterface<'_>) {
+    let interface = standard.interface.idl_name.as_deref().unwrap_or_default();
+    let function = format!("retire_{}", snake_case(object_name(interface)));
+    let _ = writeln!(
+        output,
+        "/// Retires the native ownership held by a `{interface}` wrapper exactly once."
+    );
+    let _ = writeln!(
+        output,
+        "pub(super) fn {function}(payload: &{}, env: &Environment) {{",
+        standard.payload
+    );
+    let _ = writeln!(
+        output,
+        "    let handle = {{ let Ok(mut slot) = payload.{}.lock() else {{ return; }}; let Some(handle) = slot.take() else {{ return; }}; handle }};",
+        standard.handle_field
+    );
+    let _ = writeln!(
+        output,
+        "    let _ = env.queue().enqueue(ReleaseRequest::{} {{",
+        standard.release_variant
+    );
+    let _ = writeln!(output, "        {}: handle,", standard.release_field);
+    for retained in &standard.retained {
+        if retained.sequence {
+            let _ = writeln!(
+                output,
+                "        {}: payload.{}.clone(),",
+                retained.field, retained.field
+            );
+        } else {
+            let _ = writeln!(
+                output,
+                "        {}: payload.{},",
+                retained.field, retained.field
+            );
+        }
+    }
+    if interface == "GPUBindGroupLayout" {
+        output.push_str("        parent_pipeline: payload.parent_pipeline,\n");
+    }
+    output.push_str("        gpu: env.gpu(),\n    });\n}\n\n");
+}
+
+fn emit_extension_methods(output: &mut String, policy: &Policy) {
+    for method in &policy.extension.methods {
+        let function = format!(
+            "nonstandard_{}_{}",
+            snake_case(object_name(&method.interface)),
+            snake_case(&method.member)
+        );
+        let target = format!("extension_{}", snake_case(&method.member));
+        let docs = format!(
+            "Implements the non-standard extension `{}.{}`.",
+            method.interface, method.member
+        );
+        let reason = format!("Policy reason: {}", method.reason);
+        let _ = writeln!(output, "#[doc = {docs:?}]");
+        let _ = writeln!(output, "#[doc = {reason:?}]");
+        let _ = writeln!(
+            output,
+            "pub fn {function}<E: JsEngine + 'static>(cx: E::Context<'_>, this: E::Value, args: &[E::Value]) -> Result<E::Value, E::Error> {{"
+        );
+        let _ = writeln!(output, "    {target}::<E>(cx, this, args)\n}}\n");
+    }
+}
+
 fn emit_finalizer(output: &mut String, standard: &StandardInterface<'_>) {
     let interface = standard.interface.idl_name.as_deref().unwrap_or_default();
     let _ = writeln!(
@@ -1516,6 +1629,12 @@ fn emit_finalizer(output: &mut String, standard: &StandardInterface<'_>) {
             output,
             "    let _ = env.queue().enqueue(ReleaseRequest::{} {{ {}: state.{}, gpu: env.gpu() }});",
             standard.release_variant, standard.release_field, standard.handle_field
+        );
+    } else if standard.extension_destroyable {
+        let _ = writeln!(
+            output,
+            "    retire_{}(&payload, env);",
+            snake_case(object_name(interface))
         );
     } else {
         let _ = writeln!(
@@ -1560,7 +1679,15 @@ fn emit_class_specs(
         })
         .collect();
     for extra in &lifecycle.extra_class_interfaces {
-        emit_one_class(output, extra, None, None, lifecycle, &standard_map)?;
+        emit_one_class(
+            output,
+            extra,
+            None,
+            None,
+            lifecycle,
+            &policy.extension.methods,
+            &standard_map,
+        )?;
     }
     for subset in &policy.subset {
         let pair = report
@@ -1574,6 +1701,7 @@ fn emit_class_specs(
             Some(subset),
             Some(pair),
             lifecycle,
+            &policy.extension.methods,
             &standard_map,
         )?;
     }
@@ -1586,6 +1714,7 @@ fn emit_one_class(
     subset: Option<&SubsetEntry>,
     pair: Option<&TypePair>,
     lifecycle: &LifecyclePolicy,
+    extension_methods: &[ExtensionMethodPolicy],
     standards: &BTreeMap<&str, &StandardInterface<'_>>,
 ) -> Result<(), CodegenError> {
     let object = object_name(interface);
@@ -1795,6 +1924,22 @@ fn emit_one_class(
                 mapping.length.unwrap_or(0),
             ));
         }
+    }
+    for (index, method) in extension_methods
+        .iter()
+        .filter(|method| method.interface == interface)
+        .enumerate()
+    {
+        methods.push((
+            usize::MAX / 4 * 3 + index,
+            method.member.as_str(),
+            format!(
+                "nonstandard_{}_{}",
+                snake_case(object_name(interface)),
+                snake_case(&method.member)
+            ),
+            0,
+        ));
     }
     methods.sort_by_key(|method| method.0);
     if methods.is_empty() {

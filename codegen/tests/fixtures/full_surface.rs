@@ -1966,11 +1966,13 @@ pub(super) fn convert_bind_group_entry<E: JsEngine + 'static>(
     // C2/R24: wrapper-union arms are selected by generated ClassSpec identity.
     let sampler_resource = E::payload(cx, resource_value, GPU_SAMPLER_CLASS)
         .and_then(|payload| payload.downcast_ref::<SamplerPayload>())
-        .map(|payload| payload.sampler);
+        .map(|_| sampler_handle::<E>(cx, resource_value))
+        .transpose()?;
     // C2/R24: wrapper-union arms are selected by generated ClassSpec identity.
     let texture_view_resource = E::payload(cx, resource_value, GPU_TEXTURE_VIEW_CLASS)
         .and_then(|payload| payload.downcast_ref::<TextureViewPayload>())
-        .map(|payload| payload.texture_view);
+        .map(|_| texture_view_handle::<E>(cx, resource_value))
+        .transpose()?;
     // B-4b: direct union arms are selected by generated ClassSpec identity.
     let buffer_direct_resource = E::payload(cx, resource_value, GPU_BUFFER_CLASS)
         .and_then(|payload| payload.downcast_ref::<BufferPayload<E>>())
@@ -2246,8 +2248,8 @@ pub(super) fn convert_compute_pipeline_descriptor<E: JsEngine + 'static>(
     // Policy: the handle-or-enum union preserves explicit handles and auto layout.
     let layout = if E::is_null(cx, layout_value) {
         return Err(E::type_error(cx, "layout"));
-    } else if let Ok(handle) = pipeline_layout_handle::<E>(cx, layout_value) {
-        handle
+    } else if E::payload(cx, layout_value, GPU_PIPELINE_LAYOUT_CLASS).is_some() {
+        pipeline_layout_handle::<E>(cx, layout_value)?
     } else {
         let union_arena = Arena::new();
         match E::to_str(cx, layout_value, &union_arena)? {
@@ -3155,8 +3157,8 @@ pub(super) fn convert_render_pipeline_descriptor<E: JsEngine + 'static>(
     // Policy: the handle-or-enum union preserves explicit handles and auto layout.
     let layout = if E::is_null(cx, layout_value) {
         return Err(E::type_error(cx, "layout"));
-    } else if let Ok(handle) = pipeline_layout_handle::<E>(cx, layout_value) {
-        handle
+    } else if E::payload(cx, layout_value, GPU_PIPELINE_LAYOUT_CLASS).is_some() {
+        pipeline_layout_handle::<E>(cx, layout_value)?
     } else {
         let union_arena = Arena::new();
         match E::to_str(cx, layout_value, &union_arena)? {
@@ -3805,7 +3807,7 @@ pub(super) fn feature_name_to_str(value: WGPUFeatureName) -> Option<&'static str
 
 /// Payload stored by a `GPUShaderModule` wrapper.
 pub struct ShaderModulePayload {
-    pub(super) module: WGPUShaderModule,
+    pub(super) module: Mutex<Option<WGPUShaderModule>>,
     pub(super) label: Mutex<String>,
     pub(super) source: Arc<str>,
 }
@@ -3818,7 +3820,7 @@ unsafe impl Send for ShaderModulePayload {}
 
 /// Payload stored by a `GPUSampler` wrapper.
 pub struct SamplerPayload {
-    pub(super) sampler: WGPUSampler,
+    pub(super) sampler: Mutex<Option<WGPUSampler>>,
     pub(super) label: Mutex<String>,
 }
 
@@ -3845,7 +3847,7 @@ unsafe impl Send for TexturePayload {}
 
 /// Payload stored by a `GPUTextureView` wrapper.
 pub struct TextureViewPayload {
-    pub(super) texture_view: WGPUTextureView,
+    pub(super) texture_view: Mutex<Option<WGPUTextureView>>,
     pub(super) texture: WGPUTexture,
     pub(super) label: Mutex<String>,
     pub(super) dimension: WGPUTextureViewDimension,
@@ -3860,7 +3862,7 @@ unsafe impl Send for TextureViewPayload {}
 
 /// Payload stored by a `GPUBindGroupLayout` wrapper.
 pub struct BindGroupLayoutPayload {
-    pub(super) layout: WGPUBindGroupLayout,
+    pub(super) layout: Mutex<Option<WGPUBindGroupLayout>>,
     pub(super) parent_pipeline: Option<PipelineParent>,
     pub(super) label: Mutex<String>,
 }
@@ -3873,7 +3875,7 @@ unsafe impl Send for BindGroupLayoutPayload {}
 
 /// Payload stored by a `GPUPipelineLayout` wrapper.
 pub struct PipelineLayoutPayload {
-    pub(super) layout: WGPUPipelineLayout,
+    pub(super) layout: Mutex<Option<WGPUPipelineLayout>>,
     pub(super) label: Mutex<String>,
 }
 
@@ -3885,7 +3887,7 @@ unsafe impl Send for PipelineLayoutPayload {}
 
 /// Payload stored by a `GPUBindGroup` wrapper.
 pub struct BindGroupPayload {
-    pub(super) bind_group: WGPUBindGroup,
+    pub(super) bind_group: Mutex<Option<WGPUBindGroup>>,
     pub(super) layout: WGPUBindGroupLayout,
     pub(super) buffers: Vec<WGPUBuffer>,
     pub(super) samplers: Vec<WGPUSampler>,
@@ -3902,7 +3904,7 @@ unsafe impl Send for BindGroupPayload {}
 
 /// Payload stored by a `GPUComputePipeline` wrapper.
 pub struct ComputePipelinePayload {
-    pub(super) pipeline: WGPUComputePipeline,
+    pub(super) pipeline: Mutex<Option<WGPUComputePipeline>>,
     pub(super) module: WGPUShaderModule,
     pub(super) layout: WGPUPipelineLayout,
     pub(super) label: Mutex<String>,
@@ -3916,7 +3918,7 @@ unsafe impl Send for ComputePipelinePayload {}
 
 /// Payload stored by a `GPURenderPipeline` wrapper.
 pub struct RenderPipelinePayload {
-    pub(super) render_pipeline: WGPURenderPipeline,
+    pub(super) render_pipeline: Mutex<Option<WGPURenderPipeline>>,
     pub(super) vertex_module: WGPUShaderModule,
     pub(super) fragment_module: WGPUShaderModule,
     pub(super) layout: WGPUPipelineLayout,
@@ -4216,7 +4218,7 @@ pub fn device_create_shader_module<E: JsEngine + 'static>(
         return Err(error);
     }
     match E::new_instance(cx, GPU_SHADER_MODULE_CLASS, Box::new(ShaderModulePayload {
-        module,
+        module: Mutex::new(Some(module)),
         label: Mutex::new(label),
         source: source.into(),
     })) {
@@ -4242,19 +4244,26 @@ pub fn shader_module_label_set<E: JsEngine + 'static>(cx: E::Context<'_>, this: 
     let arena = Arena::new();
     let new_label = E::to_str(cx, value, &arena)?;
     let payload = E::payload(cx, this, GPU_SHADER_MODULE_CLASS).and_then(|payload| payload.downcast_ref::<ShaderModulePayload>()).ok_or_else(|| E::type_error(cx, "GPUShaderModule.label called on an incompatible object"))?;
-    unsafe { (E::environment(cx).gpu().shader_module_set_label)(payload.module, WGPUStringView::from_bytes(new_label.as_bytes())); }
+    let handle = handle_or_throw::<E, _>(cx, "GPUShaderModule", &payload.module)?;
+    unsafe { (E::environment(cx).gpu().shader_module_set_label)(handle, WGPUStringView::from_bytes(new_label.as_bytes())); }
     let mut label = payload.label.lock().map_err(|_| E::operation_error(cx, "GPUShaderModule label is poisoned"))?;
     new_label.clone_into(&mut label);
     Ok(())
 }
 
+/// Retires the native ownership held by a `GPUShaderModule` wrapper exactly once.
+pub(super) fn retire_shader_module(payload: &ShaderModulePayload, env: &Environment) {
+    let handle = { let Ok(mut slot) = payload.module.lock() else { return; }; let Some(handle) = slot.take() else { return; }; handle };
+    let _ = env.queue().enqueue(ReleaseRequest::ShaderModule {
+        module: handle,
+        gpu: env.gpu(),
+    });
+}
+
 /// Finalizes a `GPUShaderModule` payload by enqueuing its release.
 pub fn finalize_shader_module(payload: Box<dyn Any + Send>, env: &Environment) {
     let Ok(payload) = payload.downcast::<ShaderModulePayload>() else { return; };
-    let _ = env.queue().enqueue(ReleaseRequest::ShaderModule {
-        module: payload.module,
-        gpu: env.gpu(),
-    });
+    retire_shader_module(&payload, env);
 }
 
 /// Implements `GPUDevice.createSampler`.
@@ -4279,7 +4288,7 @@ pub fn device_create_sampler<E: JsEngine + 'static>(
         return Err(error);
     }
     match E::new_instance(cx, GPU_SAMPLER_CLASS, Box::new(SamplerPayload {
-        sampler,
+        sampler: Mutex::new(Some(sampler)),
         label: Mutex::new(label),
     })) {
         Ok(value) => Ok(value),
@@ -4304,19 +4313,26 @@ pub fn sampler_label_set<E: JsEngine + 'static>(cx: E::Context<'_>, this: E::Val
     let arena = Arena::new();
     let new_label = E::to_str(cx, value, &arena)?;
     let payload = E::payload(cx, this, GPU_SAMPLER_CLASS).and_then(|payload| payload.downcast_ref::<SamplerPayload>()).ok_or_else(|| E::type_error(cx, "GPUSampler.label called on an incompatible object"))?;
-    unsafe { (E::environment(cx).gpu().sampler_set_label)(payload.sampler, WGPUStringView::from_bytes(new_label.as_bytes())); }
+    let handle = handle_or_throw::<E, _>(cx, "GPUSampler", &payload.sampler)?;
+    unsafe { (E::environment(cx).gpu().sampler_set_label)(handle, WGPUStringView::from_bytes(new_label.as_bytes())); }
     let mut label = payload.label.lock().map_err(|_| E::operation_error(cx, "GPUSampler label is poisoned"))?;
     new_label.clone_into(&mut label);
     Ok(())
 }
 
+/// Retires the native ownership held by a `GPUSampler` wrapper exactly once.
+pub(super) fn retire_sampler(payload: &SamplerPayload, env: &Environment) {
+    let handle = { let Ok(mut slot) = payload.sampler.lock() else { return; }; let Some(handle) = slot.take() else { return; }; handle };
+    let _ = env.queue().enqueue(ReleaseRequest::Sampler {
+        sampler: handle,
+        gpu: env.gpu(),
+    });
+}
+
 /// Finalizes a `GPUSampler` payload by enqueuing its release.
 pub fn finalize_sampler(payload: Box<dyn Any + Send>, env: &Environment) {
     let Ok(payload) = payload.downcast::<SamplerPayload>() else { return; };
-    let _ = env.queue().enqueue(ReleaseRequest::Sampler {
-        sampler: payload.sampler,
-        gpu: env.gpu(),
-    });
+    retire_sampler(&payload, env);
 }
 
 /// Implements `GPUDevice.createTexture`.
@@ -4583,7 +4599,7 @@ pub fn texture_create_view<E: JsEngine + 'static>(
     }
     let retained_texture = texture;
     match E::new_instance(cx, GPU_TEXTURE_VIEW_CLASS, Box::new(TextureViewPayload {
-        texture_view,
+        texture_view: Mutex::new(Some(texture_view)),
         texture,
         label: Mutex::new(label),
         dimension,
@@ -4612,20 +4628,27 @@ pub fn texture_view_label_set<E: JsEngine + 'static>(cx: E::Context<'_>, this: E
     let arena = Arena::new();
     let new_label = E::to_str(cx, value, &arena)?;
     let payload = E::payload(cx, this, GPU_TEXTURE_VIEW_CLASS).and_then(|payload| payload.downcast_ref::<TextureViewPayload>()).ok_or_else(|| E::type_error(cx, "GPUTextureView.label called on an incompatible object"))?;
-    unsafe { (E::environment(cx).gpu().texture_view_set_label)(payload.texture_view, WGPUStringView::from_bytes(new_label.as_bytes())); }
+    let handle = handle_or_throw::<E, _>(cx, "GPUTextureView", &payload.texture_view)?;
+    unsafe { (E::environment(cx).gpu().texture_view_set_label)(handle, WGPUStringView::from_bytes(new_label.as_bytes())); }
     let mut label = payload.label.lock().map_err(|_| E::operation_error(cx, "GPUTextureView label is poisoned"))?;
     new_label.clone_into(&mut label);
     Ok(())
 }
 
-/// Finalizes a `GPUTextureView` payload by enqueuing its release.
-pub fn finalize_texture_view(payload: Box<dyn Any + Send>, env: &Environment) {
-    let Ok(payload) = payload.downcast::<TextureViewPayload>() else { return; };
+/// Retires the native ownership held by a `GPUTextureView` wrapper exactly once.
+pub(super) fn retire_texture_view(payload: &TextureViewPayload, env: &Environment) {
+    let handle = { let Ok(mut slot) = payload.texture_view.lock() else { return; }; let Some(handle) = slot.take() else { return; }; handle };
     let _ = env.queue().enqueue(ReleaseRequest::TextureView {
-        texture_view: payload.texture_view,
+        texture_view: handle,
         texture: payload.texture,
         gpu: env.gpu(),
     });
+}
+
+/// Finalizes a `GPUTextureView` payload by enqueuing its release.
+pub fn finalize_texture_view(payload: Box<dyn Any + Send>, env: &Environment) {
+    let Ok(payload) = payload.downcast::<TextureViewPayload>() else { return; };
+    retire_texture_view(&payload, env);
 }
 
 /// Implements `GPUDevice.createBindGroupLayout`.
@@ -4650,7 +4673,7 @@ pub fn device_create_bind_group_layout<E: JsEngine + 'static>(
         return Err(error);
     }
     match E::new_instance(cx, GPU_BIND_GROUP_LAYOUT_CLASS, Box::new(BindGroupLayoutPayload {
-        layout,
+        layout: Mutex::new(Some(layout)),
         parent_pipeline: None,
         label: Mutex::new(label),
     })) {
@@ -4676,20 +4699,27 @@ pub fn bind_group_layout_label_set<E: JsEngine + 'static>(cx: E::Context<'_>, th
     let arena = Arena::new();
     let new_label = E::to_str(cx, value, &arena)?;
     let payload = E::payload(cx, this, GPU_BIND_GROUP_LAYOUT_CLASS).and_then(|payload| payload.downcast_ref::<BindGroupLayoutPayload>()).ok_or_else(|| E::type_error(cx, "GPUBindGroupLayout.label called on an incompatible object"))?;
-    unsafe { (E::environment(cx).gpu().bind_group_layout_set_label)(payload.layout, WGPUStringView::from_bytes(new_label.as_bytes())); }
+    let handle = handle_or_throw::<E, _>(cx, "GPUBindGroupLayout", &payload.layout)?;
+    unsafe { (E::environment(cx).gpu().bind_group_layout_set_label)(handle, WGPUStringView::from_bytes(new_label.as_bytes())); }
     let mut label = payload.label.lock().map_err(|_| E::operation_error(cx, "GPUBindGroupLayout label is poisoned"))?;
     new_label.clone_into(&mut label);
     Ok(())
 }
 
-/// Finalizes a `GPUBindGroupLayout` payload by enqueuing its release.
-pub fn finalize_bind_group_layout(payload: Box<dyn Any + Send>, env: &Environment) {
-    let Ok(payload) = payload.downcast::<BindGroupLayoutPayload>() else { return; };
+/// Retires the native ownership held by a `GPUBindGroupLayout` wrapper exactly once.
+pub(super) fn retire_bind_group_layout(payload: &BindGroupLayoutPayload, env: &Environment) {
+    let handle = { let Ok(mut slot) = payload.layout.lock() else { return; }; let Some(handle) = slot.take() else { return; }; handle };
     let _ = env.queue().enqueue(ReleaseRequest::BindGroupLayout {
-        layout: payload.layout,
+        layout: handle,
         parent_pipeline: payload.parent_pipeline,
         gpu: env.gpu(),
     });
+}
+
+/// Finalizes a `GPUBindGroupLayout` payload by enqueuing its release.
+pub fn finalize_bind_group_layout(payload: Box<dyn Any + Send>, env: &Environment) {
+    let Ok(payload) = payload.downcast::<BindGroupLayoutPayload>() else { return; };
+    retire_bind_group_layout(&payload, env);
 }
 
 /// Implements `GPUDevice.createPipelineLayout`.
@@ -4714,7 +4744,7 @@ pub fn device_create_pipeline_layout<E: JsEngine + 'static>(
         return Err(error);
     }
     match E::new_instance(cx, GPU_PIPELINE_LAYOUT_CLASS, Box::new(PipelineLayoutPayload {
-        layout,
+        layout: Mutex::new(Some(layout)),
         label: Mutex::new(label),
     })) {
         Ok(value) => Ok(value),
@@ -4739,19 +4769,26 @@ pub fn pipeline_layout_label_set<E: JsEngine + 'static>(cx: E::Context<'_>, this
     let arena = Arena::new();
     let new_label = E::to_str(cx, value, &arena)?;
     let payload = E::payload(cx, this, GPU_PIPELINE_LAYOUT_CLASS).and_then(|payload| payload.downcast_ref::<PipelineLayoutPayload>()).ok_or_else(|| E::type_error(cx, "GPUPipelineLayout.label called on an incompatible object"))?;
-    unsafe { (E::environment(cx).gpu().pipeline_layout_set_label)(payload.layout, WGPUStringView::from_bytes(new_label.as_bytes())); }
+    let handle = handle_or_throw::<E, _>(cx, "GPUPipelineLayout", &payload.layout)?;
+    unsafe { (E::environment(cx).gpu().pipeline_layout_set_label)(handle, WGPUStringView::from_bytes(new_label.as_bytes())); }
     let mut label = payload.label.lock().map_err(|_| E::operation_error(cx, "GPUPipelineLayout label is poisoned"))?;
     new_label.clone_into(&mut label);
     Ok(())
 }
 
+/// Retires the native ownership held by a `GPUPipelineLayout` wrapper exactly once.
+pub(super) fn retire_pipeline_layout(payload: &PipelineLayoutPayload, env: &Environment) {
+    let handle = { let Ok(mut slot) = payload.layout.lock() else { return; }; let Some(handle) = slot.take() else { return; }; handle };
+    let _ = env.queue().enqueue(ReleaseRequest::PipelineLayout {
+        layout: handle,
+        gpu: env.gpu(),
+    });
+}
+
 /// Finalizes a `GPUPipelineLayout` payload by enqueuing its release.
 pub fn finalize_pipeline_layout(payload: Box<dyn Any + Send>, env: &Environment) {
     let Ok(payload) = payload.downcast::<PipelineLayoutPayload>() else { return; };
-    let _ = env.queue().enqueue(ReleaseRequest::PipelineLayout {
-        layout: payload.layout,
-        gpu: env.gpu(),
-    });
+    retire_pipeline_layout(&payload, env);
 }
 
 /// Implements `GPUDevice.createBindGroup`.
@@ -4793,7 +4830,7 @@ pub fn device_create_bind_group<E: JsEngine + 'static>(
     let retained_texture_views = converted.texture_views.clone();
     let retained_created_texture_views = converted.created_texture_views.clone();
     match E::new_instance(cx, GPU_BIND_GROUP_CLASS, Box::new(BindGroupPayload {
-        bind_group,
+        bind_group: Mutex::new(Some(bind_group)),
         layout: converted.layout,
         buffers: converted.buffers,
         samplers: converted.samplers,
@@ -4828,24 +4865,31 @@ pub fn bind_group_label_set<E: JsEngine + 'static>(cx: E::Context<'_>, this: E::
     let arena = Arena::new();
     let new_label = E::to_str(cx, value, &arena)?;
     let payload = E::payload(cx, this, GPU_BIND_GROUP_CLASS).and_then(|payload| payload.downcast_ref::<BindGroupPayload>()).ok_or_else(|| E::type_error(cx, "GPUBindGroup.label called on an incompatible object"))?;
-    unsafe { (E::environment(cx).gpu().bind_group_set_label)(payload.bind_group, WGPUStringView::from_bytes(new_label.as_bytes())); }
+    let handle = handle_or_throw::<E, _>(cx, "GPUBindGroup", &payload.bind_group)?;
+    unsafe { (E::environment(cx).gpu().bind_group_set_label)(handle, WGPUStringView::from_bytes(new_label.as_bytes())); }
     let mut label = payload.label.lock().map_err(|_| E::operation_error(cx, "GPUBindGroup label is poisoned"))?;
     new_label.clone_into(&mut label);
     Ok(())
 }
 
+/// Retires the native ownership held by a `GPUBindGroup` wrapper exactly once.
+pub(super) fn retire_bind_group(payload: &BindGroupPayload, env: &Environment) {
+    let handle = { let Ok(mut slot) = payload.bind_group.lock() else { return; }; let Some(handle) = slot.take() else { return; }; handle };
+    let _ = env.queue().enqueue(ReleaseRequest::BindGroup {
+        bind_group: handle,
+        layout: payload.layout,
+        buffers: payload.buffers.clone(),
+        samplers: payload.samplers.clone(),
+        texture_views: payload.texture_views.clone(),
+        created_texture_views: payload.created_texture_views.clone(),
+        gpu: env.gpu(),
+    });
+}
+
 /// Finalizes a `GPUBindGroup` payload by enqueuing its release.
 pub fn finalize_bind_group(payload: Box<dyn Any + Send>, env: &Environment) {
     let Ok(payload) = payload.downcast::<BindGroupPayload>() else { return; };
-    let _ = env.queue().enqueue(ReleaseRequest::BindGroup {
-        bind_group: payload.bind_group,
-        layout: payload.layout,
-        buffers: payload.buffers,
-        samplers: payload.samplers,
-        texture_views: payload.texture_views,
-        created_texture_views: payload.created_texture_views,
-        gpu: env.gpu(),
-    });
+    retire_bind_group(&payload, env);
 }
 
 /// Implements `GPUDevice.createComputePipeline`.
@@ -4879,7 +4923,7 @@ pub fn device_create_compute_pipeline<E: JsEngine + 'static>(
     let retained_module = converted.module;
     let retained_layout = converted.layout;
     match E::new_instance(cx, GPU_COMPUTE_PIPELINE_CLASS, Box::new(ComputePipelinePayload {
-        pipeline,
+        pipeline: Mutex::new(Some(pipeline)),
         module: converted.module,
         layout: converted.layout,
         label: Mutex::new(label),
@@ -4908,21 +4952,28 @@ pub fn compute_pipeline_label_set<E: JsEngine + 'static>(cx: E::Context<'_>, thi
     let arena = Arena::new();
     let new_label = E::to_str(cx, value, &arena)?;
     let payload = E::payload(cx, this, GPU_COMPUTE_PIPELINE_CLASS).and_then(|payload| payload.downcast_ref::<ComputePipelinePayload>()).ok_or_else(|| E::type_error(cx, "GPUComputePipeline.label called on an incompatible object"))?;
-    unsafe { (E::environment(cx).gpu().compute_pipeline_set_label)(payload.pipeline, WGPUStringView::from_bytes(new_label.as_bytes())); }
+    let handle = handle_or_throw::<E, _>(cx, "GPUComputePipeline", &payload.pipeline)?;
+    unsafe { (E::environment(cx).gpu().compute_pipeline_set_label)(handle, WGPUStringView::from_bytes(new_label.as_bytes())); }
     let mut label = payload.label.lock().map_err(|_| E::operation_error(cx, "GPUComputePipeline label is poisoned"))?;
     new_label.clone_into(&mut label);
     Ok(())
 }
 
-/// Finalizes a `GPUComputePipeline` payload by enqueuing its release.
-pub fn finalize_compute_pipeline(payload: Box<dyn Any + Send>, env: &Environment) {
-    let Ok(payload) = payload.downcast::<ComputePipelinePayload>() else { return; };
+/// Retires the native ownership held by a `GPUComputePipeline` wrapper exactly once.
+pub(super) fn retire_compute_pipeline(payload: &ComputePipelinePayload, env: &Environment) {
+    let handle = { let Ok(mut slot) = payload.pipeline.lock() else { return; }; let Some(handle) = slot.take() else { return; }; handle };
     let _ = env.queue().enqueue(ReleaseRequest::ComputePipeline {
-        pipeline: payload.pipeline,
+        pipeline: handle,
         module: payload.module,
         layout: payload.layout,
         gpu: env.gpu(),
     });
+}
+
+/// Finalizes a `GPUComputePipeline` payload by enqueuing its release.
+pub fn finalize_compute_pipeline(payload: Box<dyn Any + Send>, env: &Environment) {
+    let Ok(payload) = payload.downcast::<ComputePipelinePayload>() else { return; };
+    retire_compute_pipeline(&payload, env);
 }
 
 /// Implements `GPUDevice.createRenderPipeline`.
@@ -4959,7 +5010,7 @@ pub fn device_create_render_pipeline<E: JsEngine + 'static>(
     let retained_fragment_module = converted.fragment_module;
     let retained_layout = converted.layout;
     match E::new_instance(cx, GPU_RENDER_PIPELINE_CLASS, Box::new(RenderPipelinePayload {
-        render_pipeline,
+        render_pipeline: Mutex::new(Some(render_pipeline)),
         vertex_module: converted.vertex_module,
         fragment_module: converted.fragment_module,
         layout: converted.layout,
@@ -4990,22 +5041,29 @@ pub fn render_pipeline_label_set<E: JsEngine + 'static>(cx: E::Context<'_>, this
     let arena = Arena::new();
     let new_label = E::to_str(cx, value, &arena)?;
     let payload = E::payload(cx, this, GPU_RENDER_PIPELINE_CLASS).and_then(|payload| payload.downcast_ref::<RenderPipelinePayload>()).ok_or_else(|| E::type_error(cx, "GPURenderPipeline.label called on an incompatible object"))?;
-    unsafe { (E::environment(cx).gpu().render_pipeline_set_label)(payload.render_pipeline, WGPUStringView::from_bytes(new_label.as_bytes())); }
+    let handle = handle_or_throw::<E, _>(cx, "GPURenderPipeline", &payload.render_pipeline)?;
+    unsafe { (E::environment(cx).gpu().render_pipeline_set_label)(handle, WGPUStringView::from_bytes(new_label.as_bytes())); }
     let mut label = payload.label.lock().map_err(|_| E::operation_error(cx, "GPURenderPipeline label is poisoned"))?;
     new_label.clone_into(&mut label);
     Ok(())
 }
 
-/// Finalizes a `GPURenderPipeline` payload by enqueuing its release.
-pub fn finalize_render_pipeline(payload: Box<dyn Any + Send>, env: &Environment) {
-    let Ok(payload) = payload.downcast::<RenderPipelinePayload>() else { return; };
+/// Retires the native ownership held by a `GPURenderPipeline` wrapper exactly once.
+pub(super) fn retire_render_pipeline(payload: &RenderPipelinePayload, env: &Environment) {
+    let handle = { let Ok(mut slot) = payload.render_pipeline.lock() else { return; }; let Some(handle) = slot.take() else { return; }; handle };
     let _ = env.queue().enqueue(ReleaseRequest::RenderPipeline {
-        render_pipeline: payload.render_pipeline,
+        render_pipeline: handle,
         vertex_module: payload.vertex_module,
         fragment_module: payload.fragment_module,
         layout: payload.layout,
         gpu: env.gpu(),
     });
+}
+
+/// Finalizes a `GPURenderPipeline` payload by enqueuing its release.
+pub fn finalize_render_pipeline(payload: Box<dyn Any + Send>, env: &Environment) {
+    let Ok(payload) = payload.downcast::<RenderPipelinePayload>() else { return; };
+    retire_render_pipeline(&payload, env);
 }
 
 /// Implements `GPUDevice.createQuerySet`.
@@ -5227,6 +5285,60 @@ pub fn finalize_render_bundle_encoder(payload: Box<dyn Any + Send>, env: &Enviro
     let _ = env.queue().enqueue(ReleaseRequest::RenderBundleEncoder { render_bundle_encoder: state.render_bundle_encoder, gpu: env.gpu() });
 }
 
+#[doc = "Implements the non-standard extension `GPURenderBundle.destroy`."]
+#[doc = "Policy reason: block 20 provides bounded native release under JavaScriptCore"]
+pub fn nonstandard_render_bundle_destroy<E: JsEngine + 'static>(cx: E::Context<'_>, this: E::Value, args: &[E::Value]) -> Result<E::Value, E::Error> {
+    extension_destroy::<E>(cx, this, args)
+}
+
+#[doc = "Implements the non-standard extension `GPUBindGroup.destroy`."]
+#[doc = "Policy reason: block 20 provides bounded native release under JavaScriptCore"]
+pub fn nonstandard_bind_group_destroy<E: JsEngine + 'static>(cx: E::Context<'_>, this: E::Value, args: &[E::Value]) -> Result<E::Value, E::Error> {
+    extension_destroy::<E>(cx, this, args)
+}
+
+#[doc = "Implements the non-standard extension `GPUComputePipeline.destroy`."]
+#[doc = "Policy reason: block 20 provides bounded native release under JavaScriptCore"]
+pub fn nonstandard_compute_pipeline_destroy<E: JsEngine + 'static>(cx: E::Context<'_>, this: E::Value, args: &[E::Value]) -> Result<E::Value, E::Error> {
+    extension_destroy::<E>(cx, this, args)
+}
+
+#[doc = "Implements the non-standard extension `GPURenderPipeline.destroy`."]
+#[doc = "Policy reason: block 20 provides bounded native release under JavaScriptCore"]
+pub fn nonstandard_render_pipeline_destroy<E: JsEngine + 'static>(cx: E::Context<'_>, this: E::Value, args: &[E::Value]) -> Result<E::Value, E::Error> {
+    extension_destroy::<E>(cx, this, args)
+}
+
+#[doc = "Implements the non-standard extension `GPUSampler.destroy`."]
+#[doc = "Policy reason: block 20 provides bounded native release under JavaScriptCore"]
+pub fn nonstandard_sampler_destroy<E: JsEngine + 'static>(cx: E::Context<'_>, this: E::Value, args: &[E::Value]) -> Result<E::Value, E::Error> {
+    extension_destroy::<E>(cx, this, args)
+}
+
+#[doc = "Implements the non-standard extension `GPUShaderModule.destroy`."]
+#[doc = "Policy reason: block 20 provides bounded native release under JavaScriptCore"]
+pub fn nonstandard_shader_module_destroy<E: JsEngine + 'static>(cx: E::Context<'_>, this: E::Value, args: &[E::Value]) -> Result<E::Value, E::Error> {
+    extension_destroy::<E>(cx, this, args)
+}
+
+#[doc = "Implements the non-standard extension `GPUTextureView.destroy`."]
+#[doc = "Policy reason: block 20 provides bounded native release under JavaScriptCore"]
+pub fn nonstandard_texture_view_destroy<E: JsEngine + 'static>(cx: E::Context<'_>, this: E::Value, args: &[E::Value]) -> Result<E::Value, E::Error> {
+    extension_destroy::<E>(cx, this, args)
+}
+
+#[doc = "Implements the non-standard extension `GPUBindGroupLayout.destroy`."]
+#[doc = "Policy reason: block 20 provides bounded native release under JavaScriptCore"]
+pub fn nonstandard_bind_group_layout_destroy<E: JsEngine + 'static>(cx: E::Context<'_>, this: E::Value, args: &[E::Value]) -> Result<E::Value, E::Error> {
+    extension_destroy::<E>(cx, this, args)
+}
+
+#[doc = "Implements the non-standard extension `GPUPipelineLayout.destroy`."]
+#[doc = "Policy reason: block 20 provides bounded native release under JavaScriptCore"]
+pub fn nonstandard_pipeline_layout_destroy<E: JsEngine + 'static>(cx: E::Context<'_>, this: E::Value, args: &[E::Value]) -> Result<E::Value, E::Error> {
+    extension_destroy::<E>(cx, this, args)
+}
+
 pub(super) fn gpu_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
     class_spec_once::<E, _>(GPU_CLASS, || ClassSpec {
         name: "GPU",
@@ -5425,7 +5537,9 @@ pub(super) fn texture_view_class<E: JsEngine + 'static>() -> &'static ClassSpec<
         properties: Box::leak(Box::new([
             PropertySpec { name: "label", get: Some(texture_view_label_get::<E>), set: Some(texture_view_label_set::<E>) },
         ])),
-        methods: &[],
+        methods: Box::leak(Box::new([
+            MethodSpec { name: "destroy", length: 0, call: nonstandard_texture_view_destroy::<E> },
+        ])),
         finalizer: finalize_texture_view,
     })
 }
@@ -5458,6 +5572,7 @@ pub(super) fn shader_module_class<E: JsEngine + 'static>() -> &'static ClassSpec
         ])),
         methods: Box::leak(Box::new([
             MethodSpec { name: "getCompilationInfo", length: 0, call: shader_module_get_compilation_info::<E> },
+            MethodSpec { name: "destroy", length: 0, call: nonstandard_shader_module_destroy::<E> },
         ])),
         finalizer: finalize_shader_module,
     })
@@ -5471,7 +5586,9 @@ pub(super) fn sampler_class<E: JsEngine + 'static>() -> &'static ClassSpec<E> {
         properties: Box::leak(Box::new([
             PropertySpec { name: "label", get: Some(sampler_label_get::<E>), set: Some(sampler_label_set::<E>) },
         ])),
-        methods: &[],
+        methods: Box::leak(Box::new([
+            MethodSpec { name: "destroy", length: 0, call: nonstandard_sampler_destroy::<E> },
+        ])),
         finalizer: finalize_sampler,
     })
 }
@@ -5484,7 +5601,9 @@ pub(super) fn bind_group_layout_class<E: JsEngine + 'static>() -> &'static Class
         properties: Box::leak(Box::new([
             PropertySpec { name: "label", get: Some(bind_group_layout_label_get::<E>), set: Some(bind_group_layout_label_set::<E>) },
         ])),
-        methods: &[],
+        methods: Box::leak(Box::new([
+            MethodSpec { name: "destroy", length: 0, call: nonstandard_bind_group_layout_destroy::<E> },
+        ])),
         finalizer: finalize_bind_group_layout,
     })
 }
@@ -5497,7 +5616,9 @@ pub(super) fn pipeline_layout_class<E: JsEngine + 'static>() -> &'static ClassSp
         properties: Box::leak(Box::new([
             PropertySpec { name: "label", get: Some(pipeline_layout_label_get::<E>), set: Some(pipeline_layout_label_set::<E>) },
         ])),
-        methods: &[],
+        methods: Box::leak(Box::new([
+            MethodSpec { name: "destroy", length: 0, call: nonstandard_pipeline_layout_destroy::<E> },
+        ])),
         finalizer: finalize_pipeline_layout,
     })
 }
@@ -5510,7 +5631,9 @@ pub(super) fn bind_group_class<E: JsEngine + 'static>() -> &'static ClassSpec<E>
         properties: Box::leak(Box::new([
             PropertySpec { name: "label", get: Some(bind_group_label_get::<E>), set: Some(bind_group_label_set::<E>) },
         ])),
-        methods: &[],
+        methods: Box::leak(Box::new([
+            MethodSpec { name: "destroy", length: 0, call: nonstandard_bind_group_destroy::<E> },
+        ])),
         finalizer: finalize_bind_group,
     })
 }
@@ -5525,6 +5648,7 @@ pub(super) fn compute_pipeline_class<E: JsEngine + 'static>() -> &'static ClassS
         ])),
         methods: Box::leak(Box::new([
             MethodSpec { name: "getBindGroupLayout", length: 1, call: compute_pipeline_get_bind_group_layout::<E> },
+            MethodSpec { name: "destroy", length: 0, call: nonstandard_compute_pipeline_destroy::<E> },
         ])),
         finalizer: finalize_compute_pipeline,
     })
@@ -5540,6 +5664,7 @@ pub(super) fn render_pipeline_class<E: JsEngine + 'static>() -> &'static ClassSp
         ])),
         methods: Box::leak(Box::new([
             MethodSpec { name: "getBindGroupLayout", length: 1, call: render_pipeline_get_bind_group_layout::<E> },
+            MethodSpec { name: "destroy", length: 0, call: nonstandard_render_pipeline_destroy::<E> },
         ])),
         finalizer: finalize_render_pipeline,
     })
@@ -5680,7 +5805,9 @@ pub(super) fn render_bundle_class<E: JsEngine + 'static>() -> &'static ClassSpec
         properties: Box::leak(Box::new([
             PropertySpec { name: "label", get: Some(render_bundle_label_get::<E>), set: Some(render_bundle_label_set::<E>) },
         ])),
-        methods: &[],
+        methods: Box::leak(Box::new([
+            MethodSpec { name: "destroy", length: 0, call: nonstandard_render_bundle_destroy::<E> },
+        ])),
         finalizer: finalize_render_bundle,
     })
 }

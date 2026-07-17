@@ -2048,6 +2048,12 @@ fn emit_handle_or_enum_local(
     value: &str,
     policy: &HandleOrEnumUnionPolicy,
 ) {
+    let object = policy
+        .handle_type
+        .strip_prefix("GPU")
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&policy.handle_type);
+    let class = format!("GPU_{}_CLASS", snake_case(object).to_ascii_uppercase());
     output.push_str(
         "    // Policy: the handle-or-enum union preserves explicit handles and auto layout.\n",
     );
@@ -2055,10 +2061,14 @@ fn emit_handle_or_enum_local(
     let _ = writeln!(output, "        return Err(E::type_error(cx, \"{name}\"));");
     let _ = writeln!(
         output,
-        "    }} else if let Ok(handle) = {}::<E>(cx, {value}) {{",
+        "    }} else if E::payload(cx, {value}, {class}).is_some() {{"
+    );
+    let _ = writeln!(
+        output,
+        "        {}::<E>(cx, {value})?",
         policy.handle_helper
     );
-    output.push_str("        handle\n    } else {\n        let union_arena = Arena::new();\n");
+    output.push_str("    } else {\n        let union_arena = Arena::new();\n");
     let _ = writeln!(
         output,
         "        match E::to_str(cx, {value}, &union_arena)? {{"
@@ -2104,7 +2114,8 @@ fn emit_union_flatten_locals(
             output,
             "        .and_then(|payload| payload.downcast_ref::<{payload}>())"
         );
-        let _ = writeln!(output, "        .map(|payload| payload.{field});");
+        let _ = writeln!(output, "        .map(|_| {field}_handle::<E>(cx, {value}))");
+        output.push_str("        .transpose()?;\n");
     }
     for direct in &policy.direct_handle_arms {
         let object = direct

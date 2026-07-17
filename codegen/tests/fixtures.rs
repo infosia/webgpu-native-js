@@ -273,6 +273,40 @@ fn lifecycle_method_policy_is_checked_in_both_directions() {
 }
 
 #[test]
+fn extension_method_is_documented_and_emitted_in_the_class_spec() {
+    let (idl, yaml, policy) = fixture("lifecycle");
+    let policy = format!(
+        "{policy}\n[[extension.methods]]\ninterface = \"GPUSampler\"\nmember = \"releaseNow\"\nreason = \"fixture non-standard release path\"\n"
+    );
+    let emitted = generate_lifecycle_with_policy(&idl, &yaml, &policy)
+        .expect("non-colliding extension method");
+
+    assert!(emitted
+        .contains("#[doc = \"Implements the non-standard extension `GPUSampler.releaseNow`.\"]"));
+    assert!(emitted.contains("#[doc = \"Policy reason: fixture non-standard release path\"]"));
+    assert!(emitted.contains(
+        "MethodSpec { name: \"releaseNow\", length: 0, call: nonstandard_sampler_release_now::<E> }"
+    ));
+}
+
+#[test]
+fn extension_method_colliding_with_pinned_idl_is_rejected() {
+    let (idl, yaml, policy) = pinned_inputs();
+    let policy = format!(
+        "{policy}\n[[extension.methods]]\ninterface = \"GPUBuffer\"\nmember = \"destroy\"\nreason = \"collision fixture\"\n"
+    );
+    let error = generate_core_with_policy(&idl, &yaml, &policy)
+        .expect_err("IDL collisions must force extension review");
+
+    assert!(
+        error
+            .to_string()
+            .contains("extension method GPUBuffer.destroy collides with the pinned WebGPU IDL"),
+        "{error}"
+    );
+}
+
+#[test]
 fn nullable_handle_argument_policy_matches_webidl_and_c_abi() {
     let (idl, yaml, policy) = pinned_inputs();
     generate_core_with_policy(&idl, &yaml, &policy).expect("nullable handle argument policy");
@@ -426,25 +460,25 @@ fn generated_lifecycle_covers_every_selected_class_and_retention_set() {
     }
 
     assert!(emitted.contains(
-        "pub struct BindGroupPayload {\n    pub(super) bind_group: WGPUBindGroup,\n    pub(super) layout: WGPUBindGroupLayout,\n    pub(super) buffers: Vec<WGPUBuffer>,\n    pub(super) samplers: Vec<WGPUSampler>,\n    pub(super) texture_views: Vec<WGPUTextureView>,\n    pub(super) created_texture_views: Vec<WGPUTextureView>,\n    pub(super) label: Mutex<String>,\n}"
+        "pub struct BindGroupPayload {\n    pub(super) bind_group: Mutex<Option<WGPUBindGroup>>,\n    pub(super) layout: WGPUBindGroupLayout,\n    pub(super) buffers: Vec<WGPUBuffer>,\n    pub(super) samplers: Vec<WGPUSampler>,\n    pub(super) texture_views: Vec<WGPUTextureView>,\n    pub(super) created_texture_views: Vec<WGPUTextureView>,\n    pub(super) label: Mutex<String>,\n}"
     ));
     assert!(emitted.contains(
-        "pub struct ComputePipelinePayload {\n    pub(super) pipeline: WGPUComputePipeline,\n    pub(super) module: WGPUShaderModule,\n    pub(super) layout: WGPUPipelineLayout,\n    pub(super) label: Mutex<String>,\n}"
+        "pub struct ComputePipelinePayload {\n    pub(super) pipeline: Mutex<Option<WGPUComputePipeline>>,\n    pub(super) module: WGPUShaderModule,\n    pub(super) layout: WGPUPipelineLayout,\n    pub(super) label: Mutex<String>,\n}"
     ));
     assert!(emitted.contains(
-        "pub struct ShaderModulePayload {\n    pub(super) module: WGPUShaderModule,\n    pub(super) label: Mutex<String>,\n    pub(super) source: Arc<str>,\n}"
+        "pub struct ShaderModulePayload {\n    pub(super) module: Mutex<Option<WGPUShaderModule>>,\n    pub(super) label: Mutex<String>,\n    pub(super) source: Arc<str>,\n}"
     ));
     assert!(emitted
         .contains("let source = unsafe { shader_module_source_to_owned(native.nextInChain) };"));
     assert!(emitted.contains("source: source.into(),"));
     assert!(emitted.contains(
-        "pub struct RenderPipelinePayload {\n    pub(super) render_pipeline: WGPURenderPipeline,\n    pub(super) vertex_module: WGPUShaderModule,\n    pub(super) fragment_module: WGPUShaderModule,\n    pub(super) layout: WGPUPipelineLayout,\n    pub(super) label: Mutex<String>,\n}"
+        "pub struct RenderPipelinePayload {\n    pub(super) render_pipeline: Mutex<Option<WGPURenderPipeline>>,\n    pub(super) vertex_module: WGPUShaderModule,\n    pub(super) fragment_module: WGPUShaderModule,\n    pub(super) layout: WGPUPipelineLayout,\n    pub(super) label: Mutex<String>,\n}"
     ));
     assert!(emitted.contains(
         "pub struct TexturePayload {\n    pub(super) texture: WGPUTexture,\n    pub(super) destroyed: AtomicBool,\n    pub(super) label: Mutex<String>,\n    pub(super) dimension: WGPUTextureDimension,\n    pub(super) depth_or_array_layers: u32,\n}"
     ));
     assert!(emitted.contains(
-        "pub struct TextureViewPayload {\n    pub(super) texture_view: WGPUTextureView,\n    pub(super) texture: WGPUTexture,\n    pub(super) label: Mutex<String>,\n    pub(super) dimension: WGPUTextureViewDimension,\n    pub(super) mip_depth: u32,\n}"
+        "pub struct TextureViewPayload {\n    pub(super) texture_view: Mutex<Option<WGPUTextureView>>,\n    pub(super) texture: WGPUTexture,\n    pub(super) label: Mutex<String>,\n    pub(super) dimension: WGPUTextureViewDimension,\n    pub(super) mip_depth: u32,\n}"
     ));
 }
 

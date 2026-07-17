@@ -418,6 +418,8 @@ pub(crate) struct Policy {
     pub(crate) schema_version: u32,
     pub(crate) subset: Vec<SubsetEntry>,
     #[serde(default)]
+    pub(crate) extension: ExtensionPolicy,
+    #[serde(default)]
     pub(crate) name_map: Vec<NameMapEntry>,
     #[serde(default)]
     pub(crate) dict_or_sequence_union: Vec<DictOrSequenceUnionPolicy>,
@@ -429,6 +431,21 @@ pub(crate) struct Policy {
     pub(crate) lifecycle: Option<LifecyclePolicy>,
     #[serde(default)]
     pub(crate) reverse_enum: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ExtensionPolicy {
+    #[serde(default)]
+    pub(crate) methods: Vec<ExtensionMethodPolicy>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ExtensionMethodPolicy {
+    pub(crate) interface: String,
+    pub(crate) member: String,
+    pub(crate) reason: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1171,6 +1188,47 @@ fn validate_policy(
                 )));
             }
         }
+    }
+    let selected_interfaces: BTreeSet<_> = policy
+        .subset
+        .iter()
+        .map(|entry| entry.interface.as_str())
+        .collect();
+    let mut extension_methods = BTreeSet::new();
+    for method in &policy.extension.methods {
+        if method.reason.trim().is_empty() {
+            return Err(CodegenError::Policy(format!(
+                "extension method {}.{} has an empty reason",
+                method.interface, method.member
+            )));
+        }
+        if !extension_methods.insert((method.interface.as_str(), method.member.as_str())) {
+            return Err(CodegenError::Policy(format!(
+                "duplicate extension method {}.{}",
+                method.interface, method.member
+            )));
+        }
+        if !selected_interfaces.contains(method.interface.as_str()) {
+            return Err(CodegenError::Policy(format!(
+                "extension method {}.{} is not on a subset interface",
+                method.interface, method.member
+            )));
+        }
+        let collides = index
+            .effective_members(&method.interface)
+            .into_iter()
+            .any(|member| member.name == method.member);
+        if collides {
+            return Err(CodegenError::Policy(format!(
+                "extension method {}.{} collides with the pinned WebGPU IDL",
+                method.interface, method.member
+            )));
+        }
+    }
+    if !policy.extension.methods.is_empty() && policy.lifecycle.is_none() {
+        return Err(CodegenError::Policy(
+            "extension methods require lifecycle class-spec emission".to_owned(),
+        ));
     }
     let mut seen_descriptors = BTreeSet::new();
     for entry in &policy.descriptor {

@@ -10,11 +10,13 @@ pub(super) fn convert_bind_group_entry<E: JsEngine + 'static>(
     // C2/R24: wrapper-union arms are selected by generated ClassSpec identity.
     let sampler_resource = E::payload(cx, resource_value, GPU_SAMPLER_CLASS)
         .and_then(|payload| payload.downcast_ref::<SamplerPayload>())
-        .map(|payload| payload.sampler);
+        .map(|_| sampler_handle::<E>(cx, resource_value))
+        .transpose()?;
     // C2/R24: wrapper-union arms are selected by generated ClassSpec identity.
     let texture_view_resource = E::payload(cx, resource_value, GPU_TEXTURE_VIEW_CLASS)
         .and_then(|payload| payload.downcast_ref::<TextureViewPayload>())
-        .map(|payload| payload.texture_view);
+        .map(|_| texture_view_handle::<E>(cx, resource_value))
+        .transpose()?;
     // B-4b: direct union arms are selected by generated ClassSpec identity.
     let buffer_direct_resource = E::payload(cx, resource_value, GPU_BUFFER_CLASS)
         .and_then(|payload| payload.downcast_ref::<BufferPayload<E>>())

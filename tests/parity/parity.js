@@ -11,6 +11,11 @@
     var retainedBindGroup;
     var parityQuerySet;
     var uncapturedEventLines = [];
+    var frameDestroyLayout = device.createBindGroupLayout({ entries: [] });
+    var frameDestroyBindGroup = device.createBindGroup({
+        layout: frameDestroyLayout,
+        entries: []
+    });
 
     function removedUncapturedListener() {
         log("event:removed-listener:called");
@@ -49,6 +54,8 @@
         return { then: function () {} };
     };
     globalThis.frameContractThrow = function () {
+        frameDestroyBindGroup.destroy();
+        frameContractLines.push("extensionDestroy:bind-group-frame:ok");
         enqueueFrameContractRelease();
         Promise.resolve().then(function () {
             frameContractPostThrow = true;
@@ -1741,6 +1748,27 @@
         });
     }
 
+    function runExtensionDestroy() {
+        var encoder = device.createRenderBundleEncoder({
+            colorFormats: ["rgba8unorm"]
+        });
+        var bundle = encoder.finish();
+        bundle.destroy();
+        var useAfterDestroy = caught(function () {
+            bundle.label = "retired";
+        });
+        if (useAfterDestroy === null || useAfterDestroy.name !== "OperationError") {
+            throw new Error("render bundle use after destroy did not throw OperationError");
+        }
+        log("extensionDestroy:render-bundle:" + useAfterDestroy.constructor.name + ":" +
+            useAfterDestroy.name + ":" + useAfterDestroy.message);
+        var secondDestroy = caught(function () {
+            bundle.destroy();
+        });
+        log("extensionDestroy:double:" +
+            (secondDestroy === null ? "null" : secondDestroy.constructor.name));
+    }
+
     function runIndirectCommands() {
         return validationScope("indirect-commands", function () {
             var indirectBuffer = device.createBuffer({
@@ -2045,6 +2073,7 @@
             .then(runLockedEncoderValidation)
             .then(runDepthSliceParity)
             .then(runRenderBundles)
+            .then(runExtensionDestroy)
             .then(runIndirectCommands)
             .then(runErrorScopes)
             .then(runMapAsyncErrorRouting)

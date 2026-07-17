@@ -23,16 +23,19 @@ and the size of one buffer copy, but not the number of binding crossings.
 At frame 45 the example demonstrates the one legitimate re-record: the script
 records a new bundle against a second pipeline (a dimmed fragment variant,
 created at init like every other resource), assigns it to
-`globalThis.bounceBundle`, increments `globalThis.bundleGeneration`, and calls
-the registered host function `signalBundleSwap()`. The host, after that
-`frame()` returns and before encoding the pass, re-borrows the native handle,
-replaces its retention global, and swaps its stored handle. The superseded
-handle is never touched again: its release rides GC and the release queue.
-Under JavaScriptCore a superseded bundle lives until context teardown
-(finalizers effectively never run earlier, and `GPURenderBundle` has no
-`destroy()`), which is one reason re-record is rare by design. That one frame
-spends O(bundle commands) crossings, and the verify golden proves it happens
-exactly once in the run.
+`globalThis.bounceBundle`, increments `globalThis.bundleGeneration`, calls the
+registered host function `signalBundleSwap()`, and destroys the superseded
+bundle with the binding's extension `destroy()`
+(`specs/blocks/20-explicit-release.md`) — so its native release is bounded on
+both engines instead of waiting for a finalizer that JavaScriptCore may not
+run before context teardown. The host, after that `frame()` returns and before
+encoding the pass, re-borrows the native handle, replaces its retention
+global, and swaps its stored handle; the superseded handle is never touched
+again. The destroy is safe in the same update because the host's last use of
+the old handle was the previous frame's submit and in-flight work is retained
+by the backend — a script must not destroy an object whose native handle the
+host will still use. That one frame spends O(bundle commands) crossings, and
+the verify golden proves it happens exactly once in the run.
 
 `examples/triangle` shows the static case with zero per-frame JavaScript; this
 example shows the dynamic case — per-frame data through buffer writes, and
