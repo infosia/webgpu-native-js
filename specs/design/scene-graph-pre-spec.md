@@ -172,3 +172,112 @@ Implication: each individual bet is production-proven elsewhere, so design
 risk concentrates in the integration — exactly the parts (N-bundle swap
 contract, JIT-less matrix propagation) where prior-art benchmarks do not
 transfer and §6's measurements are required.
+
+## 8. Memo (2026-07-18): scripting-language alternatives
+
+A same-day discussion asked whether replacing JavaScript changes this design.
+Same standing as the rest of this document: discussion record, nothing
+normative. All claims below about daslang, Dart, and the three.js Dart ports
+summarize public documentation and a 2026-07-18 web search; none were
+executed or measured here (§7's *(docs)* caveat applies to the whole section).
+
+Evaluation axes, from this project's measured pains and standing assets: the
+conformance oracle (invariant 5 makes the upstream TS CTS the end-state
+oracle — a JS-specific asset); GC pressure (bounce's measured dominant
+per-frame cost) and lifetime semantics (invariant 7); host integration cost
+(Boa's no-C-toolchain, plain-`cargo build` property); mobile deployment
+proof; ecosystem and author availability.
+
+### 8.1 daslang
+
+[daslang](https://daslang.io/) (formerly daScript;
+[Gaijin Entertainment](https://github.com/GaijinEntertainment/daScript),
+BSD-3-Clause): statically typed, data layout identical to C++, three
+execution tiers (tree interpreter, AOT to C++, LLVM JIT); Context-scoped
+memory with manual `delete` and explicitly invoked GC.
+
+- Removes both measured pains by design: no per-frame tracing-GC pressure,
+  and deterministic destruction means the invariant-7 problem class does not
+  arise.
+- Descriptor conversion — the bulk of this project's work (invariant 1) —
+  mostly vanishes for a static C-layout language; codegen could come from
+  `webgpu.yml` directly, dropping WebIDL.
+- Costs: the CTS oracle is lost (a TS suite cannot run); the embedding API is
+  C++-first (the docs list a C API; no Rust bindings were found), forfeiting
+  Boa's toolchain property; production use is effectively Gaijin's titles.
+
+### 8.2 Dart
+
+Dart (BSD-3-Clause), embedded via
+[`dart_api.h`](https://github.com/dart-lang/sdk/blob/main/runtime/include/dart_api.h);
+the SDK ships embedder samples and `dart_engine.h`, but embedders build the
+VM from source per target, and the primary embedder is the Flutter engine.
+
+- iOS/Android AOT deployment is proven at Flutter scale; JIT and hot reload
+  are development-only. AOT means no runtime script loading on iOS.
+- Tracing GC and nondeterministic finalization remain:
+  [`NativeFinalizer`](https://api.dart.dev/dart-ffi/NativeFinalizer-class.html)
+  runs at GC and at isolate/VM shutdown (documentation vs. implementation
+  mismatch on which:
+  [dart-lang/sdk#55511](https://github.com/dart-lang/sdk/issues/55511)), on
+  an arbitrary thread. The release-queue design (invariant 4) transfers;
+  `destroy()` discipline stays.
+- The CTS oracle is lost, as with daslang. Host integration is the heaviest
+  of the three.
+- Prior art exists —
+  [dart_webgpu](https://github.com/brendan-duncan/dart_webgpu) (ffigen over
+  Dawn/lib_webgpu) and [pub.dev wgpu](https://pub.dev/packages/wgpu) — so a
+  Dart pivot adopts or duplicates those; it does not port this codebase.
+
+### 8.3 AOT and the scope invariant
+
+§1 prices the scope invariant with three costs: interpreter execution, GC
+pressure, re-record pricing. AOT compilation removes only the first. Flutter
+runs Dart per frame (build/layout/paint at 60–120 Hz) and dart:ffi leaf calls
+approach plain C-call cost, so the crossing-budget premise weakens under AOT;
+GC pressure does not — Flutter's frame-drop guidance is allocation
+discipline, the bounce lesson — and the skeleton/data split retains value
+independently (render bundles amortize encoding, not only crossings).
+
+Consequence: script-in-the-frame-loop under AOT Dart is not a relaxation of
+this binding but an architecture inversion. The natural substrate is a
+dart:ffi binding with Dart owning the frame loop — invariant 6 inverts — and
+the Rust-host/guest-VM design does not carry over. What transfers from this
+project is design knowledge (release queue, `AllowProcessEvents` discipline,
+the skeleton/data split, the oracle protocol), not code.
+
+### 8.4 three.js Dart ports
+
+[wasabia/three_dart](https://github.com/wasabia/three_dart) (three.js
+rewritten in Dart over flutter_gl/OpenGL; stalled) and its successor
+[Knightro63/three_js](https://github.com/Knightro63/three_js) (active; ANGLE
+on desktop/mobile, WebGL2 on web) implement the WebGL-era three.js
+architecture. Neither has a WebGPU renderer, and upstream three.js's
+`WebGPURenderer` is built on the unported TSL/node material system.
+Integrating a Dart port with a `webgpu.h` binding therefore means writing
+that renderer — the largest missing component. three_js states an intent to
+move toward Impeller, and Flutter's flutter_gpu competes for the same
+custom-renderer slot, so that gap may be filled from the Flutter side
+instead.
+
+### 8.5 Comparison and conclusion
+
+| | JS (current) | daslang | Dart |
+|---|---|---|---|
+| CTS oracle | kept | lost | lost |
+| GC / lifetime pains | measured, present | absent by design | reduced, present |
+| Host integration | Boa: pure Rust | C++ build | VM built from source (heaviest) |
+| Mobile deployment proof | JIT-less interpreters | Gaijin titles | Flutter scale |
+| Ecosystem / authors | largest | niche | large (Flutter) |
+
+Conclusion (2026-07-18): the JS route stands. Either alternative forfeits the
+conformance oracle and the conversion layer that is the bulk of the existing
+codebase. Recorded contingencies:
+
+- If §6.1's measurement shows matrix propagation is not viable under JIT-less
+  JS, daslang is the first replacement candidate; §6.1 is therefore also the
+  deciding experiment for this memo.
+- Dart becomes the candidate only on a product-level move into the Flutter
+  ecosystem, where the path is adopting/extending dart_webgpu and porting a
+  WebGPU renderer to three_js — replacing this design, not integrating with
+  it.
