@@ -177,9 +177,10 @@ transfer and §6's measurements are required.
 
 A same-day discussion asked whether replacing JavaScript changes this design.
 Same standing as the rest of this document: discussion record, nothing
-normative. All claims below about daslang, Dart, and the three.js Dart ports
-summarize public documentation and a 2026-07-18 web search; none were
-executed or measured here (§7's *(docs)* caveat applies to the whole section).
+normative. All claims in §8.1–§8.4 about daslang, Dart, and the three.js
+Dart ports summarize public documentation and a 2026-07-18 web search; none
+were executed or measured here (§7's *(docs)* caveat applies to the whole
+section). §8.6 states its own provenance.
 
 Evaluation axes, from this project's measured pains and standing assets: the
 conformance oracle (invariant 5 makes the upstream TS CTS the end-state
@@ -281,3 +282,66 @@ codebase. Recorded contingencies:
   ecosystem, where the path is adopting/extending dart_webgpu and porting a
   WebGPU renderer to three_js — replacing this design, not integrating with
   it.
+
+### 8.6 Follow-up (2026-07-19): JS-runtime and TS-AOT prior art
+
+Two projects examined after §8.5. Claims about their internals come from
+reading their sources (paths below are repo-relative as those repositories
+see them); their performance numbers are their own published benchmarks,
+not measured here.
+
+**Mystral Native**
+([mystralengine/mystralnative](https://github.com/mystralengine/mystralnative),
+MIT) is a browser-shaped runtime — "Electron for games without Chromium":
+V8/JSC/QuickJS × Dawn/wgpu-native behind a WebGPU-shaped JS binding, plus
+SDL3, Skia Canvas 2D, and libuv. It is the closest prior art found to this
+binding's component set (multi-engine, multi-backend, three.js/PixiJS
+WebGPU demonstrated), with inverted ownership: JS owns the frame loop and
+issues draw calls from `requestAnimationFrame`. Its `compile` command is
+not AOT — `src/cli/main.cpp` copies the runtime executable and appends
+script plus assets as a trailing bundle; no bytecode or snapshot
+precompilation exists. On iOS its engines are JSC/QuickJS: JIT-less JS in
+the frame loop, the configuration §1 prices out. Its
+[Show HN discussion](https://news.ycombinator.com/item?id=46784221) raised
+exactly that concern and floated a TS-to-C++ AOT compiler in response —
+the §1/§8.3 pressures operating on a shipping project.
+
+**Perry** ([PerryTS/perry](https://github.com/PerryTS/perry), MIT) is a
+native TypeScript AOT compiler in Rust: SWC parse → HIR → LLVM, statically
+linked Rust runtime with its own generational GC, no JS engine in the
+default binary. Dynamic semantics are retained: the public ABI is
+NaN-boxed, and where local static proofs hold the compiler emits raw typed
+clones (`f64`/`i32`/`i1`/string) behind guarded JSValue trampolines that
+fall back to the generic body — JIT speculation techniques (guards, side
+exits, packed-array loop versioning, scalar replacement) applied at compile
+time (its `TYPE_LOWERING.md`). Node compatibility (~97% of `node:*` tests
+per its README) rests on native Rust reimplementations of roughly forty npm
+packages; pure-JS `node_modules` files route to an opt-in QuickJS
+interpreter the build refuses to link by default. Its published benchmarks
+are bimodal: native-competitive rows next to large losses to Node/Bun where
+the proofs miss (`matrix_multiply` 2311 ms vs 35 ms, `prime_sieve` 254 ms
+vs 7 ms). Consequence: AOT performance is a function of static-proof
+hit-rate, not a property of AOT. [Bloom Engine](https://bloomengine.dev)
+(a TS game engine on Perry shipping on iOS/Android) is an existence proof
+for the TS-AOT game direction.
+
+**Building a sound-typed TS-AOT compiler.** Perry's cost decomposes into a
+compiler core (comparatively small) and retaining full JS semantics plus
+Node parity (dominant). The alternative corner — unboxed layouts from
+trusted annotations, rejecting code whose types cannot be proven — is
+demonstrated at small-team scale by
+[AssemblyScript](https://www.assemblyscript.org/) (TS syntax, sound
+`i32`/`u32`/`f64` types, no `any`) and Microsoft's
+[Static TypeScript](https://www.microsoft.com/en-us/research/publication/static-typescript/);
+[porffor](https://porffor.dev/) illustrates the sustained cost of the
+full-semantics side. The trade is fixed: sound typing rejects the unsound
+patterns the TS ecosystem is written against, so npm libraries (three.js
+included) do not carry over and the TS CTS oracle is lost, as in §8.1 —
+the endpoint is daslang with TS syntax, differing in author familiarity
+only.
+
+Consequence for this project: unchanged from §8.5. The scope invariant
+leaves AOT little room to pay here; §6.1 remains the deciding experiment;
+and Perry's `matrix_multiply` row shows AOT is not by itself an answer to
+that workload shape. If §6.1 fails, adopting an existing bet (daslang
+first, or the Perry/Bloom stack) precedes building a compiler.
