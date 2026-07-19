@@ -180,7 +180,7 @@ Same standing as the rest of this document: discussion record, nothing
 normative. All claims in §8.1–§8.4 about daslang, Dart, and the three.js
 Dart ports summarize public documentation and a 2026-07-18 web search; none
 were executed or measured here (§7's *(docs)* caveat applies to the whole
-section). §8.6 states its own provenance.
+section). §8.6 and §8.7 state their own provenance.
 
 Evaluation axes, from this project's measured pains and standing assets: the
 conformance oracle (invariant 5 makes the upstream TS CTS the end-state
@@ -345,3 +345,49 @@ leaves AOT little room to pay here; §6.1 remains the deciding experiment;
 and Perry's `matrix_multiply` row shows AOT is not by itself an answer to
 that workload shape. If §6.1 fails, adopting an existing bet (daslang
 first, or the Perry/Bloom stack) precedes building a compiler.
+
+### 8.7 Follow-up (2026-07-20): Nitrogen — Dart-FFI evidence for §8.2
+
+[Nitrogen](https://github.com/Shreemanarjun/nitro_ecosystem) (MIT,
+published on pub.dev; the Flutter analogue of react-native-nitro-modules)
+generates typed Kotlin/Swift/C++ bridges from one annotated Dart spec
+class, replacing Flutter method channels with direct `dart:ffi` calls.
+Claims about its internals come from reading its sources; performance
+numbers are its own published benchmarks (its in-repo `benchmark` package),
+not measured here.
+
+Findings that bear on §8.2's Dart assessment:
+
+- Boundary cost, their measurements: a generated sync call is ~0.26 µs on
+  macOS and ~1.7–2.1 µs on Android, vs ~0.011 µs for a raw `dart:ffi` leaf
+  call and ~27–108 µs for a method channel. They attribute the delta over
+  raw FFI to generated safety plumbing: a thread-local error slot read
+  after each call (native exceptions are caught at the boundary and
+  surfaced by a follow-up `get_error` call, never thrown across it), an
+  instance registry, and typed marshaling.
+- Dart constructs C-layout data directly: its `@HybridStruct` types are
+  `dart:ffi` `Struct`s (fields limited to int64/double/bool/pointer/nested
+  struct), and stream payloads arrive as native pointers wrapped in a
+  generated proxy whose getters read native memory lazily. This is genuine
+  layout sharing of the kind invariant 9 rules out for both JS engines —
+  under Dart, descriptor conversion could be in-place `WGPUXxx` struct
+  construction rather than per-field engine conversion.
+- Everything not expressible as such a struct crosses via a bespoke
+  little-endian binary codec (`@HybridRecord`) implemented separately in
+  Dart, Swift, Kotlin, and C++ — four hand-maintained copies of the
+  marshaling layer that a C-layout-identical language (§8.6's endpoint)
+  eliminates by construction. The JVM path also shows the boundary's
+  limit: the generated Kotlin decoder for a pointer-carrying struct reads
+  and discards the pointer field — pointers do not cross into a managed
+  runtime.
+- Lifetime: explicit `dispose()` first, `NativeFinalizer` bound to a
+  generated release symbol as backstop — the invariant-7 shape, with the
+  §8.2 caveat on when Dart finalizers run
+  ([dart-lang/sdk#55511](https://github.com/dart-lang/sdk/issues/55511))
+  still applying.
+
+Consequence: §8.2 gains concrete boundary numbers and one asset unique to
+Dart among the alternatives examined — in-place C-struct descriptor
+construction via `dart:ffi`. The §8.5 conclusion is unchanged: the
+CTS-oracle loss and host-integration weight still price the pivot, and
+§6.1 remains the deciding experiment.
